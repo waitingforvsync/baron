@@ -57,7 +57,7 @@ void arena_reset(arena_t *arena);
 /**
  *  Return an allocator which works with the given arena
  */
-allocator_t arena_allocator(const arena_t *arena);
+allocator_t arena_allocator(arena_t *arena);
 
 
 #endif // ifndef ARENA_H_

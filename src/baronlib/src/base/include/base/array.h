@@ -9,47 +9,45 @@
 
 
 #include <stdint.h>
-#include <assert.h>
+#include <stdbool.h>
 
 typedef struct allocator_t allocator_t;
-
-struct array_header_t {
-    const allocator_t *allocator;
-    uint32_t capacity;
-    uint32_t element_size;
-};
-
-static_assert(sizeof(struct array_header_t) == 16, "array_header wrong size");
 
 
 /**
  *  Convenience macro for defining arbitrary slice types.
  */
-#define def_slice(type, name) \
-    typedef struct array_##name##_t { type *data; uint32_t size; } array_##name##_t; \
-    typedef struct array_##name##_ptr_t { type **data; uint32_t size; } array_##name##_ptr_t; \
-    typedef array_##name##_t slice_##name##_t; \
-    typedef struct slice_const_##name##_t { const type *data; uint32_t size; } slice_const_##name##_t; \
-    typedef array_##name##_ptr_t slice_##name##_ptr_t; \
-    typedef struct slice_const_##name##_ptr_t { const type **data; uint32_t size; } slice_const_##name##_ptr_t
+#define def_slice(type) \
+    typedef struct array_##type { type *data; uint32_t size; } array_##type; \
+    typedef struct slice_##type { type *data; uint32_t size; } slice_##type; \
+    typedef struct slice_const_##type { const type *data; uint32_t size; } slice_const_##type; \
+    typedef struct array_ptr_##type { type **data; uint32_t size; } array_ptr_##type; \
+    typedef struct slice_ptr_##type { type **data; uint32_t size; } slice_ptr_##type; \
+    typedef struct slice_const_ptr_##type { const type **data; uint32_t size; } slice_const_ptr_##type
 
-def_slice(uint8_t, uint8);
-def_slice(uint16_t, uint16);
-def_slice(uint32_t, uint32);
-def_slice(uint64_t, uint64);
-def_slice(int8_t, int8);
-def_slice(int16_t, int16);
-def_slice(int32_t, int32);
-def_slice(int64_t, int64);
-def_slice(char, char);
-def_slice(float, float);
-def_slice(double, double);
+def_slice(uint8_t);
+def_slice(uint16_t);
+def_slice(uint32_t);
+def_slice(uint64_t);
+def_slice(int8_t);
+def_slice(int16_t);
+def_slice(int32_t);
+def_slice(int64_t);
+def_slice(char);
+def_slice(float);
+def_slice(double);
+
+
+/**
+ *  Get a slice from an existing array
+ */
+#define make_slice(type, name) (slice_##type){name.data, name.size}
 
 
 /**
  *  Get a const slice from an existing array or slice
  */
-#define const_slice(type, name) (slice_const_##type##_t){name.data, name.size}
+#define make_const_slice(type, name) (slice_const_##type){name.data, name.size}
 
 
 /**
@@ -62,7 +60,17 @@ def_slice(double, double);
  *  @param  allocator   Pointer to the allocator to use and associate with the array
  *  @param  capacity    Initial capacity of the array (reserved element count)
  */
-#define make_array(type, allocator, capacity) {array_allocate_generic(allocator, capacity, (uint32_t)sizeof(type)), 0}
+#define make_array(type, allocator, capacity) (array_##type){array_init_generic(allocator, capacity, (uint32_t)sizeof(type)), 0}
+
+
+/**
+ *  Return whether the given array is valid, i.e. has been initialized
+ * 
+ *  @param  array       Pointer to array to check validity
+ * 
+ *  @return bool whether valid or not
+ */
+#define array_is_valid(array) (!!(array)->data)
 
 
 /**
@@ -72,9 +80,19 @@ def_slice(double, double);
  *  @param  array       Pointer to array to reserve space for
  *  @param  capacity    Number of elements to reserve space for
  * 
- *  @return 0 if successful, otherwise 1
+ *  @return Success true/false
  */
-#define array_reserve(array, capacity) (array_reserve_generic((void **)&((array)->data), capacity))
+#define array_reserve(array, capacity) array_reserve_generic((void **)&(array)->data, capacity)
+
+
+/**
+ *  Determine if the array is empty
+ * 
+ *  @param  array       Pointer to the array to query
+ * 
+ *  @return Empty true/false
+ */
+#define array_is_empty(array) (!(array)->size)
 
 
 /**
@@ -84,7 +102,7 @@ def_slice(double, double);
  * 
  *  @return Reserved number of elements
  */
-#define array_capacity(array) ((((const struct array_header_t *)((array)->data)) - 1)->capacity)
+#define array_capacity(array) array_get_capacity_generic((array)->data)
 
 
 /**
@@ -94,9 +112,17 @@ def_slice(double, double);
  *  @param  array       Pointer to array to reserve space for
  *  @param  new_size    Number of elements in the array
  * 
- *  @return 0 if successful, otherwise 1
+ *  @return Success true/false
  */
-#define array_resize(array, new_size) (((new_size) >= array_capacity(array) && (array_reserve_generic((void **)&((array)->data), new_size))) || (((array)->size = new_size), 0))
+#define array_resize(array, new_size) (array_reserve_generic((void **)&(array)->data, new_size) && (((array)->size = new_size), true))
+
+
+/**
+ *  Reset the array to empty, without deallocating existing allocations.
+ * 
+ *  @param  array       Pointer to array to reset
+ */
+#define array_reset(array) ((array)->size = 0)
 
 
 /**
@@ -105,9 +131,9 @@ def_slice(double, double);
  *  @param  array       Pointer to the array to add an item to
  *  @param  value       The value to be added
  * 
- *  @return 0 if successful, otherwise 1
+ *  @return Success true/false
  */
-#define array_add(array, value) ((((array)->size >= array_capacity(array)) && array_reserve(array, (array_capacity(array) < 8) ? 8 : array_capacity(array) * 3 / 2)) || (((array)->data[((array)->size)++] = (value)), 0))
+#define array_add(array, value) (array_maybe_grow_generic((void **)&(array)->data, (array)->size) && (((array)->data[((array)->size)++] = (value)), true))
 
 
 /**
@@ -115,11 +141,11 @@ def_slice(double, double);
  * 
  *  @param  array       Pointer to the array to deinitialize
  */
-#define array_deinit(array) (array_free_generic(array->data), array->data = 0, array->size = 0)
+#define array_deinit(array) (array_free_generic((array)->data), (array)->data = 0, (array)->size = 0)
 
 
 /**
- *  Allocate memory for the array.
+ *  Initialize an array, allocating memory for it.
  *  A special header is allocated immediately in front of the data buffer containing details relating to the array.
  *  
  *  @param  allocator       The allocator used by this array
@@ -128,7 +154,7 @@ def_slice(double, double);
  * 
  *  @return Pointer to the allocated memory, or null if it failed
  */
-void *array_allocate_generic(const allocator_t *allocator, uint32_t capacity, uint32_t element_size);
+void *array_init_generic(const allocator_t *allocator, uint32_t capacity, uint32_t element_size);
 
 
 /**
@@ -137,9 +163,31 @@ void *array_allocate_generic(const allocator_t *allocator, uint32_t capacity, ui
  *  @param  data            Pointer to the data member of the array slice. This will be rewritten with the new buffer address.
  *  @param  capacity        New capacity to allocate.
  * 
- *  @return 0 if successful, otherwise 1
+ *  @return Success true/false
  */
-int array_reserve_generic(void **data, uint32_t capacity);
+bool array_reserve_generic(void **data, uint32_t capacity);
+
+
+/**
+ *  Maybe grow the array exponentially.
+ * 
+ *  @param  data            Pointer to the data member of the array slice.
+ *                          This will be rewritten with the new buffer address if reallocation occurs.
+ *  @param  current_size    Number of active elements currently held in the array.
+ * 
+ *  @return Success true/false
+ */
+bool array_maybe_grow_generic(void **data, uint32_t current_size);
+
+
+/**
+ *  Get the allocated capacity for a given array
+ * 
+ *  @param  data            Pointer to the data of the array slice
+ * 
+ *  @return The capacity of the array, in elements (not bytes)
+ */
+uint32_t array_get_capacity_generic(const void *data);
 
 
 /**

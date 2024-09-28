@@ -1,7 +1,7 @@
-#include <assert.h>
 #include <string.h>
 #include "arena.h"
 #include "allocator.h"
+#include "defines.h"
 
 
 #define ARENA_REGION_SIZE 0x4000
@@ -26,28 +26,27 @@ static uint32_t get_aligned_size(uint32_t size) {
 
 
 arena_t make_arena(const allocator_t *allocator, uint32_t initial_size) {
-    assert(allocator);
     return (arena_t){
         .child_allocator = allocator_alloc(allocator, get_aligned_size(initial_size))
     };
 }
 
 
-void arena_init(arena_t *arena, const allocator_t *allocator, uint32_t inital_size) {
-    assert(arena);
-    assert(allocator);
+void arena_init(arena_t *arena, const allocator_t *allocator, uint32_t initial_size) {
+    ASSERT(arena);
+    UNUSED(initial_size);
     arena_deinit(arena);
     arena->child_allocator = allocator;
 }
 
 
 void arena_deinit(arena_t *arena) {
-    assert(arena);
+    ASSERT(arena);
 }
 
 
 void *arena_alloc(arena_t *arena, uint32_t size) {
-    assert(arena);
+    ASSERT(arena);
 
     size = ((size + 0x0F) & ~0x0F) + 0x10;
     if (!arena->_region || arena->_region->end - arena->_region->start < size) {
@@ -63,11 +62,12 @@ void *arena_alloc(arena_t *arena, uint32_t size) {
         new_region->end = region_size;
     }
 
+    return 0; //todo
 }
 
 
 void arena_reset(arena_t *arena) {
-    assert(arena);
+    ASSERT(arena);
     if (arena->_region) {
         arena_region_t *ptr = arena->_region->next;
         while (ptr) {
@@ -98,15 +98,15 @@ static void *arena_allocator_realloc(void *ptr, uint32_t size, void *context) {
 }
 
 
-static void *arena_allocator_free(void *ptr, void *context) {
-    (void)ptr;
-    (void)context;
+static void arena_allocator_free(void *ptr, void *context) {
+    UNUSED(ptr);
+    UNUSED(context);
     // do nothing!
 }
 
 
-allocator_t arena_allocator(const arena_t *arena) {
-    assert(arena);
+allocator_t arena_allocator(arena_t *arena) {
+    ASSERT(arena);
 
     static const allocator_vtable_t allocator_vtable = {
         arena_allocator_alloc,

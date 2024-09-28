@@ -5,9 +5,17 @@
 
 typedef struct array_header_t array_header_t;
 
+struct array_header_t {
+    const allocator_t *allocator;
+    uint32_t capacity;
+    uint32_t element_size;
+};
 
-void *array_allocate_generic(const allocator_t *allocator, uint32_t capacity, uint32_t element_size) {
-    uint32_t total_size = capacity * element_size + 16;
+static_assert(sizeof(array_header_t) == 16, "array_header wrong size");
+
+
+void *array_init_generic(const allocator_t *allocator, uint32_t capacity, uint32_t element_size) {
+    uint32_t total_size = capacity * element_size + sizeof(array_header_t);
     array_header_t *header = allocator_alloc(allocator, total_size);
     header->allocator = allocator;
     header->capacity = capacity;
@@ -16,20 +24,49 @@ void *array_allocate_generic(const allocator_t *allocator, uint32_t capacity, ui
 }
 
 
-int array_reserve_generic(void **data, uint32_t capacity) {
-    if (*data) {
-        array_header_t *header = (array_header_t *)(*data) - 1;
-        if (header->capacity < capacity) {
-            uint32_t total_size = capacity * header->element_size + 16;
-            array_header_t *new_header = allocator_realloc(header->allocator, header, total_size);
-            if (new_header) {
-                new_header->capacity = capacity;
-                *data = new_header + 1;
-                return 0;
-            }
-        }
+static bool array_reallocate(void **data, array_header_t *header, uint32_t capacity) {
+    uint32_t total_size = capacity * header->element_size + sizeof(array_header_t);
+    array_header_t *new_header = allocator_realloc(header->allocator, header, total_size);
+    if (new_header) {
+        new_header->capacity = capacity;
+        *data = new_header + 1;
+        return true;
     }
-    return 1;   // failed
+    return false;
+}
+
+
+bool array_reserve_generic(void **data, uint32_t capacity) {
+    if (!*data) {
+        return false;
+    }
+    array_header_t *header = (array_header_t *)(*data) - 1;
+    if (capacity <= header->capacity) {
+        return true;
+    }
+    return array_reallocate(data, header, capacity);
+}
+
+
+bool array_maybe_grow_generic(void **data, uint32_t current_size) {
+    if (!*data) {
+        return false;
+    }
+    array_header_t *header = (array_header_t *)(*data) - 1;
+    if (current_size < header->capacity) {
+        return true;
+    }
+    return array_reallocate(data, header, (current_size < 8) ? 8 : current_size * 3 / 2);
+}
+
+
+uint32_t array_get_capacity_generic(const void *data) {
+    if (data) {
+        const array_header_t *header = (const array_header_t *)data - 1;
+        return header->capacity;
+    }
+
+    return 0;
 }
 
 

@@ -9,7 +9,7 @@
 
 
 #include <stdint.h>
-#include "sref.h"
+#include "array.h"
 
 typedef struct file_error_t file_error_t;
 typedef struct file_load_result_t file_load_result_t;
@@ -22,7 +22,7 @@ struct file_error_t {
 
 
 struct file_load_result_t {
-    sref_t data;
+    slice_const_uint8_t data;
     file_error_t error;
 };
 
@@ -43,11 +43,11 @@ file_load_result_t file_load(const allocator_t *allocator, const char *filename)
  *  Saves the block of data referenced by the sref to the given file
  * 
  *  @param  filenamem       The filename to save to
- *  @param  data            A sref to the data to be saved
+ *  @param  data            A slice to the data to be saved
  * 
  *  @return Any error which occurred while attempting to save the file
  */
-file_error_t file_save(const char *filename, sref_t data);
+file_error_t file_save(const char *filename, slice_const_uint8_t data);
 
 
 #endif // ifndef FILE_H_

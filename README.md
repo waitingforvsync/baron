@@ -6,7 +6,7 @@ Baron is a cross-platform 6502 assembler, using syntax reminiscent of BBC BASIC'
 
 Baron is a ground-up rewrite of BeebAsm, incorporating many of its features and syntax, while adding new functionality and fixing some of its perennial irrations and limitations.
 
-#### Why Baron? ####
+#### Why "Baron"? ####
 Since there are breaking changes to syntax compared to BeebAsm, I can't really release this as BeebAsm 2.0. So instead, with allusions to that Acorn folklore staple, the [Baron of Beef](https://www.upi.com/Archives/1984/12/24/Their-bits-are-worse-than-their-bytes/9853472712400/) pub in Cambridge, it has been retitled Baron.
 
 It's an acronym for Beeb Asm, Ready or Not.

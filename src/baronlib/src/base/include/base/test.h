@@ -37,23 +37,23 @@ struct test_item {
     SECTION("test$b") const test_item *test_item_ptr_##group##_##test = &test_item_##group##_##test; \
 	static void test_##group##_##test(void)
 
-#define EQ_TEST_DEF_GROUP_DATA(group) \
+#define DEF_TEST_GROUP_DATA(group) \
 	struct test_group_data_##group; \
 	static void (*test_group_initfn_##group)(struct test_group_data_##group *); \
 	static void (*test_group_deinitfn_##group)(struct test_group_data_##group *); \
 	struct test_group_data_##group 
 
-#define EQ_TEST_GROUP_INIT(group) \
+#define DEF_TEST_GROUP_INIT(group) \
 	static void test_group_init_##group(struct test_group_data_##group *data); \
 	static void (*test_group_initfn_##group)(struct test_group_data_##group *) = &test_group_init_##group; \
 	static void test_group_init_##group(struct test_group_data_##group *data)
 
-#define EQ_TEST_GROUP_DEINIT(group) \
+#define DEF_TEST_GROUP_DEINIT(group) \
 	static void test_group_deinit_##group(struct test_group_data_##group *data); \
 	static void (*test_group_deinitfn_##group)(struct test_group_data_##group *) = &test_group_deinit_##group; \
 	static void test_group_deinit_##group(struct test_group_data_##group *data)
 
-#define EQ_TEST_WITH_FIXTURE(group, test) \
+#define DEF_TEST_STEP(group, test) \
 	static void test_##group##_##test(struct test_group_data_##group *); \
 	static struct test_group_data_##group test_group_data_##group##_##test; \
 	static const test_item test_item_##group##_##test = { \
@@ -67,7 +67,7 @@ struct test_item {
     SECTION("test$b") const test_item *test_item_ptr_##group##_##test = &test_item_##group##_##test; \
 	static void test_##group##_##test(struct test_group_data_##group *data)
 
-#define EQ_TEST_WITH_FIXTURE_SKIP(group, test) \
+#define DEF_TEST_STEP_SKIP(group, test) \
 	UNUSED_FN static void test_##group##_##test(struct test_group_data_##group *); \
 	static struct test_group_data_##group test_group_data_##group##_##test; \
 	static const test_item test_item_##group##_##test = { \

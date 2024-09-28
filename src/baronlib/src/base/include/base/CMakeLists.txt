@@ -1,8 +1,11 @@
 target_sources("base"
     PUBLIC
     "allocator.h"
+    "arena.h"
     "array.h"
+    "bitarray.h"
     "defines.h"
+    "file.h"
     "str.h"
     "test.h"
 )

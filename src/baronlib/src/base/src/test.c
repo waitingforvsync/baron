@@ -90,8 +90,6 @@ int test_run(const char *filter_string) {
 	int num_pass = 0;
 	int num_skip = 0;
 
-//    printf("start/stop %p %p\n", (void *)&__start_test, (void *)&__stop_test);
-
 	// Count number of tests we're going to run
 	int total = 0;
 	int max_width = 0;
@@ -161,7 +159,8 @@ int test_run(const char *filter_string) {
 		}
 	}
 	
-	printf("\nRESULTS: %d tests (%d ok, %d failed, %d skipped)", total, num_pass, num_fail, num_skip);
+	printf("\nRESULTS: %d tests (%d ok, %d failed, %d skipped)\n", total, num_pass, num_fail, num_skip);
+	fflush(stdout);
 	return num_fail;
 }
 

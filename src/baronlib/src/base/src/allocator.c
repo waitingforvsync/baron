@@ -1,13 +1,13 @@
-#include <assert.h>
 #include <stdlib.h>
 #include "allocator.h"
+#include "defines.h"
 
 
 void *allocator_alloc(const allocator_t *allocator, uint32_t size) {
     if (!allocator) {
         allocator = allocator_default();
     }
-    assert(allocator->vtable);
+    ASSERT(allocator->vtable);
     return allocator->vtable->alloc(size, allocator->context);
 }
 
@@ -16,7 +16,7 @@ void *allocator_realloc(const allocator_t *allocator, void *current_ptr, uint32_
     if (!allocator) {
         allocator = allocator_default();
     }
-    assert(allocator->vtable);
+    ASSERT(allocator->vtable);
     return allocator->vtable->realloc(current_ptr, new_size, allocator->context);
 }
 
@@ -25,25 +25,25 @@ void allocator_free(const allocator_t *allocator, void *ptr) {
     if (!allocator) {
         allocator = allocator_default();
     }
-    assert(allocator->vtable);
+    ASSERT(allocator->vtable);
     allocator->vtable->free(ptr, allocator->context);
 }
 
 
 static void *allocator_default_alloc(uint32_t size, void *context) {
-    (void)context;
+    UNUSED(context);
     return malloc((size_t)size);
 }
 
 
 static void *allocator_default_realloc(void *ptr, uint32_t size, void *context) {
-    (void)context;
+    UNUSED(context);
     return realloc(ptr, (size_t)size);
 }
 
 
 static void allocator_default_free(void *ptr, void *context) {
-    (void)context;
+    UNUSED(context);
     free(ptr);
 }
 
