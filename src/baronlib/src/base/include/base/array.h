@@ -9,6 +9,7 @@
 
 
 #include <stdint.h>
+#include <assert.h>
 
 typedef struct allocator_t allocator_t;
 
@@ -18,7 +19,7 @@ struct array_header_t {
     uint32_t element_size;
 };
 
-//_Static_assert(sizeof(struct array_header_t) == 16, "array_header wrong size");
+static_assert(sizeof(struct array_header_t) == 16, "array_header wrong size");
 
 
 /**
@@ -70,8 +71,10 @@ def_slice(double, double);
  * 
  *  @param  array       Pointer to array to reserve space for
  *  @param  capacity    Number of elements to reserve space for
+ * 
+ *  @return 0 if successful, otherwise 1
  */
-#define array_reserve(array, capacity) array_reserve_generic(&(array)->data, capacity)
+#define array_reserve(array, capacity) (array_reserve_generic((void **)&((array)->data), capacity))
 
 
 /**
@@ -81,7 +84,7 @@ def_slice(double, double);
  * 
  *  @return Reserved number of elements
  */
-#define array_capacity(array) ((((const struct array_header_t *)(array)->data) - 1)->capacity)
+#define array_capacity(array) ((((const struct array_header_t *)((array)->data)) - 1)->capacity)
 
 
 /**
@@ -89,17 +92,22 @@ def_slice(double, double);
  *  If the size is greater than the currently allocated capacity, it will be reallocated.
  * 
  *  @param  array       Pointer to array to reserve space for
- *  @param  size        Number of elements in the array
+ *  @param  new_size    Number of elements in the array
  * 
  *  @return 0 if successful, otherwise 1
  */
-#define array_resize(array, size) (((size) < (array)->size || (!array_reserve_generic(&(array)->data, size))) && (array)->size = size)
+#define array_resize(array, new_size) (((new_size) >= array_capacity(array) && (array_reserve_generic((void **)&((array)->data), new_size))) || (((array)->size = new_size), 0))
 
 
 /**
  *  Add an element to the end of the array, allocating more space if necessary
+ * 
+ *  @param  array       Pointer to the array to add an item to
+ *  @param  value       The value to be added
+ * 
+ *  @return 0 if successful, otherwise 1
  */
-#define array_add(array, value) ((array)->size < ((struct array_header_t *)((array)->data) - 1)->capacity) ? 
+#define array_add(array, value) ((((array)->size >= array_capacity(array)) && array_reserve(array, (array_capacity(array) < 8) ? 8 : array_capacity(array) * 3 / 2)) || (((array)->data[((array)->size)++] = (value)), 0))
 
 
 /**
@@ -129,7 +137,7 @@ void *array_allocate_generic(const allocator_t *allocator, uint32_t capacity, ui
  *  @param  data            Pointer to the data member of the array slice. This will be rewritten with the new buffer address.
  *  @param  capacity        New capacity to allocate.
  * 
- *  @return Whether the operation succeeded (0) or failed (1)
+ *  @return 0 if successful, otherwise 1
  */
 int array_reserve_generic(void **data, uint32_t capacity);
 
