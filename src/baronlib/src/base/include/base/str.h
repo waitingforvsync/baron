@@ -41,10 +41,63 @@ struct str_t {
 
 
 /**
- *  Make an empty str_t with the given capacity
+ *  Make an empty str with the given capacity
  * 
- *  @
+ *  @param	capacity		The initial capacity that will be reserved for the string
+ * 
+ *  @return A new str_t instance.
+ *          If allocation failed, the str is invalid.
  */
+str_t make_str(uint32_t capacity);
+
+
+/**
+ *  Check validity of a str
+ * 
+ *  @param	str				Pointer to the str to check validity
+ * 
+ *  @return Whether valid, true/false
+ */
+static inline bool str_is_valid(const str_t *str) {
+	return str && str->data;
+}
+
+
+/**
+ *  Reset a str to empty, without changing any existing allocations.
+ * 
+ *  @param	str				Pointer to the str to reset
+ */
+void str_reset(str_t *str);
+
+
+/**
+ *  Determine whether a str is empty or not.
+ * 
+ *  @param	str				Pointer to the str to query
+ * 
+ *  @return	Whether empty, true/false
+ */
+bool str_is_empty(const str_t *str);
+
+
+/**
+ *  Deinitialize a str, freeing all allocations
+ * 
+ *  @param	str				Pointer to the str to deinitialize
+ */
+void str_deinit(str_t *str);
+
+
+/**
+ *  Append a strview to the given str
+ * 
+ *  @param	str				Pointer to the str to be appended to
+ *  @param	append_str		strview to be appended
+ * 
+ *  @return	Whether the append was successful, true/false
+ */
+bool str_append(str_t *str, strview_t append_str);
 
 
 /**

@@ -135,8 +135,12 @@ DEF_TEST(strview, parseint) {
 
 DEF_TEST(strview, parsehex) {
     strview_parse_hex_result_t result;
-    
+
     result = strview_parse_hex(STRVIEW("D00B1E5"));
     REQUIRE(result.value,==,0xD00B1E5);
     REQUIRE(result.length_parsed,==,7);
+}
+
+DEF_TEST(strview, parsefloat) {
+    
 }
