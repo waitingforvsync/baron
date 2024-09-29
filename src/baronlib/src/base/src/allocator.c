@@ -32,7 +32,7 @@ void allocator_free(const allocator_t *allocator, void *ptr) {
 
 static void *allocator_default_alloc(uint32_t size, void *context) {
     UNUSED(context);
-    return malloc((size_t)size);
+    return calloc((size_t)size, 1);
 }
 
 

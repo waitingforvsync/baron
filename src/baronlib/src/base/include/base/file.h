@@ -33,7 +33,7 @@ struct file_load_result_t {
  *  @param  allocator       Allocator to use to allocate the required space for the file
  *  @param  filename        Zero-terminated filename to load
  * 
- *  @return On success, the data field is a sref to the loaded data, and the error field is zero.
+ *  @return On success, the data field is a slice to the loaded data, and the error field is zero.
  *          On failutre, the data field is invalid, and the error field is a value representing the type of error.
  */
 file_load_result_t file_load(const allocator_t *allocator, const char *filename);

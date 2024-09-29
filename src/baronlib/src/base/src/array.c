@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <string.h>
 #include "array.h"
 #include "allocator.h"
 
@@ -17,6 +18,10 @@ static_assert(sizeof(array_header_t) == 16, "array_header wrong size");
 void *array_init_generic(const allocator_t *allocator, uint32_t capacity, uint32_t element_size) {
     uint32_t total_size = capacity * element_size + sizeof(array_header_t);
     array_header_t *header = allocator_alloc(allocator, total_size);
+    if (!header) {
+        return 0;
+    }
+
     header->allocator = allocator;
     header->capacity = capacity;
     header->element_size = element_size;
@@ -57,6 +62,22 @@ bool array_maybe_grow_generic(void **data, uint32_t current_size) {
         return true;
     }
     return array_reallocate(data, header, (current_size < 8) ? 8 : current_size * 3 / 2);
+}
+
+
+bool array_append_generic(void **dest, const void *src, uint32_t dest_size, uint32_t src_size) {
+    if (!*dest || !src) {
+        return false;
+    }
+    array_header_t *header = (array_header_t *)(*dest) - 1;
+    uint32_t element_size = header->element_size;
+
+    if (dest_size + src_size > header->capacity && !array_reallocate(dest, header, dest_size + src_size)) {
+        return false;
+    }
+
+    memcpy((uint8_t *)(*dest) + dest_size * element_size, src, src_size * element_size);
+    return true;
 }
 
 

@@ -18,12 +18,12 @@ typedef struct allocator_t allocator_t;
  *  Convenience macro for defining arbitrary slice types.
  */
 #define def_slice(type) \
-    typedef struct array_##type { type *data; uint32_t size; } array_##type; \
-    typedef struct slice_##type { type *data; uint32_t size; } slice_##type; \
     typedef struct slice_const_##type { const type *data; uint32_t size; } slice_const_##type; \
-    typedef struct array_ptr_##type { type **data; uint32_t size; } array_ptr_##type; \
-    typedef struct slice_ptr_##type { type **data; uint32_t size; } slice_ptr_##type; \
-    typedef struct slice_const_ptr_##type { const type **data; uint32_t size; } slice_const_ptr_##type
+    typedef struct slice_##type { union { struct { type *data; uint32_t size; }; slice_const_##type const_slice; }; } slice_##type; \
+    typedef struct array_##type { union { struct { type *data; uint32_t size; }; slice_const_##type const_slice; slice_##type slice; }; } array_##type; \
+    typedef struct slice_const_ptr_##type { const type **data; uint32_t size; } slice_const_ptr_##type; \
+    typedef struct slice_ptr_##type { union { struct { type **data; uint32_t size; }; slice_const_ptr_##type const_slice; }; } slice_ptr_##type; \
+    typedef struct array_ptr_##type { union { struct { type **data; uint32_t size; }; slice_const_ptr_##type const_slice; slice_ptr_##type slice; }; } array_ptr_##type
 
 def_slice(uint8_t);
 def_slice(uint16_t);
@@ -39,28 +39,19 @@ def_slice(double);
 
 
 /**
- *  Get a slice from an existing array
- */
-#define make_slice(type, name) (slice_##type){name.data, name.size}
-
-
-/**
- *  Get a const slice from an existing array or slice
- */
-#define make_const_slice(type, name) (slice_const_##type){name.data, name.size}
-
-
-/**
  *  Return an array initializer literal, initializing the array with the given capacity
  * 
  *  Example of use:
  *    array_int32_t numbers = make_array(int32_t, allocator_default(), 256);
+ *    if (array_is_valid(&numbers)) {
+ *       // ...
+ *    }
  *
  *  @param  type        Element type of the array
  *  @param  allocator   Pointer to the allocator to use and associate with the array
  *  @param  capacity    Initial capacity of the array (reserved element count)
  */
-#define make_array(type, allocator, capacity) (array_##type){array_init_generic(allocator, capacity, (uint32_t)sizeof(type)), 0}
+#define make_array(type, allocator, capacity) (array_##type){.data = array_init_generic(allocator, capacity, (uint32_t)sizeof(type)), .size = 0}
 
 
 /**
@@ -126,6 +117,30 @@ def_slice(double);
 
 
 /**
+ *  Check whether an array contains a slice
+ * 
+ *  @param  array       Pointer to the array to check
+ *  @param  slice       Slice to check against
+ * 
+ *  @return true/false
+ */
+#define array_contains_slice(array, slice) ((slice).data - (array)->data >= 0 && (slice).data - (array)->data < (array)->size)
+
+
+/**
+ *  Append a slice to the array, allocating more space if necessary
+ *  
+ *  @param  array       Pointer to the array to append the slice to
+ *  @param  slice       Slice to be appended
+ * 
+ *  @return Success true/false
+ * 
+ *  @note   It is not allowed to append any part of an array to itself, as potential reallocation would render the slice invalid.
+ */
+#define array_append(array, slice) (!array_contains_slice(array, slice) && array_append_generic((void **)&(array)->data, (slice).data, (array)->size, (slice).size) && ((array)->size += (slice).size, true))
+
+
+/**
  *  Add an element to the end of the array, allocating more space if necessary
  * 
  *  @param  array       Pointer to the array to add an item to
@@ -178,6 +193,22 @@ bool array_reserve_generic(void **data, uint32_t capacity);
  *  @return Success true/false
  */
 bool array_maybe_grow_generic(void **data, uint32_t current_size);
+
+
+/**
+ *  Append the given slice to the array.
+ * 
+ *  @param  dest            Pointer to the data member of the array slice.
+ *                          This will be rewritten with the new buffer address if reallocation occurs.
+ *  @param  src             Pointer to the data to be appended.
+ *  @param  dest_size       Number of items in the array.
+ *  @param  src_size        Number of items in the slice to be appended.
+ *  
+ *  @return Success true/false
+ * 
+ *  @note   It is incumbent on the caller to ensure that the slice holds the same element type as the array.
+ */
+bool array_append_generic(void **dest, const void *src, uint32_t dest_size, uint32_t src_size);
 
 
 /**

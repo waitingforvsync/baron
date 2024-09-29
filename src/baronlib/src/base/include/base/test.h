@@ -81,6 +81,7 @@ struct test_item {
 
 #define REQUIRE(a, op, b) REQUIRE_IMPL(a, op, b, __FILE__, __LINE__)
 #define REQUIRE_TRUE(a)   REQUIRE_IMPL(!!(a),==,true, __FILE__, __LINE__)
+#define REQUIRE_FALSE(a)   REQUIRE_IMPL(!(a),==,true, __FILE__, __LINE__)
 
 #define REQUIRE_IMPL(a, op, b, file, line) \
 	_Generic((a), \
