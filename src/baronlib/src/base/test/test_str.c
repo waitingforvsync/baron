@@ -108,3 +108,35 @@ DEF_TEST(strview, split) {
     REQUIRE_FALSE(strview_is_valid(split.first));
     REQUIRE(split.second,==,STRVIEW("path"));
 }
+
+DEF_TEST(strview, parseint) {
+    strview_parse_int_result_t result;
+
+    result = strview_parse_int(STRVIEW("379"));
+    REQUIRE(result.value,==,379);
+    REQUIRE(result.length_parsed,==,3);
+
+    result = strview_parse_int(STRVIEW("1234abcd"));
+    REQUIRE(result.value,==,1234);
+    REQUIRE(result.length_parsed,==,4);
+
+    result = strview_parse_int(STRVIEW("-1024"));
+    REQUIRE(result.value,==,-1024);
+    REQUIRE(result.length_parsed,==,5);
+
+    result = strview_parse_int(STRVIEW("-"));
+    REQUIRE(result.value,==,0);
+    REQUIRE(result.length_parsed,==,0);
+
+    result = strview_parse_int(STRVIEW("nothing"));
+    REQUIRE(result.value,==,0);
+    REQUIRE(result.length_parsed,==,0);
+}
+
+DEF_TEST(strview, parsehex) {
+    strview_parse_hex_result_t result;
+    
+    result = strview_parse_hex(STRVIEW("D00B1E5"));
+    REQUIRE(result.value,==,0xD00B1E5);
+    REQUIRE(result.length_parsed,==,7);
+}

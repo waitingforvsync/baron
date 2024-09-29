@@ -12,7 +12,6 @@
 
 typedef struct str_t str_t;
 typedef struct strview_t strview_t;
-typedef struct strview_pair_t strview_pair_t;
 
 struct strview_t {
 	const uint8_t *data;
@@ -29,10 +28,6 @@ struct str_t {
 	};
 };
 
-struct strview_pair_t {
-    strview_t first;
-    strview_t second;
-};
 
 
 /**
@@ -179,6 +174,12 @@ strview_t strview_remove_prefix(strview_t src, strview_t prefix);
 strview_t strview_remove_suffix(strview_t src, strview_t suffix);
 
 
+typedef struct strview_pair_t strview_pair_t;
+struct strview_pair_t {
+    strview_t first;
+    strview_t second;
+};
+
 /**
  *	Splits the given strview by a given substring from the front, and returns the head/tail pair
  */
@@ -189,6 +190,30 @@ strview_pair_t strview_first_split(strview_t src, strview_t split_by);
  *	Splits the given strview by a given substring from the back, and returns the head/tail pair
  */
 strview_pair_t strview_last_split(strview_t src, strview_t split_by);
+
+
+typedef struct strview_parse_int_result_t strview_parse_int_result_t;
+struct strview_parse_int_result_t {
+	int64_t value;
+	uint32_t length_parsed;
+};
+
+/**
+ *  Parses the given strview as a decimal numeric value
+ */
+strview_parse_int_result_t strview_parse_int(strview_t src);
+
+
+typedef struct strview_parse_hex_result_t strview_parse_hex_result_t;
+struct strview_parse_hex_result_t {
+	uint64_t value;
+	uint32_t length_parsed;
+};
+
+/**
+ *  Parses the given strview as a hex numeric value
+ */
+strview_parse_hex_result_t strview_parse_hex(strview_t src);
 
 
 /**

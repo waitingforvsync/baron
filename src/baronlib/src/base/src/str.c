@@ -139,3 +139,59 @@ strview_pair_t strview_last_split(strview_t src, strview_t split_by) {
 		strview_mid(src, index + split_by.length)
 	};
 }
+
+
+strview_parse_int_result_t strview_parse_int(strview_t src) {
+	int64_t value = 0;
+	uint32_t i = 0;
+
+	bool negative = (src.length > 0 && src.data[0] == '-' && src.data[1] >= '0' && src.data[1] <= '9');
+	if (negative) {
+		i++;
+	}
+
+	while (i < src.length && src.data[i] >= '0' && src.data[i] <= '9') {
+		// @todo: catch overflow
+		value = value * 10 + (src.data[i] - '0');
+		i++;
+	}
+
+	if (negative) {
+		value = -value;
+	}
+
+	return (strview_parse_int_result_t){value, i};
+}
+
+
+static bool is_hex_digit(uint8_t c) {
+	return (c >= '0' && c <= '9') ||
+	       (c >= 'A' && c <= 'F') ||
+		   (c >= 'a' && c <= 'f');
+}
+
+static uint32_t get_hex_digit_value(uint8_t c) {
+	if (c >= '0' && c <= '9') {
+		return c - '0';
+	}
+	else if (c >= 'A' && c <= 'F') {
+		return c + 10 - 'A';
+	}
+	else if (c >= 'a' && c <= 'f') {
+		return c + 10 - 'a';
+	}
+	UNREACHABLE();
+}
+
+strview_parse_hex_result_t strview_parse_hex(strview_t src) {
+	uint64_t value = 0;
+	uint32_t i = 0;
+
+	while (i < src.length && is_hex_digit(src.data[i])) {
+		// @todo: catch overflow
+		value = value * 16 + get_hex_digit_value(src.data[i]);
+		i++;
+	}
+
+	return (strview_parse_hex_result_t){value, i};
+}
