@@ -27,7 +27,7 @@ struct arena_t {
 /**
  *  Make an arena
  */
-arena_t make_arena(const allocator_t *allocator, uint32_t initial_size);
+arena_t make_arena(const allocator_t *allocator, uint32_t region_size);
 
 
 /**

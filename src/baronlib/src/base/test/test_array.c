@@ -2,8 +2,7 @@
 #include "base/allocator.h"
 #include "base/array.h"
 
-DEF_TEST(array, common_ops)
-{
+DEF_TEST(array, common_ops) {
     array_int32_t arr = make_array(int32_t, allocator_default(), 4);
     REQUIRE_TRUE(array_is_valid(&arr));
     REQUIRE(array_capacity(&arr),==,4);
@@ -30,8 +29,7 @@ DEF_TEST(array, common_ops)
     REQUIRE_TRUE(arr.data == 0);
 }
 
-DEF_TEST(array, append)
-{
+DEF_TEST(array, append) {
     array_int32_t arr = make_array(int32_t, allocator_default(), 4);
     array_add(&arr, 1);
     array_add(&arr, 2);
@@ -47,6 +45,11 @@ DEF_TEST(array, append)
     REQUIRE(copy.data[1],==,2);
     REQUIRE(copy.data[2],==,3);
     REQUIRE(copy.data[3],==,4);
+
+    array_double different_type = make_array(double, allocator_default(), 4);
+    // The below line is a compile error (different types)
+    // REQUIRE_FALSE(array_append(&copy, different_type.const_slice)); 
+    array_deinit(&different_type);
 
     array_deinit(&copy);
     array_deinit(&arr);

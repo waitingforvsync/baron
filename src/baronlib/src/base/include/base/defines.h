@@ -7,6 +7,8 @@
 #ifndef DEFINES_H_
 #define DEFINES_H_
 
+#include <stdint.h>
+
 
 // Set up compiler defines
 
@@ -58,6 +60,24 @@
 
 #define STRINGIFY(x) STRINGIFY_IMPL(x)
 #define STRINGIFY_IMPL(x) #x
+
+
+// Constants
+
+#define invalid_index 0xFFFFFFFFU
+
+
+// Min/max
+
+static inline int32_t math_min_int32(int32_t a, int32_t b) { return a < b ? a : b; }
+static inline uint32_t math_min_uint32(uint32_t a, uint32_t b) { return a < b ? a : b; }
+static inline float math_min_float(float a, float b) { return a < b ? a : b; }
+static inline double math_min_double(double a, double b) { return a < b ? a : b; }
+
+static inline int32_t math_max_int32(int32_t a, int32_t b) { return a > b ? a : b; }
+static inline uint32_t math_max_uint32(uint32_t a, uint32_t b) { return a > b ? a : b; }
+static inline float math_max_float(float a, float b) { return a > b ? a : b; }
+static inline double math_max_double(double a, double b) { return a > b ? a : b; }
 
 
 #endif // ifndef DEFINES_H_

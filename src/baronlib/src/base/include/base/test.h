@@ -8,8 +8,8 @@
 typedef struct test_item test_item;
 
 struct test_item {
-    str_t group_name;
-	str_t test_name;
+    const char *group_name;
+	const char *test_name;
 	void (*test_fn)(void);
 	void (*test_group_fn)(void *);
 	void (**init_fn)(void *);
@@ -21,8 +21,8 @@ struct test_item {
 #define DEF_TEST(group, test) \
 	static void test_##group##_##test(void); \
 	static const test_item test_item_##group##_##test = { \
-		.group_name = {(const uint8_t *)#group, (uint32_t)(sizeof #group) - 1}, \
-		.test_name = {(const uint8_t *)#test, (uint32_t)(sizeof #test) - 1}, \
+		.group_name = #group, \
+		.test_name = #test, \
 		.test_fn = test_##group##_##test \
 	}; \
     SECTION("test$b") const test_item *test_item_ptr_##group##_##test = &test_item_##group##_##test; \
@@ -31,8 +31,8 @@ struct test_item {
 #define DEF_TEST_SKIP(group, test) \
 	UNUSED_FN static void test_##group##_##test(void); \
 	static const eq_test_item test_item_##group##_##test = { \
-		.group_name = {(const uint8_t *)#group, (uint32_t)(sizeof #group) - 1}, \
-		.test_name = {(const uint8_t *)#test, (uint32_t)(sizeof #test) - 1}, \
+		.group_name = #group, \
+		.test_name = #test, \
 	}; \
     SECTION("test$b") const test_item *test_item_ptr_##group##_##test = &test_item_##group##_##test; \
 	static void test_##group##_##test(void)
@@ -57,8 +57,8 @@ struct test_item {
 	static void test_##group##_##test(struct test_group_data_##group *); \
 	static struct test_group_data_##group test_group_data_##group##_##test; \
 	static const test_item test_item_##group##_##test = { \
-		.group_name = {(const uint8_t *)#group, (uint32_t)(sizeof #group) - 1}, \
-		.test_name = {(const uint8_t *)#test, (uint32_t)(sizeof #test) - 1}, \
+		.group_name = #group, \
+		.test_name = #test, \
 		.test_group_fn = (void (*)(void *))test_##group##_##test, \
 		.init_fn = (void(**)(void *))&test_group_initfn_##group, \
 		.deinit_fn = (void(**)(void *))&test_group_deinitfn_##group, \
@@ -71,8 +71,8 @@ struct test_item {
 	UNUSED_FN static void test_##group##_##test(struct test_group_data_##group *); \
 	static struct test_group_data_##group test_group_data_##group##_##test; \
 	static const test_item test_item_##group##_##test = { \
-		.group_name = {(const uint8_t *)#group, (uint32_t)(sizeof #group) - 1}, \
-		.test_name = {(const uint8_t *)#test, (uint32_t)(sizeof #test) - 1}, \
+		.group_name = #group, \
+		.test_name = #test, \
 		.context = &test_group_data_##group##_##test \
 	}; \
     SECTION("test$b") const test_item *test_item_ptr_##group##_##test = &test_item_##group##_##test; \
@@ -96,13 +96,13 @@ struct test_item {
 		uint64_t: test_require_int, \
 		float: test_require_float, \
 		double: test_require_float, \
-		str_t: test_require_str \
+		strview_t: test_require_str \
 	)(a, #op, b, #a " " #op " " #b, file, line)
 
 void test_require_bool(bool actual, const char *op, bool expected, const char *expr, const char *file, int line);
 void test_require_int(int64_t actual, const char *op, int64_t expected, const char *expr, const char *file, int line);
 void test_require_float(double actual, const char *op, double expected, const char *expr, const char *file, int line);
-void test_require_str(str_t actual, const char *op, str_t expected, const char *expr, const char *file, int line);
+void test_require_str(strview_t actual, const char *op, strview_t expected, const char *expr, const char *file, int line);
 
 int test_run(const char *filter);
 

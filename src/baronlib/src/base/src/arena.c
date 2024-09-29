@@ -25,9 +25,10 @@ static uint32_t get_aligned_size(uint32_t size) {
 }
 
 
-arena_t make_arena(const allocator_t *allocator, uint32_t initial_size) {
+arena_t make_arena(const allocator_t *allocator, uint32_t region_size) {
     return (arena_t){
-        .child_allocator = allocator_alloc(allocator, get_aligned_size(initial_size))
+        .child_allocator = allocator,
+        ._region = allocator_alloc(allocator, get_aligned_size(region_size))
     };
 }
 

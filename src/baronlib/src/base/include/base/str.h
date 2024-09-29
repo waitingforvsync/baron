@@ -9,143 +9,192 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "array.h"
 
-typedef array_uint8_t strbuf_t;
-typedef slice_const_uint8_t str_t;
-typedef struct str_pair_t str_pair_t;
+typedef struct str_t str_t;
+typedef struct strview_t strview_t;
+typedef struct strview_pair_t strview_pair_t;
 
-struct str_pair_t {
-    str_t first;
-    str_t second;
+struct strview_t {
+	const uint8_t *data;
+	uint32_t length;
+};
+
+struct str_t {
+	union {
+		struct {
+			uint8_t *data;
+			uint32_t length;
+		};
+		strview_t view;
+	};
+};
+
+struct strview_pair_t {
+    strview_t first;
+    strview_t second;
 };
 
 
 /**
- *	Make a str_t from a C string literal
+ *	Make a strview_t from a C string literal
  */
-#define STR(s) \
+#define STRVIEW(s) \
 	_Generic((&(s)), \
-		char(*)[sizeof s]: ((str_t){(const uint8_t *)(s), (uint32_t)(sizeof s) - 1}), \
-		const char(*)[sizeof s]: ((str_t){(const uint8_t *)(s), (uint32_t)(sizeof s) - 1}) \
+		char(*)[sizeof s]: ((strview_t){(const uint8_t *)(s), (uint32_t)(sizeof s) - 1}), \
+		const char(*)[sizeof s]: ((strview_t){(const uint8_t *)(s), (uint32_t)(sizeof s) - 1}) \
 	)
 
 
 /**
- *	Make a str_t from an arbitrary char *
+ *  Make an empty str_t with the given capacity
+ * 
+ *  @
  */
-str_t str_from_chars(const char *s);
+
+
+/**
+ *	Make a strview_t from an arbitrary char *
+ *
+ *  @param	s			A C-string pointer
+ * 
+ *  @return a strview_t referencing the C-string (minus the zero terminator)
+ */
+strview_t make_strview(const char *s);
 
 
 /**
  *	Is a str_t valid?
+ *
+ *  @param	str			The strview to check for validity
+ * 
+ *  @return	valid true/false
  */
-static inline bool str_is_valid(str_t str) {
-	return str.data;
-}
-
-/**
- * Get the length of the str_t
- */
-static inline uint32_t str_length(str_t str) {
-	return str.size;
+static inline bool strview_is_valid(strview_t str) {
+	return str.data != 0;
 }
 
 
 /**
- *	Is str_t a equal to str_t b?
+ *	Return whether two strviews are equal
+ * 
+ *  @param	a			First strview to compare
+ *  @param	b			Second strview to compare
+ *
+ *  @return strviews are equal, true/false
  */
-bool str_equal(str_t a, str_t b);
+bool strview_equal(strview_t a, strview_t b);
 
 
 /**
- *	Compare str_t a with str_t b
+ *	Compare strview a with strview b
+ * 
+ *  @param	a			First strview to compare
+ *  @param	b			Second strview to compare
+ *
+ *  @return 0 if the strings are lexographically equal
+ *          <0 if string a is lexographically before string b
+ *          >0 if string a is lexographically after string b
  */
-int str_compare(str_t a, str_t b);
+int strview_compare(strview_t a, strview_t b);
 
 
 /**
- *	Does str_t a contain str_t b?
+ *	Get the leftmost chars of a strview
  */
-bool str_contains(str_t a, str_t b);
+strview_t strview_left(strview_t s, uint32_t count);
 
 
 /**
- *	Get the leftmost chars of a str_t
+ *	Get the rightmost chars of a strview
  */
-str_t str_left(str_t s, uint32_t count);
+strview_t strview_right(strview_t s, uint32_t count);
 
 
 /**
- *	Get the rightmost chars of a str_t
+ *	Get a substring of a strview
  */
-str_t str_right(str_t s, uint32_t count);
+strview_t strview_substr(strview_t s, uint32_t start, uint32_t count);
 
 
 /**
- *	Get a substring of a str_t
+ *	Get a strview from the middle to the end
  */
-str_t str_substr(str_t s, uint32_t start, uint32_t count);
+strview_t strview_mid(strview_t s, uint32_t start);
 
 
 /**
- *	Get a str_t from the middle to the end
+ *	Does strview a start with strview b?
+ *
+ *  @param	a			strview to test
+ *  @param	b			prefix to test for
+ *
+ *  @return true/false
  */
-str_t str_mid(str_t s, uint32_t start);
+bool strview_startswith(strview_t a, strview_t b);
 
 
 /**
- *	Does str_t a start with str_t b?
+ *	Does strview a end with strview b?
+ *
+ *  @param	a			strview to test
+ *  @param	b			suffix to test for
+ *
+ *  @return true/false
  */
-bool str_startswith(str_t a, str_t b);
+bool strview_endswith(strview_t a, strview_t b);
 
 
 /**
- *	Does str_t a end with str_t b?
+ *	Find the first instance of strview b in strview a and return its index
  */
-bool str_endswith(str_t a, str_t b);
+uint32_t strview_find_first(strview_t a, strview_t b);
 
 
 /**
- *	Find the first instance of str_t b in str_t a and return its index
+ *	Find the last instance of strview b in strview a and return its index
  */
-uint32_t str_find_first(str_t a, str_t b);
+uint32_t strview_find_last(strview_t a, strview_t b);
 
 
 /**
- *	Find the last instance of str_t b in str_t a and return its index
+ *	Does strview a contain strview b?
+ * 
+ *  @param	a			strview to query
+ *  @param	b			Substring to check
+ *
+ *  @return true/false
  */
-uint32_t str_find_last(str_t a, str_t b);
+bool strview_contains(strview_t a, strview_t b);
 
 
 /**
- *	Return the str_t with the given prefix removed if possible
+ *	Return the strview with the given prefix removed if possible
  */
-str_t str_remove_prefix(str_t src, str_t prefix);
+strview_t strview_remove_prefix(strview_t src, strview_t prefix);
 
 
 /**
- *	Return the str_t with the given suffix removed if possible
+ *	Return the strview with the given suffix removed if possible
  */
-str_t str_remove_suffix(str_t src, str_t suffix);
+strview_t strview_remove_suffix(strview_t src, strview_t suffix);
 
 
 /**
- *	Splits the given str_t by a given substring from the front, and returns the head/tail pair
+ *	Splits the given strview by a given substring from the front, and returns the head/tail pair
  */
-str_pair_t str_first_split(str_t src, str_t split_by);
+strview_pair_t strview_first_split(strview_t src, strview_t split_by);
 
 
 /**
- *	Splits the given str_t by a given substring from the back, and returns the head/tail pair
+ *	Splits the given strview by a given substring from the back, and returns the head/tail pair
  */
-str_pair_t str_last_split(str_t src, str_t split_by);
+strview_pair_t strview_last_split(strview_t src, strview_t split_by);
 
 
 /**
  *	Macro to output {length, data} parameters to a %.*s printf formatter, to print a cstr
  */
-#define STR_PRINT(s) (s).size, (s).data
+#define STR_PRINT(s) (s).length, (s).data
 #define STR_FORMAT "%.*s"
 
 

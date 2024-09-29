@@ -73,9 +73,9 @@ void test_require_float(double actual, const char *op, double expected, const ch
 	longjmp(env, 1);
 }
 
-void test_require_str(str_t actual, const char *op, str_t expected, const char *expr, const char *file, int line) {
-	if (is_op2(op, "==")) { if (str_equal(actual, expected)) return; } else
-	if (is_op2(op, "!=")) { if (!str_equal(actual, expected)) return; }
+void test_require_str(strview_t actual, const char *op, strview_t expected, const char *expr, const char *file, int line) {
+	if (is_op2(op, "==")) { if (strview_equal(actual, expected)) return; } else
+	if (is_op2(op, "!=")) { if (!strview_equal(actual, expected)) return; }
 	else {
 		printf("[FAIL]\n%s:%d: Unsupported operation: %s\n", file, line, op);
 	}
@@ -85,7 +85,7 @@ void test_require_str(str_t actual, const char *op, str_t expected, const char *
 
 
 int test_run(const char *filter_string) {
-    str_t filter = str_from_chars(filter_string);
+    strview_t filter = make_strview(filter_string);
 	int num_fail = 0;
 	int num_pass = 0;
 	int num_skip = 0;
@@ -95,12 +95,16 @@ int test_run(const char *filter_string) {
 	int max_width = 0;
 	for (const test_item **start = &__start_test; start != &__stop_test; start++) {
 		const test_item *test_item = *start;
-		if (test_item && str_startswith(test_item->group_name, filter)) {
-            int width = test_item->group_name.size + test_item->test_name.size;
-            if (width > max_width) {
-                max_width = width;
-            }
-			total++;
+		if (test_item) {
+			strview_t group_name = make_strview(test_item->group_name);
+			if (strview_startswith(group_name, filter)) {
+				strview_t test_name = make_strview(test_item->test_name);
+				int width = group_name.length + test_name.length;
+				if (width > max_width) {
+					max_width = width;
+				}
+				total++;
+			}
 		}
 	}
 	
@@ -108,54 +112,57 @@ int test_run(const char *filter_string) {
 	int count = 1;
 	for (const test_item **start = &__start_test; start != &__stop_test; start++) {
 		const test_item *test_item = *start;
-		
-		if (test_item && str_startswith(test_item->group_name, filter)) {
-			int32_t padding = max_width + 3 - test_item->group_name.size - test_item->test_name.size;
-            if (padding < 0) {
-                padding = 0;
-            }
-			
-			printf("%4d/%d:  " STR_FORMAT "." STR_FORMAT "%-*s", 
-				count, total, STR_PRINT(test_item->group_name), STR_PRINT(test_item->test_name), padding, ":");
-			fflush(stdout);
-			
-			if (test_item->test_fn || test_item->test_group_fn) {
-			
-				if (!setjmp(env)) {
-					// Call the group init function if one defined
-					if (test_item->init_fn && *test_item->init_fn) {
-						(*test_item->init_fn)(test_item->context);
-					}
+		if (test_item) {
+			strview_t group_name = make_strview(test_item->group_name);
+			if (strview_startswith(group_name, filter)) {
+				strview_t test_name = make_strview(test_item->test_name);
+				int32_t padding = max_width + 3 - group_name.length - test_name.length;
+				if (padding < 0) {
+					padding = 0;
+				}
+				
+				printf("%4d/%d:  " STR_FORMAT "." STR_FORMAT "%-*s", 
+					count, total, STR_PRINT(group_name), STR_PRINT(test_name), padding, ":");
+				fflush(stdout);
+				
+				if (test_item->test_fn || test_item->test_group_fn) {
+				
+					if (!setjmp(env)) {
+						// Call the group init function if one defined
+						if (test_item->init_fn && *test_item->init_fn) {
+							(*test_item->init_fn)(test_item->context);
+						}
 
-					// Call the test, with or without fixture context as appropriate
-					if (test_item->context) {
-						test_item->test_group_fn(test_item->context);
+						// Call the test, with or without fixture context as appropriate
+						if (test_item->context) {
+							test_item->test_group_fn(test_item->context);
+						}
+						else {
+							test_item->test_fn();
+						}
+						
+						// Call the group deinit function if one defined
+						if (test_item->deinit_fn && *test_item->deinit_fn) {
+							(*test_item->deinit_fn)(test_item->context);
+						}
+						
+						// If we got here, it's a pass
+						printf("ok\n");
+						num_pass++;
 					}
 					else {
-						test_item->test_fn();
+						// If we got here it's a fail
+						num_fail++;
 					}
-					
-					// Call the group deinit function if one defined
-					if (test_item->deinit_fn && *test_item->deinit_fn) {
-						(*test_item->deinit_fn)(test_item->context);
-					}
-					
-					// If we got here, it's a pass
-					printf("ok\n");
-					num_pass++;
 				}
 				else {
-					// If we got here it's a fail
-					num_fail++;
+					// If we got here, we skipped
+					printf("[SKIP]\n");
+					num_skip++;
 				}
+				
+				count++;
 			}
-			else {
-				// If we got here, we skipped
-				printf("[SKIP]\n");
-				num_skip++;
-			}
-			
-			count++;
 		}
 	}
 	

@@ -4,6 +4,7 @@ target_link_libraries("base_tests" PRIVATE "base")
 target_sources("base_tests"
     PRIVATE
     "main.c"
+    "test_arena.c"
     "test_array.c"
     "test_str.c"
 )
