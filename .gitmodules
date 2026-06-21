@@ -1,0 +1,3 @@
+[submodule "extern/richc"]
+	path = extern/richc
+	url = https://github.com/waitingforvsync/richc.git
