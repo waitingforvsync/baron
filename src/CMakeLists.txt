@@ -2,6 +2,11 @@ add_executable(baron
     main.c
     value.c
     value.h
+    lexeme.h
+    token.c
+    token.h
+    lexer.c
+    lexer.h
 )
 
 target_link_libraries(baron PRIVATE richc)
