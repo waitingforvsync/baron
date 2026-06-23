@@ -21,9 +21,10 @@ typedef struct token {
 // A token table is a read-only view of tokens.
 typedef rc_view_token token_table;
 
-// Return the entry whose name is the longest prefix of `text` (case-insensitive,
-// since keywords/operators are case-insensitive), or NULL if none match.
-const token *token_table_find(token_table tt, rc_str text);
+// Return the index of the entry whose name is the longest prefix of `text`
+// (case-insensitive, since keywords/operators are case-insensitive), or
+// RC_INDEX_NONE if none match.
+uint32_t token_table_find(token_table tt, rc_str text);
 
 
 #endif // ifndef BARON_TOKEN_H_

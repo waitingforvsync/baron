@@ -22,9 +22,9 @@ static bool is_ident_char(char c)    { return is_ident_start(c) || is_digit(c); 
 
 static uint32_t hex_value(char c)
 {
-    if (c >= '0' && c <= '9') return (uint32_t)(c - '0');
-    if (c >= 'a' && c <= 'f') return (uint32_t)(c - 'a' + 10);
-    if (c >= 'A' && c <= 'F') return (uint32_t)(c - 'A' + 10);
+    if (c >= '0' && c <= '9') return (uint32_t) (c - '0');
+    if (c >= 'a' && c <= 'f') return (uint32_t) (c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return (uint32_t) (c - 'A' + 10);
     RC_UNREACHABLE();
 }
 
@@ -94,9 +94,11 @@ static uint32_t skip_whitespace(rc_str text, uint32_t cursor)
     while (!is_eof(text, cursor) && is_whitespace(at(text, cursor))) {
         cursor++;
     }
+
     if (!is_eof(text, cursor) && is_comment_start(at(text, cursor))) {
         cursor = skip_comment(text, cursor);
     }
+
     return cursor;
 }
 
@@ -109,7 +111,8 @@ static uint32_t skip_terminator(rc_str text, uint32_t cursor)
 
     do {
         cursor = skip_whitespace(text, cursor + 1);
-    } while (!is_eof(text, cursor) && is_terminator(at(text, cursor)));
+    }
+    while (!is_eof(text, cursor) && is_terminator(at(text, cursor)));
 
     return cursor;
 }
@@ -129,7 +132,8 @@ static lexer_result lex_decimal(rc_str text, uint32_t cursor)
         }
         result = result * 10.0 + (at(text, cursor) - '0');
         cursor++;
-    } while (!is_eof(text, cursor) && is_digit(at(text, cursor)));
+    }
+    while (!is_eof(text, cursor) && is_digit(at(text, cursor)));
 
     // Fractional part, only if there is a digit after the '.'
     // There's a subtlety here: we don't want to consume a '.' if it is not followed by a digit, so
@@ -171,7 +175,8 @@ static lexer_result lex_hex(rc_str text, uint32_t cursor)
         }
         result = (result << 4) | hex_value(at(text, cursor));
         cursor++;
-    } while (!is_eof(text, cursor) && is_hex_digit(at(text, cursor)));
+    }
+    while (!is_eof(text, cursor) && is_hex_digit(at(text, cursor)));
 
     return make_numeric((double)result, cursor);
 }
@@ -192,7 +197,8 @@ static lexer_result lex_binary(rc_str text, uint32_t cursor)
         }
         result = (result << 1) | (uint32_t)(at(text, cursor) - '0');
         cursor++;
-    } while (!is_eof(text, cursor) && is_bin_digit(at(text, cursor)));
+    }
+    while (!is_eof(text, cursor) && is_bin_digit(at(text, cursor)));
 
     return make_numeric((double)result, cursor);
 }
@@ -253,7 +259,9 @@ static uint32_t scan_segment(rc_str text, uint32_t cursor)
 
     do {
         cursor++;
-    } while (!is_eof(text, cursor) && is_ident_char(at(text, cursor)));
+    }
+    while (!is_eof(text, cursor) && is_ident_char(at(text, cursor)));
+
     return cursor;
 }
 
@@ -341,15 +349,16 @@ lexer_result lexer_next(rc_str text, uint32_t cursor, token_table tt)
 
     // Operators / keywords from the context table. An identifier starting here
     // wins if it is longer than the matched token (so ANDY beats the AND token).
-    const token *tok = token_table_find(tt, rc_str_skip(text, cursor));
-    if (tok) {
+    uint32_t tok = token_table_find(tt, rc_str_skip(text, cursor));
+    if (tok != RC_INDEX_NONE) {
+        rc_str name = tt.data[tok].name;
         if (is_ident_start(c)) {
             uint32_t end = scan_dotted_identifier(text, cursor);
-            if (end - cursor > tok->name.len) {
+            if (end - cursor > name.len) {
                 return make_identifier(text, cursor, end);
             }
         }
-        return make_result(tok->lexeme, cursor + tok->name.len);
+        return make_result(tt.data[tok].lexeme, cursor + name.len);
     }
 
     // Identifier is the last resort.
@@ -379,10 +388,8 @@ static const token lexer_test_tokens[] = {
     { RC_STR("."),   { .type = lexeme_type_binary_op } },
     { RC_STR("and"), { .type = lexeme_type_binary_op } },
 };
-static const token_table lexer_tt = {
-    .data = lexer_test_tokens,
-    .num = (uint32_t)(sizeof lexer_test_tokens / sizeof lexer_test_tokens[0]),
-};
+
+static const token_table lexer_tt = RC_VIEW(lexer_test_tokens);
 
 RC_TEST(lexer, numbers)
 {

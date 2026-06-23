@@ -1,14 +1,14 @@
 #include "token.h"
 
 
-const token *token_table_find(token_table tt, rc_str text)
+uint32_t token_table_find(token_table tt, rc_str text)
 {
-    const token *best = NULL;
+    uint32_t best = RC_INDEX_NONE;
     for (uint32_t i = 0; i < tt.num; i++) {
         rc_str name = tt.data[i].name;
         if (name.len <= text.len && rc_str_is_equal_insensitive(rc_str_left(text, name.len), name)) {
-            if (!best || name.len > best->name.len) {
-                best = &tt.data[i];
+            if (best == RC_INDEX_NONE || name.len > tt.data[best].name.len) {
+                best = i;
             }
         }
     }
@@ -30,21 +30,21 @@ RC_TEST(token, find_longest_match)
     token_table tt = { .data = toks, .num = (uint32_t)(sizeof toks / sizeof toks[0]) };
 
     // Longest prefix wins.
-    const token *t = token_table_find(tt, RC_STR("++x"));
-    RC_CHECK_TRUE(t != NULL);
-    RC_CHECK(t->name, ==, RC_STR("++"));
+    uint32_t i = token_table_find(tt, RC_STR("++x"));
+    RC_CHECK_TRUE(i != RC_INDEX_NONE);
+    RC_CHECK(tt.data[i].name, ==, RC_STR("++"));
 
-    t = token_table_find(tt, RC_STR("+y"));
-    RC_CHECK_TRUE(t != NULL);
-    RC_CHECK(t->name, ==, RC_STR("+"));
+    i = token_table_find(tt, RC_STR("+y"));
+    RC_CHECK_TRUE(i != RC_INDEX_NONE);
+    RC_CHECK(tt.data[i].name, ==, RC_STR("+"));
 
     // Case-insensitive (keywords).
-    t = token_table_find(tt, RC_STR("ANDY"));
-    RC_CHECK_TRUE(t != NULL);
-    RC_CHECK(t->name, ==, RC_STR("and"));
+    i = token_table_find(tt, RC_STR("ANDY"));
+    RC_CHECK_TRUE(i != RC_INDEX_NONE);
+    RC_CHECK(tt.data[i].name, ==, RC_STR("and"));
 
     // No match.
-    RC_CHECK_TRUE(token_table_find(tt, RC_STR("xyz")) == NULL);
+    RC_CHECK_TRUE(token_table_find(tt, RC_STR("xyz")) == RC_INDEX_NONE);
 }
 
 #endif // BARON_TESTS
