@@ -36,9 +36,18 @@ typedef enum lexeme_type {
     lexeme_type_close_bracket,
     lexeme_type_unary_op,
     lexeme_type_binary_op,
+    lexeme_type_function,               // a bracketed call like ABS(x)
     lexeme_type_error,
     // deferred until later milestones: keyword, constant
 } lexeme_type;
+
+
+// How a binary operator groups when chained at equal precedence: a-b-c is
+// (a-b)-c (left), a^b^c is a^(b^c) (right).
+typedef enum assoc {
+    assoc_left,                         // 0 / default
+    assoc_right,
+} assoc;
 
 
 typedef struct lexeme_numeric_literal {
@@ -62,14 +71,23 @@ typedef struct lexeme_constant {
 
 
 typedef struct lexeme_unary_op {
-    // The handler will be a function pointer to the operator's evaluation function.
+    value (*apply)(value v, rc_arena *arena);
+    uint8_t precedence;                 // its operand is parsed at this precedence,
+                                        // so -2^2 is -(2^2) and a future LO/HI can
+                                        // swallow the whole expression that follows
 } lexeme_unary_op;
 
 
 typedef struct lexeme_binary_op {
-    // The handler will be a function pointer to the operator's evaluation function.
-    // Also precedence and associativity for parsing.
+    value (*apply)(value a, value b, rc_arena *arena);
+    uint8_t precedence;                 // higher binds tighter
+    assoc   associativity;
 } lexeme_binary_op;
+
+
+typedef struct lexeme_function {
+    value (*apply)(value v, rc_arena *arena);   // one argument for now
+} lexeme_function;
 
 
 typedef struct lexeme_keyword {
@@ -91,6 +109,7 @@ typedef struct lexeme {
         lexeme_constant constant;
         lexeme_unary_op unary_op;
         lexeme_binary_op binary_op;
+        lexeme_function function;
         lexeme_keyword keyword;
         lexeme_error error;
     };

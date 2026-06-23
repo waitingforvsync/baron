@@ -9,6 +9,8 @@ add_executable(baron
     lexer.h
     scopes.c
     scopes.h
+    expression.c
+    expression.h
     baron.c
     baron.h
 )

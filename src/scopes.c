@@ -157,97 +157,87 @@ value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
 
 #include "richc/test.h"
 
-RC_TEST(scopes, set_get_overwrite)
-{
-    scopes s;
-    scopes_init(&s);
-    uint32_t root = scopes_make_root(&s);
+// Each test gets a fresh scope tree with its root already made.
+RC_TEST_GROUP_DATA(scopes) {
+    scopes   scopes;
+    uint32_t root;
+};
 
+RC_TEST_GROUP_INIT(scopes, fix)
+{
+    scopes_init(&fix->scopes);
+    fix->root = scopes_make_root(&fix->scopes);
+}
+
+RC_TEST_GROUP_DEINIT(scopes, fix)
+{
+    scopes_deinit(&fix->scopes);
+}
+
+RC_TEST_STEP(scopes, set_get_overwrite, fix)
+{
     // A brand new symbol reports no change; get hands it straight back.
-    RC_CHECK_FALSE(scopes_set_symbol(&s, root, RC_STR("snowy"), value_make_numeric(1234.0)));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, root, RC_STR("snowy")), value_make_numeric(1234.0)));
+    RC_CHECK_FALSE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), value_make_numeric(1234.0)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("snowy")), value_make_numeric(1234.0)));
 
     // Rewriting the same value is not a change, even though the symbol exists.
-    RC_CHECK_FALSE(scopes_set_symbol(&s, root, RC_STR("snowy"), value_make_numeric(1234.0)));
+    RC_CHECK_FALSE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), value_make_numeric(1234.0)));
 
     // A different value for an existing symbol is a change, and it sticks.
-    RC_CHECK_TRUE(scopes_set_symbol(&s, root, RC_STR("snowy"), value_make_numeric(321.0)));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, root, RC_STR("snowy")), value_make_numeric(321.0)));
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), value_make_numeric(321.0)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("snowy")), value_make_numeric(321.0)));
 
-    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&s, root, RC_STR("penguin"))));
-
-    scopes_deinit(&s);
+    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("penguin"))));
 }
 
-RC_TEST(scopes, remove)
+RC_TEST_STEP(scopes, remove, fix)
 {
-    scopes s;
-    scopes_init(&s);
-    uint32_t root = scopes_make_root(&s);
-
-    scopes_set_symbol(&s, root, RC_STR("barn"), value_make_numeric(3141.0));
-    RC_CHECK_TRUE(scopes_remove_symbol(&s, root, RC_STR("barn")));    // was present
-    RC_CHECK_FALSE(scopes_remove_symbol(&s, root, RC_STR("barn")));   // now gone
-    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&s, root, RC_STR("barn"))));
-
-    scopes_deinit(&s);
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("barn"), value_make_numeric(3141.0));
+    RC_CHECK_TRUE(scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("barn")));    // was present
+    RC_CHECK_FALSE(scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("barn")));   // now gone
+    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("barn"))));
 }
 
-RC_TEST(scopes, qualified_path)
+RC_TEST_STEP(scopes, qualified_path, fix)
 {
-    scopes s;
-    scopes_init(&s);
-    uint32_t root    = scopes_make_root(&s);
-    uint32_t routine = scopes_make_child(&s, root, RC_STR("routine"));
+    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
 
-    scopes_set_symbol(&s, routine, RC_STR("core"), value_make_numeric(0x2000));
+    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), value_make_numeric(0x2000));
 
     // Bare name from inside the child, and the dotted path from the parent.
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, routine, RC_STR("core")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, root, RC_STR("routine.core")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, routine, RC_STR("core")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("routine.core")), value_make_numeric(0x2000)));
 
     // An unknown leaf symbol and an unknown head scope both come up empty.
-    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&s, root, RC_STR("routine.missing"))));
-    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&s, root, RC_STR("ghost.core"))));
-
-    scopes_deinit(&s);
+    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("routine.missing"))));
+    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("ghost.core"))));
 }
 
-RC_TEST(scopes, qualified_head_walks_up)
+RC_TEST_STEP(scopes, qualified_head_walks_up, fix)
 {
     // From a sibling scope, routine.core still finds `routine` by walking up to the root.
-    scopes s;
-    scopes_init(&s);
-    uint32_t root    = scopes_make_root(&s);
-    uint32_t routine = scopes_make_child(&s, root, RC_STR("routine"));
-    uint32_t other   = scopes_make_child(&s, root, RC_STR("other"));
+    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
+    uint32_t other   = scopes_make_child(&fix->scopes, fix->root, RC_STR("other"));
 
-    scopes_set_symbol(&s, routine, RC_STR("core"), value_make_numeric(42.0));
+    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), value_make_numeric(42.0));
 
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, other, RC_STR("routine.core")), value_make_numeric(42.0)));
-
-    scopes_deinit(&s);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, other, RC_STR("routine.core")), value_make_numeric(42.0)));
 }
 
-RC_TEST(scopes, nested_path_and_shadowing)
+RC_TEST_STEP(scopes, nested_path_and_shadowing, fix)
 {
-    scopes s;
-    scopes_init(&s);
-    uint32_t root = scopes_make_root(&s);
-    uint32_t a    = scopes_make_child(&s, root, RC_STR("a"));
-    uint32_t b    = scopes_make_child(&s, a, RC_STR("b"));
+    uint32_t a = scopes_make_child(&fix->scopes, fix->root, RC_STR("a"));
+    uint32_t b = scopes_make_child(&fix->scopes, a, RC_STR("b"));
 
-    scopes_set_symbol(&s, root, RC_STR("x"), value_make_numeric(1.0));
-    scopes_set_symbol(&s, b,    RC_STR("x"), value_make_numeric(2.0));
-    scopes_set_symbol(&s, b,    RC_STR("y"), value_make_numeric(99.0));
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("x"), value_make_numeric(1.0));
+    scopes_set_symbol(&fix->scopes, b,         RC_STR("x"), value_make_numeric(2.0));
+    scopes_set_symbol(&fix->scopes, b,         RC_STR("y"), value_make_numeric(99.0));
 
     // Three-component descent from the root.
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, root, RC_STR("a.b.y")), value_make_numeric(99.0)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("a.b.y")), value_make_numeric(99.0)));
     // Shadowing: from b a bare x is b's; from a it falls through to the root's.
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, b, RC_STR("x")), value_make_numeric(2.0)));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&s, a, RC_STR("x")), value_make_numeric(1.0)));
-
-    scopes_deinit(&s);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, b, RC_STR("x")), value_make_numeric(2.0)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, a, RC_STR("x")), value_make_numeric(1.0)));
 }
 
 #endif // BARON_TESTS

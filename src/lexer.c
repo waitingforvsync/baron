@@ -338,11 +338,11 @@ lexer_result lexer_next(rc_str text, uint32_t cursor, token_table tt)
         return lex_char(text, cursor + 1);
     }
 
-    // Context-independent grouping punctuation.
+    // Context-independent grouping punctuation. Parentheses are deliberately absent:
+    // they are operators in their own right (open paren begins an operand, close paren
+    // ends one), so they live in the expression token tables alongside the operators.
     switch (c) {
         case ',': return make_simple(lexeme_type_comma, cursor + 1);
-        case '(': return make_simple(lexeme_type_open_paren, cursor + 1);
-        case ')': return make_simple(lexeme_type_close_paren, cursor + 1);
         case '[': return make_simple(lexeme_type_open_bracket, cursor + 1);
         case ']': return make_simple(lexeme_type_close_bracket, cursor + 1);
     }
@@ -387,6 +387,8 @@ static const token lexer_test_tokens[] = {
     { RC_STR(".."),  { .type = lexeme_type_binary_op } },
     { RC_STR("."),   { .type = lexeme_type_binary_op } },
     { RC_STR("and"), { .type = lexeme_type_binary_op } },
+    { RC_STR("("),   { .type = lexeme_type_open_paren } },
+    { RC_STR(")"),   { .type = lexeme_type_close_paren } },
 };
 
 static const token_table lexer_tt = RC_VIEW(lexer_test_tokens);
