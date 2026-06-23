@@ -7,6 +7,10 @@ add_executable(baron
     token.h
     lexer.c
     lexer.h
+    scopes.c
+    scopes.h
+    baron.c
+    baron.h
 )
 
 target_link_libraries(baron PRIVATE richc)
