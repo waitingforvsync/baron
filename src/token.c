@@ -5,9 +5,9 @@ uint32_t token_table_find(token_table tt, rc_str text)
 {
     uint32_t best = RC_INDEX_NONE;
     for (uint32_t i = 0; i < tt.num; i++) {
-        rc_str name = tt.data[i].name;
+        rc_str name = rc_view_token_get(tt, i).name;
         if (name.len <= text.len && rc_str_is_equal_insensitive(rc_str_left(text, name.len), name)) {
-            if (best == RC_INDEX_NONE || name.len > tt.data[best].name.len) {
+            if (best == RC_INDEX_NONE || name.len > rc_view_token_get(tt, best).name.len) {
                 best = i;
             }
         }
@@ -32,16 +32,16 @@ RC_TEST(token, find_longest_match)
     // Longest prefix wins.
     uint32_t i = token_table_find(tt, RC_STR("++x"));
     RC_CHECK_TRUE(i != RC_INDEX_NONE);
-    RC_CHECK(tt.data[i].name, ==, RC_STR("++"));
+    RC_CHECK(rc_view_token_get(tt, i).name, ==, RC_STR("++"));
 
     i = token_table_find(tt, RC_STR("+y"));
     RC_CHECK_TRUE(i != RC_INDEX_NONE);
-    RC_CHECK(tt.data[i].name, ==, RC_STR("+"));
+    RC_CHECK(rc_view_token_get(tt, i).name, ==, RC_STR("+"));
 
     // Case-insensitive (keywords).
     i = token_table_find(tt, RC_STR("ANDY"));
     RC_CHECK_TRUE(i != RC_INDEX_NONE);
-    RC_CHECK(tt.data[i].name, ==, RC_STR("and"));
+    RC_CHECK(rc_view_token_get(tt, i).name, ==, RC_STR("and"));
 
     // No match.
     RC_CHECK_TRUE(token_table_find(tt, RC_STR("xyz")) == RC_INDEX_NONE);

@@ -351,14 +351,14 @@ lexer_result lexer_next(rc_str text, uint32_t cursor, token_table tt)
     // wins if it is longer than the matched token (so ANDY beats the AND token).
     uint32_t tok = token_table_find(tt, rc_str_skip(text, cursor));
     if (tok != RC_INDEX_NONE) {
-        rc_str name = tt.data[tok].name;
+        rc_str name = rc_view_token_get(tt, tok).name;
         if (is_ident_start(c)) {
             uint32_t end = scan_dotted_identifier(text, cursor);
             if (end - cursor > name.len) {
                 return make_identifier(text, cursor, end);
             }
         }
-        return make_result(tt.data[tok].lexeme, cursor + name.len);
+        return make_result(rc_view_token_get(tt, tok).lexeme, cursor + name.len);
     }
 
     // Identifier is the last resort.
