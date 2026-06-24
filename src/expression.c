@@ -286,6 +286,106 @@ static value op_range_excl(value a, value b, rc_arena *arena)
 }
 
 
+// ---- list shape and broadcasting ----
+// Rough first cut, to be refined later (lives here, not in value.c, while it settles).
+
+#define MAX_RANK 32   // nested lists deeper than this are rejected; far beyond real use
+
+// Axis lengths down v's first-child chain (the candidate shape), stopping at a scalar or
+// an empty list. Returns the rank, or UINT32_MAX if the nesting is deeper than max.
+static uint32_t first_branch_dims(value v, uint32_t dims[], uint32_t max)
+{
+    uint32_t rank = 0;
+    while (value_is_list(v)) {
+        if (rank >= max) {
+            return UINT32_MAX;
+        }
+        dims[rank++] = v.list.num;
+        if (v.list.num == 0) {
+            break;
+        }
+        v = rc_view_value_get(v.list, 0);
+    }
+    return rank;
+}
+
+// True if v has exactly the shape dims[depth..rank): a leaf (depth == rank) must be a
+// non-list; an interior node a list of the expected length whose elements all conform.
+// This is the rectangularity test.
+static bool conforms(value v, const uint32_t dims[], uint32_t depth, uint32_t rank)
+{
+    if (depth == rank) {
+        return !value_is_list(v);
+    }
+    if (!value_is_list(v) || v.list.num != dims[depth]) {
+        return false;
+    }
+    for (uint32_t i = 0; i < v.list.num; i++) {
+        if (!conforms(rc_view_value_get(v.list, i), dims, depth + 1, rank)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The rank of v if it is rectangular, else -1 (ragged, or nested deeper than the cap).
+static int32_t rank_of(value v)
+{
+    uint32_t dims[MAX_RANK];
+    uint32_t rank = first_branch_dims(v, dims, MAX_RANK);
+    if (rank == UINT32_MAX || !conforms(v, dims, 0, rank)) {
+        return -1;
+    }
+    return (int32_t)rank;
+}
+
+// The shape() function: the axis lengths outermost-first as a list of numbers (a scalar
+// is rank 0, so its shape is the empty list); a ragged list has no shape -> error.
+static value fn_shape(value v, rc_arena *arena)
+{
+    uint32_t dims[MAX_RANK];
+    uint32_t rank = first_branch_dims(v, dims, MAX_RANK);
+    if (rank == UINT32_MAX || !conforms(v, dims, 0, rank)) {
+        return value_make_error(value_error_shape_mismatch);
+    }
+    rc_array_value out = {0};
+    for (uint32_t i = 0; i < rank; i++) {
+        rc_array_value_push(&out, value_make_numeric((double)dims[i]), arena);
+    }
+    return value_make_list(out.view);
+}
+
+// Walk the broadcast result shape, indexing into the original a and b - no padded or
+// repeated copies. An operand reaches result-axis `depth` only once depth >= rrank - its
+// rank; before that it is a prepended length-1 axis and is passed through whole.
+static value bc(value a, value b, uint32_t depth, uint32_t rrank, uint32_t ra, uint32_t rb,
+                value (*op)(value, value, rc_arena *), rc_arena *arena)
+{
+    if (depth == rrank) {                       // both are leaves now
+        if (value_is_error(a)) return a;        // an element error stays element-local
+        if (value_is_error(b)) return b;
+        return op(a, b, arena);
+    }
+
+    bool a_here = depth >= rrank - ra;
+    bool b_here = depth >= rrank - rb;
+    uint32_t na = a_here ? a.list.num : 1;
+    uint32_t nb = b_here ? b.list.num : 1;
+    if (na != nb && na != 1 && nb != 1) {
+        return value_make_error(value_error_shape_mismatch);
+    }
+    uint32_t n = (na == 1) ? nb : na;           // (na==1)?nb:na, not max, so 0-length axes work
+
+    rc_array_value out = {0};
+    for (uint32_t i = 0; i < n; i++) {
+        value ai = a_here ? rc_view_value_get(a.list, na == 1 ? 0 : i) : a;
+        value bi = b_here ? rc_view_value_get(b.list, nb == 1 ? 0 : i) : b;
+        rc_array_value_push(&out, bc(ai, bi, depth + 1, rrank, ra, rb, op, arena), arena);
+    }
+    return value_make_list(out.view);
+}
+
+
 // ---- the two context tables ----
 // EVEN: lexed where an operand is expected (the start, after a binary op, after an
 // open paren). Numbers/strings/identifiers come from the lexer itself, so the table
@@ -298,15 +398,16 @@ static const token even_entries[] = {
     { RC_STR("..<"),   { .type = lexeme_type_range, .range = { true } } },
     { RC_STR("+"),     { .type = lexeme_type_unary_op, .unary_op = { op_pos, prec_neg } } },
     { RC_STR("-"),     { .type = lexeme_type_unary_op, .unary_op = { op_neg, prec_neg } } },
-    { RC_STR("abs"),   { .type = lexeme_type_function, .function = { fn_abs } } },
-    { RC_STR("lo"),    { .type = lexeme_type_function, .function = { fn_lo } } },
-    { RC_STR("hi"),    { .type = lexeme_type_function, .function = { fn_hi } } },
-    { RC_STR("sqrt"),  { .type = lexeme_type_function, .function = { fn_sqrt } } },
-    { RC_STR("not"),   { .type = lexeme_type_function, .function = { fn_not } } },
-    { RC_STR("int"),   { .type = lexeme_type_function, .function = { fn_int } } },
-    { RC_STR("floor"), { .type = lexeme_type_function, .function = { fn_int } } },   // alias of int
-    { RC_STR("round"), { .type = lexeme_type_function, .function = { fn_round } } },
-    { RC_STR("ceil"),  { .type = lexeme_type_function, .function = { fn_ceil } } },
+    { RC_STR("abs"),   { .type = lexeme_type_function, .function = { fn_abs,   false } } },
+    { RC_STR("lo"),    { .type = lexeme_type_function, .function = { fn_lo,    false } } },
+    { RC_STR("hi"),    { .type = lexeme_type_function, .function = { fn_hi,    false } } },
+    { RC_STR("sqrt"),  { .type = lexeme_type_function, .function = { fn_sqrt,  false } } },
+    { RC_STR("not"),   { .type = lexeme_type_function, .function = { fn_not,   false } } },
+    { RC_STR("int"),   { .type = lexeme_type_function, .function = { fn_int,   false } } },
+    { RC_STR("floor"), { .type = lexeme_type_function, .function = { fn_int,   false } } },   // alias of int
+    { RC_STR("round"), { .type = lexeme_type_function, .function = { fn_round, false } } },
+    { RC_STR("ceil"),  { .type = lexeme_type_function, .function = { fn_ceil,  false } } },
+    { RC_STR("shape"), { .type = lexeme_type_function, .function = { fn_shape, true } } },   // aggregate
 };
 
 // ODD: lexed where a binary operator is expected (after an operand). The close paren
@@ -351,11 +452,25 @@ typedef struct parser {
     rc_arena     *arena;
 } parser;
 
+// Apply a binary operator, broadcasting component-wise over lists (NumPy-style). Two
+// non-lists fall straight through to the handler (5 + 3 stays 8); a ragged operand or
+// non-broadcastable shapes give a shape-mismatch error. Errors propagate, and the bc
+// worker builds the result by re-reading the inputs, never copying them.
 static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena)
 {
     if (value_is_error(a)) return a;
     if (value_is_error(b)) return b;
-    return op.apply(a, b, arena);
+    if (!value_is_list(a) && !value_is_list(b)) {
+        return op.apply(a, b, arena);
+    }
+
+    int32_t ra = rank_of(a);
+    int32_t rb = rank_of(b);
+    if (ra < 0 || rb < 0) {
+        return value_make_error(value_error_shape_mismatch);   // a ragged operand
+    }
+    uint32_t rrank = ra > rb ? (uint32_t)ra : (uint32_t)rb;
+    return bc(a, b, 0, rrank, (uint32_t)ra, (uint32_t)rb, op.apply, arena);
 }
 
 // A scalar applies directly; a list maps element-wise, recursing so nested lists map
@@ -396,6 +511,10 @@ static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
 
 static value apply_function(lexeme_function fn, value v, rc_arena *arena)
 {
+    // An aggregate function (e.g. shape) takes the whole value; the rest map element-wise.
+    if (fn.aggregate) {
+        return value_is_error(v) ? v : fn.apply(v, arena);
+    }
     return apply_elementwise(fn.apply, v, arena);
 }
 
@@ -833,8 +952,6 @@ RC_TEST_STEP(expression, list_errors, fix)
     RC_CHECK_TRUE(RESULT("{1").error    == expr_error_expected_close_brace);
     RC_CHECK_TRUE(RESULT("{1 2}").error == expr_error_expected_close_brace);   // missing comma
     RC_CHECK_TRUE(RESULT("{,}").error   == expr_error_expected_expression);
-    // A list flows as a value, but the binary operators reject it (no broadcasting yet).
-    RC_CHECK_TRUE(value_is_error(VAL("{1}+2")));
 }
 
 RC_TEST_STEP(expression, list_elementwise, fix)
@@ -884,6 +1001,59 @@ RC_TEST_STEP(expression, range_elementwise, fix)
 
     // An unbounded range can't be enumerated.
     RC_CHECK_TRUE(value_is_error(VAL("-(0..)")));
+}
+
+RC_TEST_STEP(expression, list_shape, fix)
+{
+    value s32[] = {value_make_numeric(3), value_make_numeric(2)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape({{1,2},{3,4},{5,6}})"), value_make_list((rc_view_value) RC_VIEW(s32))));
+
+    value s3[] = {value_make_numeric(3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape({1,2,3})"), value_make_list((rc_view_value) RC_VIEW(s3))));
+
+    value sc = VAL("shape(5)");   // a scalar is rank 0
+    RC_CHECK_TRUE(value_is_list(sc) && sc.list.num == 0);
+
+    RC_CHECK_TRUE(value_is_error(VAL("shape({1,{2,3}})")));   // ragged -> shape error
+}
+
+RC_TEST_STEP(expression, list_broadcast, fix)
+{
+    value r1[] = {value_make_numeric(11), value_make_numeric(22), value_make_numeric(33)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3}+{10,20,30}"), value_make_list((rc_view_value) RC_VIEW(r1))));
+
+    value r2[] = {value_make_numeric(11), value_make_numeric(12), value_make_numeric(13)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3}+10"), value_make_list((rc_view_value) RC_VIEW(r2))));
+    RC_CHECK_TRUE(value_is_equal(VAL("10+{1,2,3}"), value_make_list((rc_view_value) RC_VIEW(r2))));
+
+    RC_CHECK_TRUE(value_is_equal(VAL("5+3"), value_make_numeric(8)));   // two scalars stay scalar
+
+    value r3[] = {value_make_numeric(10), value_make_numeric(40)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2}*{10,20}"), value_make_list((rc_view_value) RC_VIEW(r3))));
+
+    value r4[] = {value_make_numeric(0), value_make_numeric(1), value_make_numeric(0)};   // comparisons map (1/0)
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3}=2"), value_make_list((rc_view_value) RC_VIEW(r4))));
+
+    // nested: a scalar broadcasts into every leaf
+    value n0[] = {value_make_numeric(11), value_make_numeric(12)};
+    value n1[] = {value_make_numeric(13), value_make_numeric(14)};
+    value nn[] = {value_make_list((rc_view_value) RC_VIEW(n0)), value_make_list((rc_view_value) RC_VIEW(n1))};
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2},{3,4}}+10"), value_make_list((rc_view_value) RC_VIEW(nn))));
+
+    // the 1-axis broadcast example: {{1},{2}}+{3,4} == {{4,5},{5,6}}
+    value b0[] = {value_make_numeric(4), value_make_numeric(5)};
+    value b1[] = {value_make_numeric(5), value_make_numeric(6)};
+    value bb[] = {value_make_list((rc_view_value) RC_VIEW(b0)), value_make_list((rc_view_value) RC_VIEW(b1))};
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1},{2}}+{3,4}"), value_make_list((rc_view_value) RC_VIEW(bb))));
+
+    RC_CHECK_TRUE(value_is_error(VAL("{1,2,3}+{10,20,30,40}")));   // incompatible lengths
+    RC_CHECK_TRUE(value_is_error(VAL("{1,{2,3}}+1")));             // a ragged operand
+
+    // an element error stays element-local
+    value mixed = VAL("{1,bar}+{10,20}");
+    RC_CHECK_TRUE(value_is_list(mixed) && mixed.list.num == 2);
+    RC_CHECK_TRUE(value_is_equal(rc_view_value_get(mixed.list, 0), value_make_numeric(11)));
+    RC_CHECK_TRUE(value_is_error(rc_view_value_get(mixed.list, 1)));
 }
 
 RC_TEST_STEP(expression, ranges_two_value, fix)

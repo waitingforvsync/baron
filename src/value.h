@@ -35,6 +35,7 @@ typedef enum value_error {
     value_error_type_mismatch,
     value_error_subscript_range,
     value_error_incorrect_parameters,
+    value_error_shape_mismatch,         // a ragged operand, or shapes that do not broadcast
     value_error_not_implemented,
 } value_error;
 

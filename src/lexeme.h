@@ -95,6 +95,8 @@ typedef struct lexeme_binary_op {
 
 typedef struct lexeme_function {
     value (*apply)(value v, rc_arena *arena);   // one argument for now
+    bool  aggregate;   // false (default): map element-wise over a list/range;
+                       // true: take the whole value (e.g. shape)
 } lexeme_function;
 
 
