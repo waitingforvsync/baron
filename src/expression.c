@@ -6,9 +6,11 @@
 
 
 // ---- precedence ladder (higher binds tighter) ----
-// Comparisons and the logical ops sit below arithmetic; shifts share the multiply
+// The range operator '..' is the loosest, so its endpoints are whole expressions;
+// comparisons and the logical ops sit below arithmetic; shifts share the multiply
 // level; unary +/- sit below pow so -2^2 is -(2^2).
 enum {
+    PREC_RANGE = 5,    // ..  ..<  (right-associative; handled specially, not a binary_op)
     PREC_OR  = 10,   // or eor
     PREC_AND = 20,   // and
     PREC_CMP = 30,   // = == != <> < > <= >=
@@ -267,6 +269,22 @@ static value fn_ceil(value v, rc_arena *arena)
 
 #undef NEEDS_NUM
 
+// The range operator handlers. Unlike the operators above they live nowhere in the
+// tables (range is lexeme_type_range, not a binary_op); parse_precedence synthesises a
+// binary_op around one of these so the range folds through the same path as the rest.
+// value_make_range_pair owns the semantics (and the error propagation).
+static value op_range(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    return value_make_range_pair(a, b, false);
+}
+
+static value op_range_excl(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    return value_make_range_pair(a, b, true);
+}
+
 
 // ---- the two context tables ----
 // EVEN: lexed where an operand is expected (the start, after a binary op, after an
@@ -276,6 +294,8 @@ static const token even_entries[] = {
     { RC_STR("("),     { .type = lexeme_type_open_paren } },
     { RC_STR("{"),     { .type = lexeme_type_open_brace } },     // begins a list literal
     { RC_STR("}"),     { .type = lexeme_type_close_brace } },    // ends one (empty, or after a comma)
+    { RC_STR(".."),    { .type = lexeme_type_range, .range = { false } } },   // start-unbounded range
+    { RC_STR("..<"),   { .type = lexeme_type_range, .range = { true } } },
     { RC_STR("+"),     { .type = lexeme_type_unary_op, .unary_op = { op_pos, PREC_NEG } } },
     { RC_STR("-"),     { .type = lexeme_type_unary_op, .unary_op = { op_neg, PREC_NEG } } },
     { RC_STR("abs"),   { .type = lexeme_type_function, .function = { fn_abs } } },
@@ -294,6 +314,8 @@ static const token even_entries[] = {
 static const token odd_entries[] = {
     { RC_STR(")"),   { .type = lexeme_type_close_paren } },
     { RC_STR("}"),   { .type = lexeme_type_close_brace } },   // ends a list (after an element)
+    { RC_STR(".."),  { .type = lexeme_type_range, .range = { false } } },   // range operator (handled specially)
+    { RC_STR("..<"), { .type = lexeme_type_range, .range = { true } } },
     { RC_STR("^"),   { .type = lexeme_type_binary_op, .binary_op = { op_pow,  PREC_POW, assoc_right } } },
     { RC_STR("*"),   { .type = lexeme_type_binary_op, .binary_op = { op_mul,  PREC_MUL, assoc_left } } },
     { RC_STR("/"),   { .type = lexeme_type_binary_op, .binary_op = { op_div,  PREC_MUL, assoc_left } } },
@@ -493,6 +515,20 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             return ok(apply_function(lex.function, closed.value, p->arena), closed.next);
         }
 
+        case lexeme_type_range: {
+            // A '..' where an operand is expected opens an unbounded-start range. Parse a
+            // single endpoint (above range precedence, so '..b..c' leaves the second '..'
+            // to error in the caller); nothing there gives the fully-open '..'.
+            expr_result end = parse_precedence(p, lr.next, PREC_RANGE + 1);
+            if (end.error == expr_error_expected_expression) {
+                return ok(value_make_range_open(lex.range.exclusive), lr.next);
+            }
+            if (end.error != expr_error_none) {
+                return end;
+            }
+            return ok(value_make_range_open_start(end.value, lex.range.exclusive), end.next);
+        }
+
         default:
             // A terminator, a stray close paren, a lexer error: no operand here.
             return fail(expr_error_expected_expression, cursor);
@@ -511,29 +547,51 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
 
     while (true) {
         lexer_result lr = lexer_next(p->text, lhs.next, odd_tokens);
-        if (lr.token.type != lexeme_type_binary_op) {
-            return lhs;   // not an operator: stop here, leaving the lexeme unconsumed
-        }
 
-        lexeme_binary_op op = lr.token.binary_op;
-        if (op.precedence < min_prec) {
-            return lhs;   // binds looser than the caller allows: leave it to them
-        }
+        switch (lr.token.type) {
+            // A binary operator, or a range - which synthesises a binary_op (lowest
+            // precedence, right-associative so a..b..c folds as a..(b..c), with a handler
+            // that builds the range), so the two share this fold; only the empty-right-side
+            // case differs. The subscript operator '[' will get its own case here later.
+            case lexeme_type_binary_op:
+            case lexeme_type_range: {
+                lexeme_binary_op op = (lr.token.type == lexeme_type_range)
+                    ? (lexeme_binary_op) {
+                          .apply         = lr.token.range.exclusive ? op_range_excl : op_range,
+                          .precedence    = PREC_RANGE,
+                          .associativity = assoc_right
+                      }
+                    : lr.token.binary_op;
 
-        // Left-assoc parses its right side one notch higher so a-b-c folds as (a-b)-c;
-        // right-assoc keeps the level so a^b^c folds as a^(b^c).
-        uint8_t next_min = (uint8_t) (op.precedence + (op.associativity == assoc_left ? 1 : 0));
-        expr_result rhs = parse_precedence(p, lr.next, next_min);
+                if (op.precedence < min_prec) {
+                    return lhs;   // binds looser than the caller allows: leave it to them
+                }
+                // Left-assoc parses its right side one notch higher so a-b-c folds as
+                // (a-b)-c; right-assoc keeps the level so a^b^c folds as a^(b^c).
+                uint8_t next_min = (uint8_t) (op.precedence + (op.associativity == assoc_left ? 1 : 0));
+                expr_result rhs = parse_precedence(p, lr.next, next_min);
 
-        if (rhs.error == expr_error_expected_expression) {
-            return lhs;   // a trailing operator with no operand ("1+3+"): roll it back
-        }
-        if (rhs.error != expr_error_none) {
-            return rhs;   // a real error on the right-hand side: propagate
-        }
+                if (rhs.error == expr_error_expected_expression) {
+                    if (lr.token.type != lexeme_type_range) {
+                        return lhs;   // a trailing operator with no operand ("1+3+"): roll it back
+                    }
+                    // a range with no right side is an unbounded end ("a..")
+                    lhs.value = value_make_range_open_end(lhs.value, lr.token.range.exclusive);
+                    lhs.next  = lr.next;
+                    break;
+                }
+                if (rhs.error != expr_error_none) {
+                    return rhs;   // a real error on the right-hand side: propagate
+                }
 
-        lhs.value = apply_binary(op, lhs.value, rhs.value, p->arena);
-        lhs.next  = rhs.next;
+                lhs.value = apply_binary(op, lhs.value, rhs.value, p->arena);
+                lhs.next  = rhs.next;
+                break;
+            }
+
+            default:
+                return lhs;   // not a usable infix operator: stop, leaving it unconsumed
+        }
     }
 }
 
@@ -582,6 +640,13 @@ RC_TEST_GROUP_DEINIT(expression, fix)
 // Parse a source literal from offset 0 in the fixture's root scope.
 #define RESULT(src) expression_parse(RC_STR(src), 0, &fix->scopes, 0, &fix->arena)
 #define VAL(src)    RESULT(src).value
+
+// A bounded range with the expected start/end/step.
+static bool range_is(value v, int64_t start, int64_t end, int64_t step)
+{
+    return value_is_range(v) && v.range.has_start && v.range.has_end
+        && v.range.start == start && v.range.end == end && v.range.step == step;
+}
 
 RC_TEST_STEP(expression, arithmetic_and_precedence, fix)
 {
@@ -705,23 +770,23 @@ RC_TEST_STEP(expression, list_literals, fix)
     RC_CHECK_TRUE(value_is_list(empty));
     RC_CHECK(empty.list.num, ==, 0u);
 
-    value e123[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(3) };
-    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3}"), value_make_list((rc_view_value){ .data = e123, .num = 3 })));
+    value e123[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3}"), value_make_list((rc_view_value) RC_VIEW(e123))));
 
     // Elements are full expressions.
-    value e312[] = { value_make_numeric(3), value_make_numeric(12) };
-    RC_CHECK_TRUE(value_is_equal(VAL("{1+2,3*4}"), value_make_list((rc_view_value){ .data = e312, .num = 2 })));
+    value e312[] = {value_make_numeric(3), value_make_numeric(12)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{1+2,3*4}"), value_make_list((rc_view_value) RC_VIEW(e312))));
 
     // Nested lists.
-    value inner[] = { value_make_numeric(2), value_make_numeric(3) };
-    value nested[] = { value_make_numeric(1), value_make_list((rc_view_value){ .data = inner, .num = 2 }), value_make_numeric(4) };
-    RC_CHECK_TRUE(value_is_equal(VAL("{1,{2,3},4}"), value_make_list((rc_view_value){ .data = nested, .num = 3 })));
+    value inner[] = {value_make_numeric(2), value_make_numeric(3)};
+    value nested[] = {value_make_numeric(1), value_make_list((rc_view_value) RC_VIEW(inner)), value_make_numeric(4)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,{2,3},4}"), value_make_list((rc_view_value) RC_VIEW(nested))));
 }
 
 RC_TEST_STEP(expression, list_newlines_and_commas, fix)
 {
-    value e12[] = { value_make_numeric(1), value_make_numeric(2) };
-    value want12 = value_make_list((rc_view_value){ .data = e12, .num = 2 });
+    value e12[] = {value_make_numeric(1), value_make_numeric(2)};
+    value want12 = value_make_list((rc_view_value) RC_VIEW(e12));
 
     RC_CHECK_TRUE(value_is_equal(VAL("{1,\n2}"),     want12));   // newline after a comma
     RC_CHECK_TRUE(value_is_equal(VAL("{\n1,\n2\n}"), want12));   // newlines throughout
@@ -739,6 +804,62 @@ RC_TEST_STEP(expression, list_errors, fix)
     RC_CHECK_TRUE(RESULT("{,}").error   == expr_error_expected_expression);
     // A list flows as a value, but the numeric operators reject it (no list ops yet).
     RC_CHECK_TRUE(value_is_error(VAL("{1}+2")));
+}
+
+RC_TEST_STEP(expression, ranges_two_value, fix)
+{
+    RC_CHECK_TRUE(range_is(VAL("0..9"),   0, 9, 0));     // step 0 = direction inferred
+    RC_CHECK_TRUE(range_is(VAL("4..1"),   4, 1, 0));     // descending
+    RC_CHECK_TRUE(range_is(VAL("5..5"),   5, 5, 0));     // single element
+    RC_CHECK_TRUE(range_is(VAL("0..<10"), 0, 9, 0));     // exclusive end
+}
+
+RC_TEST_STEP(expression, ranges_stepped, fix)
+{
+    RC_CHECK_TRUE(range_is(VAL("1..3..7"),     1,  7,  2));
+    RC_CHECK_TRUE(range_is(VAL("4..6..<10"),   4,  8,  2));   // exclusive, canonical end
+    RC_CHECK_TRUE(range_is(VAL("10..8..2"),    10, 2, -2));   // descending step
+    RC_CHECK_TRUE(range_is(VAL("1..3..5..9"),  1,  9,  2));   // chained, consistent
+    RC_CHECK_TRUE(range_is(VAL("0..2..4..10"), 0,  10, 2));
+    // same elements, however spelled, compare equal (canonical end)
+    RC_CHECK_TRUE(value_is_equal(VAL("4..6..8"), VAL("4..6..<10")));
+}
+
+RC_TEST_STEP(expression, ranges_precedence, fix)
+{
+    RC_CHECK_TRUE(range_is(VAL("0..9+1"), 0, 10, 0));   // '+' binds tighter than '..'
+    RC_CHECK_TRUE(value_is_error(VAL("(0..9)+1")));     // a range rejects '+'
+}
+
+RC_TEST_STEP(expression, ranges_unbounded, fix)
+{
+    value a = VAL("5..");
+    RC_CHECK_TRUE(value_is_range(a) && a.range.has_start && !a.range.has_end
+        && a.range.start == 5 && a.range.step == 0);
+
+    value b = VAL("..5");
+    RC_CHECK_TRUE(value_is_range(b) && !b.range.has_start && b.range.has_end && b.range.end == 5);
+
+    value c = VAL("..");
+    RC_CHECK_TRUE(value_is_range(c) && !c.range.has_start && !c.range.has_end);
+
+    value d = VAL("0..2..");   // stepped, open end
+    RC_CHECK_TRUE(value_is_range(d) && d.range.has_start && !d.range.has_end
+        && d.range.start == 0 && d.range.step == 2);
+}
+
+RC_TEST_STEP(expression, ranges_errors, fix)
+{
+    RC_CHECK_TRUE(value_is_error(VAL("1..3..0")));      // not monotonic
+    RC_CHECK_TRUE(value_is_error(VAL("0..3.5")));       // non-integer endpoint
+    RC_CHECK_TRUE(value_is_error(VAL("5..<5")));        // empty
+    RC_CHECK_TRUE(value_is_error(VAL("4..<1")));        // empty (descending exclusive)
+    RC_CHECK_TRUE(value_is_error(VAL("0..<2..6")));     // '<' on the wrong separator
+    RC_CHECK_TRUE(value_is_error(VAL("(1..2)..3")));    // a range can't be a start
+    RC_CHECK_TRUE(value_is_error(VAL("1..3..6..9")));   // inconsistent step (2 then 3)
+    RC_CHECK_TRUE(value_is_error(VAL("0..3..4..10")));  // inconsistent step (1 then 3)
+    RC_CHECK_TRUE(value_is_error(VAL("..2..6")));       // start-open and stepped
+    RC_CHECK_TRUE(value_is_error(VAL("bar..9")));       // unknown symbol propagates
 }
 
 #undef RESULT

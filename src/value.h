@@ -88,6 +88,15 @@ value value_make_error(value_error e);
 value value_make_range(value_range r);
 value value_make_list(rc_view_value items);    // wraps the view; does not copy
 
+// Range builders. They take the (already evaluated) endpoint values and own all the
+// range semantics: step inference, the second-element/stepped form (rhs is a range),
+// exclusivity, and validation. Each returns a range value, or a propagating error
+// value (a bad endpoint, a non-integer, an empty or inconsistent range).
+value value_make_range_pair(value lhs, value rhs, bool exclusive);   // lhs..rhs / lhs..<rhs
+value value_make_range_open_end(value lhs, bool exclusive);          // lhs..
+value value_make_range_open_start(value rhs, bool exclusive);        // ..rhs / ..<rhs
+value value_make_range_open(bool exclusive);                         // ..
+
 // Type queries.
 value_type value_type_of(value v);
 bool value_is_none(value v);

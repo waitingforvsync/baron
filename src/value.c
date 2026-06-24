@@ -1,6 +1,7 @@
 #include "value.h"
 
 #include "richc/macros.h"
+#include <math.h>
 #include <stdio.h>
 
 
@@ -36,6 +37,108 @@ value value_make_list(rc_view_value items)
     // permanent storage is a deliberate deep value_clone done at the symbol-table
     // boundary, not something hidden in here.
     return (value) {.type = value_type_list, .list = items};
+}
+
+
+// A range endpoint is a whole number. Pull the int64 out of v, or hand back the
+// reason it cannot be one as an error value (none means success, *out is set). An
+// error operand passes straight through so it can propagate.
+static value range_int(value v, int64_t *out)
+{
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (!value_is_numeric(v)) {
+        return value_make_error(value_error_type_mismatch);
+    }
+    double d = v.numeric;
+    if (floor(d) != d || d < (double)INT64_MIN || d > (double)INT64_MAX) {
+        return value_make_error(value_error_domain);   // not a whole number (or out of range / NaN)
+    }
+    *out = (int64_t)d;
+    return value_make_none();
+}
+
+// The sign of x as -1 / 0 / +1.
+static int64_t sign64(int64_t x)
+{
+    return (x > 0) - (x < 0);
+}
+
+value value_make_range_pair(value lhs, value rhs, bool exclusive)
+{
+    int64_t start;
+    value err = range_int(lhs, &start);
+    if (!value_is_none(err)) {
+        return err;
+    }
+
+    if (value_is_range(rhs)) {
+        // Stepped form a..(b..c): the inner range's start is our second element, so the
+        // step is fixed at (second - start) and the inner end becomes our end.
+        if (exclusive) {
+            return value_make_error(value_error_domain);   // '<' must sit on the final separator
+        }
+        value_range r = rhs.range;
+        if (!r.has_start) {
+            return value_make_error(value_error_domain);   // ..(..x) makes no sense as a start
+        }
+        int64_t step = r.start - start;
+        if (step == 0 || (r.step != 0 && r.step != step)) {
+            return value_make_error(value_error_domain);   // zero or inconsistent step
+        }
+        if (!r.has_end) {
+            return value_make_range((value_range) {.start = start, .step = step, .has_start = true});
+        }
+        if (sign64(r.end - r.start) != sign64(step)) {
+            return value_make_error(value_error_domain);   // the end does not continue the same way
+        }
+        int64_t end = start + step * ((r.end - start) / step);   // canonical last element
+        return value_make_range((value_range) {.start = start, .end = end, .step = step, .has_start = true, .has_end = true});
+    }
+
+    // Simple form a..b: step stays 0 (the direction is inferred from the endpoints).
+    int64_t end;
+    err = range_int(rhs, &end);
+    if (!value_is_none(err)) {
+        return err;
+    }
+    if (exclusive) {
+        if (start >= end) {
+            return value_make_error(value_error_domain);   // '..<' must be a non-empty ascent
+        }
+        end -= 1;
+    }
+    return value_make_range((value_range) {.start = start, .end = end, .has_start = true, .has_end = true});
+}
+
+value value_make_range_open_end(value lhs, bool exclusive)
+{
+    if (exclusive) {
+        return value_make_error(value_error_domain);   // 'a..<' has nothing to exclude
+    }
+    int64_t start;
+    value err = range_int(lhs, &start);
+    if (!value_is_none(err)) {
+        return err;
+    }
+    return value_make_range((value_range) {.start = start, .has_start = true});
+}
+
+value value_make_range_open_start(value rhs, bool exclusive)
+{
+    int64_t end;
+    value err = range_int(rhs, &end);   // a range here (..b..c) coerces to type_mismatch
+    if (!value_is_none(err)) {
+        return err;
+    }
+    return value_make_range((value_range) {.end = end - (exclusive ? 1 : 0), .has_end = true});
+}
+
+value value_make_range_open(bool exclusive)
+{
+    (void)exclusive;   // '..<' with neither endpoint is just the fully-open range
+    return value_make_range((value_range) {0});
 }
 
 
@@ -216,7 +319,7 @@ RC_TEST(value, scalar_equality)
 
 RC_TEST(value, range_equality)
 {
-    value_range a = { .start = 0, .end = 10, .step = 1, .has_start = true, .has_end = true };
+    value_range a = {.start = 0, .end = 10, .step = 1, .has_start = true, .has_end = true};
     value_range b = a;
     RC_CHECK_TRUE(value_is_equal(value_make_range(a), value_make_range(b)));
     b.end = 9;
@@ -225,8 +328,8 @@ RC_TEST(value, range_equality)
 
 RC_TEST(value, list_equality)
 {
-    value elems[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(3) };
-    rc_view_value view = { .data = elems, .num = 3 };
+    value elems[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3)};
+    rc_view_value view = (rc_view_value) RC_VIEW(elems);
     value list = value_make_list(view);
     RC_CHECK_TRUE(value_is_list(list));
     RC_CHECK(list.list.num, ==, 3u);
@@ -235,19 +338,19 @@ RC_TEST(value, list_equality)
     RC_CHECK_TRUE(value_is_equal(list, value_make_list(view)));
 
     // Unequal to a shorter list, and to one with a differing element.
-    value short_elems[] = { value_make_numeric(1), value_make_numeric(2) };
-    value shorter = value_make_list((rc_view_value){ .data = short_elems, .num = 2 });
+    value short_elems[] = {value_make_numeric(1), value_make_numeric(2)};
+    value shorter = value_make_list((rc_view_value) RC_VIEW(short_elems));
     RC_CHECK_FALSE(value_is_equal(list, shorter));
 
-    value diff_elems[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(4) };
-    value different = value_make_list((rc_view_value){ .data = diff_elems, .num = 3 });
+    value diff_elems[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(4)};
+    value different = value_make_list((rc_view_value) RC_VIEW(diff_elems));
     RC_CHECK_FALSE(value_is_equal(list, different));
 
     // Nested lists compare recursively.
-    value outer_a[] = { list };
-    value outer_b[] = { value_make_list(view) };
-    value nested_a = value_make_list((rc_view_value){ .data = outer_a, .num = 1 });
-    value nested_b = value_make_list((rc_view_value){ .data = outer_b, .num = 1 });
+    value outer_a[] = {list};
+    value outer_b[] = {value_make_list(view)};
+    value nested_a = value_make_list((rc_view_value) RC_VIEW(outer_a));
+    value nested_b = value_make_list((rc_view_value) RC_VIEW(outer_b));
     RC_CHECK_TRUE(value_is_equal(nested_a, nested_b));
 }
 
@@ -274,20 +377,20 @@ RC_TEST(value, formatting)
 
     // Stepped, fully-bounded range.
     out = rc_mstr_make(16, &arena);
-    value_range stepped = { .start = 0, .end = 10, .step = 2, .has_start = true, .has_end = true };
+    value_range stepped = {.start = 0, .end = 10, .step = 2, .has_start = true, .has_end = true};
     value_format(&out, value_make_range(stepped), &arena);
     RC_CHECK(out.view, ==, RC_STR("0..2..10"));
 
     // Boundless start, step 1.
     out = rc_mstr_make(16, &arena);
-    value_range upto = { .end = 9, .step = 1, .has_end = true };
+    value_range upto = {.end = 9, .step = 1, .has_end = true};
     value_format(&out, value_make_range(upto), &arena);
     RC_CHECK(out.view, ==, RC_STR("..9"));
 
     // List, formatted recursively.
     out = rc_mstr_make(16, &arena);
-    value elems[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(3) };
-    value list = value_make_list((rc_view_value){ .data = elems, .num = 3 });
+    value elems[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3)};
+    value list = value_make_list((rc_view_value) RC_VIEW(elems));
     value_format(&out, list, &arena);
     RC_CHECK(out.view, ==, RC_STR("{1, 2, 3}"));
 
@@ -327,7 +430,7 @@ RC_TEST(value, list_is_rc_view_value)
 {
     // value_list must be the real rc_view_value, not a look-alike.
     RC_CHECK((uint32_t)sizeof(value_list), ==, (uint32_t)sizeof(rc_view_value));
-    value_list vl = { .data = NULL, .num = 0 };
+    value_list vl = {.data = NULL, .num = 0};
     rc_view_value rv = vl;            // compiles only if they are the same type
     RC_CHECK_TRUE(rv.data == NULL);
 }

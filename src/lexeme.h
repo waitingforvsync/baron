@@ -39,6 +39,7 @@ typedef enum lexeme_type {
     lexeme_type_unary_op,
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)
+    lexeme_type_range,                  // '..' / '..<', the range operator
     lexeme_type_error,
     // deferred until later milestones: keyword, constant
 } lexeme_type;
@@ -97,6 +98,11 @@ typedef struct lexeme_function {
 } lexeme_function;
 
 
+typedef struct lexeme_range {
+    bool exclusive;   // '..<' excludes the end value; '..' includes it
+} lexeme_range;
+
+
 typedef struct lexeme_keyword {
     // The handler will be a function pointer to the keyword's handler
 } lexeme_keyword;
@@ -118,6 +124,7 @@ typedef struct lexeme {
         lexeme_unary_op unary_op;
         lexeme_binary_op binary_op;
         lexeme_function function;
+        lexeme_range range;
         lexeme_keyword keyword;
         lexeme_error error;
     };
