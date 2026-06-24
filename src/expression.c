@@ -286,101 +286,54 @@ static value op_range_excl(value a, value b, rc_arena *arena)
 }
 
 
-// ---- list shape and broadcasting ----
-// Rough first cut, to be refined later (lives here, not in value.c, while it settles).
+// ---- list shape ----
+// A list's shape is its axis lengths outermost-first; this backs shape() and the rank()
+// used by broadcasting. Rough first cut, to be refined later (here, not in value.c).
 
-#define MAX_RANK 32   // nested lists deeper than this are rejected; far beyond real use
+#define MAX_RANK 32   // shape is truncated past this depth; far beyond any real list
 
-// Axis lengths down v's first-child chain (the candidate shape), stopping at a scalar or
-// an empty list. Returns the rank, or UINT32_MAX if the nesting is deeper than max.
-static uint32_t first_branch_dims(value v, uint32_t dims[], uint32_t max)
+// The uniform-length-prefix shape of v written into dims[], returning its rank: descend
+// while every node at a level is a list of the same length, stopping at the first axis
+// that is not uniform (so a ragged list reports the axes that ARE uniform). A scalar is
+// rank 0; a leading length-1 axis is kept, not squashed.
+static uint32_t shape_dims(value v, uint32_t dims[], uint32_t max)
 {
-    uint32_t rank = 0;
-    while (value_is_list(v)) {
-        if (rank >= max) {
-            return UINT32_MAX;
-        }
-        dims[rank++] = v.list.num;
-        if (v.list.num == 0) {
-            break;
-        }
-        v = rc_view_value_get(v.list, 0);
+    if (!value_is_list(v) || max == 0) {
+        return 0;
     }
-    return rank;
+    dims[0] = v.list.num;
+    if (v.list.num == 0) {
+        return 1;   // empty list: shape {0}
+    }
+    // The inner axes are the common prefix of every element's shape.
+    uint32_t inner = shape_dims(rc_view_value_get(v.list, 0), dims + 1, max - 1);
+    for (uint32_t i = 1; i < v.list.num && inner > 0; i++) {
+        uint32_t other[MAX_RANK];
+        uint32_t ri = shape_dims(rc_view_value_get(v.list, i), other, max - 1);
+        uint32_t common = 0;
+        while (common < inner && common < ri && dims[1 + common] == other[common]) {
+            common++;
+        }
+        inner = common;
+    }
+    return 1 + inner;
 }
 
-// True if v has exactly the shape dims[depth..rank): a leaf (depth == rank) must be a
-// non-list; an interior node a list of the expected length whose elements all conform.
-// This is the rectangularity test.
-static bool conforms(value v, const uint32_t dims[], uint32_t depth, uint32_t rank)
-{
-    if (depth == rank) {
-        return !value_is_list(v);
-    }
-    if (!value_is_list(v) || v.list.num != dims[depth]) {
-        return false;
-    }
-    for (uint32_t i = 0; i < v.list.num; i++) {
-        if (!conforms(rc_view_value_get(v.list, i), dims, depth + 1, rank)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// The rank of v if it is rectangular, else -1 (ragged, or nested deeper than the cap).
-static int32_t rank_of(value v)
+// The rank of v: the length of its uniform-length-prefix shape (0 for a scalar).
+static uint32_t rank_of(value v)
 {
     uint32_t dims[MAX_RANK];
-    uint32_t rank = first_branch_dims(v, dims, MAX_RANK);
-    if (rank == UINT32_MAX || !conforms(v, dims, 0, rank)) {
-        return -1;
-    }
-    return (int32_t)rank;
+    return shape_dims(v, dims, MAX_RANK);
 }
 
-// The shape() function: the axis lengths outermost-first as a list of numbers (a scalar
-// is rank 0, so its shape is the empty list); a ragged list has no shape -> error.
+// The shape() function: the axis lengths as a list of numbers (a scalar -> the empty list).
 static value fn_shape(value v, rc_arena *arena)
 {
     uint32_t dims[MAX_RANK];
-    uint32_t rank = first_branch_dims(v, dims, MAX_RANK);
-    if (rank == UINT32_MAX || !conforms(v, dims, 0, rank)) {
-        return value_make_error(value_error_shape_mismatch);
-    }
+    uint32_t rank = shape_dims(v, dims, MAX_RANK);
     rc_array_value out = {0};
     for (uint32_t i = 0; i < rank; i++) {
         rc_array_value_push(&out, value_make_numeric((double)dims[i]), arena);
-    }
-    return value_make_list(out.view);
-}
-
-// Walk the broadcast result shape, indexing into the original a and b - no padded or
-// repeated copies. An operand reaches result-axis `depth` only once depth >= rrank - its
-// rank; before that it is a prepended length-1 axis and is passed through whole.
-static value bc(value a, value b, uint32_t depth, uint32_t rrank, uint32_t ra, uint32_t rb,
-                value (*op)(value, value, rc_arena *), rc_arena *arena)
-{
-    if (depth == rrank) {                       // both are leaves now
-        if (value_is_error(a)) return a;        // an element error stays element-local
-        if (value_is_error(b)) return b;
-        return op(a, b, arena);
-    }
-
-    bool a_here = depth >= rrank - ra;
-    bool b_here = depth >= rrank - rb;
-    uint32_t na = a_here ? a.list.num : 1;
-    uint32_t nb = b_here ? b.list.num : 1;
-    if (na != nb && na != 1 && nb != 1) {
-        return value_make_error(value_error_shape_mismatch);
-    }
-    uint32_t n = (na == 1) ? nb : na;           // (na==1)?nb:na, not max, so 0-length axes work
-
-    rc_array_value out = {0};
-    for (uint32_t i = 0; i < n; i++) {
-        value ai = a_here ? rc_view_value_get(a.list, na == 1 ? 0 : i) : a;
-        value bi = b_here ? rc_view_value_get(b.list, nb == 1 ? 0 : i) : b;
-        rc_array_value_push(&out, bc(ai, bi, depth + 1, rrank, ra, rb, op, arena), arena);
     }
     return value_make_list(out.view);
 }
@@ -452,10 +405,12 @@ typedef struct parser {
     rc_arena     *arena;
 } parser;
 
-// Apply a binary operator, broadcasting component-wise over lists (NumPy-style). Two
-// non-lists fall straight through to the handler (5 + 3 stays 8); a ragged operand or
-// non-broadcastable shapes give a shape-mismatch error. Errors propagate, and the bc
-// worker builds the result by re-reading the inputs, never copying them.
+// Apply a binary operator, broadcasting component-wise over lists (NumPy-style) by
+// recursing into itself - so a ragged tail just broadcasts on its own. Two non-lists
+// fall through to the handler (5 + 3 stays 8); errors propagate. The shallower operand
+// is a prepended length-1 axis: it is held whole while the deeper one is descended. At
+// equal rank a length-1 axis repeats; mismatched lengths are a shape error. The result
+// is freshly built; the inputs are only re-read, never copied.
 static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena)
 {
     if (value_is_error(a)) return a;
@@ -464,13 +419,36 @@ static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena
         return op.apply(a, b, arena);
     }
 
-    int32_t ra = rank_of(a);
-    int32_t rb = rank_of(b);
-    if (ra < 0 || rb < 0) {
-        return value_make_error(value_error_shape_mismatch);   // a ragged operand
+    uint32_t ra = rank_of(a);
+    uint32_t rb = rank_of(b);
+    rc_array_value out = {0};
+
+    if (ra < rb) {   // a is shallower: hold it whole over b's outer axis
+        for (uint32_t i = 0; i < b.list.num; i++) {
+            rc_array_value_push(&out, apply_binary(op, a, rc_view_value_get(b.list, i), arena), arena);
+        }
+        return value_make_list(out.view);
     }
-    uint32_t rrank = ra > rb ? (uint32_t)ra : (uint32_t)rb;
-    return bc(a, b, 0, rrank, (uint32_t)ra, (uint32_t)rb, op.apply, arena);
+    if (rb < ra) {
+        for (uint32_t i = 0; i < a.list.num; i++) {
+            rc_array_value_push(&out, apply_binary(op, rc_view_value_get(a.list, i), b, arena), arena);
+        }
+        return value_make_list(out.view);
+    }
+
+    // Equal rank, so both are lists: broadcast this axis (a length-1 side repeats).
+    uint32_t na = a.list.num;
+    uint32_t nb = b.list.num;
+    if (na != nb && na != 1 && nb != 1) {
+        return value_make_error(value_error_shape_mismatch);
+    }
+    uint32_t n = (na == 1) ? nb : na;   // (na==1)?nb:na, not max, so 0-length axes work
+    for (uint32_t i = 0; i < n; i++) {
+        value ai = rc_view_value_get(a.list, na == 1 ? 0 : i);
+        value bi = rc_view_value_get(b.list, nb == 1 ? 0 : i);
+        rc_array_value_push(&out, apply_binary(op, ai, bi, arena), arena);
+    }
+    return value_make_list(out.view);
 }
 
 // A scalar applies directly; a list maps element-wise, recursing so nested lists map
@@ -1014,7 +992,8 @@ RC_TEST_STEP(expression, list_shape, fix)
     value sc = VAL("shape(5)");   // a scalar is rank 0
     RC_CHECK_TRUE(value_is_list(sc) && sc.list.num == 0);
 
-    RC_CHECK_TRUE(value_is_error(VAL("shape({1,{2,3}})")));   // ragged -> shape error
+    value sr[] = {value_make_numeric(2)};   // ragged: shape is the uniform prefix
+    RC_CHECK_TRUE(value_is_equal(VAL("shape({1,{2,3}})"), value_make_list((rc_view_value) RC_VIEW(sr))));
 }
 
 RC_TEST_STEP(expression, list_broadcast, fix)
@@ -1047,7 +1026,11 @@ RC_TEST_STEP(expression, list_broadcast, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("{{1},{2}}+{3,4}"), value_make_list((rc_view_value) RC_VIEW(bb))));
 
     RC_CHECK_TRUE(value_is_error(VAL("{1,2,3}+{10,20,30,40}")));   // incompatible lengths
-    RC_CHECK_TRUE(value_is_error(VAL("{1,{2,3}}+1")));             // a ragged operand
+
+    // a ragged operand broadcasts structurally: {1,{2,3}}+1 == {2,{3,4}}
+    value rag_inner[] = {value_make_numeric(3), value_make_numeric(4)};
+    value rag[] = {value_make_numeric(2), value_make_list((rc_view_value) RC_VIEW(rag_inner))};
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,{2,3}}+1"), value_make_list((rc_view_value) RC_VIEW(rag))));
 
     // an element error stays element-local
     value mixed = VAL("{1,bar}+{10,20}");
