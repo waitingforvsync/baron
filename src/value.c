@@ -6,35 +6,36 @@
 
 value value_make_none(void)
 {
-    return (value){ .type = value_type_none };
+    return (value) {.type = value_type_none};
 }
 
 value value_make_numeric(double n)
 {
-    return (value){ .type = value_type_numeric, .numeric = n };
+    return (value) {.type = value_type_numeric, .numeric = n};
 }
 
 value value_make_string(rc_str s)
 {
-    return (value){ .type = value_type_string, .string = s };
+    return (value) {.type = value_type_string, .string = s};
 }
 
 value value_make_error(value_error e)
 {
-    return (value){ .type = value_type_error, .error = e };
+    return (value) {.type = value_type_error, .error = e};
 }
 
 value value_make_range(value_range r)
 {
-    return (value){ .type = value_type_range, .range = r };
+    return (value) {.type = value_type_range, .range = r};
 }
 
-value value_make_list(rc_view_value items, rc_arena *arena)
+value value_make_list(rc_view_value items)
 {
-    // Copy the elements so the list owns arena-stable storage independent of the
-    // caller's buffer.
-    rc_array_value copy = rc_array_value_make_copy(items, items.num, arena);
-    return (value){ .type = value_type_list, .list = copy.view };
+    // A value is a non-owning handle, so we just wrap the view: the elements stay
+    // wherever the caller built them (a scratch arena, say). Promoting a list to
+    // permanent storage is a deliberate deep value_clone done at the symbol-table
+    // boundary, not something hidden in here.
+    return (value) {.type = value_type_list, .list = items};
 }
 
 
@@ -224,34 +225,30 @@ RC_TEST(value, range_equality)
 
 RC_TEST(value, list_equality)
 {
-    rc_arena arena = rc_arena_make_default();
-
     value elems[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(3) };
     rc_view_value view = { .data = elems, .num = 3 };
-    value list = value_make_list(view, &arena);
+    value list = value_make_list(view);
     RC_CHECK_TRUE(value_is_list(list));
     RC_CHECK(list.list.num, ==, 3u);
 
-    // Equal to an independently-built copy of the same elements.
-    RC_CHECK_TRUE(value_is_equal(list, value_make_list(view, &arena)));
+    // Equal to an independently-built list over the same elements.
+    RC_CHECK_TRUE(value_is_equal(list, value_make_list(view)));
 
     // Unequal to a shorter list, and to one with a differing element.
     value short_elems[] = { value_make_numeric(1), value_make_numeric(2) };
-    value shorter = value_make_list((rc_view_value){ .data = short_elems, .num = 2 }, &arena);
+    value shorter = value_make_list((rc_view_value){ .data = short_elems, .num = 2 });
     RC_CHECK_FALSE(value_is_equal(list, shorter));
 
     value diff_elems[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(4) };
-    value different = value_make_list((rc_view_value){ .data = diff_elems, .num = 3 }, &arena);
+    value different = value_make_list((rc_view_value){ .data = diff_elems, .num = 3 });
     RC_CHECK_FALSE(value_is_equal(list, different));
 
     // Nested lists compare recursively.
     value outer_a[] = { list };
-    value outer_b[] = { value_make_list(view, &arena) };
-    value nested_a = value_make_list((rc_view_value){ .data = outer_a, .num = 1 }, &arena);
-    value nested_b = value_make_list((rc_view_value){ .data = outer_b, .num = 1 }, &arena);
+    value outer_b[] = { value_make_list(view) };
+    value nested_a = value_make_list((rc_view_value){ .data = outer_a, .num = 1 });
+    value nested_b = value_make_list((rc_view_value){ .data = outer_b, .num = 1 });
     RC_CHECK_TRUE(value_is_equal(nested_a, nested_b));
-
-    rc_arena_deinit(&arena);
 }
 
 RC_TEST(value, formatting)
@@ -290,7 +287,7 @@ RC_TEST(value, formatting)
     // List, formatted recursively.
     out = rc_mstr_make(16, &arena);
     value elems[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(3) };
-    value list = value_make_list((rc_view_value){ .data = elems, .num = 3 }, &arena);
+    value list = value_make_list((rc_view_value){ .data = elems, .num = 3 });
     value_format(&out, list, &arena);
     RC_CHECK(out.view, ==, RC_STR("{1, 2, 3}"));
 

@@ -102,19 +102,30 @@ static uint32_t skip_whitespace(rc_str text, uint32_t cursor)
     return cursor;
 }
 
-// Coalesce a run of ':' / newline (and the whitespace/comments between them) into
-// a single terminator. `pos` is at the first terminator character.
-static uint32_t skip_terminator(rc_str text, uint32_t cursor)
+// Coalesce a run of ':' / newline (and the whitespace/comments between them) into a
+// single terminator lexeme. We enter at the first terminator character. The lexeme's
+// `newline` flag is true only when the whole run was newlines; a ':' makes it the
+// hard kind that a list will not skip over (as does EOF, handled separately).
+static lexer_result lex_terminator(rc_str text, uint32_t cursor)
 {
-    // We enter with cursor at a terminator character
     RC_ASSERT(!is_eof(text, cursor) && is_terminator(at(text, cursor)));
 
+    bool only_newlines = true;
     do {
+        if (at(text, cursor) == ':') {
+            only_newlines = false;
+        }
         cursor = skip_whitespace(text, cursor + 1);
     }
     while (!is_eof(text, cursor) && is_terminator(at(text, cursor)));
 
-    return cursor;
+    return make_result(
+        (lexeme) {
+            .type = lexeme_type_terminator,
+            .terminator = { .newline = only_newlines }
+        },
+        cursor
+    );
 }
 
 
@@ -310,7 +321,7 @@ lexer_result lexer_next(rc_str text, uint32_t cursor, token_table tt)
 
     // If reached the end of the line, or a separator, return a separator lexeme
     if (is_terminator(c)) {
-        return make_simple(lexeme_type_terminator, skip_terminator(text, cursor));
+        return lex_terminator(text, cursor);
     }
 
     // Parse string literals
@@ -389,6 +400,8 @@ static const token lexer_test_tokens[] = {
     { RC_STR("and"), { .type = lexeme_type_binary_op } },
     { RC_STR("("),   { .type = lexeme_type_open_paren } },
     { RC_STR(")"),   { .type = lexeme_type_close_paren } },
+    { RC_STR("{"),   { .type = lexeme_type_open_brace } },
+    { RC_STR("}"),   { .type = lexeme_type_close_brace } },
 };
 
 static const token_table lexer_tt = RC_VIEW(lexer_test_tokens);
@@ -492,6 +505,23 @@ RC_TEST(lexer, terminators_and_punctuation)
     r = lexer_next(s2, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_comma);         p = r.next;
     r = lexer_next(s2, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_close_bracket); p = r.next;
     r = lexer_next(s2, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_close_paren);
+
+    // Braces come from the token table (their own lexeme types).
+    rc_str s3 = RC_STR("{}");
+    p = 0;
+    r = lexer_next(s3, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_open_brace);  p = r.next;
+    r = lexer_next(s3, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_close_brace);
+
+    // The newline flag distinguishes a soft (newline-only) terminator from a hard one.
+    r = lexer_next(RC_STR("a\nb"), 1, lexer_tt);
+    RC_CHECK_TRUE(r.token.type == lexeme_type_terminator);
+    RC_CHECK_TRUE(r.token.terminator.newline);             // pure newline -> soft
+    r = lexer_next(RC_STR("a:b"), 1, lexer_tt);
+    RC_CHECK_TRUE(r.token.type == lexeme_type_terminator);
+    RC_CHECK_FALSE(r.token.terminator.newline);            // a ':' -> hard
+    r = lexer_next(RC_STR("a"), 1, lexer_tt);
+    RC_CHECK_TRUE(r.token.type == lexeme_type_terminator);
+    RC_CHECK_FALSE(r.token.terminator.newline);            // EOF -> hard
 }
 
 RC_TEST(lexer, whitespace_and_comments)

@@ -86,7 +86,7 @@ value value_make_numeric(double n);
 value value_make_string(rc_str s);
 value value_make_error(value_error e);
 value value_make_range(value_range r);
-value value_make_list(rc_view_value items, rc_arena *arena);    // copies items into arena
+value value_make_list(rc_view_value items);    // wraps the view; does not copy
 
 // Type queries.
 value_type value_type_of(value v);

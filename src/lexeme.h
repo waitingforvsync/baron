@@ -34,6 +34,8 @@ typedef enum lexeme_type {
     lexeme_type_close_paren,
     lexeme_type_open_bracket,
     lexeme_type_close_bracket,
+    lexeme_type_open_brace,
+    lexeme_type_close_brace,
     lexeme_type_unary_op,
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)
@@ -48,6 +50,11 @@ typedef enum assoc {
     assoc_left,                         // 0 / default
     assoc_right,
 } assoc;
+
+
+typedef struct lexeme_terminator {
+    bool newline;   // true if the run was only newline(s): the soft kind a list ignores
+} lexeme_terminator;
 
 
 typedef struct lexeme_numeric_literal {
@@ -103,6 +110,7 @@ typedef struct lexeme_error {
 typedef struct lexeme {
     uint32_t type;
     union {
+        lexeme_terminator terminator;
         lexeme_numeric_literal numeric_literal;
         lexeme_string_literal string_literal;
         lexeme_identifier identifier;

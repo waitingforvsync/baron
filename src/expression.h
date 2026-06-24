@@ -23,6 +23,7 @@ typedef enum expr_error {
     expr_error_expected_expression,     // an operand was required but none was there
     expr_error_expected_open_paren,     // a function name was not followed by '('
     expr_error_expected_close_paren,    // a '(' or function argument was left open
+    expr_error_expected_close_brace,    // a list literal wanted a ',' or '}'
 } expr_error;
 
 

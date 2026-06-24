@@ -274,6 +274,8 @@ static value fn_ceil(value v, rc_arena *arena)
 // only carries the leading operators, the functions, and the open paren.
 static const token even_entries[] = {
     { RC_STR("("),     { .type = lexeme_type_open_paren } },
+    { RC_STR("{"),     { .type = lexeme_type_open_brace } },     // begins a list literal
+    { RC_STR("}"),     { .type = lexeme_type_close_brace } },    // ends one (empty, or after a comma)
     { RC_STR("+"),     { .type = lexeme_type_unary_op, .unary_op = { op_pos, PREC_NEG } } },
     { RC_STR("-"),     { .type = lexeme_type_unary_op, .unary_op = { op_neg, PREC_NEG } } },
     { RC_STR("abs"),   { .type = lexeme_type_function, .function = { fn_abs } } },
@@ -291,6 +293,7 @@ static const token even_entries[] = {
 // lives here, so a parenthesised group is closed from operator position.
 static const token odd_entries[] = {
     { RC_STR(")"),   { .type = lexeme_type_close_paren } },
+    { RC_STR("}"),   { .type = lexeme_type_close_brace } },   // ends a list (after an element)
     { RC_STR("^"),   { .type = lexeme_type_binary_op, .binary_op = { op_pow,  PREC_POW, assoc_right } } },
     { RC_STR("*"),   { .type = lexeme_type_binary_op, .binary_op = { op_mul,  PREC_MUL, assoc_left } } },
     { RC_STR("/"),   { .type = lexeme_type_binary_op, .binary_op = { op_div,  PREC_MUL, assoc_left } } },
@@ -372,11 +375,65 @@ static expr_result expect_close_paren(const parser *p, value v, uint32_t cursor)
     return ok(v, rp.next);
 }
 
+// parse_operand and parse_precedence are mutually recursive, so one of the pair must
+// be declared ahead; everything else below is defined in call order (callees first).
 static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t min_prec);
 
+// Accept a newline if one is here (a list literal treats newlines as whitespace),
+// returning the cursor past it, else the cursor unchanged. The lexer coalesces a run
+// of newlines into one terminator, so there is only ever one to skip. We lex with `tt`
+// so the caller can re-lex the same spot for whatever it expects there; a ':' or EOF
+// lexes as a hard terminator and is left in place, so an unclosed list is reported.
+static uint32_t accept_newline(const parser *p, uint32_t cursor, token_table tt)
+{
+    lexer_result lr = lexer_next(p->text, cursor, tt);
+    if (lr.token.type == lexeme_type_terminator && lr.token.terminator.newline) {
+        return lr.next;
+    }
+    return cursor;
+}
+
+// Parse a list literal from just after the '{': comma-separated element expressions
+// (nested lists allowed, empty allowed), with newlines ignored inside the braces. We
+// gather the elements in the parser's scratch arena and wrap that view - no copy,
+// since a value is a non-owning handle.
+static expr_result parse_list(const parser *p, uint32_t cursor)
+{
+    rc_array_value elems = {0};
+
+    while (true) {
+        // Value-or-'}' position.
+        cursor = accept_newline(p, cursor, even_tokens);
+        lexer_result lr = lexer_next(p->text, cursor, even_tokens);
+        if (lr.token.type == lexeme_type_close_brace) {
+            return ok(value_make_list(elems.view), lr.next);   // possibly empty
+        }
+
+        // One element, a full expression. A soft fail here (e.g. "{,}") is a real error.
+        expr_result e = parse_precedence(p, cursor, 0);
+        if (e.error != expr_error_none) {
+            return e;
+        }
+        rc_array_value_push(&elems, e.value, p->arena);
+        cursor = e.next;
+
+        // Separator position: after any newline we want a ',' or '}'.
+        cursor = accept_newline(p, cursor, odd_tokens);
+        lr = lexer_next(p->text, cursor, odd_tokens);
+        if (lr.token.type == lexeme_type_comma) {
+            cursor = lr.next;
+            continue;   // a trailing comma simply loops back and finds the '}'
+        }
+        if (lr.token.type == lexeme_type_close_brace) {
+            return ok(value_make_list(elems.view), lr.next);
+        }
+        return fail(expr_error_expected_close_brace, cursor);
+    }
+}
+
 // Parse one operand: a literal, a symbol, a parenthesised group, a prefixed unary
-// expression, or a function call. A lexeme that cannot begin an operand is a soft
-// expected_expression failure, leaving the caller to decide whether that is fatal.
+// expression, a function call, or a list literal. A lexeme that cannot begin an
+// operand is a soft expected_expression failure, leaving the caller to decide.
 static expr_result parse_operand(const parser *p, uint32_t cursor)
 {
     lexer_result lr = lexer_next(p->text, cursor, even_tokens);
@@ -388,6 +445,9 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
 
         case lexeme_type_string_literal:
         case lexeme_type_escaped_string_literal:
+            // TODO: do this properly for the escaped case - the ref still holds its
+            // doubled quotes verbatim, so we must build a fresh copy (in the scratch
+            // arena) with the escapes collapsed rather than wrapping the raw source.
             return ok(value_make_string(lex.string_literal.ref), lr.next);
 
         case lexeme_type_identifier: {
@@ -404,6 +464,9 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             }
             return expect_close_paren(p, sub.value, sub.next);
         }
+
+        case lexeme_type_open_brace:
+            return parse_list(p, lr.next);
 
         case lexeme_type_unary_op: {
             // The operand is parsed at the operator's own precedence (prefix climb).
@@ -634,6 +697,48 @@ RC_TEST_STEP(expression, more_functions, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("ROUND(-2.7)"), value_make_numeric(-2.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("CEIL(2.1)"),   value_make_numeric(3.0)));  // toward +inf
     RC_CHECK_TRUE(value_is_error(VAL("SQRT(-1)")));
+}
+
+RC_TEST_STEP(expression, list_literals, fix)
+{
+    value empty = VAL("{}");
+    RC_CHECK_TRUE(value_is_list(empty));
+    RC_CHECK(empty.list.num, ==, 0u);
+
+    value e123[] = { value_make_numeric(1), value_make_numeric(2), value_make_numeric(3) };
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3}"), value_make_list((rc_view_value){ .data = e123, .num = 3 })));
+
+    // Elements are full expressions.
+    value e312[] = { value_make_numeric(3), value_make_numeric(12) };
+    RC_CHECK_TRUE(value_is_equal(VAL("{1+2,3*4}"), value_make_list((rc_view_value){ .data = e312, .num = 2 })));
+
+    // Nested lists.
+    value inner[] = { value_make_numeric(2), value_make_numeric(3) };
+    value nested[] = { value_make_numeric(1), value_make_list((rc_view_value){ .data = inner, .num = 2 }), value_make_numeric(4) };
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,{2,3},4}"), value_make_list((rc_view_value){ .data = nested, .num = 3 })));
+}
+
+RC_TEST_STEP(expression, list_newlines_and_commas, fix)
+{
+    value e12[] = { value_make_numeric(1), value_make_numeric(2) };
+    value want12 = value_make_list((rc_view_value){ .data = e12, .num = 2 });
+
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,\n2}"),     want12));   // newline after a comma
+    RC_CHECK_TRUE(value_is_equal(VAL("{\n1,\n2\n}"), want12));   // newlines throughout
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,}"),      want12));   // trailing comma
+
+    value emptynl = VAL("{\n}");
+    RC_CHECK_TRUE(value_is_list(emptynl));
+    RC_CHECK(emptynl.list.num, ==, 0u);
+}
+
+RC_TEST_STEP(expression, list_errors, fix)
+{
+    RC_CHECK_TRUE(RESULT("{1").error    == expr_error_expected_close_brace);
+    RC_CHECK_TRUE(RESULT("{1 2}").error == expr_error_expected_close_brace);   // missing comma
+    RC_CHECK_TRUE(RESULT("{,}").error   == expr_error_expected_expression);
+    // A list flows as a value, but the numeric operators reject it (no list ops yet).
+    RC_CHECK_TRUE(value_is_error(VAL("{1}+2")));
 }
 
 #undef RESULT
