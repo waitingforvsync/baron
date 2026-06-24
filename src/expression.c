@@ -9,16 +9,16 @@
 // The range operator '..' is the loosest, so its endpoints are whole expressions;
 // comparisons and the logical ops sit below arithmetic; shifts share the multiply
 // level; unary +/- sit below pow so -2^2 is -(2^2).
-enum {
-    PREC_RANGE = 5,    // ..  ..<  (right-associative; handled specially, not a binary_op)
-    PREC_OR  = 10,   // or eor
-    PREC_AND = 20,   // and
-    PREC_CMP = 30,   // = == != <> < > <= >=
-    PREC_ADD = 40,   // + -
-    PREC_MUL = 50,   // * / div mod << >>
-    PREC_NEG = 60,   // unary + -
-    PREC_POW = 70,   // ^  (right-associative)
-};
+typedef enum prec {
+    prec_range = 5,    // ..  ..<  (right-associative; handled specially, not a binary_op)
+    prec_or    = 10,   // or eor
+    prec_and   = 20,   // and
+    prec_cmp   = 30,   // = == != <> < > <= >=
+    prec_add   = 40,   // + -
+    prec_mul   = 50,   // * / div mod << >>
+    prec_neg   = 60,   // unary + -
+    prec_pow   = 70,   // ^  (right-associative)
+} prec;
 
 
 // ---- operator and function handlers ----
@@ -296,8 +296,8 @@ static const token even_entries[] = {
     { RC_STR("}"),     { .type = lexeme_type_close_brace } },    // ends one (empty, or after a comma)
     { RC_STR(".."),    { .type = lexeme_type_range, .range = { false } } },   // start-unbounded range
     { RC_STR("..<"),   { .type = lexeme_type_range, .range = { true } } },
-    { RC_STR("+"),     { .type = lexeme_type_unary_op, .unary_op = { op_pos, PREC_NEG } } },
-    { RC_STR("-"),     { .type = lexeme_type_unary_op, .unary_op = { op_neg, PREC_NEG } } },
+    { RC_STR("+"),     { .type = lexeme_type_unary_op, .unary_op = { op_pos, prec_neg } } },
+    { RC_STR("-"),     { .type = lexeme_type_unary_op, .unary_op = { op_neg, prec_neg } } },
     { RC_STR("abs"),   { .type = lexeme_type_function, .function = { fn_abs } } },
     { RC_STR("lo"),    { .type = lexeme_type_function, .function = { fn_lo } } },
     { RC_STR("hi"),    { .type = lexeme_type_function, .function = { fn_hi } } },
@@ -316,26 +316,26 @@ static const token odd_entries[] = {
     { RC_STR("}"),   { .type = lexeme_type_close_brace } },   // ends a list (after an element)
     { RC_STR(".."),  { .type = lexeme_type_range, .range = { false } } },   // range operator (handled specially)
     { RC_STR("..<"), { .type = lexeme_type_range, .range = { true } } },
-    { RC_STR("^"),   { .type = lexeme_type_binary_op, .binary_op = { op_pow,  PREC_POW, assoc_right } } },
-    { RC_STR("*"),   { .type = lexeme_type_binary_op, .binary_op = { op_mul,  PREC_MUL, assoc_left } } },
-    { RC_STR("/"),   { .type = lexeme_type_binary_op, .binary_op = { op_div,  PREC_MUL, assoc_left } } },
-    { RC_STR("div"), { .type = lexeme_type_binary_op, .binary_op = { op_idiv, PREC_MUL, assoc_left } } },
-    { RC_STR("mod"), { .type = lexeme_type_binary_op, .binary_op = { op_mod,  PREC_MUL, assoc_left } } },
-    { RC_STR("<<"),  { .type = lexeme_type_binary_op, .binary_op = { op_shl,  PREC_MUL, assoc_left } } },
-    { RC_STR(">>"),  { .type = lexeme_type_binary_op, .binary_op = { op_shr,  PREC_MUL, assoc_left } } },
-    { RC_STR("+"),   { .type = lexeme_type_binary_op, .binary_op = { op_add,  PREC_ADD, assoc_left } } },
-    { RC_STR("-"),   { .type = lexeme_type_binary_op, .binary_op = { op_sub,  PREC_ADD, assoc_left } } },
-    { RC_STR("="),   { .type = lexeme_type_binary_op, .binary_op = { op_eq,   PREC_CMP, assoc_left } } },
-    { RC_STR("=="),  { .type = lexeme_type_binary_op, .binary_op = { op_eq,   PREC_CMP, assoc_left } } },   // alias of =
-    { RC_STR("!="),  { .type = lexeme_type_binary_op, .binary_op = { op_ne,   PREC_CMP, assoc_left } } },
-    { RC_STR("<>"),  { .type = lexeme_type_binary_op, .binary_op = { op_ne,   PREC_CMP, assoc_left } } },   // alias of !=
-    { RC_STR("<="),  { .type = lexeme_type_binary_op, .binary_op = { op_le,   PREC_CMP, assoc_left } } },
-    { RC_STR(">="),  { .type = lexeme_type_binary_op, .binary_op = { op_ge,   PREC_CMP, assoc_left } } },
-    { RC_STR("<"),   { .type = lexeme_type_binary_op, .binary_op = { op_lt,   PREC_CMP, assoc_left } } },
-    { RC_STR(">"),   { .type = lexeme_type_binary_op, .binary_op = { op_gt,   PREC_CMP, assoc_left } } },
-    { RC_STR("and"), { .type = lexeme_type_binary_op, .binary_op = { op_and,  PREC_AND, assoc_left } } },
-    { RC_STR("or"),  { .type = lexeme_type_binary_op, .binary_op = { op_or,   PREC_OR,  assoc_left } } },
-    { RC_STR("eor"), { .type = lexeme_type_binary_op, .binary_op = { op_eor,  PREC_OR,  assoc_left } } },
+    { RC_STR("^"),   { .type = lexeme_type_binary_op, .binary_op = { op_pow,  prec_pow, assoc_right } } },
+    { RC_STR("*"),   { .type = lexeme_type_binary_op, .binary_op = { op_mul,  prec_mul, assoc_left } } },
+    { RC_STR("/"),   { .type = lexeme_type_binary_op, .binary_op = { op_div,  prec_mul, assoc_left } } },
+    { RC_STR("div"), { .type = lexeme_type_binary_op, .binary_op = { op_idiv, prec_mul, assoc_left } } },
+    { RC_STR("mod"), { .type = lexeme_type_binary_op, .binary_op = { op_mod,  prec_mul, assoc_left } } },
+    { RC_STR("<<"),  { .type = lexeme_type_binary_op, .binary_op = { op_shl,  prec_mul, assoc_left } } },
+    { RC_STR(">>"),  { .type = lexeme_type_binary_op, .binary_op = { op_shr,  prec_mul, assoc_left } } },
+    { RC_STR("+"),   { .type = lexeme_type_binary_op, .binary_op = { op_add,  prec_add, assoc_left } } },
+    { RC_STR("-"),   { .type = lexeme_type_binary_op, .binary_op = { op_sub,  prec_add, assoc_left } } },
+    { RC_STR("="),   { .type = lexeme_type_binary_op, .binary_op = { op_eq,   prec_cmp, assoc_left } } },
+    { RC_STR("=="),  { .type = lexeme_type_binary_op, .binary_op = { op_eq,   prec_cmp, assoc_left } } },   // alias of =
+    { RC_STR("!="),  { .type = lexeme_type_binary_op, .binary_op = { op_ne,   prec_cmp, assoc_left } } },
+    { RC_STR("<>"),  { .type = lexeme_type_binary_op, .binary_op = { op_ne,   prec_cmp, assoc_left } } },   // alias of !=
+    { RC_STR("<="),  { .type = lexeme_type_binary_op, .binary_op = { op_le,   prec_cmp, assoc_left } } },
+    { RC_STR(">="),  { .type = lexeme_type_binary_op, .binary_op = { op_ge,   prec_cmp, assoc_left } } },
+    { RC_STR("<"),   { .type = lexeme_type_binary_op, .binary_op = { op_lt,   prec_cmp, assoc_left } } },
+    { RC_STR(">"),   { .type = lexeme_type_binary_op, .binary_op = { op_gt,   prec_cmp, assoc_left } } },
+    { RC_STR("and"), { .type = lexeme_type_binary_op, .binary_op = { op_and,  prec_and, assoc_left } } },
+    { RC_STR("or"),  { .type = lexeme_type_binary_op, .binary_op = { op_or,   prec_or,  assoc_left } } },
+    { RC_STR("eor"), { .type = lexeme_type_binary_op, .binary_op = { op_eor,  prec_or,  assoc_left } } },
 };
 
 static const token_table even_tokens = RC_VIEW(even_entries);
@@ -358,14 +358,45 @@ static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena
     return op.apply(a, b, arena);
 }
 
+// A scalar applies directly; a list maps element-wise, recursing so nested lists map
+// too; an error short-circuits. The new list is built in the (scratch) arena and
+// wrapped - value_make_list does not copy.
+static value apply_elementwise(value (*scalar)(value, rc_arena *), value v, rc_arena *arena)
+{
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (value_is_list(v)) {
+        rc_array_value out = {0};
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            rc_array_value_push(&out, apply_elementwise(scalar, rc_view_value_get(v.list, i), arena), arena);
+        }
+        return value_make_list(out.view);
+    }
+    if (value_is_range(v)) {
+        // Enumerate the range and map; an unbounded range cannot be enumerated.
+        value_range r = v.range;
+        if (!r.has_start || !r.has_end) {
+            return value_make_error(value_error_domain);
+        }
+        int64_t step = r.step != 0 ? r.step : (r.end >= r.start ? 1 : -1);   // step 0 = inferred +-1
+        rc_array_value out = {0};
+        for (int64_t n = r.start; step > 0 ? n <= r.end : n >= r.end; n += step) {
+            rc_array_value_push(&out, scalar(value_make_numeric((double)n), arena), arena);
+        }
+        return value_make_list(out.view);
+    }
+    return scalar(v, arena);
+}
+
 static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
 {
-    return value_is_error(v) ? v : op.apply(v, arena);
+    return apply_elementwise(op.apply, v, arena);
 }
 
 static value apply_function(lexeme_function fn, value v, rc_arena *arena)
 {
-    return value_is_error(v) ? v : fn.apply(v, arena);
+    return apply_elementwise(fn.apply, v, arena);
 }
 
 static expr_result ok(value v, uint32_t next)
@@ -519,7 +550,7 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             // A '..' where an operand is expected opens an unbounded-start range. Parse a
             // single endpoint (above range precedence, so '..b..c' leaves the second '..'
             // to error in the caller); nothing there gives the fully-open '..'.
-            expr_result end = parse_precedence(p, lr.next, PREC_RANGE + 1);
+            expr_result end = parse_precedence(p, lr.next, prec_range + 1);
             if (end.error == expr_error_expected_expression) {
                 return ok(value_make_range_open(lex.range.exclusive), lr.next);
             }
@@ -558,7 +589,7 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                 lexeme_binary_op op = (lr.token.type == lexeme_type_range)
                     ? (lexeme_binary_op) {
                           .apply         = lr.token.range.exclusive ? op_range_excl : op_range,
-                          .precedence    = PREC_RANGE,
+                          .precedence    = prec_range,
                           .associativity = assoc_right
                       }
                     : lr.token.binary_op;
@@ -802,8 +833,57 @@ RC_TEST_STEP(expression, list_errors, fix)
     RC_CHECK_TRUE(RESULT("{1").error    == expr_error_expected_close_brace);
     RC_CHECK_TRUE(RESULT("{1 2}").error == expr_error_expected_close_brace);   // missing comma
     RC_CHECK_TRUE(RESULT("{,}").error   == expr_error_expected_expression);
-    // A list flows as a value, but the numeric operators reject it (no list ops yet).
+    // A list flows as a value, but the binary operators reject it (no broadcasting yet).
     RC_CHECK_TRUE(value_is_error(VAL("{1}+2")));
+}
+
+RC_TEST_STEP(expression, list_elementwise, fix)
+{
+    // A unary op or a function maps over every element, building a new list.
+    value neg[] = {value_make_numeric(-1), value_make_numeric(-2), value_make_numeric(-3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("-{1,2,3}"), value_make_list((rc_view_value) RC_VIEW(neg))));
+
+    value abs3[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("abs({-1,-2,-3})"), value_make_list((rc_view_value) RC_VIEW(abs3))));
+
+    value ints[] = {value_make_numeric(2), value_make_numeric(-3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("int({2.7,-2.7})"), value_make_list((rc_view_value) RC_VIEW(ints))));
+
+    // Nested lists map recursively: -{1,{2,3}} == {-1,{-2,-3}}.
+    value inner[] = {value_make_numeric(-2), value_make_numeric(-3)};
+    value nested[] = {value_make_numeric(-1), value_make_list((rc_view_value) RC_VIEW(inner))};
+    RC_CHECK_TRUE(value_is_equal(VAL("-{1,{2,3}}"), value_make_list((rc_view_value) RC_VIEW(nested))));
+
+    // An empty list maps to an empty list.
+    value empty = VAL("-{}");
+    RC_CHECK_TRUE(value_is_list(empty) && empty.list.num == 0);
+
+    // An element the op can't take becomes an error in that slot; the rest are fine.
+    value mixed = VAL("abs({-5, \"x\"})");
+    RC_CHECK_TRUE(value_is_list(mixed) && mixed.list.num == 2);
+    RC_CHECK_TRUE(value_is_equal(rc_view_value_get(mixed.list, 0), value_make_numeric(5)));
+    RC_CHECK_TRUE(value_is_error(rc_view_value_get(mixed.list, 1)));
+}
+
+RC_TEST_STEP(expression, range_elementwise, fix)
+{
+    // A unary op or function over a range enumerates it and maps -> a list. Note the
+    // parens: unary binds tighter than '..', so -(0..3) negates the range.
+    value neg[] = {value_make_numeric(0), value_make_numeric(-1), value_make_numeric(-2), value_make_numeric(-3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("-(0..3)"), value_make_list((rc_view_value) RC_VIEW(neg))));
+
+    value a[] = {value_make_numeric(2), value_make_numeric(1), value_make_numeric(0), value_make_numeric(1), value_make_numeric(2)};
+    RC_CHECK_TRUE(value_is_equal(VAL("abs(-2..2)"), value_make_list((rc_view_value) RC_VIEW(a))));
+
+    // Descending and stepped ranges enumerate correctly.
+    value d[] = {value_make_numeric(-4), value_make_numeric(-3), value_make_numeric(-2), value_make_numeric(-1)};
+    RC_CHECK_TRUE(value_is_equal(VAL("-(4..1)"), value_make_list((rc_view_value) RC_VIEW(d))));
+
+    value s[] = {value_make_numeric(0), value_make_numeric(-2), value_make_numeric(-4), value_make_numeric(-6)};
+    RC_CHECK_TRUE(value_is_equal(VAL("-(0..2..6)"), value_make_list((rc_view_value) RC_VIEW(s))));
+
+    // An unbounded range can't be enumerated.
+    RC_CHECK_TRUE(value_is_error(VAL("-(0..)")));
 }
 
 RC_TEST_STEP(expression, ranges_two_value, fix)
