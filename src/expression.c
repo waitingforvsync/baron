@@ -156,48 +156,42 @@ static value op_eor(value a, value b, rc_arena *arena)
     return value_make_numeric((double)(as_u32(a) ^ as_u32(b)));
 }
 
-// Comparisons yield 1 for true, 0 for false.
-static value op_eq(value a, value b, rc_arena *arena)
+// Order two operands of the same kind - both numbers, or both strings (lexicographic) -
+// as -1 / 0 / +1; sets *ok false on a type mismatch, which makes the comparison an error.
+static int compare_values(value a, value b, bool *ok)
 {
-    (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
-    return value_make_numeric(a.numeric == b.numeric ? 1.0 : 0.0);
+    *ok = true;
+    if (value_is_numeric(a) && value_is_numeric(b)) {
+        return (a.numeric > b.numeric) - (a.numeric < b.numeric);
+    }
+    if (value_is_string(a) && value_is_string(b)) {
+        int c = rc_str_compare(a.string, b.string);
+        return (c > 0) - (c < 0);
+    }
+    *ok = false;
+    return 0;
 }
 
-static value op_ne(value a, value b, rc_arena *arena)
-{
-    (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
-    return value_make_numeric(a.numeric != b.numeric ? 1.0 : 0.0);
-}
+// The comparisons each yield 1 for true, 0 for false, and read the ordering c from
+// compare_values (so they all work on numbers or on strings). COMP is the test on c.
+#define COMPARE_OP(name, COMP)                                            \
+    static value name(value a, value b, rc_arena *arena)                  \
+    {                                                                     \
+        (void)arena;                                                      \
+        bool ok;                                                          \
+        int c = compare_values(a, b, &ok);                               \
+        return ok ? value_make_numeric((COMP) ? 1.0 : 0.0)               \
+                  : value_make_error(value_error_type_mismatch);         \
+    }
 
-static value op_lt(value a, value b, rc_arena *arena)
-{
-    (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
-    return value_make_numeric(a.numeric < b.numeric ? 1.0 : 0.0);
-}
+COMPARE_OP(op_eq, c == 0)
+COMPARE_OP(op_ne, c != 0)
+COMPARE_OP(op_lt, c <  0)
+COMPARE_OP(op_gt, c >  0)
+COMPARE_OP(op_le, c <= 0)
+COMPARE_OP(op_ge, c >= 0)
 
-static value op_gt(value a, value b, rc_arena *arena)
-{
-    (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
-    return value_make_numeric(a.numeric > b.numeric ? 1.0 : 0.0);
-}
-
-static value op_le(value a, value b, rc_arena *arena)
-{
-    (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
-    return value_make_numeric(a.numeric <= b.numeric ? 1.0 : 0.0);
-}
-
-static value op_ge(value a, value b, rc_arena *arena)
-{
-    (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
-    return value_make_numeric(a.numeric >= b.numeric ? 1.0 : 0.0);
-}
+#undef COMPARE_OP
 
 // The fold operators behind min()/max(); they are not in the tables, only used by reduce().
 static value op_min(value a, value b, rc_arena *arena)
@@ -826,6 +820,46 @@ static value fn_concat(rc_view_value args, rc_arena *arena)
     return value_make_list(out.view);
 }
 
+// zip: turn N equal-length lists into one list of N-tuples (the transpose of the stacked
+// arguments), so zip({1,2,3},{4,5,6}) == {{1,4},{2,5},{3,6}}. Ranges coerce to lists; the
+// arguments must all share the same outer length.
+static value fn_zip(rc_view_value args, rc_arena *arena)
+{
+    rc_array_value lists = {0};   // the arguments, each coerced to a list
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < args.num; i++) {
+        value a = rc_view_value_get(args, i);
+        if (value_is_error(a)) {
+            return a;
+        }
+        if (value_is_range(a)) {
+            a = range_to_list(a.range, arena);
+            if (value_is_error(a)) return a;
+        }
+        if (!value_is_list(a)) {
+            return value_make_error(value_error_type_mismatch);
+        }
+        if (i == 0) {
+            n = a.list.num;
+        }
+        else if (a.list.num != n) {
+            return value_make_error(value_error_shape_mismatch);   // lengths must match
+        }
+        rc_array_value_push(&lists, a, arena);
+    }
+
+    rc_array_value out = {0};
+    for (uint32_t i = 0; i < n; i++) {
+        rc_array_value tuple = {0};
+        for (uint32_t j = 0; j < lists.num; j++) {
+            value lst = rc_view_value_get(lists.view, j);
+            rc_array_value_push(&tuple, rc_view_value_get(lst.list, i), arena);
+        }
+        rc_array_value_push(&out, value_make_list(tuple.view), arena);
+    }
+    return value_make_list(out.view);
+}
+
 // reverse: the outermost axis reversed (a list's elements, or a string's characters).
 static value fn_reverse(rc_view_value args, rc_arena *arena)
 {
@@ -975,6 +1009,7 @@ static const token even_entries[] = {
     {RC_STR("rank("),    {.type = lexeme_type_function, .function = {.apply = fn_rank}}},
     {RC_STR("flatten("), {.type = lexeme_type_function, .function = {.apply = fn_flatten}}},
     {RC_STR("concat("),  {.type = lexeme_type_function, .function = {.apply = fn_concat}}},
+    {RC_STR("zip("),      {.type = lexeme_type_function, .function = {.apply = fn_zip}}},
     {RC_STR("reverse("), {.type = lexeme_type_function, .function = {.apply = fn_reverse}}},
     {RC_STR("sort("),    {.type = lexeme_type_function, .function = {.apply = fn_sort}}},
     {RC_STR("sum("),     {.type = lexeme_type_function, .function = {.apply = fn_sum}}},
@@ -1137,11 +1172,16 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             return ok(value_make_numeric(lex.numeric_literal.value), lr.next);
 
         case lexeme_type_string_literal:
-        case lexeme_type_escaped_string_literal:
-            // TODO: do this properly for the escaped case - the ref still holds its
-            // doubled quotes verbatim, so we must build a fresh copy (in the scratch
-            // arena) with the escapes collapsed rather than wrapping the raw source.
+            // Plain literal: wrap the source view directly, no copy.
             return ok(value_make_string(lex.string_literal.ref), lr.next);
+
+        case lexeme_type_escaped_string_literal: {
+            // The ref still holds each escaped quote as a doubled "", so copy it into the
+            // scratch arena and collapse every pair to a single quote.
+            rc_mstr m = rc_mstr_from_str(lex.string_literal.ref, lex.string_literal.ref.len, p->arena);
+            rc_mstr_replace(&m, RC_STR("\"\""), RC_STR("\""), p->arena);
+            return ok(value_make_string(m.view), lr.next);
+        }
 
         case lexeme_type_identifier: {
             value v = scopes_get_symbol(p->scopes, p->scope_index, lex.identifier.name);
@@ -1888,6 +1928,40 @@ RC_TEST_STEP(expression, math_functions, fix)
     // element-wise over a list, like the other unary ops
     value c[] = {value_make_numeric(1)};
     RC_CHECK_TRUE(value_is_equal(VAL("cos({0})"), value_make_list((rc_view_value) RC_VIEW(c))));
+}
+
+RC_TEST_STEP(expression, strings_and_zip, fix)
+{
+    // escaped string literals: a doubled "" collapses to one quote
+    RC_CHECK_TRUE(value_is_equal(VAL("\"a\"\"b\""), value_make_string(RC_STR("a\"b"))));   // "a""b" -> a"b
+    RC_CHECK_TRUE(value_is_equal(VAL("\"\"\"\""),   value_make_string(RC_STR("\""))));     // """" -> "
+
+    // string comparisons (equality and lexicographic ordering)
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" = \"abc\""), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" = \"abd\""), value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" != \"abd\""), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" < \"abd\""), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abd\" > \"abc\""), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"ab\" < \"abc\""),  value_make_numeric(1)));   // prefix is less
+    RC_CHECK_TRUE(value_is_error(VAL("\"a\" = 1")));                                  // mixed types
+
+    // comparisons broadcast over a list of strings
+    value cmp[] = {value_make_numeric(1), value_make_numeric(0)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{\"a\",\"b\"} = \"a\""), value_make_list((rc_view_value) RC_VIEW(cmp))));
+
+    // zip: equal-length lists into tuples (transpose of the stacked args)
+    value z0[] = {value_make_numeric(1), value_make_numeric(4)};
+    value z1[] = {value_make_numeric(2), value_make_numeric(5)};
+    value z2[] = {value_make_numeric(3), value_make_numeric(6)};
+    value zz[] = {value_make_list((rc_view_value) RC_VIEW(z0)), value_make_list((rc_view_value) RC_VIEW(z1)), value_make_list((rc_view_value) RC_VIEW(z2))};
+    RC_CHECK_TRUE(value_is_equal(VAL("zip({1,2,3},{4,5,6})"), value_make_list((rc_view_value) RC_VIEW(zz))));
+
+    value t0[] = {value_make_numeric(1), value_make_numeric(3), value_make_numeric(5)};
+    value t1[] = {value_make_numeric(2), value_make_numeric(4), value_make_numeric(6)};
+    value tt[] = {value_make_list((rc_view_value) RC_VIEW(t0)), value_make_list((rc_view_value) RC_VIEW(t1))};
+    RC_CHECK_TRUE(value_is_equal(VAL("zip({1,2},{3,4},{5,6})"), value_make_list((rc_view_value) RC_VIEW(tt))));
+
+    RC_CHECK_TRUE(value_is_error(VAL("zip({1,2},{3,4,5})")));   // lengths must match
 }
 
 #undef RESULT
