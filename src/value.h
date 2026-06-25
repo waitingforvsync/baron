@@ -106,6 +106,8 @@ bool value_is_string(value v);
 bool value_is_list(value v);
 bool value_is_range(value v);
 bool value_is_error(value v);
+bool value_is_simple(value v);     // numeric, string, or error: stands alone
+bool value_is_compound(value v);   // list or range: gathers other values
 
 // Structural equality: types must match, then compared field-wise (lists
 // element-wise, recursively).

@@ -150,6 +150,11 @@ bool value_is_list(value v)        { return v.type == value_type_list; }
 bool value_is_range(value v)       { return v.type == value_type_range; }
 bool value_is_error(value v)       { return v.type == value_type_error; }
 
+// Simple values stand alone (a number, a string, an error); compound values gather
+// others (a list of values, a range that enumerates to one). none belongs to neither.
+bool value_is_simple(value v)      { return value_is_numeric(v) || value_is_string(v) || value_is_error(v); }
+bool value_is_compound(value v)    { return value_is_list(v) || value_is_range(v); }
+
 
 bool value_is_equal(value a, value b)
 {

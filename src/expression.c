@@ -270,9 +270,10 @@ static value fn_ceil(value v, rc_arena *arena)
 #undef NEEDS_NUM
 
 // The range operator handlers. Unlike the operators above they live nowhere in the
-// tables (range is lexeme_type_range, not a binary_op); parse_precedence synthesises a
-// binary_op around one of these so the range folds through the same path as the rest.
-// value_make_range_pair owns the semantics (and the error propagation).
+// tables (range is lexeme_type_range, not a binary_op): parse_precedence has its own '..'
+// case that calls one of these directly, at prec_range and right-associative. A range
+// builds from its raw operands - no broadcast, no coercion - and value_make_range_pair
+// owns the semantics (and the error propagation).
 static value op_range(value a, value b, rc_arena *arena)
 {
     (void)arena;
@@ -296,17 +297,30 @@ static value op_range_excl(value a, value b, rc_arena *arena)
 // while every node at a level is a list of the same length, stopping at the first axis
 // that is not uniform (so a ragged list reports the axes that ARE uniform). A scalar is
 // rank 0; a leading length-1 axis is kept, not squashed.
+//
+// The whole thing rests on one recursive idea: a list's shape is its own length, followed
+// by the shape that ALL of its elements agree on. So {{1,2},{3,4}} is 2-of-(things that
+// are each {2}) -> {2,2}; but {{1,2},{3,4,5}} is 2-of-(a {2} and a {3}, which agree on
+// nothing) -> just {2}. "What they all agree on" is the common leading prefix of the
+// elements' shapes, and each element can only ever trim that prefix shorter.
 static uint32_t shape_dims(value v, uint32_t dims[], uint32_t max)
 {
     if (!value_is_list(v) || max == 0) {
-        return 0;
+        return 0;   // a scalar (or we have run out of room): empty shape, rank 0
     }
-    dims[0] = v.list.num;
+    dims[0] = v.list.num;   // axis 0 is always just how many things we are holding
     if (v.list.num == 0) {
-        return 1;   // empty list: shape {0}
+        return 1;   // empty list: shape {0}, with no elements to descend into
     }
-    // The inner axes are the common prefix of every element's shape.
+
+    // Element 0 proposes the inner shape. We let it write straight into our own buffer at
+    // dims+1, so dims ends up as [our length, elem0's shape...] - if everyone agrees, that
+    // IS the answer and nobody need touch it again.
     uint32_t inner = shape_dims(rc_view_value_get(v.list, 0), dims + 1, max - 1);
+
+    // Every other element now gets a say, but only to trim: we shape it off to one side and
+    // keep however many leading axes still match. The moment inner hits 0 there is nothing
+    // left to agree on, so we stop looking (the inner > 0 guard)
     for (uint32_t i = 1; i < v.list.num && inner > 0; i++) {
         uint32_t other[MAX_RANK];
         uint32_t ri = shape_dims(rc_view_value_get(v.list, i), other, max - 1);
@@ -314,9 +328,10 @@ static uint32_t shape_dims(value v, uint32_t dims[], uint32_t max)
         while (common < inner && common < ri && dims[1 + common] == other[common]) {
             common++;
         }
-        inner = common;
+        inner = common;   // the agreed prefix can only shrink, never grow
     }
-    return 1 + inner;
+
+    return 1 + inner;   // our own axis, plus whatever inner axes survived the haggling
 }
 
 // The rank of v: the length of its uniform-length-prefix shape (0 for a scalar).
@@ -405,19 +420,42 @@ typedef struct parser {
     rc_arena     *arena;
 } parser;
 
+// Expand a bounded range into its rank-1 list of numeric values; an unbounded range has
+// no end to count to, so it cannot be enumerated and yields a domain error instead.
+static value range_to_list(value_range r, rc_arena *arena)
+{
+    if (!r.has_start || !r.has_end) {
+        return value_make_error(value_error_domain);
+    }
+    int64_t step = r.step != 0 ? r.step : (r.end >= r.start ? 1 : -1);   // step 0 = inferred +-1
+    rc_array_value out = {0};
+    for (int64_t n = r.start; step > 0 ? n <= r.end : n >= r.end; n += step) {
+        rc_array_value_push(&out, value_make_numeric((double)n), arena);
+    }
+    return value_make_list(out.view);
+}
+
 // Apply a binary operator, broadcasting component-wise over lists (NumPy-style) by
-// recursing into itself - so a ragged tail just broadcasts on its own. Two non-lists
-// fall through to the handler (5 + 3 stays 8); errors propagate. The shallower operand
-// is a prepended length-1 axis: it is held whole while the deeper one is descended. At
-// equal rank a length-1 axis repeats; mismatched lengths are a shape error. The result
-// is freshly built; the inputs are only re-read, never copied.
+// recursing into itself - so a ragged tail just broadcasts on its own. Two simple
+// operands fall through to the handler (5 + 3 stays 8); errors propagate. A range is just
+// a rank-1 list written compactly, so we expand it and broadcast over the elements. The
+// shallower operand is a prepended length-1 axis: it is held whole while the deeper one is
+// descended. At equal rank a length-1 axis repeats; mismatched lengths are a shape error.
+// The result is freshly built; the inputs are only re-read, never copied.
 static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena)
 {
     if (value_is_error(a)) return a;
     if (value_is_error(b)) return b;
-    if (!value_is_list(a) && !value_is_list(b)) {
+    if (value_is_simple(a) && value_is_simple(b)) {
         return op.apply(a, b, arena);
     }
+
+    // At least one operand is compound; flatten any range to its list so the broadcast
+    // below only ever meets lists and scalars.
+    if (value_is_range(a)) a = range_to_list(a.range, arena);
+    if (value_is_range(b)) b = range_to_list(b.range, arena);
+    if (value_is_error(a)) return a;   // an unbounded range could not be enumerated
+    if (value_is_error(b)) return b;
 
     uint32_t ra = rank_of(a);
     uint32_t rb = rank_of(b);
@@ -467,17 +505,9 @@ static value apply_elementwise(value (*scalar)(value, rc_arena *), value v, rc_a
         return value_make_list(out.view);
     }
     if (value_is_range(v)) {
-        // Enumerate the range and map; an unbounded range cannot be enumerated.
-        value_range r = v.range;
-        if (!r.has_start || !r.has_end) {
-            return value_make_error(value_error_domain);
-        }
-        int64_t step = r.step != 0 ? r.step : (r.end >= r.start ? 1 : -1);   // step 0 = inferred +-1
-        rc_array_value out = {0};
-        for (int64_t n = r.start; step > 0 ? n <= r.end : n >= r.end; n += step) {
-            rc_array_value_push(&out, scalar(value_make_numeric((double)n), arena), arena);
-        }
-        return value_make_list(out.view);
+        // A range maps as its enumerated list would; range_to_list carries the unbounded
+        // case through as an error, which the recursive call passes straight back.
+        return apply_elementwise(scalar, range_to_list(v.range, arena), arena);
     }
     return scalar(v, arena);
 }
@@ -677,20 +707,10 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
         lexer_result lr = lexer_next(p->text, lhs.next, odd_tokens);
 
         switch (lr.token.type) {
-            // A binary operator, or a range - which synthesises a binary_op (lowest
-            // precedence, right-associative so a..b..c folds as a..(b..c), with a handler
-            // that builds the range), so the two share this fold; only the empty-right-side
-            // case differs. The subscript operator '[' will get its own case here later.
-            case lexeme_type_binary_op:
-            case lexeme_type_range: {
-                lexeme_binary_op op = (lr.token.type == lexeme_type_range)
-                    ? (lexeme_binary_op) {
-                          .apply         = lr.token.range.exclusive ? op_range_excl : op_range,
-                          .precedence    = prec_range,
-                          .associativity = assoc_right
-                      }
-                    : lr.token.binary_op;
-
+            // A normal infix operator: parse its right side at the precedence its
+            // associativity dictates, then broadcast the two through apply_binary.
+            case lexeme_type_binary_op: {
+                lexeme_binary_op op = lr.token.binary_op;
                 if (op.precedence < min_prec) {
                     return lhs;   // binds looser than the caller allows: leave it to them
                 }
@@ -700,19 +720,37 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                 expr_result rhs = parse_precedence(p, lr.next, next_min);
 
                 if (rhs.error == expr_error_expected_expression) {
-                    if (lr.token.type != lexeme_type_range) {
-                        return lhs;   // a trailing operator with no operand ("1+3+"): roll it back
-                    }
-                    // a range with no right side is an unbounded end ("a..")
+                    return lhs;   // a trailing operator with no operand ("1+3+"): roll it back
+                }
+                if (rhs.error != expr_error_none) {
+                    return rhs;   // a real error on the right-hand side: propagate
+                }
+                lhs.value = apply_binary(op, lhs.value, rhs.value, p->arena);
+                lhs.next  = rhs.next;
+                break;
+            }
+
+            // The range operator '..' / '..<'. It is the loosest operator and right-
+            // associative, so a..b..c folds as a..(b..c) and a range on the right is the
+            // stepped form. It builds from its raw operands (no broadcast, no coercion),
+            // and a missing right side is not an error but an unbounded end ("a..").
+            case lexeme_type_range: {
+                if (prec_range < min_prec) {
+                    return lhs;
+                }
+                expr_result rhs = parse_precedence(p, lr.next, prec_range);   // right-assoc: same level
+
+                if (rhs.error == expr_error_expected_expression) {
                     lhs.value = value_make_range_open_end(lhs.value, lr.token.range.exclusive);
                     lhs.next  = lr.next;
                     break;
                 }
                 if (rhs.error != expr_error_none) {
-                    return rhs;   // a real error on the right-hand side: propagate
+                    return rhs;
                 }
-
-                lhs.value = apply_binary(op, lhs.value, rhs.value, p->arena);
+                lhs.value = lr.token.range.exclusive
+                    ? op_range_excl(lhs.value, rhs.value, p->arena)
+                    : op_range(lhs.value, rhs.value, p->arena);
                 lhs.next  = rhs.next;
                 break;
             }
@@ -1032,6 +1070,19 @@ RC_TEST_STEP(expression, list_broadcast, fix)
     value rag[] = {value_make_numeric(2), value_make_list((rc_view_value) RC_VIEW(rag_inner))};
     RC_CHECK_TRUE(value_is_equal(VAL("{1,{2,3}}+1"), value_make_list((rc_view_value) RC_VIEW(rag))));
 
+    // a range coerces to its rank-1 list under a binary op (parens: + binds tighter than ..)
+    value cr1[] = {value_make_numeric(11), value_make_numeric(12), value_make_numeric(13)};
+    RC_CHECK_TRUE(value_is_equal(VAL("(1..3)+10"), value_make_list((rc_view_value) RC_VIEW(cr1))));
+    RC_CHECK_TRUE(value_is_equal(VAL("10+(1..3)"), value_make_list((rc_view_value) RC_VIEW(cr1))));
+
+    value cr2[] = {value_make_numeric(11), value_make_numeric(22), value_make_numeric(33)};
+    RC_CHECK_TRUE(value_is_equal(VAL("(1..3)+{10,20,30}"), value_make_list((rc_view_value) RC_VIEW(cr2))));
+
+    value cr3[] = {value_make_numeric(11), value_make_numeric(13), value_make_numeric(15)};   // range + range
+    RC_CHECK_TRUE(value_is_equal(VAL("(1..3)+(10..12)"), value_make_list((rc_view_value) RC_VIEW(cr3))));
+
+    RC_CHECK_TRUE(value_is_error(VAL("(1..)+10")));   // an unbounded range cannot be enumerated
+
     // an element error stays element-local
     value mixed = VAL("{1,bar}+{10,20}");
     RC_CHECK_TRUE(value_is_list(mixed) && mixed.list.num == 2);
@@ -1061,7 +1112,7 @@ RC_TEST_STEP(expression, ranges_stepped, fix)
 RC_TEST_STEP(expression, ranges_precedence, fix)
 {
     RC_CHECK_TRUE(range_is(VAL("0..9+1"), 0, 10, 0));   // '+' binds tighter than '..'
-    RC_CHECK_TRUE(value_is_error(VAL("(0..9)+1")));     // a range rejects '+'
+    RC_CHECK_TRUE(value_is_list(VAL("(0..9)+1")));      // ( ) makes the range the operand; it coerces and broadcasts
 }
 
 RC_TEST_STEP(expression, ranges_unbounded, fix)
