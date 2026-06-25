@@ -1,6 +1,7 @@
 #include "expression.h"
 
 #include "lexer.h"
+#include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
 #include "richc/macros.h"
 #include <math.h>
 
@@ -18,6 +19,7 @@ typedef enum prec {
     prec_mul   = 50,   // * / div mod << >>
     prec_neg   = 60,   // unary + -
     prec_pow   = 70,   // ^  (right-associative)
+    prec_subscript = 80,   // [..] postfix; binds tightest, so -L[0] is -(L[0])
 } prec;
 
 
@@ -383,6 +385,8 @@ static const token even_entries[] = {
 static const token odd_entries[] = {
     {RC_STR(")"),   {.type = lexeme_type_close_paren}},
     {RC_STR("}"),   {.type = lexeme_type_close_brace}},   // ends a list (after an element)
+    {RC_STR("["),   {.type = lexeme_type_open_bracket}},  // postfix subscript
+    {RC_STR("]"),   {.type = lexeme_type_close_bracket}}, // ends a subscript (after a selector)
     {RC_STR(".."),  {.type = lexeme_type_range, .range = {false}}},   // range operator (handled specially)
     {RC_STR("..<"), {.type = lexeme_type_range, .range = {true}}},
     {RC_STR("^"),   {.type = lexeme_type_binary_op, .binary_op = {op_pow,  prec_pow, assoc_right}}},
@@ -524,6 +528,144 @@ static value apply_function(lexeme_function fn, value v, rc_arena *arena)
         return value_is_error(v) ? v : fn.apply(v, arena);
     }
     return apply_elementwise(fn.apply, v, arena);
+}
+
+
+// ---- subscripting ----
+// v[sel0, sel1, ...]: one selector per axis (outermost first), each an integer, a range,
+// or a list of integers. An integer drops its axis; a range or list keeps it. Selectors
+// compose orthogonally (a cross-product), which falls out of recursing per selected index.
+
+// A selector value as an axis index in [0,len), or RC_INDEX_NONE if it is not a whole
+// number in range. Negatives, fractionals and out-of-range all fail: integer and gather
+// selectors must land on a real element (only ranges are forgiving, by clamping).
+static uint32_t selector_index(value sel, uint32_t len)
+{
+    if (!value_is_numeric(sel) || sel.numeric < 0.0 || sel.numeric >= (double)len) {
+        return RC_INDEX_NONE;
+    }
+    uint32_t i = (uint32_t)sel.numeric;
+    return (double)i == sel.numeric ? i : RC_INDEX_NONE;   // reject a fractional index
+}
+
+// The indices a range selector picks along an axis of the given length: the range
+// enumerated with unbounded ends standing in for the axis bounds, then kept only where
+// they fall in [0,len). Slice semantics - forgiving, never an error (may come back empty).
+static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
+{
+    rc_array_u32 out = {0};
+    if (len == 0) {
+        return out;
+    }
+    int64_t step = r.step != 0      ? r.step
+                 : r.has_start && r.has_end ? (r.end >= r.start ? 1 : -1)
+                 : 1;   // unbounded: enumerate the axis ascending
+    int64_t start = r.has_start ? r.start : (step > 0 ? 0 : (int64_t)len - 1);
+    int64_t end   = r.has_end   ? r.end   : (step > 0 ? (int64_t)len - 1 : 0);
+    if (step > 0 && end > (int64_t)len - 1) end = (int64_t)len - 1;   // clamp the far end so the
+    if (step < 0 && end < 0)                end = 0;                  // loop cannot run off the axis
+    for (int64_t n = start; step > 0 ? n <= end : n >= end; n += step) {
+        if (n >= 0 && n < (int64_t)len) {
+            rc_array_u32_push(&out, (uint32_t)n, arena);
+        }
+    }
+    return out;
+}
+
+// Index a string. A string is rank 1 and always yields a string (there is no character
+// type to drop to), so it consumes exactly one selector: an integer gives a 1-char string,
+// a range or list the selected characters gathered. Out-of-range integers/elements error.
+static value subscript_string(rc_str s, rc_view_value sels, uint32_t k, rc_arena *arena)
+{
+    if (sels.num - k != 1) {
+        return value_make_error(value_error_subscript_range);   // too many axes for a string
+    }
+    value sel = rc_view_value_get(sels, k);
+
+    if (value_is_numeric(sel)) {
+        uint32_t i = selector_index(sel, s.len);
+        if (i == RC_INDEX_NONE) {
+            return value_make_error(value_error_subscript_range);
+        }
+        return value_make_string(rc_str_substr(s, i, 1));
+    }
+
+    rc_mstr m = rc_mstr_make(s.len, arena);   // gather the picked characters
+    if (value_is_range(sel)) {
+        rc_array_u32 idx = range_indices(sel.range, s.len, arena);
+        for (uint32_t j = 0; j < idx.num; j++) {
+            rc_mstr_append_char(&m, s.data[RC_AT(idx, j)], arena);
+        }
+    } else if (value_is_list(sel)) {
+        for (uint32_t j = 0; j < sel.list.num; j++) {
+            uint32_t i = selector_index(rc_view_value_get(sel.list, j), s.len);
+            if (i == RC_INDEX_NONE) {
+                return value_make_error(value_error_subscript_range);
+            }
+            rc_mstr_append_char(&m, s.data[i], arena);
+        }
+    } else {
+        return value_make_error(value_error_type_mismatch);   // selector not int/range/list
+    }
+    return value_make_string(m.view);
+}
+
+// Index a value by the remaining selectors sels[k..]. Recurses per selected element, so
+// each selector applies to one axis and the selectors cross-product. A spent selector list
+// returns the value whole (trailing axes untouched); a non-subscriptable value errors.
+static value subscript(value v, rc_view_value sels, uint32_t k, rc_arena *arena)
+{
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (k == sels.num) {
+        return v;   // no more selectors: this axis and anything within it taken whole
+    }
+    if (value_is_string(v)) {
+        return subscript_string(v.string, sels, k, arena);
+    }
+    if (value_is_range(v)) {
+        v = range_to_list(v.range, arena);   // index a range via its enumeration
+        if (value_is_error(v)) {
+            return v;   // an unbounded range cannot be enumerated
+        }
+    }
+    if (!value_is_list(v)) {
+        return value_make_error(value_error_type_mismatch);   // a number is not subscriptable
+    }
+
+    value sel = rc_view_value_get(sels, k);
+    uint32_t len = v.list.num;
+
+    if (value_is_numeric(sel)) {   // an integer drops this axis
+        uint32_t i = selector_index(sel, len);
+        if (i == RC_INDEX_NONE) {
+            return value_make_error(value_error_subscript_range);
+        }
+        return subscript(rc_view_value_get(v.list, i), sels, k + 1, arena);
+    }
+
+    // a range or list keeps this axis: recurse on each selected element into a result list
+    rc_array_value out = {0};
+    if (value_is_range(sel)) {
+        rc_array_u32 idx = range_indices(sel.range, len, arena);
+        for (uint32_t j = 0; j < idx.num; j++) {
+            value e = subscript(rc_view_value_get(v.list, RC_AT(idx, j)), sels, k + 1, arena);
+            rc_array_value_push(&out, e, arena);
+        }
+    } else if (value_is_list(sel)) {
+        for (uint32_t j = 0; j < sel.list.num; j++) {
+            uint32_t i = selector_index(rc_view_value_get(sel.list, j), len);
+            if (i == RC_INDEX_NONE) {
+                return value_make_error(value_error_subscript_range);
+            }
+            value e = subscript(rc_view_value_get(v.list, i), sels, k + 1, arena);
+            rc_array_value_push(&out, e, arena);
+        }
+    } else {
+        return value_make_error(value_error_type_mismatch);   // selector not int/range/list
+    }
+    return value_make_list(out.view);
 }
 
 static expr_result ok(value v, uint32_t next)
@@ -693,6 +835,38 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
     }
 }
 
+// Parse a subscript from just after the '[': comma-separated selector expressions up to
+// the ']', then index target by them. Selectors are full expressions (so i, a..b, {..}
+// and a bare .. all work, each stopping cleanly at the ',' or ']'). Newlines are not
+// skipped - a subscript is an inline postfix. An empty '[]', a trailing comma, or a
+// missing ']' is a committed error; index/type problems become propagating error values.
+static expr_result parse_subscript(const parser *p, value target, uint32_t cursor)
+{
+    rc_array_value sels = {0};
+
+    while (true) {
+        expr_result s = parse_precedence(p, cursor, 0);
+        if (s.error == expr_error_expected_expression) {
+            return fail(expr_error_expected_expression, cursor);   // empty "[]" or a trailing comma
+        }
+        if (s.error != expr_error_none) {
+            return s;
+        }
+        rc_array_value_push(&sels, s.value, p->arena);
+        cursor = s.next;
+
+        lexer_result lr = lexer_next(p->text, cursor, odd_tokens);
+        if (lr.token.type == lexeme_type_comma) {
+            cursor = lr.next;
+            continue;
+        }
+        if (lr.token.type == lexeme_type_close_bracket) {
+            return ok(subscript(target, sels.view, 0, p->arena), lr.next);
+        }
+        return fail(expr_error_expected_close_bracket, cursor);
+    }
+}
+
 // Parse an expression whose operators bind at least as tightly as min_prec, folding
 // left-to-right. Stops (greedily) at the first lexeme that is not a usable binary
 // operator, returning the value so far and the cursor before that lexeme.
@@ -752,6 +926,20 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                     ? op_range_excl(lhs.value, rhs.value, p->arena)
                     : op_range(lhs.value, rhs.value, p->arena);
                 lhs.next  = rhs.next;
+                break;
+            }
+
+            // A postfix subscript. It binds tightest, so it always applies to the operand
+            // just parsed; looping back lets L[..][..] chain.
+            case lexeme_type_open_bracket: {
+                if (prec_subscript < min_prec) {
+                    return lhs;
+                }
+                expr_result sub = parse_subscript(p, lhs.value, lr.next);
+                if (sub.error != expr_error_none) {
+                    return sub;
+                }
+                lhs = sub;
                 break;
             }
 
@@ -1144,6 +1332,75 @@ RC_TEST_STEP(expression, ranges_errors, fix)
     RC_CHECK_TRUE(value_is_error(VAL("0..3..4..10")));  // inconsistent step (1 then 3)
     RC_CHECK_TRUE(value_is_error(VAL("..2..6")));       // start-open and stepped
     RC_CHECK_TRUE(value_is_error(VAL("bar..9")));       // unknown symbol propagates
+}
+
+RC_TEST_STEP(expression, subscript, fix)
+{
+    // L = {{1,2,3},{4,5,6}}, indexed inline.
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2,3},{4,5,6}}[1,2]"), value_make_numeric(6)));   // both int -> scalar
+
+    value r456[] = {value_make_numeric(4), value_make_numeric(5), value_make_numeric(6)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2,3},{4,5,6}}[1]"), value_make_list((rc_view_value) RC_VIEW(r456))));   // axis 1 whole
+
+    value r23[] = {value_make_numeric(2), value_make_numeric(3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2,3},{4,5,6}}[0,1..2]"), value_make_list((rc_view_value) RC_VIEW(r23))));
+
+    value r25[] = {value_make_numeric(2), value_make_numeric(5)};
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2,3},{4,5,6}}[..,1]"), value_make_list((rc_view_value) RC_VIEW(r25))));
+
+    // a list selector keeps the axis where the bare integer dropped it: {1} vs 1
+    value c2[] = {value_make_numeric(2)};
+    value c5[] = {value_make_numeric(5)};
+    value cc[] = {value_make_list((rc_view_value) RC_VIEW(c2)), value_make_list((rc_view_value) RC_VIEW(c5))};
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2,3},{4,5,6}}[..,{1}]"), value_make_list((rc_view_value) RC_VIEW(cc))));
+
+    // orthogonal cross-product, not NumPy's zip
+    value x0[] = {value_make_numeric(1), value_make_numeric(3)};
+    value x1[] = {value_make_numeric(4), value_make_numeric(6)};
+    value xx[] = {value_make_list((rc_view_value) RC_VIEW(x0)), value_make_list((rc_view_value) RC_VIEW(x1))};
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2,3},{4,5,6}}[{0,1},{0,2}]"), value_make_list((rc_view_value) RC_VIEW(xx))));
+
+    // a range that clamps to empty -> an empty list, not an error
+    value empty = VAL("{{1,2,3},{4,5,6}}[0,5..10]");
+    RC_CHECK_TRUE(value_is_list(empty) && empty.list.num == 0);
+
+    // chaining: L[1][2] == L[1,2]
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2,3},{4,5,6}}[1][2]"), value_make_numeric(6)));
+
+    // errors on a dropped (integer) axis fail the whole subscript
+    RC_CHECK_TRUE(value_is_error(VAL("{{1,2,3},{4,5,6}}[0,{0,5}]")));   // gather out of bounds
+    RC_CHECK_TRUE(value_is_error(VAL("{{1,2,3},{4,5,6}}[5]")));         // integer out of bounds
+    RC_CHECK_TRUE(value_is_error(VAL("{{1,2,3},{4,5,6}}[-1]")));        // negative (v1)
+    RC_CHECK_TRUE(value_is_error(VAL("5[0]")));                         // a number is not subscriptable
+
+    // an error under a kept axis stays element-local (like apply_binary)
+    value rag = VAL("{{1,2},{3,4,5}}[..,2]");                           // row 0 has no index 2
+    RC_CHECK_TRUE(value_is_list(rag) && rag.list.num == 2);
+    RC_CHECK_TRUE(value_is_error(rc_view_value_get(rag.list, 0)));
+    RC_CHECK_TRUE(value_is_equal(rc_view_value_get(rag.list, 1), value_make_numeric(5)));
+
+    // indexing a range value via its enumeration
+    RC_CHECK_TRUE(value_is_equal(VAL("(0..10)[2]"), value_make_numeric(2)));
+    value r123[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("(0..10)[1..3]"), value_make_list((rc_view_value) RC_VIEW(r123))));
+    RC_CHECK_TRUE(value_is_error(VAL("(0..)[0]")));   // an unbounded range cannot be enumerated
+
+    // strings are rank-1 and always yield a string
+    RC_CHECK_TRUE(value_is_equal(VAL("\"hello\"[0]"),      value_make_string(RC_STR("h"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"hello\"[1..3]"),   value_make_string(RC_STR("ell"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"hello\"[{0,4}]"),  value_make_string(RC_STR("ho"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"hello\"[..]"),     value_make_string(RC_STR("hello"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"hello\"[2..100]"), value_make_string(RC_STR("llo"))));   // clamps
+    RC_CHECK_TRUE(value_is_error(VAL("\"hello\"[0,1]")));   // too many axes for a string
+
+    // subscript binds tighter than unary and pow
+    RC_CHECK_TRUE(value_is_equal(VAL("-{10,20,30}[0]"),  value_make_numeric(-10)));    // -(L[0])
+    RC_CHECK_TRUE(value_is_equal(VAL("2^{10,20,30}[0]"), value_make_numeric(1024)));   // 2^(L[0])
+    RC_CHECK_TRUE(value_is_equal(VAL("{10,20,30}[0]^2"), value_make_numeric(100)));    // (L[0])^2
+
+    RC_CHECK_TRUE(RESULT("{1,2,3}[0").error != expr_error_none);   // a missing ']' is a committed error
+    RC_CHECK_TRUE(RESULT("{1,2,3}[]").error != expr_error_none);   // an empty '[]' is illegal
+    RC_CHECK_TRUE(RESULT("{1,2,3}[0,]").error != expr_error_none); // a trailing comma too
 }
 
 #undef RESULT
