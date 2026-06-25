@@ -4,6 +4,7 @@
 #include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
 #include "richc/macros.h"
 #include <math.h>
+#include <stdlib.h>   // qsort, for sort()
 
 
 // ---- precedence ladder (higher binds tighter) ----
@@ -11,6 +12,7 @@
 // comparisons and the logical ops sit below arithmetic; shifts share the multiply
 // level; unary +/- sit below pow so -2^2 is -(2^2).
 typedef enum prec {
+    prec_lohi  = 1,    // unary < > (low/high byte); swallow the whole following expression
     prec_range = 5,    // ..  ..<  (right-associative; handled specially, not a binary_op)
     prec_or    = 10,   // or eor
     prec_and   = 20,   // and
@@ -40,7 +42,12 @@ static uint32_t as_u32(value v) { return (uint32_t)(int64_t)v.numeric; }
 
 static value op_add(value a, value b, rc_arena *arena)
 {
-    (void)arena;
+    if (value_is_string(a) && value_is_string(b)) {
+        rc_mstr m = rc_mstr_make(a.string.len + b.string.len, arena);
+        rc_mstr_append(&m, a.string, arena);
+        rc_mstr_append(&m, b.string, arena);
+        return value_make_string(m.view);   // '+' concatenates two strings
+    }
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric(a.numeric + b.numeric);
 }
@@ -193,6 +200,21 @@ static value op_ge(value a, value b, rc_arena *arena)
     return value_make_numeric(a.numeric >= b.numeric ? 1.0 : 0.0);
 }
 
+// The fold operators behind min()/max(); they are not in the tables, only used by reduce().
+static value op_min(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    return value_make_numeric(a.numeric < b.numeric ? a.numeric : b.numeric);
+}
+
+static value op_max(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    return value_make_numeric(a.numeric > b.numeric ? a.numeric : b.numeric);
+}
+
 static value op_neg(value v, rc_arena *arena)
 {
     (void)arena;
@@ -268,6 +290,28 @@ static value fn_ceil(value v, rc_arena *arena)
     NEEDS_NUM(value_is_numeric(v));
     return value_make_numeric(ceil(v.numeric));
 }
+
+// Apply a one-argument C math function, turning a NaN result (a domain error such as
+// asin(2) or ln(-1)) into a domain error value. The trig/log builtins are thin wrappers.
+static value math1(double (*f)(double), value v)
+{
+    NEEDS_NUM(value_is_numeric(v));
+    double r = f(v.numeric);
+    if (isnan(r)) {
+        return value_make_error(value_error_domain);
+    }
+    return value_make_numeric(r);
+}
+
+static value fn_sin(value v, rc_arena *arena)  { (void)arena; return math1(sin,   v); }
+static value fn_cos(value v, rc_arena *arena)  { (void)arena; return math1(cos,   v); }
+static value fn_tan(value v, rc_arena *arena)  { (void)arena; return math1(tan,   v); }
+static value fn_asin(value v, rc_arena *arena) { (void)arena; return math1(asin,  v); }
+static value fn_acos(value v, rc_arena *arena) { (void)arena; return math1(acos,  v); }
+static value fn_atan(value v, rc_arena *arena) { (void)arena; return math1(atan,  v); }
+static value fn_log(value v, rc_arena *arena)  { (void)arena; return math1(log10, v); }   // base 10
+static value fn_ln(value v, rc_arena *arena)   { (void)arena; return math1(log,   v); }   // natural
+static value fn_exp(value v, rc_arena *arena)  { (void)arena; return math1(exp,   v); }
 
 #undef NEEDS_NUM
 
@@ -350,83 +394,18 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
     if (args.num != 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;   // functions get raw args now, so propagate an error operand ourselves
+    }
     uint32_t dims[MAX_RANK];
-    uint32_t rank = shape_dims(rc_view_value_get(args, 0), dims, MAX_RANK);
+    uint32_t rank = shape_dims(v, dims, MAX_RANK);
     rc_array_value out = {0};
     for (uint32_t i = 0; i < rank; i++) {
         rc_array_value_push(&out, value_make_numeric((double)dims[i]), arena);
     }
     return value_make_list(out.view);
 }
-
-
-// ---- the two context tables ----
-// EVEN: lexed where an operand is expected (the start, after a binary op, after an
-// open paren). Numbers/strings/identifiers come from the lexer itself, so the table
-// only carries the leading operators, the functions, and the open paren.
-static const token even_entries[] = {
-    {RC_STR("("),     {.type = lexeme_type_open_paren}},
-    {RC_STR("{"),     {.type = lexeme_type_open_brace}},            // begins a list literal
-    {RC_STR("}"),     {.type = lexeme_type_close_brace}},           // ends one (empty, or after a comma)
-    
-    {RC_STR(".."),    {.type = lexeme_type_range}},                 // start-unbounded range
-    {RC_STR("..<"),   {.type = lexeme_type_range, .range = {.exclusive = true}}},
-
-    {RC_STR("+"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_pos, .precedence = prec_neg}}},
-    {RC_STR("-"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_neg, .precedence = prec_neg}}},
-
-    // Element-wise builtins are parenthesised unary ops: the '(' is part of the token (so
-    // the name only reads as a call when followed by '(' - 'lo' is a variable, 'lo(' the op),
-    // and precedence is unused (left default) because the argument is closed by ')'.
-    {RC_STR("abs("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_abs}}},
-    {RC_STR("lo("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo}}},
-    {RC_STR("hi("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi}}},
-    {RC_STR("sqrt("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sqrt}}},
-    {RC_STR("not("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_not}}},
-    {RC_STR("int("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
-    {RC_STR("floor("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
-    {RC_STR("round("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_round}}},
-    {RC_STR("ceil("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ceil}}},
-
-    // Structural/variadic builtins are functions: the handler gets the whole arg list.
-    {RC_STR("shape("), {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
-};
-
-// ODD: lexed where a binary operator is expected (after an operand). The close paren
-// lives here, so a parenthesised group is closed from operator position.
-static const token odd_entries[] = {
-    {RC_STR(")"),   {.type = lexeme_type_close_paren}},
-    {RC_STR("}"),   {.type = lexeme_type_close_brace}},         // ends a list (after an element)
-    {RC_STR("["),   {.type = lexeme_type_open_bracket}},        // postfix subscript
-    {RC_STR("]"),   {.type = lexeme_type_close_bracket}},       // ends a subscript
-
-    {RC_STR(".."),  {.type = lexeme_type_range}},               // range operator (handled specially)
-    {RC_STR("..<"), {.type = lexeme_type_range, .range = {.exclusive = true}}},
-
-    {RC_STR("^"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_pow,  .precedence = prec_pow, .associativity = assoc_right}}},
-    {RC_STR("*"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mul,  .precedence = prec_mul}}},
-    {RC_STR("/"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_div,  .precedence = prec_mul}}},
-    {RC_STR("div"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_idiv, .precedence = prec_mul}}},
-    {RC_STR("mod"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mod,  .precedence = prec_mul}}},
-    {RC_STR("<<"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shl,  .precedence = prec_mul}}},
-    {RC_STR(">>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shr,  .precedence = prec_mul}}},
-    {RC_STR("+"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_add,  .precedence = prec_add}}},
-    {RC_STR("-"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_sub,  .precedence = prec_add}}},
-    {RC_STR("="),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
-    {RC_STR("=="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
-    {RC_STR("!="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
-    {RC_STR("<>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
-    {RC_STR("<="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_le,   .precedence = prec_cmp}}},
-    {RC_STR(">="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ge,   .precedence = prec_cmp}}},
-    {RC_STR("<"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_lt,   .precedence = prec_cmp}}},
-    {RC_STR(">"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_gt,   .precedence = prec_cmp}}},
-    {RC_STR("and"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_and,  .precedence = prec_and}}},
-    {RC_STR("or"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_or,   .precedence = prec_or}}},
-    {RC_STR("eor"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eor,  .precedence = prec_or}}},
-};
-
-static const token_table even_tokens = RC_VIEW(even_entries);
-static const token_table odd_tokens  = RC_VIEW(odd_entries);
 
 
 // ---- the parser ----
@@ -507,10 +486,10 @@ static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena
     return value_make_list(out.view);
 }
 
-// A scalar applies directly; a list maps element-wise, recursing so nested lists map
-// too; an error short-circuits. The new list is built in the (scratch) arena and
-// wrapped - value_make_list does not copy.
-static value apply_elementwise(value (*scalar)(value, rc_arena *), value v, rc_arena *arena)
+// A scalar applies the operator directly; a list maps it element-wise, recursing so nested
+// lists map too; a range maps as its enumerated list would; an error short-circuits. The
+// new list is built in the (scratch) arena and wrapped - value_make_list does not copy.
+static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
 {
     if (value_is_error(v)) {
         return v;
@@ -518,33 +497,15 @@ static value apply_elementwise(value (*scalar)(value, rc_arena *), value v, rc_a
     if (value_is_list(v)) {
         rc_array_value out = {0};
         for (uint32_t i = 0; i < v.list.num; i++) {
-            rc_array_value_push(&out, apply_elementwise(scalar, rc_view_value_get(v.list, i), arena), arena);
+            rc_array_value_push(&out, apply_unary(op, rc_view_value_get(v.list, i), arena), arena);
         }
         return value_make_list(out.view);
     }
     if (value_is_range(v)) {
-        // A range maps as its enumerated list would; range_to_list carries the unbounded
-        // case through as an error, which the recursive call passes straight back.
-        return apply_elementwise(scalar, range_to_list(v.range, arena), arena);
+        // range_to_list carries an unbounded range through as an error, passed straight back.
+        return apply_unary(op, range_to_list(v.range, arena), arena);
     }
-    return scalar(v, arena);
-}
-
-static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
-{
-    return apply_elementwise(op.apply, v, arena);
-}
-
-static value apply_function(lexeme_function fn, rc_view_value args, rc_arena *arena)
-{
-    // Screen the arguments for errors first, so a handler only ever sees real values.
-    for (uint32_t i = 0; i < args.num; i++) {
-        value a = rc_view_value_get(args, i);
-        if (value_is_error(a)) {
-            return a;
-        }
-    }
-    return fn.apply(args, arena);
+    return op.apply(v, arena);
 }
 
 
@@ -574,11 +535,19 @@ static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
     if (len == 0) {
         return out;
     }
+
     int64_t step  = value_range_step(r);
     int64_t start = r.has_start ? r.start : (step > 0 ? 0 : (int64_t)len - 1);
     int64_t end   = r.has_end   ? r.end   : (step > 0 ? (int64_t)len - 1 : 0);
-    if (step > 0 && end > (int64_t)len - 1) end = (int64_t)len - 1;   // clamp the far end so the
-    if (step < 0 && end < 0)                end = 0;                  // loop cannot run off the axis
+
+    // clamp the far end so the loop cannot run off the axis
+    if (step > 0 && end > (int64_t)len - 1) {
+        end = (int64_t)len - 1;
+    }
+    if (step < 0 && end < 0) {
+        end = 0;
+    }                
+
     for (int64_t n = start; step > 0 ? n <= end : n >= end; n += step) {
         if (n >= 0 && n < (int64_t)len) {
             rc_array_u32_push(&out, (uint32_t)n, arena);
@@ -595,10 +564,10 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
     if (indices.num != 1) {
         return value_make_error(value_error_subscript_range);   // a string takes exactly one axis
     }
-    value sel = rc_view_value_get(indices, 0);
+    value index = rc_view_value_get(indices, 0);
 
-    if (value_is_numeric(sel)) {
-        uint32_t i = selector_index(sel, s.len);
+    if (value_is_numeric(index)) {
+        uint32_t i = selector_index(index, s.len);
         if (i == RC_INDEX_NONE) {
             return value_make_error(value_error_subscript_range);
         }
@@ -606,14 +575,14 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
     }
 
     rc_mstr m = rc_mstr_make(s.len, arena);   // gather the picked characters
-    if (value_is_range(sel)) {
-        rc_array_u32 idx = range_indices(sel.range, s.len, arena);
+    if (value_is_range(index)) {
+        rc_array_u32 idx = range_indices(index.range, s.len, arena);
         for (uint32_t j = 0; j < idx.num; j++) {
             rc_mstr_append_char(&m, s.data[RC_AT(idx, j)], arena);
         }
-    } else if (value_is_list(sel)) {
-        for (uint32_t j = 0; j < sel.list.num; j++) {
-            uint32_t i = selector_index(rc_view_value_get(sel.list, j), s.len);
+    } else if (value_is_list(index)) {
+        for (uint32_t j = 0; j < index.list.num; j++) {
+            uint32_t i = selector_index(rc_view_value_get(index.list, j), s.len);
             if (i == RC_INDEX_NONE) {
                 return value_make_error(value_error_subscript_range);
             }
@@ -703,6 +672,355 @@ static expr_result fail(expr_error error, uint32_t at)
     };
 }
 
+// ---- list, reduction and query functions ----
+
+// Fold elems left-to-right with op, broadcasting at each step (so a list of vectors reduces
+// element-wise). identity seeds the accumulator; pass value_make_none() for an op with no
+// identity (min/max), which then seeds with the first element and errors on an empty list.
+static value fold(rc_view_value elems, value (*op)(value, value, rc_arena *), value identity, rc_arena *arena)
+{
+    lexeme_binary_op binop = {.apply = op};
+    bool has_identity = !value_is_none(identity);
+    if (!has_identity && elems.num == 0) {
+        return value_make_error(value_error_domain);   // an empty reduction with no identity
+    }
+    value acc = has_identity ? identity : rc_view_value_get(elems, 0);
+    for (uint32_t i = has_identity ? 0 : 1; i < elems.num; i++) {
+        acc = apply_binary(binop, acc, rc_view_value_get(elems, i), arena);
+    }
+    return acc;
+}
+
+// Reduce v over a single axis: axis 0 folds the elements together (collapsing the outer
+// axis); a deeper axis recurses into each element. The axis is assumed in range.
+static value reduce_axis(value v, uint32_t axis, value (*op)(value, value, rc_arena *), value identity, rc_arena *arena)
+{
+    if (!value_is_list(v)) {
+        return value_make_error(value_error_subscript_range);   // axis out of range for this branch
+    }
+    if (axis == 0) {
+        return fold(v.list, op, identity, arena);
+    }
+    rc_array_value out = {0};
+    for (uint32_t i = 0; i < v.list.num; i++) {
+        value r = reduce_axis(rc_view_value_get(v.list, i), axis - 1, op, identity, arena);
+        rc_array_value_push(&out, r, arena);
+    }
+    return value_make_list(out.view);
+}
+
+// Collect every leaf of v (descending lists and, by enumeration, ranges) into out.
+static void flatten_into(value v, rc_array_value *out, rc_arena *arena)
+{
+    if (value_is_list(v)) {
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            flatten_into(rc_view_value_get(v.list, i), out, arena);
+        }
+    } else if (value_is_range(v)) {
+        flatten_into(range_to_list(v.range, arena), out, arena);
+    } else {
+        rc_array_value_push(out, v, arena);
+    }
+}
+
+// The shared reduction body: f(L) folds every leaf to a scalar; f(L, axis) collapses one
+// axis. op + identity pick the specific reduction (sum / product / min / max).
+static value reduce(rc_view_value args, value (*op)(value, value, rc_arena *), value identity, rc_arena *arena)
+{
+    if (args.num < 1 || args.num > 2) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (value_is_range(v)) {
+        v = range_to_list(v.range, arena);
+        if (value_is_error(v)) return v;
+    }
+
+    if (args.num == 1) {
+        rc_array_value leaves = {0};
+        flatten_into(v, &leaves, arena);
+        return fold(leaves.view, op, identity, arena);
+    }
+
+    uint32_t axis = selector_index(rc_view_value_get(args, 1), rank_of(v));   // 0 <= axis < rank
+    if (axis == RC_INDEX_NONE) {
+        return value_make_error(value_error_subscript_range);
+    }
+    return reduce_axis(v, axis, op, identity, arena);
+}
+
+static value fn_sum(rc_view_value args, rc_arena *arena)     { return reduce(args, op_add, value_make_numeric(0), arena); }
+static value fn_product(rc_view_value args, rc_arena *arena) { return reduce(args, op_mul, value_make_numeric(1), arena); }
+static value fn_min(rc_view_value args, rc_arena *arena)     { return reduce(args, op_min, value_make_none(), arena); }
+static value fn_max(rc_view_value args, rc_arena *arena)     { return reduce(args, op_max, value_make_none(), arena); }
+
+// len: the length of the outermost axis (list elements, string characters, range count).
+static value fn_len(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 1) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (value_is_string(v)) return value_make_numeric(v.string.len);
+    if (value_is_list(v))   return value_make_numeric(v.list.num);
+    if (value_is_range(v)) {
+        value l = range_to_list(v.range, arena);
+        return value_is_error(l) ? l : value_make_numeric(l.list.num);
+    }
+    return value_make_error(value_error_type_mismatch);   // a scalar has no length
+}
+
+// rank: the number of axes (0 for a scalar).
+static value fn_rank(rc_view_value args, rc_arena *arena)
+{
+    (void)arena;
+    if (args.num != 1) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
+    value v = rc_view_value_get(args, 0);
+    return value_is_error(v) ? v : value_make_numeric(rank_of(v));
+}
+
+// flatten: every leaf, in order, as a single rank-1 list.
+static value fn_flatten(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 1) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+    rc_array_value out = {0};
+    flatten_into(v, &out, arena);
+    return value_make_list(out.view);
+}
+
+// concat: join the arguments along axis 0 - each list (or range) contributes its elements,
+// each scalar joins as a single element.
+static value fn_concat(rc_view_value args, rc_arena *arena)
+{
+    rc_array_value out = {0};
+    for (uint32_t i = 0; i < args.num; i++) {
+        value a = rc_view_value_get(args, i);
+        if (value_is_error(a)) {
+            return a;
+        }
+        if (value_is_range(a)) {
+            a = range_to_list(a.range, arena);
+            if (value_is_error(a)) return a;
+        }
+        if (value_is_list(a)) {
+            for (uint32_t j = 0; j < a.list.num; j++) {
+                rc_array_value_push(&out, rc_view_value_get(a.list, j), arena);
+            }
+        } else {
+            rc_array_value_push(&out, a, arena);
+        }
+    }
+    return value_make_list(out.view);
+}
+
+// reverse: the outermost axis reversed (a list's elements, or a string's characters).
+static value fn_reverse(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 1) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (value_is_range(v)) {
+        v = range_to_list(v.range, arena);
+        if (value_is_error(v)) return v;
+    }
+    if (value_is_string(v)) {
+        rc_mstr m = rc_mstr_make(v.string.len, arena);
+        for (uint32_t i = v.string.len; i-- > 0; ) {
+            rc_mstr_append_char(&m, v.string.data[i], arena);
+        }
+        return value_make_string(m.view);
+    }
+    if (value_is_list(v)) {
+        rc_array_value out = {0};
+        for (uint32_t i = v.list.num; i-- > 0; ) {
+            rc_array_value_push(&out, rc_view_value_get(v.list, i), arena);
+        }
+        return value_make_list(out.view);
+    }
+    return value_make_error(value_error_type_mismatch);
+}
+
+// sort: order a list's elements ascending by a numeric key. The key is the element itself,
+// or - given extra arguments - the result of subscripting each element by them, so
+// sort(L, 0) sorts on each element's first item. The key must resolve to a number.
+typedef struct sort_pair {
+    double key;
+    value  v;
+} sort_pair;
+
+static int compare_sort_pair(const void *a, const void *b)
+{
+    double ka = ((const sort_pair *)a)->key;
+    double kb = ((const sort_pair *)b)->key;
+    return (ka > kb) - (ka < kb);
+}
+
+static value fn_sort(rc_view_value args, rc_arena *arena)
+{
+    if (args.num < 1) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (value_is_range(v)) {
+        v = range_to_list(v.range, arena);
+        if (value_is_error(v)) return v;
+    }
+    if (!value_is_list(v)) {
+        return value_make_error(value_error_type_mismatch);
+    }
+
+    rc_view_value key_path = rc_view_value_get_tail(args, 1);   // the per-element subscript to the key
+    uint32_t n = v.list.num;
+    sort_pair *pairs = rc_arena_alloc_type(arena, sort_pair, n);
+    for (uint32_t i = 0; i < n; i++) {
+        value e = rc_view_value_get(v.list, i);
+        value key = subscript(e, key_path, arena);   // an empty path leaves the element itself
+        if (value_is_error(key)) {
+            return key;
+        }
+        if (!value_is_numeric(key)) {
+            return value_make_error(value_error_type_mismatch);   // the key must be a number
+        }
+        pairs[i] = (sort_pair) {.key = key.numeric, .v = e};
+    }
+    qsort(pairs, n, sizeof(sort_pair), compare_sort_pair);
+
+    rc_array_value out = {0};
+    for (uint32_t i = 0; i < n; i++) {
+        rc_array_value_push(&out, pairs[i].v, arena);
+    }
+    return value_make_list(out.view);
+}
+
+// defined: false only for an unresolved symbol; true for any other value (including other
+// errors). Unlike the rest, it inspects its argument's error rather than propagating it -
+// which is the whole point, so it works on a symbol that has not been defined yet.
+static value fn_defined(rc_view_value args, rc_arena *arena)
+{
+    (void)arena;
+    if (args.num != 1) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
+    value v = rc_view_value_get(args, 0);
+    bool unresolved = value_is_error(v) && v.error == value_error_unknown_symbol;
+    return value_make_numeric(unresolved ? 0.0 : 1.0);
+}
+
+
+// ---- the two context tables ----
+// EVEN: lexed where an operand is expected (the start, after a binary op, after an
+// open paren). Numbers/strings/identifiers come from the lexer itself, so the table
+// only carries the leading operators, the functions, and the open paren.
+static const token even_entries[] = {
+    {RC_STR("("),     {.type = lexeme_type_open_paren}},
+    {RC_STR("{"),     {.type = lexeme_type_open_brace}},            // begins a list literal
+    {RC_STR("}"),     {.type = lexeme_type_close_brace}},           // ends one (empty, or after a comma)
+
+    {RC_STR(".."),    {.type = lexeme_type_range}},                 // start-unbounded range
+    {RC_STR("..<"),   {.type = lexeme_type_range, .range = {.exclusive = true}}},
+
+    {RC_STR("+"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_pos, .precedence = prec_neg}}},
+    {RC_STR("-"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_neg, .precedence = prec_neg}}},
+    // Bare low/high-byte operators (6502 style): '<' is the low byte, '>' the high byte. Very
+    // low precedence, so they swallow the whole following expression: <start+1 is lo(start+1).
+    {RC_STR("<"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo, .precedence = prec_lohi}}},
+    {RC_STR(">"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi, .precedence = prec_lohi}}},
+
+    // Element-wise builtins are parenthesised unary ops: the '(' is part of the token (so
+    // the name only reads as a call when followed by '(' - 'lo' is a variable, 'lo(' the op),
+    // and precedence is unused (left default) because the argument is closed by ')'.
+    {RC_STR("abs("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_abs}}},
+    {RC_STR("lo("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo}}},
+    {RC_STR("hi("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi}}},
+    {RC_STR("sqrt("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sqrt}}},
+    {RC_STR("not("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_not}}},
+    {RC_STR("int("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
+    {RC_STR("floor("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
+    {RC_STR("round("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_round}}},
+    {RC_STR("ceil("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ceil}}},
+    {RC_STR("sin("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sin}}},
+    {RC_STR("cos("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_cos}}},
+    {RC_STR("tan("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_tan}}},
+    {RC_STR("asin("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_asin}}},
+    {RC_STR("acos("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_acos}}},
+    {RC_STR("atan("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_atan}}},
+    {RC_STR("log("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_log}}},     // base 10
+    {RC_STR("ln("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ln}}},      // natural
+    {RC_STR("exp("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_exp}}},
+
+    // Structural/variadic builtins are functions: the handler gets the whole arg list.
+    {RC_STR("shape("),   {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
+    {RC_STR("len("),     {.type = lexeme_type_function, .function = {.apply = fn_len}}},
+    {RC_STR("rank("),    {.type = lexeme_type_function, .function = {.apply = fn_rank}}},
+    {RC_STR("flatten("), {.type = lexeme_type_function, .function = {.apply = fn_flatten}}},
+    {RC_STR("concat("),  {.type = lexeme_type_function, .function = {.apply = fn_concat}}},
+    {RC_STR("reverse("), {.type = lexeme_type_function, .function = {.apply = fn_reverse}}},
+    {RC_STR("sort("),    {.type = lexeme_type_function, .function = {.apply = fn_sort}}},
+    {RC_STR("sum("),     {.type = lexeme_type_function, .function = {.apply = fn_sum}}},
+    {RC_STR("product("), {.type = lexeme_type_function, .function = {.apply = fn_product}}},
+    {RC_STR("min("),     {.type = lexeme_type_function, .function = {.apply = fn_min}}},
+    {RC_STR("max("),     {.type = lexeme_type_function, .function = {.apply = fn_max}}},
+    {RC_STR("defined("), {.type = lexeme_type_function, .function = {.apply = fn_defined}}},
+};
+
+// ODD: lexed where a binary operator is expected (after an operand). The close paren
+// lives here, so a parenthesised group is closed from operator position.
+static const token odd_entries[] = {
+    {RC_STR(")"),   {.type = lexeme_type_close_paren}},
+    {RC_STR("}"),   {.type = lexeme_type_close_brace}},         // ends a list (after an element)
+    {RC_STR("["),   {.type = lexeme_type_open_bracket}},        // postfix subscript
+    {RC_STR("]"),   {.type = lexeme_type_close_bracket}},       // ends a subscript
+
+    {RC_STR(".."),  {.type = lexeme_type_range}},               // range operator (handled specially)
+    {RC_STR("..<"), {.type = lexeme_type_range, .range = {.exclusive = true}}},
+
+    {RC_STR("^"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_pow,  .precedence = prec_pow, .associativity = assoc_right}}},
+    {RC_STR("*"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mul,  .precedence = prec_mul}}},
+    {RC_STR("/"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_div,  .precedence = prec_mul}}},
+    {RC_STR("div"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_idiv, .precedence = prec_mul}}},
+    {RC_STR("mod"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mod,  .precedence = prec_mul}}},
+    {RC_STR("<<"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shl,  .precedence = prec_mul}}},
+    {RC_STR(">>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shr,  .precedence = prec_mul}}},
+    {RC_STR("+"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_add,  .precedence = prec_add}}},
+    {RC_STR("-"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_sub,  .precedence = prec_add}}},
+    {RC_STR("="),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
+    {RC_STR("=="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
+    {RC_STR("!="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
+    {RC_STR("<>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
+    {RC_STR("<="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_le,   .precedence = prec_cmp}}},
+    {RC_STR(">="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ge,   .precedence = prec_cmp}}},
+    {RC_STR("<"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_lt,   .precedence = prec_cmp}}},
+    {RC_STR(">"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_gt,   .precedence = prec_cmp}}},
+    {RC_STR("and"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_and,  .precedence = prec_and}}},
+    {RC_STR("or"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_or,   .precedence = prec_or}}},
+    {RC_STR("eor"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eor,  .precedence = prec_or}}},
+};
+
+static const token_table even_tokens = RC_VIEW(even_entries);
+static const token_table odd_tokens  = RC_VIEW(odd_entries);
+
+
 // Require a ')' at cursor (lexed from operator position). On success returns v with
 // the cursor past the ')'; otherwise an expected_close_paren error.
 static expr_result expect_close_paren(const parser *p, value v, uint32_t cursor)
@@ -771,8 +1089,9 @@ static expr_result parse_list(const parser *p, uint32_t cursor)
 }
 
 // Parse a function call's arguments from just after the '(' (which was part of the token):
-// comma-separated expressions up to the ')', then hand them to the function. An empty list
-// is allowed (the handler validates arity); a missing ')' is the committed close-paren error.
+// comma-separated expressions up to the ')', then hand the raw arguments to the function's
+// handler, which validates the count and types and decides how to treat errors (most
+// propagate, defined() inspects). An empty list is allowed; a missing ')' is committed.
 static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t cursor)
 {
     RC_ASSERT(cursor > 0 && p->text.data[cursor - 1] == '(');   // the '(' is part of the function token
@@ -782,7 +1101,7 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
     // An immediate ')' is an empty argument list.
     lexer_result lr = lexer_next(p->text, cursor, odd_tokens);
     if (lr.token.type == lexeme_type_close_paren) {
-        return ok(apply_function(fn, args.view, p->arena), lr.next);
+        return ok(fn.apply(args.view, p->arena), lr.next);
     }
 
     while (true) {
@@ -799,7 +1118,7 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
             continue;
         }
         if (lr.token.type == lexeme_type_close_paren) {
-            return ok(apply_function(fn, args.view, p->arena), lr.next);
+            return ok(fn.apply(args.view, p->arena), lr.next);
         }
         return fail(expr_error_expected_close_paren, cursor);
     }
@@ -1474,6 +1793,101 @@ RC_TEST_STEP(expression, subscript, fix)
     RC_CHECK_TRUE(RESULT("{1,2,3}[0").error != expr_error_none);   // a missing ']' is a committed error
     RC_CHECK_TRUE(RESULT("{1,2,3}[]").error != expr_error_none);   // an empty '[]' is illegal
     RC_CHECK_TRUE(RESULT("{1,2,3}[0,]").error != expr_error_none); // a trailing comma too
+}
+
+RC_TEST_STEP(expression, reductions, fix)
+{
+    RC_CHECK_TRUE(value_is_equal(VAL("sum({1,2,3,4})"),         value_make_numeric(10)));
+    RC_CHECK_TRUE(value_is_equal(VAL("product({1,2,3,4})"),     value_make_numeric(24)));
+    RC_CHECK_TRUE(value_is_equal(VAL("min({3,1,2})"),           value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("max({3,1,2})"),           value_make_numeric(3)));
+    RC_CHECK_TRUE(value_is_equal(VAL("sum({{1,2,3},{4,5,6}})"), value_make_numeric(21)));   // full reduction
+
+    // collapse one axis: column sums (axis 0) and row sums (axis 1)
+    value cols[] = {value_make_numeric(5), value_make_numeric(7), value_make_numeric(9)};
+    RC_CHECK_TRUE(value_is_equal(VAL("sum({{1,2,3},{4,5,6}}, 0)"), value_make_list((rc_view_value) RC_VIEW(cols))));
+    value rows[] = {value_make_numeric(6), value_make_numeric(15)};
+    RC_CHECK_TRUE(value_is_equal(VAL("sum({{1,2,3},{4,5,6}}, 1)"), value_make_list((rc_view_value) RC_VIEW(rows))));
+
+    // matrix * vector, the original motivation: sum(M*v, 1) with v = {1,0,0} picks column 0
+    value mv[] = {value_make_numeric(1), value_make_numeric(4)};
+    RC_CHECK_TRUE(value_is_equal(VAL("sum({{1,2,3},{4,5,6}} * {1,0,0}, 1)"), value_make_list((rc_view_value) RC_VIEW(mv))));
+
+    // min/max over an axis pick element-wise vs per-row
+    value mn0[] = {value_make_numeric(2), value_make_numeric(1)};
+    RC_CHECK_TRUE(value_is_equal(VAL("min({{5,1},{2,8}}, 0)"), value_make_list((rc_view_value) RC_VIEW(mn0))));
+    value mn1[] = {value_make_numeric(1), value_make_numeric(2)};
+    RC_CHECK_TRUE(value_is_equal(VAL("min({{5,1},{2,8}}, 1)"), value_make_list((rc_view_value) RC_VIEW(mn1))));
+
+    RC_CHECK_TRUE(value_is_equal(VAL("sum({})"), value_make_numeric(0)));   // identity 0
+    RC_CHECK_TRUE(value_is_error(VAL("min({})")));                          // min has no identity
+    RC_CHECK_TRUE(value_is_error(VAL("sum(5, 0)")));                        // axis out of range
+}
+
+RC_TEST_STEP(expression, list_functions, fix)
+{
+    RC_CHECK_TRUE(value_is_equal(VAL("len({1,2,3})"),            value_make_numeric(3)));
+    RC_CHECK_TRUE(value_is_equal(VAL("len(\"hello\")"),         value_make_numeric(5)));
+    RC_CHECK_TRUE(value_is_equal(VAL("len({{1,2},{3,4},{5,6}})"), value_make_numeric(3)));
+    RC_CHECK_TRUE(value_is_equal(VAL("rank(5)"),                 value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("rank({1,2,3})"),          value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("rank({{1,2},{3,4}})"),    value_make_numeric(2)));
+    RC_CHECK_TRUE(value_is_error(VAL("len(5)")));                            // a scalar has no length
+
+    value fl[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3), value_make_numeric(4), value_make_numeric(5)};
+    RC_CHECK_TRUE(value_is_equal(VAL("flatten({1,{2,{3,4}},5})"), value_make_list((rc_view_value) RC_VIEW(fl))));
+    RC_CHECK_TRUE(value_is_equal(VAL("concat({1,2}, 3, {4,5})"),  value_make_list((rc_view_value) RC_VIEW(fl))));
+
+    value rv[] = {value_make_numeric(3), value_make_numeric(2), value_make_numeric(1)};
+    RC_CHECK_TRUE(value_is_equal(VAL("reverse({1,2,3})"), value_make_list((rc_view_value) RC_VIEW(rv))));
+    RC_CHECK_TRUE(value_is_equal(VAL("reverse(\"abc\")"), value_make_string(RC_STR("cba"))));
+
+    value so[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3)};
+    RC_CHECK_TRUE(value_is_equal(VAL("sort({3,1,2})"), value_make_list((rc_view_value) RC_VIEW(so))));
+
+    // sort a list of rows keyed on each row's first element
+    value k0[] = {value_make_numeric(1), value_make_numeric(10)};
+    value k1[] = {value_make_numeric(2), value_make_numeric(20)};
+    value k2[] = {value_make_numeric(3), value_make_numeric(30)};
+    value ks[] = {value_make_list((rc_view_value) RC_VIEW(k0)), value_make_list((rc_view_value) RC_VIEW(k1)), value_make_list((rc_view_value) RC_VIEW(k2))};
+    RC_CHECK_TRUE(value_is_equal(VAL("sort({{3,30},{1,10},{2,20}}, 0)"), value_make_list((rc_view_value) RC_VIEW(ks))));
+}
+
+RC_TEST_STEP(expression, defined_lohi_strings, fix)
+{
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0));
+    RC_CHECK_TRUE(value_is_equal(VAL("defined(foo)"), value_make_numeric(1)));   // resolves
+    RC_CHECK_TRUE(value_is_equal(VAL("defined(bar)"), value_make_numeric(0)));   // an unknown symbol
+
+    // '<' low byte, '>' high byte (6502 style), super low precedence so they grab the tail
+    RC_CHECK_TRUE(value_is_equal(VAL("<258"),     value_make_numeric(2)));       // low byte of 0x102
+    RC_CHECK_TRUE(value_is_equal(VAL(">258"),     value_make_numeric(1)));       // high byte
+    RC_CHECK_TRUE(value_is_equal(VAL("<$1234"),   value_make_numeric(0x34)));
+    RC_CHECK_TRUE(value_is_equal(VAL(">$1234"),   value_make_numeric(0x12)));
+    RC_CHECK_TRUE(value_is_equal(VAL("<$1234+1"), value_make_numeric(0x35)));    // swallows the +1: lo($1234+1)
+
+    // '+' concatenates strings
+    RC_CHECK_TRUE(value_is_equal(VAL("\"foo\"+\"bar\""),      value_make_string(RC_STR("foobar"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("len(\"foo\"+\"bar\")"), value_make_numeric(6)));
+}
+
+RC_TEST_STEP(expression, math_functions, fix)
+{
+    RC_CHECK_TRUE(value_is_equal(VAL("sin(0)"), value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("cos(0)"), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("exp(0)"), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("ln(1)"),  value_make_numeric(0)));
+
+    RC_CHECK(VAL("log(1000)").numeric, ~=, 3.0);                  // base 10
+    RC_CHECK(VAL("atan(1)").numeric,   ~=, 0.7853981633974483);   // pi/4
+    RC_CHECK(VAL("asin(1)").numeric,   ~=, 1.5707963267948966);   // pi/2
+
+    RC_CHECK_TRUE(value_is_error(VAL("asin(2)")));   // domain error (NaN)
+    RC_CHECK_TRUE(value_is_error(VAL("ln(-1)")));    // domain error
+
+    // element-wise over a list, like the other unary ops
+    value c[] = {value_make_numeric(1)};
+    RC_CHECK_TRUE(value_is_equal(VAL("cos({0})"), value_make_list((rc_view_value) RC_VIEW(c))));
 }
 
 #undef RESULT
