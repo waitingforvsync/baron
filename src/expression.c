@@ -359,52 +359,52 @@ static value fn_shape(value v, rc_arena *arena)
 // open paren). Numbers/strings/identifiers come from the lexer itself, so the table
 // only carries the leading operators, the functions, and the open paren.
 static const token even_entries[] = {
-    { RC_STR("("),     { .type = lexeme_type_open_paren } },
-    { RC_STR("{"),     { .type = lexeme_type_open_brace } },     // begins a list literal
-    { RC_STR("}"),     { .type = lexeme_type_close_brace } },    // ends one (empty, or after a comma)
-    { RC_STR(".."),    { .type = lexeme_type_range, .range = { false } } },   // start-unbounded range
-    { RC_STR("..<"),   { .type = lexeme_type_range, .range = { true } } },
-    { RC_STR("+"),     { .type = lexeme_type_unary_op, .unary_op = { op_pos, prec_neg } } },
-    { RC_STR("-"),     { .type = lexeme_type_unary_op, .unary_op = { op_neg, prec_neg } } },
-    { RC_STR("abs"),   { .type = lexeme_type_function, .function = { fn_abs,   false } } },
-    { RC_STR("lo"),    { .type = lexeme_type_function, .function = { fn_lo,    false } } },
-    { RC_STR("hi"),    { .type = lexeme_type_function, .function = { fn_hi,    false } } },
-    { RC_STR("sqrt"),  { .type = lexeme_type_function, .function = { fn_sqrt,  false } } },
-    { RC_STR("not"),   { .type = lexeme_type_function, .function = { fn_not,   false } } },
-    { RC_STR("int"),   { .type = lexeme_type_function, .function = { fn_int,   false } } },
-    { RC_STR("floor"), { .type = lexeme_type_function, .function = { fn_int,   false } } },   // alias of int
-    { RC_STR("round"), { .type = lexeme_type_function, .function = { fn_round, false } } },
-    { RC_STR("ceil"),  { .type = lexeme_type_function, .function = { fn_ceil,  false } } },
-    { RC_STR("shape"), { .type = lexeme_type_function, .function = { fn_shape, true } } },   // aggregate
+    {RC_STR("("),     {.type = lexeme_type_open_paren}},
+    {RC_STR("{"),     {.type = lexeme_type_open_brace}},     // begins a list literal
+    {RC_STR("}"),     {.type = lexeme_type_close_brace}},    // ends one (empty, or after a comma)
+    {RC_STR(".."),    {.type = lexeme_type_range, .range = {false}}},   // start-unbounded range
+    {RC_STR("..<"),   {.type = lexeme_type_range, .range = {true}}},
+    {RC_STR("+"),     {.type = lexeme_type_unary_op, .unary_op = {op_pos,   prec_neg}}},
+    {RC_STR("-"),     {.type = lexeme_type_unary_op, .unary_op = {op_neg,   prec_neg}}},
+    {RC_STR("abs"),   {.type = lexeme_type_function, .function = {fn_abs,   false}}},
+    {RC_STR("lo"),    {.type = lexeme_type_function, .function = {fn_lo,    false}}},
+    {RC_STR("hi"),    {.type = lexeme_type_function, .function = {fn_hi,    false}}},
+    {RC_STR("sqrt"),  {.type = lexeme_type_function, .function = {fn_sqrt,  false}}},
+    {RC_STR("not"),   {.type = lexeme_type_function, .function = {fn_not,   false}}},
+    {RC_STR("int"),   {.type = lexeme_type_function, .function = {fn_int,   false}}},
+    {RC_STR("floor"), {.type = lexeme_type_function, .function = {fn_int,   false}}},   // alias of int
+    {RC_STR("round"), {.type = lexeme_type_function, .function = {fn_round, false}}},
+    {RC_STR("ceil"),  {.type = lexeme_type_function, .function = {fn_ceil,  false}}},
+    {RC_STR("shape"), {.type = lexeme_type_function, .function = {fn_shape, true }}},   // aggregate
 };
 
 // ODD: lexed where a binary operator is expected (after an operand). The close paren
 // lives here, so a parenthesised group is closed from operator position.
 static const token odd_entries[] = {
-    { RC_STR(")"),   { .type = lexeme_type_close_paren } },
-    { RC_STR("}"),   { .type = lexeme_type_close_brace } },   // ends a list (after an element)
-    { RC_STR(".."),  { .type = lexeme_type_range, .range = { false } } },   // range operator (handled specially)
-    { RC_STR("..<"), { .type = lexeme_type_range, .range = { true } } },
-    { RC_STR("^"),   { .type = lexeme_type_binary_op, .binary_op = { op_pow,  prec_pow, assoc_right } } },
-    { RC_STR("*"),   { .type = lexeme_type_binary_op, .binary_op = { op_mul,  prec_mul, assoc_left } } },
-    { RC_STR("/"),   { .type = lexeme_type_binary_op, .binary_op = { op_div,  prec_mul, assoc_left } } },
-    { RC_STR("div"), { .type = lexeme_type_binary_op, .binary_op = { op_idiv, prec_mul, assoc_left } } },
-    { RC_STR("mod"), { .type = lexeme_type_binary_op, .binary_op = { op_mod,  prec_mul, assoc_left } } },
-    { RC_STR("<<"),  { .type = lexeme_type_binary_op, .binary_op = { op_shl,  prec_mul, assoc_left } } },
-    { RC_STR(">>"),  { .type = lexeme_type_binary_op, .binary_op = { op_shr,  prec_mul, assoc_left } } },
-    { RC_STR("+"),   { .type = lexeme_type_binary_op, .binary_op = { op_add,  prec_add, assoc_left } } },
-    { RC_STR("-"),   { .type = lexeme_type_binary_op, .binary_op = { op_sub,  prec_add, assoc_left } } },
-    { RC_STR("="),   { .type = lexeme_type_binary_op, .binary_op = { op_eq,   prec_cmp, assoc_left } } },
-    { RC_STR("=="),  { .type = lexeme_type_binary_op, .binary_op = { op_eq,   prec_cmp, assoc_left } } },   // alias of =
-    { RC_STR("!="),  { .type = lexeme_type_binary_op, .binary_op = { op_ne,   prec_cmp, assoc_left } } },
-    { RC_STR("<>"),  { .type = lexeme_type_binary_op, .binary_op = { op_ne,   prec_cmp, assoc_left } } },   // alias of !=
-    { RC_STR("<="),  { .type = lexeme_type_binary_op, .binary_op = { op_le,   prec_cmp, assoc_left } } },
-    { RC_STR(">="),  { .type = lexeme_type_binary_op, .binary_op = { op_ge,   prec_cmp, assoc_left } } },
-    { RC_STR("<"),   { .type = lexeme_type_binary_op, .binary_op = { op_lt,   prec_cmp, assoc_left } } },
-    { RC_STR(">"),   { .type = lexeme_type_binary_op, .binary_op = { op_gt,   prec_cmp, assoc_left } } },
-    { RC_STR("and"), { .type = lexeme_type_binary_op, .binary_op = { op_and,  prec_and, assoc_left } } },
-    { RC_STR("or"),  { .type = lexeme_type_binary_op, .binary_op = { op_or,   prec_or,  assoc_left } } },
-    { RC_STR("eor"), { .type = lexeme_type_binary_op, .binary_op = { op_eor,  prec_or,  assoc_left } } },
+    {RC_STR(")"),   {.type = lexeme_type_close_paren}},
+    {RC_STR("}"),   {.type = lexeme_type_close_brace}},   // ends a list (after an element)
+    {RC_STR(".."),  {.type = lexeme_type_range, .range = {false}}},   // range operator (handled specially)
+    {RC_STR("..<"), {.type = lexeme_type_range, .range = {true}}},
+    {RC_STR("^"),   {.type = lexeme_type_binary_op, .binary_op = {op_pow,  prec_pow, assoc_right}}},
+    {RC_STR("*"),   {.type = lexeme_type_binary_op, .binary_op = {op_mul,  prec_mul, assoc_left}}},
+    {RC_STR("/"),   {.type = lexeme_type_binary_op, .binary_op = {op_div,  prec_mul, assoc_left}}},
+    {RC_STR("div"), {.type = lexeme_type_binary_op, .binary_op = {op_idiv, prec_mul, assoc_left}}},
+    {RC_STR("mod"), {.type = lexeme_type_binary_op, .binary_op = {op_mod,  prec_mul, assoc_left}}},
+    {RC_STR("<<"),  {.type = lexeme_type_binary_op, .binary_op = {op_shl,  prec_mul, assoc_left}}},
+    {RC_STR(">>"),  {.type = lexeme_type_binary_op, .binary_op = {op_shr,  prec_mul, assoc_left}}},
+    {RC_STR("+"),   {.type = lexeme_type_binary_op, .binary_op = {op_add,  prec_add, assoc_left}}},
+    {RC_STR("-"),   {.type = lexeme_type_binary_op, .binary_op = {op_sub,  prec_add, assoc_left}}},
+    {RC_STR("="),   {.type = lexeme_type_binary_op, .binary_op = {op_eq,   prec_cmp, assoc_left}}},
+    {RC_STR("=="),  {.type = lexeme_type_binary_op, .binary_op = {op_eq,   prec_cmp, assoc_left}}},   // alias of =
+    {RC_STR("!="),  {.type = lexeme_type_binary_op, .binary_op = {op_ne,   prec_cmp, assoc_left}}},
+    {RC_STR("<>"),  {.type = lexeme_type_binary_op, .binary_op = {op_ne,   prec_cmp, assoc_left}}},   // alias of !=
+    {RC_STR("<="),  {.type = lexeme_type_binary_op, .binary_op = {op_le,   prec_cmp, assoc_left}}},
+    {RC_STR(">="),  {.type = lexeme_type_binary_op, .binary_op = {op_ge,   prec_cmp, assoc_left}}},
+    {RC_STR("<"),   {.type = lexeme_type_binary_op, .binary_op = {op_lt,   prec_cmp, assoc_left}}},
+    {RC_STR(">"),   {.type = lexeme_type_binary_op, .binary_op = {op_gt,   prec_cmp, assoc_left}}},
+    {RC_STR("and"), {.type = lexeme_type_binary_op, .binary_op = {op_and,  prec_and, assoc_left}}},
+    {RC_STR("or"),  {.type = lexeme_type_binary_op, .binary_op = {op_or,   prec_or,  assoc_left}}},
+    {RC_STR("eor"), {.type = lexeme_type_binary_op, .binary_op = {op_eor,  prec_or,  assoc_left}}},
 };
 
 static const token_table even_tokens = RC_VIEW(even_entries);
