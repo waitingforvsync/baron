@@ -94,9 +94,10 @@ typedef struct lexeme_binary_op {
 
 
 typedef struct lexeme_function {
-    value (*apply)(value v, rc_arena *arena);   // one argument for now
-    bool  aggregate;   // false (default): map element-wise over a list/range;
-                       // true: take the whole value (e.g. shape)
+    // Variadic and structural: the handler gets the whole evaluated argument list and is
+    // responsible for checking the count and types. Element-wise things (abs, sqrt, ...)
+    // are unary ops, not functions, so they keep their simple scalar handler.
+    value (*apply)(rc_view_value args, rc_arena *arena);
 } lexeme_function;
 
 

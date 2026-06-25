@@ -344,10 +344,14 @@ static uint32_t rank_of(value v)
 }
 
 // The shape() function: the axis lengths as a list of numbers (a scalar -> the empty list).
-static value fn_shape(value v, rc_arena *arena)
+// A function, so it takes the whole argument list and checks it wants exactly one.
+static value fn_shape(rc_view_value args, rc_arena *arena)
 {
+    if (args.num != 1) {
+        return value_make_error(value_error_incorrect_parameters);
+    }
     uint32_t dims[MAX_RANK];
-    uint32_t rank = shape_dims(v, dims, MAX_RANK);
+    uint32_t rank = shape_dims(rc_view_value_get(args, 0), dims, MAX_RANK);
     rc_array_value out = {0};
     for (uint32_t i = 0; i < rank; i++) {
         rc_array_value_push(&out, value_make_numeric((double)dims[i]), arena);
@@ -362,53 +366,63 @@ static value fn_shape(value v, rc_arena *arena)
 // only carries the leading operators, the functions, and the open paren.
 static const token even_entries[] = {
     {RC_STR("("),     {.type = lexeme_type_open_paren}},
-    {RC_STR("{"),     {.type = lexeme_type_open_brace}},     // begins a list literal
-    {RC_STR("}"),     {.type = lexeme_type_close_brace}},    // ends one (empty, or after a comma)
-    {RC_STR(".."),    {.type = lexeme_type_range, .range = {false}}},   // start-unbounded range
-    {RC_STR("..<"),   {.type = lexeme_type_range, .range = {true}}},
-    {RC_STR("+"),     {.type = lexeme_type_unary_op, .unary_op = {op_pos,   prec_neg}}},
-    {RC_STR("-"),     {.type = lexeme_type_unary_op, .unary_op = {op_neg,   prec_neg}}},
-    {RC_STR("abs"),   {.type = lexeme_type_function, .function = {fn_abs,   false}}},
-    {RC_STR("lo"),    {.type = lexeme_type_function, .function = {fn_lo,    false}}},
-    {RC_STR("hi"),    {.type = lexeme_type_function, .function = {fn_hi,    false}}},
-    {RC_STR("sqrt"),  {.type = lexeme_type_function, .function = {fn_sqrt,  false}}},
-    {RC_STR("not"),   {.type = lexeme_type_function, .function = {fn_not,   false}}},
-    {RC_STR("int"),   {.type = lexeme_type_function, .function = {fn_int,   false}}},
-    {RC_STR("floor"), {.type = lexeme_type_function, .function = {fn_int,   false}}},   // alias of int
-    {RC_STR("round"), {.type = lexeme_type_function, .function = {fn_round, false}}},
-    {RC_STR("ceil"),  {.type = lexeme_type_function, .function = {fn_ceil,  false}}},
-    {RC_STR("shape"), {.type = lexeme_type_function, .function = {fn_shape, true }}},   // aggregate
+    {RC_STR("{"),     {.type = lexeme_type_open_brace}},            // begins a list literal
+    {RC_STR("}"),     {.type = lexeme_type_close_brace}},           // ends one (empty, or after a comma)
+    
+    {RC_STR(".."),    {.type = lexeme_type_range}},                 // start-unbounded range
+    {RC_STR("..<"),   {.type = lexeme_type_range, .range = {.exclusive = true}}},
+
+    {RC_STR("+"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_pos, .precedence = prec_neg}}},
+    {RC_STR("-"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_neg, .precedence = prec_neg}}},
+
+    // Element-wise builtins are parenthesised unary ops: the '(' is part of the token (so
+    // the name only reads as a call when followed by '(' - 'lo' is a variable, 'lo(' the op),
+    // and precedence is unused (left default) because the argument is closed by ')'.
+    {RC_STR("abs("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_abs}}},
+    {RC_STR("lo("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo}}},
+    {RC_STR("hi("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi}}},
+    {RC_STR("sqrt("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sqrt}}},
+    {RC_STR("not("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_not}}},
+    {RC_STR("int("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
+    {RC_STR("floor("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
+    {RC_STR("round("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_round}}},
+    {RC_STR("ceil("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ceil}}},
+
+    // Structural/variadic builtins are functions: the handler gets the whole arg list.
+    {RC_STR("shape("), {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
 };
 
 // ODD: lexed where a binary operator is expected (after an operand). The close paren
 // lives here, so a parenthesised group is closed from operator position.
 static const token odd_entries[] = {
     {RC_STR(")"),   {.type = lexeme_type_close_paren}},
-    {RC_STR("}"),   {.type = lexeme_type_close_brace}},   // ends a list (after an element)
-    {RC_STR("["),   {.type = lexeme_type_open_bracket}},  // postfix subscript
-    {RC_STR("]"),   {.type = lexeme_type_close_bracket}}, // ends a subscript (after a selector)
-    {RC_STR(".."),  {.type = lexeme_type_range, .range = {false}}},   // range operator (handled specially)
-    {RC_STR("..<"), {.type = lexeme_type_range, .range = {true}}},
-    {RC_STR("^"),   {.type = lexeme_type_binary_op, .binary_op = {op_pow,  prec_pow, assoc_right}}},
-    {RC_STR("*"),   {.type = lexeme_type_binary_op, .binary_op = {op_mul,  prec_mul, assoc_left}}},
-    {RC_STR("/"),   {.type = lexeme_type_binary_op, .binary_op = {op_div,  prec_mul, assoc_left}}},
-    {RC_STR("div"), {.type = lexeme_type_binary_op, .binary_op = {op_idiv, prec_mul, assoc_left}}},
-    {RC_STR("mod"), {.type = lexeme_type_binary_op, .binary_op = {op_mod,  prec_mul, assoc_left}}},
-    {RC_STR("<<"),  {.type = lexeme_type_binary_op, .binary_op = {op_shl,  prec_mul, assoc_left}}},
-    {RC_STR(">>"),  {.type = lexeme_type_binary_op, .binary_op = {op_shr,  prec_mul, assoc_left}}},
-    {RC_STR("+"),   {.type = lexeme_type_binary_op, .binary_op = {op_add,  prec_add, assoc_left}}},
-    {RC_STR("-"),   {.type = lexeme_type_binary_op, .binary_op = {op_sub,  prec_add, assoc_left}}},
-    {RC_STR("="),   {.type = lexeme_type_binary_op, .binary_op = {op_eq,   prec_cmp, assoc_left}}},
-    {RC_STR("=="),  {.type = lexeme_type_binary_op, .binary_op = {op_eq,   prec_cmp, assoc_left}}},   // alias of =
-    {RC_STR("!="),  {.type = lexeme_type_binary_op, .binary_op = {op_ne,   prec_cmp, assoc_left}}},
-    {RC_STR("<>"),  {.type = lexeme_type_binary_op, .binary_op = {op_ne,   prec_cmp, assoc_left}}},   // alias of !=
-    {RC_STR("<="),  {.type = lexeme_type_binary_op, .binary_op = {op_le,   prec_cmp, assoc_left}}},
-    {RC_STR(">="),  {.type = lexeme_type_binary_op, .binary_op = {op_ge,   prec_cmp, assoc_left}}},
-    {RC_STR("<"),   {.type = lexeme_type_binary_op, .binary_op = {op_lt,   prec_cmp, assoc_left}}},
-    {RC_STR(">"),   {.type = lexeme_type_binary_op, .binary_op = {op_gt,   prec_cmp, assoc_left}}},
-    {RC_STR("and"), {.type = lexeme_type_binary_op, .binary_op = {op_and,  prec_and, assoc_left}}},
-    {RC_STR("or"),  {.type = lexeme_type_binary_op, .binary_op = {op_or,   prec_or,  assoc_left}}},
-    {RC_STR("eor"), {.type = lexeme_type_binary_op, .binary_op = {op_eor,  prec_or,  assoc_left}}},
+    {RC_STR("}"),   {.type = lexeme_type_close_brace}},         // ends a list (after an element)
+    {RC_STR("["),   {.type = lexeme_type_open_bracket}},        // postfix subscript
+    {RC_STR("]"),   {.type = lexeme_type_close_bracket}},       // ends a subscript
+
+    {RC_STR(".."),  {.type = lexeme_type_range}},               // range operator (handled specially)
+    {RC_STR("..<"), {.type = lexeme_type_range, .range = {.exclusive = true}}},
+
+    {RC_STR("^"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_pow,  .precedence = prec_pow, .associativity = assoc_right}}},
+    {RC_STR("*"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mul,  .precedence = prec_mul}}},
+    {RC_STR("/"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_div,  .precedence = prec_mul}}},
+    {RC_STR("div"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_idiv, .precedence = prec_mul}}},
+    {RC_STR("mod"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mod,  .precedence = prec_mul}}},
+    {RC_STR("<<"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shl,  .precedence = prec_mul}}},
+    {RC_STR(">>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shr,  .precedence = prec_mul}}},
+    {RC_STR("+"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_add,  .precedence = prec_add}}},
+    {RC_STR("-"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_sub,  .precedence = prec_add}}},
+    {RC_STR("="),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
+    {RC_STR("=="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
+    {RC_STR("!="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
+    {RC_STR("<>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
+    {RC_STR("<="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_le,   .precedence = prec_cmp}}},
+    {RC_STR(">="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ge,   .precedence = prec_cmp}}},
+    {RC_STR("<"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_lt,   .precedence = prec_cmp}}},
+    {RC_STR(">"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_gt,   .precedence = prec_cmp}}},
+    {RC_STR("and"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_and,  .precedence = prec_and}}},
+    {RC_STR("or"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_or,   .precedence = prec_or}}},
+    {RC_STR("eor"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eor,  .precedence = prec_or}}},
 };
 
 static const token_table even_tokens = RC_VIEW(even_entries);
@@ -521,13 +535,16 @@ static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
     return apply_elementwise(op.apply, v, arena);
 }
 
-static value apply_function(lexeme_function fn, value v, rc_arena *arena)
+static value apply_function(lexeme_function fn, rc_view_value args, rc_arena *arena)
 {
-    // An aggregate function (e.g. shape) takes the whole value; the rest map element-wise.
-    if (fn.aggregate) {
-        return value_is_error(v) ? v : fn.apply(v, arena);
+    // Screen the arguments for errors first, so a handler only ever sees real values.
+    for (uint32_t i = 0; i < args.num; i++) {
+        value a = rc_view_value_get(args, i);
+        if (value_is_error(a)) {
+            return a;
+        }
     }
-    return apply_elementwise(fn.apply, v, arena);
+    return fn.apply(args, arena);
 }
 
 
@@ -753,6 +770,41 @@ static expr_result parse_list(const parser *p, uint32_t cursor)
     }
 }
 
+// Parse a function call's arguments from just after the '(' (which was part of the token):
+// comma-separated expressions up to the ')', then hand them to the function. An empty list
+// is allowed (the handler validates arity); a missing ')' is the committed close-paren error.
+static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t cursor)
+{
+    RC_ASSERT(cursor > 0 && p->text.data[cursor - 1] == '(');   // the '(' is part of the function token
+
+    rc_array_value args = {0};
+
+    // An immediate ')' is an empty argument list.
+    lexer_result lr = lexer_next(p->text, cursor, odd_tokens);
+    if (lr.token.type == lexeme_type_close_paren) {
+        return ok(apply_function(fn, args.view, p->arena), lr.next);
+    }
+
+    while (true) {
+        expr_result a = parse_precedence(p, cursor, 0);
+        if (a.error != expr_error_none) {
+            return a;   // a soft expected_expression here (e.g. "f(1,)") is a real error
+        }
+        rc_array_value_push(&args, a.value, p->arena);
+        cursor = a.next;
+
+        lr = lexer_next(p->text, cursor, odd_tokens);
+        if (lr.token.type == lexeme_type_comma) {
+            cursor = lr.next;
+            continue;
+        }
+        if (lr.token.type == lexeme_type_close_paren) {
+            return ok(apply_function(fn, args.view, p->arena), lr.next);
+        }
+        return fail(expr_error_expected_close_paren, cursor);
+    }
+}
+
 // Parse one operand: a literal, a symbol, a parenthesised group, a prefixed unary
 // expression, a function call, or a list literal. A lexeme that cannot begin an
 // operand is a soft expected_expression failure, leaving the caller to decide.
@@ -791,7 +843,16 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             return parse_list(p, lr.next);
 
         case lexeme_type_unary_op: {
-            // The operand is parsed at the operator's own precedence (prefix climb).
+            // A '(' baked into the token name (abs(, sqrt(, ...) marks the parenthesised form:
+            // the argument is then a whole expression closed by ')'. Otherwise (- and +) the
+            // operand is parsed at the operator's own precedence (prefix climb).
+            if (p->text.data[lr.next - 1] == '(') {
+                expr_result arg = parse_precedence(p, lr.next, 0);
+                if (arg.error != expr_error_none) {
+                    return arg;   // missing/garbled argument: malformed
+                }
+                return expect_close_paren(p, apply_unary(lex.unary_op, arg.value, p->arena), arg.next);
+            }
             expr_result arg = parse_precedence(p, lr.next, lex.unary_op.precedence);
             if (arg.error != expr_error_none) {
                 return arg;   // nothing to apply the operator to: soft fail bubbles up
@@ -799,21 +860,9 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             return ok(apply_unary(lex.unary_op, arg.value, p->arena), arg.next);
         }
 
-        case lexeme_type_function: {
-            lexer_result lp = lexer_next(p->text, lr.next, even_tokens);
-            if (lp.token.type != lexeme_type_open_paren) {
-                return fail(expr_error_expected_open_paren, lr.next);
-            }
-            expr_result arg = parse_precedence(p, lp.next, 0);
-            if (arg.error != expr_error_none) {
-                return arg;
-            }
-            expr_result closed = expect_close_paren(p, arg.value, arg.next);
-            if (closed.error != expr_error_none) {
-                return closed;
-            }
-            return ok(apply_function(lex.function, closed.value, p->arena), closed.next);
-        }
+        case lexeme_type_function:
+            // The '(' is part of the token name, so we are already inside the call.
+            return parse_call_args(p, lex.function, lr.next);
 
         case lexeme_type_range: {
             // A '..' where an operand is expected opens an unbounded-start range. Parse a
@@ -1026,6 +1075,30 @@ RC_TEST_STEP(expression, functions, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("abs(-1)"),  value_make_numeric(1.0)));   // case-insensitive
 }
 
+RC_TEST_STEP(expression, callable_syntax, fix)
+{
+    // A named callable needs its '(': a bare name is now a plain identifier, so a function
+    // and a like-named variable can coexist.
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("lo"), value_make_numeric(7.0));
+    RC_CHECK_TRUE(value_is_equal(VAL("lo"),      value_make_numeric(7.0)));   // the variable
+    RC_CHECK_TRUE(value_is_equal(VAL("lo(258)"), value_make_numeric(2.0)));   // the operator (low byte)
+    RC_CHECK_TRUE(value_is_error(VAL("abs")));   // a bare function name is just an unknown symbol
+
+    // a parenthesised unary op still maps element-wise over a compound value
+    value r12[] = {value_make_numeric(1), value_make_numeric(2)};
+    RC_CHECK_TRUE(value_is_equal(VAL("abs({-1,-2})"), value_make_list((rc_view_value) RC_VIEW(r12))));
+
+    // ... and takes exactly one argument
+    RC_CHECK_TRUE(RESULT("abs()").error    != expr_error_none);   // no argument
+    RC_CHECK_TRUE(RESULT("abs(1,2)").error != expr_error_none);   // an extra argument
+
+    // a variadic function validates its own arity
+    RC_CHECK_TRUE(value_is_error(VAL("shape(1,2)")));   // too many args -> error value
+    RC_CHECK_TRUE(value_is_error(VAL("shape()")));      // too few args
+    value sh[] = {value_make_numeric(2), value_make_numeric(2)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape({{1,2},{3,4}})"), value_make_list((rc_view_value) RC_VIEW(sh))));
+}
+
 RC_TEST_STEP(expression, symbols, fix)
 {
     scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0));
@@ -1057,10 +1130,10 @@ RC_TEST_STEP(expression, greedy_stop, fix)
 
 RC_TEST_STEP(expression, committed_errors, fix)
 {
-    RC_CHECK_TRUE(RESULT("(1+2").error  == expr_error_expected_close_paren);
-    RC_CHECK_TRUE(RESULT("ABS x").error == expr_error_expected_open_paren);
-    RC_CHECK_TRUE(RESULT("ABS(3").error == expr_error_expected_close_paren);
-    RC_CHECK_TRUE(RESULT(")").error     == expr_error_expected_expression);
+    RC_CHECK_TRUE(RESULT("(1+2").error    == expr_error_expected_close_paren);
+    RC_CHECK_TRUE(RESULT("ABS(3").error   == expr_error_expected_close_paren);   // unary op missing ')'
+    RC_CHECK_TRUE(RESULT("shape(1").error == expr_error_expected_close_paren);   // function missing ')'
+    RC_CHECK_TRUE(RESULT(")").error       == expr_error_expected_expression);
 }
 
 RC_TEST_STEP(expression, shifts, fix)
