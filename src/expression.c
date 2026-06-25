@@ -431,7 +431,7 @@ static value range_to_list(value_range r, rc_arena *arena)
     if (!r.has_start || !r.has_end) {
         return value_make_error(value_error_domain);
     }
-    int64_t step = r.step != 0 ? r.step : (r.end >= r.start ? 1 : -1);   // step 0 = inferred +-1
+    int64_t step = value_range_step(r);
     rc_array_value out = {0};
     for (int64_t n = r.start; step > 0 ? n <= r.end : n >= r.end; n += step) {
         rc_array_value_push(&out, value_make_numeric((double)n), arena);
@@ -557,9 +557,7 @@ static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
     if (len == 0) {
         return out;
     }
-    int64_t step = r.step != 0      ? r.step
-                 : r.has_start && r.has_end ? (r.end >= r.start ? 1 : -1)
-                 : 1;   // unbounded: enumerate the axis ascending
+    int64_t step  = value_range_step(r);
     int64_t start = r.has_start ? r.start : (step > 0 ? 0 : (int64_t)len - 1);
     int64_t end   = r.has_end   ? r.end   : (step > 0 ? (int64_t)len - 1 : 0);
     if (step > 0 && end > (int64_t)len - 1) end = (int64_t)len - 1;   // clamp the far end so the
@@ -575,12 +573,12 @@ static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
 // Index a string. A string is rank 1 and always yields a string (there is no character
 // type to drop to), so it consumes exactly one selector: an integer gives a 1-char string,
 // a range or list the selected characters gathered. Out-of-range integers/elements error.
-static value subscript_string(rc_str s, rc_view_value sels, uint32_t k, rc_arena *arena)
+static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
 {
-    if (sels.num - k != 1) {
-        return value_make_error(value_error_subscript_range);   // too many axes for a string
+    if (indices.num != 1) {
+        return value_make_error(value_error_subscript_range);   // a string takes exactly one axis
     }
-    value sel = rc_view_value_get(sels, k);
+    value sel = rc_view_value_get(indices, 0);
 
     if (value_is_numeric(sel)) {
         uint32_t i = selector_index(sel, s.len);
@@ -610,19 +608,20 @@ static value subscript_string(rc_str s, rc_view_value sels, uint32_t k, rc_arena
     return value_make_string(m.view);
 }
 
-// Index a value by the remaining selectors sels[k..]. Recurses per selected element, so
-// each selector applies to one axis and the selectors cross-product. A spent selector list
-// returns the value whole (trailing axes untouched); a non-subscriptable value errors.
-static value subscript(value v, rc_view_value sels, uint32_t k, rc_arena *arena)
+// Index a value by indices: the first selector applies to this axis, the rest (a right-
+// slice) descend per selected element, so each selector hits one axis and the selectors
+// cross-product. An empty selector list returns the value whole (trailing axes untouched);
+// a non-subscriptable value errors.
+static value subscript(value v, rc_view_value indices, rc_arena *arena)
 {
     if (value_is_error(v)) {
         return v;
     }
-    if (k == sels.num) {
+    if (indices.num == 0) {
         return v;   // no more selectors: this axis and anything within it taken whole
     }
     if (value_is_string(v)) {
-        return subscript_string(v.string, sels, k, arena);
+        return subscript_string(v.string, indices, arena);
     }
     if (value_is_range(v)) {
         v = range_to_list(v.range, arena);   // index a range via its enumeration
@@ -634,7 +633,8 @@ static value subscript(value v, rc_view_value sels, uint32_t k, rc_arena *arena)
         return value_make_error(value_error_type_mismatch);   // a number is not subscriptable
     }
 
-    value sel = rc_view_value_get(sels, k);
+    value sel = rc_view_value_get(indices, 0);
+    rc_view_value rest = rc_view_value_get_tail(indices, 1);
     uint32_t len = v.list.num;
 
     if (value_is_numeric(sel)) {   // an integer drops this axis
@@ -642,7 +642,7 @@ static value subscript(value v, rc_view_value sels, uint32_t k, rc_arena *arena)
         if (i == RC_INDEX_NONE) {
             return value_make_error(value_error_subscript_range);
         }
-        return subscript(rc_view_value_get(v.list, i), sels, k + 1, arena);
+        return subscript(rc_view_value_get(v.list, i), rest, arena);
     }
 
     // a range or list keeps this axis: recurse on each selected element into a result list
@@ -650,7 +650,7 @@ static value subscript(value v, rc_view_value sels, uint32_t k, rc_arena *arena)
     if (value_is_range(sel)) {
         rc_array_u32 idx = range_indices(sel.range, len, arena);
         for (uint32_t j = 0; j < idx.num; j++) {
-            value e = subscript(rc_view_value_get(v.list, RC_AT(idx, j)), sels, k + 1, arena);
+            value e = subscript(rc_view_value_get(v.list, RC_AT(idx, j)), rest, arena);
             rc_array_value_push(&out, e, arena);
         }
     } else if (value_is_list(sel)) {
@@ -659,7 +659,7 @@ static value subscript(value v, rc_view_value sels, uint32_t k, rc_arena *arena)
             if (i == RC_INDEX_NONE) {
                 return value_make_error(value_error_subscript_range);
             }
-            value e = subscript(rc_view_value_get(v.list, i), sels, k + 1, arena);
+            value e = subscript(rc_view_value_get(v.list, i), rest, arena);
             rc_array_value_push(&out, e, arena);
         }
     } else {
@@ -842,7 +842,7 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
 // missing ']' is a committed error; index/type problems become propagating error values.
 static expr_result parse_subscript(const parser *p, value target, uint32_t cursor)
 {
-    rc_array_value sels = {0};
+    rc_array_value indices = {0};
 
     while (true) {
         expr_result s = parse_precedence(p, cursor, 0);
@@ -852,7 +852,7 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t curso
         if (s.error != expr_error_none) {
             return s;
         }
-        rc_array_value_push(&sels, s.value, p->arena);
+        rc_array_value_push(&indices, s.value, p->arena);
         cursor = s.next;
 
         lexer_result lr = lexer_next(p->text, cursor, odd_tokens);
@@ -861,7 +861,7 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t curso
             continue;
         }
         if (lr.token.type == lexeme_type_close_bracket) {
-            return ok(subscript(target, sels.view, 0, p->arena), lr.next);
+            return ok(subscript(target, indices.view, p->arena), lr.next);
         }
         return fail(expr_error_expected_close_bracket, cursor);
     }

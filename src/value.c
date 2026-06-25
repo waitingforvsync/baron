@@ -141,6 +141,16 @@ value value_make_range_open(bool exclusive)
     return value_make_range((value_range) {0});
 }
 
+int64_t value_range_step(value_range r)
+{
+    if (r.step != 0) {
+        return r.step;
+    }
+    // A stored step of 0 means "infer the direction": descend only when both ends are
+    // present and the end sits below the start; otherwise (including any open end) ascend.
+    return (r.has_start && r.has_end && r.end < r.start) ? -1 : 1;
+}
+
 
 value_type value_type_of(value v)  { return v.type; }
 bool value_is_none(value v)        { return v.type == value_type_none; }

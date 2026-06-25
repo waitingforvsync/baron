@@ -98,6 +98,10 @@ value value_make_range_open_end(value lhs, bool exclusive);          // lhs..
 value value_make_range_open_start(value rhs, bool exclusive);        // ..rhs / ..<rhs
 value value_make_range_open(bool exclusive);                         // ..
 
+// The effective step of a range: the stored .step, or the inferred +-1 direction when
+// .step is 0 (the "infer the direction" convention). An open end infers ascending.
+int64_t value_range_step(value_range r);
+
 // Type queries.
 value_type value_type_of(value v);
 bool value_is_none(value v);
