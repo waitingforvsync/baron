@@ -4,7 +4,6 @@
 #include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
 #include "richc/macros.h"
 #include <math.h>
-#include <stdlib.h>   // qsort, for sort()
 
 
 // ---- precedence ladder (higher binds tighter) ----
@@ -849,10 +848,9 @@ static value fn_reverse(rc_view_value args, rc_arena *arena)
         return value_make_string(m.view);
     }
     if (value_is_list(v)) {
-        rc_array_value out = {0};
-        for (uint32_t i = v.list.num; i-- > 0; ) {
-            rc_array_value_push(&out, rc_view_value_get(v.list, i), arena);
-        }
+        // Copy first (the source view may alias shared storage), then reverse in place.
+        rc_array_value out = rc_array_value_make_copy(v.list, v.list.num, arena);
+        rc_span_value_reverse(out.span);
         return value_make_list(out.view);
     }
     return value_make_error(value_error_type_mismatch);
@@ -860,18 +858,20 @@ static value fn_reverse(rc_view_value args, rc_arena *arena)
 
 // sort: order a list's elements ascending by a numeric key. The key is the element itself,
 // or - given extra arguments - the result of subscripting each element by them, so
-// sort(L, 0) sorts on each element's first item. The key must resolve to a number.
+// sort(L, 0) sorts on each element's first item. The key must resolve to a number. We pair
+// each element with its key once, then sort the pairs (richc introsort) on the stored key.
 typedef struct sort_pair {
     double key;
     value  v;
 } sort_pair;
 
-static int compare_sort_pair(const void *a, const void *b)
-{
-    double ka = ((const sort_pair *)a)->key;
-    double kb = ((const sort_pair *)b)->key;
-    return (ka > kb) - (ka < kb);
-}
+#define RC_ARRAY_TYPE sort_pair
+#include "richc/template/array.h"
+
+#define RC_SORT_TYPE sort_pair
+#define RC_SORT_NAME sort_pairs
+#define RC_SORT_CMP(a, b) ((a).key < (b).key)
+#include "richc/template/algorithm/sort.h"
 
 static value fn_sort(rc_view_value args, rc_arena *arena)
 {
@@ -892,7 +892,7 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
 
     rc_view_value key_path = rc_view_value_get_tail(args, 1);   // the per-element subscript to the key
     uint32_t n = v.list.num;
-    sort_pair *pairs = rc_arena_alloc_type(arena, sort_pair, n);
+    rc_array_sort_pair pairs = rc_array_sort_pair_make(n, arena);
     for (uint32_t i = 0; i < n; i++) {
         value e = rc_view_value_get(v.list, i);
         value key = subscript(e, key_path, arena);   // an empty path leaves the element itself
@@ -902,13 +902,13 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
         if (!value_is_numeric(key)) {
             return value_make_error(value_error_type_mismatch);   // the key must be a number
         }
-        pairs[i] = (sort_pair) {.key = key.numeric, .v = e};
+        rc_array_sort_pair_push(&pairs, (sort_pair) {.key = key.numeric, .v = e}, arena);
     }
-    qsort(pairs, n, sizeof(sort_pair), compare_sort_pair);
+    sort_pairs(pairs.span);
 
     rc_array_value out = {0};
     for (uint32_t i = 0; i < n; i++) {
-        rc_array_value_push(&out, pairs[i].v, arena);
+        rc_array_value_push(&out, RC_AT(pairs, i).v, arena);
     }
     return value_make_list(out.view);
 }
