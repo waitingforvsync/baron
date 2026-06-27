@@ -1,5 +1,6 @@
 #include "expression.h"
 
+#include "scopes.h"   // scopes_get_symbol (expression.h only forward-declares scopes)
 #include "lexer.h"
 #include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
 #include "richc/macros.h"

@@ -3,6 +3,7 @@
 
 #include "richc/arena.h"   // rc_arena (opcode_parse)
 #include <stdint.h>
+#include <stdbool.h>
 
 
 // The 6502 (NMOS) and 65C02 (CMOS) instruction set. One (mnemonic, addr_mode) -> cell table
@@ -65,12 +66,10 @@ uint16_t opcode_def(mnemonic m, addr_mode mode);
 // error set). This lives here so opcodes.c owns both the instruction table and how to assemble
 // from it. The assembler input/output and container types are forward-declared (a declaration
 // may use incomplete types by value); opcodes.c includes assemble.h for the full definitions.
-struct parse_input;
-struct parse_result;
-struct scopes;
-struct overlay;
-struct parse_result opcode_parse(mnemonic m, struct parse_input in,
-                                 struct scopes *s, struct overlay *o, rc_arena scratch);
+typedef struct baron baron;
+typedef struct parse_result parse_result;
+parse_result opcode_parse(baron *b, mnemonic m, uint32_t source, uint32_t overlay,
+                          uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
 
 
 #endif // ifndef BARON_OPCODES_H_

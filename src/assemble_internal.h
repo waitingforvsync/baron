@@ -1,20 +1,12 @@
 #ifndef BARON_ASSEMBLE_INTERNAL_H_
 #define BARON_ASSEMBLE_INTERNAL_H_
 
-#include "assemble.h"   // assemble_error; plus value / scopes / overlay / rc_str transitively
+#include "assemble.h"   // assemble_error, rc_str, rc_arena
+#include "value.h"      // value (operand_value's input)
 
 
 // The assembler's internal parsing vocabulary, shared between assemble.c (the statement loop and
 // the directives) and opcodes.c (instruction parsing). Not part of the public assemble.h surface.
-
-// The immutable inputs at a parse point. Passed by value; every statement-level parse function
-// uses (or forwards) all four. `final_pass` arms the deferred range / undefined-symbol checks.
-typedef struct parse_input {
-    rc_str   source;
-    uint32_t cursor;
-    uint32_t scope;        // scope index
-    bool     final_pass;
-} parse_input;
 
 // The outputs of a parse, returned by value for the caller to fold into its own running state.
 // `next` is the cursor past what was consumed; `unresolved` that some operand referenced a

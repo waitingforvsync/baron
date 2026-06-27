@@ -1,7 +1,9 @@
 #ifndef BARON_EXPRESSION_H_
 #define BARON_EXPRESSION_H_
 
-#include "scopes.h"   // scopes, value, rc_arena, rc_str
+#include "value.h"   // value, rc_arena, rc_str
+
+typedef struct scopes scopes;   // forward: expression_parse needs only the pointer
 
 
 // The expression parser: a Pratt (precedence-climbing) parser that lexes an

@@ -2,18 +2,19 @@
 #define BARON_BARON_H_
 
 #include "scopes.h"
-#include "overlay.h"
+#include "overlays.h"
+#include "source_files.h"
 
 
-// Baron's global state, which we thread around by pointer rather than stash in a
-// global. It holds the scope tree (with the root already made at scope index 0), the
-// single default overlay, and the arena backing that overlay's object code. More
-// overlays, output and options pile in later. Set it up in place and then leave it
-// put - its `scopes` holds tries that point back into its own pools.
+// Baron's global state: the managers that are effectively constant across a parse and that the
+// parser threads as a single `baron *` first argument. It holds the scope tree (root already
+// made at scope index 0), the overlay manager (default overlay already made at index 0), and the
+// source-file cache. Output and options pile in later. Set it up in place and then leave it put -
+// its `scopes` holds tries that point back into its own pools.
 typedef struct baron {
-    scopes   scopes;
-    rc_arena code_arena;   // backs the overlay's object code
-    overlay  overlay;      // the single default overlay (for now)
+    scopes       scopes;
+    overlays     overlays;
+    source_files source_files;
 } baron;
 
 void baron_init(baron *b);

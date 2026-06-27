@@ -1,6 +1,7 @@
 #include "opcodes.h"
 
-#include "assemble_internal.h"   // parse_input, parse_result, operand, operand_value, require_separator, parse_fail
+#include "assemble_internal.h"   // parse_result, operand, operand_value, require_separator, parse_fail
+#include "baron.h"               // scopes / overlays / source_files reached through b
 #include "lexer.h"
 #include "expression.h"
 #include "richc/macros.h"
@@ -422,58 +423,60 @@ static index_result consume_index(rc_str source, uint32_t cursor)
                             .error = assemble_error_bad_index_register, .error_at = a.next };
 }
 
-struct parse_result opcode_parse(mnemonic m, parse_input in, scopes *s, overlay *o, rc_arena scratch)
+struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source, uint32_t overlay,
+                                 uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
-    uint32_t  start = in.cursor;           // just past the mnemonic
+    rc_str    src   = source_files_text(&b->source_files, source);
+    uint32_t  start = cursor;              // just past the mnemonic
     addr_mode mode;
-    operand   op     = { .known = true };
-    uint32_t  cursor;                      // past the operand shell, before the separator
+    operand   op    = { .known = true };
+    uint32_t  after;                       // past the operand shell, before the separator
 
-    lexer_result peek = lexer_next(in.source, start, operand_tokens);
+    lexer_result peek = lexer_next(src, start, operand_tokens);
 
     if (peek.token.type == lexeme_type_terminator) {
         // No operand: implied, or accumulator for the shift / read-modify-write mnemonics.
         if (opcode_def(m, addr_mode_imp) != 0)      { mode = addr_mode_imp; }
         else if (opcode_def(m, addr_mode_acc) != 0) { mode = addr_mode_acc; }
         else return parse_fail(assemble_error_missing_operand, start);
-        cursor = start;                    // leave the terminator for require_separator
+        after = start;                     // leave the terminator for require_separator
     }
     else if (peek.token.type == lexeme_type_hash) {
-        expr_result e = expression_parse(in.source, peek.next, s, in.scope, &scratch);
+        expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
         if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
-        op = operand_value(e.value, in.final_pass, peek.next);
+        op = operand_value(e.value, final_pass, peek.next);
         if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
-        mode   = addr_mode_imm;
-        cursor = e.next;
+        mode  = addr_mode_imm;
+        after = e.next;
     }
     else if (peek.token.type == lexeme_type_open_paren) {
-        expr_result e = expression_parse(in.source, peek.next, s, in.scope, &scratch);
+        expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
         if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
-        op = operand_value(e.value, in.final_pass, peek.next);
+        op = operand_value(e.value, final_pass, peek.next);
         if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
 
         // Closing shell: "(expr,X)" -> indexed-indirect; "(expr),Y" -> indirect-indexed;
         // "(expr)" -> indirect (JMP's ind16, or a CMOS zero-page indirect).
-        lexer_result a = lexer_next(in.source, e.next, operand_tokens);
+        lexer_result a = lexer_next(src, e.next, operand_tokens);
         if (a.token.type == lexeme_type_comma) {
-            lexer_result reg = lexer_next(in.source, a.next, operand_tokens);
+            lexer_result reg = lexer_next(src, a.next, operand_tokens);
             if (!is_register(reg.token, reg_x)) return parse_fail(assemble_error_bad_index_register, a.next);
-            lexer_result cp = lexer_next(in.source, reg.next, operand_tokens);
+            lexer_result cp = lexer_next(src, reg.next, operand_tokens);
             if (cp.token.type != lexeme_type_close_paren) return parse_fail(assemble_error_expected_close_paren, reg.next);
-            mode   = addr_mode_indx;
-            cursor = cp.next;
+            mode  = addr_mode_indx;
+            after = cp.next;
         }
         else if (a.token.type == lexeme_type_close_paren) {
-            lexer_result tail = lexer_next(in.source, a.next, operand_tokens);
+            lexer_result tail = lexer_next(src, a.next, operand_tokens);
             if (tail.token.type == lexeme_type_comma) {
-                lexer_result reg = lexer_next(in.source, tail.next, operand_tokens);
+                lexer_result reg = lexer_next(src, tail.next, operand_tokens);
                 if (!is_register(reg.token, reg_y)) return parse_fail(assemble_error_bad_index_register, tail.next);
-                mode   = addr_mode_indy;
-                cursor = reg.next;
+                mode  = addr_mode_indy;
+                after = reg.next;
             }
             else {
-                mode   = (opcode_def(m, addr_mode_ind16) != 0) ? addr_mode_ind16 : addr_mode_ind;
-                cursor = a.next;
+                mode  = (opcode_def(m, addr_mode_ind16) != 0) ? addr_mode_ind16 : addr_mode_ind;
+                after = a.next;
             }
         }
         else {
@@ -484,20 +487,20 @@ struct parse_result opcode_parse(mnemonic m, parse_input in, scopes *s, overlay 
         // Plain operand. First, a bare accumulator 'A' on a shift / rmw mnemonic.
         bool handled = false;
         if (is_register(peek.token, reg_a) && opcode_def(m, addr_mode_acc) != 0) {
-            lexer_result after_a = lexer_next(in.source, peek.next, operand_tokens);
+            lexer_result after_a = lexer_next(src, peek.next, operand_tokens);
             if (after_a.token.type == lexeme_type_terminator) {
                 mode    = addr_mode_acc;
-                cursor  = peek.next;
+                after   = peek.next;
                 handled = true;
             }
         }
         if (!handled) {
-            expr_result e = expression_parse(in.source, start, s, in.scope, &scratch);
+            expr_result e = expression_parse(src, start, &b->scopes, scope, &scratch);
             if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
-            op = operand_value(e.value, in.final_pass, start);
+            op = operand_value(e.value, final_pass, start);
             if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
 
-            index_result ix = consume_index(in.source, e.next);
+            index_result ix = consume_index(src, e.next);
             if (ix.error != assemble_error_none) return parse_fail(ix.error, ix.error_at);
 
             // A relative branch takes a bare target; everything else is zero-page/absolute.
@@ -507,7 +510,7 @@ struct parse_result opcode_parse(mnemonic m, parse_input in, scopes *s, overlay 
             else {
                 mode = resolve_direct(m, ix.reg, op.known, op.addr);
             }
-            cursor = ix.next;
+            after = ix.next;
         }
     }
 
@@ -515,38 +518,39 @@ struct parse_result opcode_parse(mnemonic m, parse_input in, scopes *s, overlay 
     if (cell == 0 || (cell & cmos) != 0) {            // NMOS target: a CMOS-only encoding is unavailable
         return parse_fail(assemble_error_bad_addressing_mode, start);
     }
-    overlay_emit_u8(o, (uint8_t)(cell & 0xFF));
+    overlays_emit_u8(&b->overlays, overlay, (uint8_t)(cell & 0xFF));
 
     uint32_t width = mode_operand_bytes(mode);
     if (width == 1) {
         if (mode == addr_mode_rel) {
             uint8_t off = 0;
             if (op.known) {
-                int64_t delta = op.addr - (int64_t)(o->pc + 1);   // from the address after the instruction
-                if (in.final_pass && (delta < -128 || delta > 127)) {
+                // From the address after the instruction (the offset byte we are about to emit).
+                int64_t delta = op.addr - (int64_t)(overlays_pc(&b->overlays, overlay) + 1);
+                if (final_pass && (delta < -128 || delta > 127)) {
                     return parse_fail(assemble_error_branch_out_of_range, start);
                 }
                 off = (uint8_t)(int8_t)delta;
             }
-            overlay_emit_u8(o, off);
+            overlays_emit_u8(&b->overlays, overlay, off);
         }
         else {
             int64_t lo = (mode == addr_mode_imm) ? -128 : 0;   // immediates may be written signed (#-1)
-            if (op.known && in.final_pass && (op.addr < lo || op.addr > 0xFF)) {
+            if (op.known && final_pass && (op.addr < lo || op.addr > 0xFF)) {
                 return parse_fail(assemble_error_value_out_of_range, start);
             }
-            overlay_emit_u8(o, (uint8_t)(op.addr & 0xFF));
+            overlays_emit_u8(&b->overlays, overlay, (uint8_t)(op.addr & 0xFF));
         }
     }
     else if (width == 2) {
-        if (op.known && in.final_pass && (op.addr < 0 || op.addr > 0xFFFF)) {
+        if (op.known && final_pass && (op.addr < 0 || op.addr > 0xFFFF)) {
             return parse_fail(assemble_error_value_out_of_range, start);
         }
-        overlay_emit_u16(o, (uint16_t)(op.addr & 0xFFFF));
+        overlays_emit_u16(&b->overlays, overlay, (uint16_t)(op.addr & 0xFFFF));
     }
 
     // The separator follows; carry forward whether the operand was a forward reference.
-    parse_result r = require_separator(in.source, cursor);
+    parse_result r = require_separator(src, after);
     r.unresolved = op.unresolved;
     return r;
 }

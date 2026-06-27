@@ -7,16 +7,18 @@ void baron_init(baron *b)
 {
     RC_ASSERT(b != NULL);
     scopes_init(&b->scopes);
-    scopes_make_root(&b->scopes);   // the root is scope index 0
-    b->code_arena = rc_arena_make_default();
-    overlay_init(&b->overlay, &b->code_arena);
+    scopes_make_root(&b->scopes);          // the root is scope index 0
+    overlays_init(&b->overlays);
+    overlays_make_default(&b->overlays);   // the default is overlay index 0
+    source_files_init(&b->source_files);
 }
 
 void baron_deinit(baron *b)
 {
     RC_ASSERT(b != NULL);
     scopes_deinit(&b->scopes);
-    rc_arena_deinit(&b->code_arena);
+    overlays_deinit(&b->overlays);
+    source_files_deinit(&b->source_files);
 }
 
 

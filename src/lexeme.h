@@ -133,12 +133,11 @@ typedef struct lexeme_register {
 // types are only forward-declared here: a function-pointer declaration may use incomplete
 // types by value, so this header stays free of any assembler include. Only the file that builds
 // the token table and calls the handler (assemble.c) needs the complete types.
-struct parse_input;
-struct parse_result;
-struct scopes;
-struct overlay;
+typedef struct baron baron;
+typedef struct parse_result parse_result;
 typedef struct lexeme_keyword {
-    struct parse_result (*handle)(struct parse_input in, struct scopes *s, struct overlay *o, rc_arena scratch);
+    parse_result (*handle)(baron *b, uint32_t source, uint32_t overlay,
+                           uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
 } lexeme_keyword;
 
 

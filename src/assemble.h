@@ -1,14 +1,14 @@
 #ifndef BARON_ASSEMBLE_H_
 #define BARON_ASSEMBLE_H_
 
-#include "scopes.h"
-#include "overlay.h"
-#include "richc/bytes.h"
+#include "richc/bytes.h"   // rc_view_bytes, rc_str
+#include "richc/arena.h"   // rc_arena (taken by value)
 
 
-// The assembler: parse 6502 source from an rc_str, lay down object code in the default
-// overlay, define labels and symbols, and run passes until everything settles. No file
-// loading yet - INCLUDE brings that later.
+// The assembler: parse 6502 source, lay down object code in the default overlay, define labels
+// and symbols, and run passes until everything settles. The managers it works through (scopes,
+// overlays, source files) live in `baron`, which the entry points need only by pointer.
+typedef struct baron baron;
 
 typedef enum assemble_error {
     assemble_error_none,
@@ -29,6 +29,7 @@ typedef enum assemble_error {
     assemble_error_undefined_symbol,
     assemble_error_expression,             // a parse error inside an operand expression
     assemble_error_no_convergence,
+    assemble_error_source_load,            // a source file could not be read
 } assemble_error;
 
 typedef struct assemble_result {
@@ -38,11 +39,13 @@ typedef struct assemble_result {
     uint32_t       error_at;  // source offset of the error (when error != none)
 } assemble_result;
 
-// Assemble source into the overlay o, resolving symbols against the scopes s, running passes
-// until labels and forward references settle (or reporting non-convergence). scratch is a
-// working arena, taken by value: assemble leaves the caller's copy untouched. The returned code
-// view points into o's object-code arena and stays valid until the next assemble into o.
-assemble_result assemble(scopes *s, overlay *o, rc_str source, rc_arena scratch);
+// Assemble a source into b's default overlay, running passes until labels and forward references
+// settle (or reporting non-convergence). Each entry point caches its source as a source file in
+// b (the text under a name, or a loaded file) and then runs the shared pass loop from that source
+// index. scratch is a working arena taken by value, so the caller's copy is left untouched. The
+// returned code view points into b's object-code arena and stays valid until the next assemble.
+assemble_result assemble_string(baron *b, rc_str name, rc_str text, rc_arena scratch);
+assemble_result assemble_file(baron *b, rc_str path, rc_arena scratch);
 
 rc_str assemble_error_name(assemble_error e);
 
