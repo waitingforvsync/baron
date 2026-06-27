@@ -89,6 +89,13 @@ value value_make_error(value_error e);
 value value_make_range(value_range r);
 value value_make_list(rc_view_value items);    // wraps the view; does not copy
 
+// Deep-copy v into arena so it can outlive the (scratch) arena it was built in. A value
+// is a non-owning handle, so a plain copy still points at the old backing; this is the
+// deliberate promotion across the scratch-to-permanent boundary. Scalars (none, numeric,
+// range, error) have no backing and copy as-is; a string copies its bytes; a list copies
+// its element storage and recurses into each element.
+value value_make_copy(value v, rc_arena *arena);
+
 // Range builders. They take the (already evaluated) endpoint values and own all the
 // range semantics: step inference, the second-element/stepped form (rhs is a range),
 // exclusivity, and validation. Each returns a range value, or a propagating error

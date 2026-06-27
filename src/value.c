@@ -40,6 +40,34 @@ value value_make_list(rc_view_value items)
 }
 
 
+value value_make_copy(value v, rc_arena *arena)
+{
+    switch (v.type) {
+        case value_type_none:
+        case value_type_numeric:
+        case value_type_range:
+        case value_type_error:
+            return v;   // wholly inline: nothing to deep-copy
+
+        case value_type_string:
+            // Copy the bytes so the copy no longer aliases the source/scratch text.
+            return value_make_string(rc_mstr_from_str(v.string, v.string.len, arena).view);
+
+        case value_type_list: {
+            // make_copy gives an arena-backed array of the (shallow) handles; deep-copy each
+            // element in place so nested lists and strings come along too.
+            rc_array_value out = rc_array_value_make_copy(v.list, v.list.num, arena);
+            for (uint32_t i = 0; i < out.num; i++) {
+                rc_array_value_set(&out, i, value_make_copy(rc_view_value_get(v.list, i), arena));
+            }
+            return value_make_list(out.view);
+        }
+    }
+
+    RC_UNREACHABLE();
+}
+
+
 // A range endpoint is a whole number. Pull the int64 out of v, or hand back the
 // reason it cannot be one as an error value (none means success, *out is set). An
 // error operand passes straight through so it can propagate.
@@ -440,6 +468,56 @@ RC_TEST(value, error_names)
     RC_CHECK(value_error_name(value_error_none), ==, RC_STR("none"));
     RC_CHECK(value_error_name(value_error_divide_by_zero), ==, RC_STR("divide_by_zero"));
     RC_CHECK(value_error_name(value_error_not_implemented), ==, RC_STR("not_implemented"));
+}
+
+RC_TEST(value, clone_string_survives_scratch)
+{
+    rc_arena permanent = rc_arena_make_default();
+    rc_arena scratch   = rc_arena_make_default();
+
+    // Build a string in scratch, then promote it into the permanent arena.
+    rc_mstr m = rc_mstr_make(8, &scratch);
+    rc_mstr_append(&m, RC_STR("hello"), &scratch);
+    value original = value_make_string(m.view);
+    value cloned   = value_make_copy(original, &permanent);
+
+    // Wipe scratch out from under the original: the clone keeps its own backing.
+    rc_arena_reset(&scratch);
+    RC_CHECK(cloned.string, ==, RC_STR("hello"));
+    RC_CHECK_TRUE(cloned.string.data != original.string.data);   // distinct storage (pointers only, not derefs)
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&permanent);
+}
+
+RC_TEST(value, clone_list_is_deep)
+{
+    rc_arena permanent = rc_arena_make_default();
+    rc_arena scratch   = rc_arena_make_default();
+
+    // {1, {2, 3}} built entirely in scratch.
+    rc_array_value inner = {0};
+    rc_array_value_push(&inner, value_make_numeric(2), &scratch);
+    rc_array_value_push(&inner, value_make_numeric(3), &scratch);
+    rc_array_value outer = {0};
+    rc_array_value_push(&outer, value_make_numeric(1), &scratch);
+    rc_array_value_push(&outer, value_make_list(inner.view), &scratch);
+    value cloned = value_make_copy(value_make_list(outer.view), &permanent);
+
+    // An independently-built equal value, in the permanent arena.
+    rc_array_value ref_inner = {0};
+    rc_array_value_push(&ref_inner, value_make_numeric(2), &permanent);
+    rc_array_value_push(&ref_inner, value_make_numeric(3), &permanent);
+    rc_array_value ref_outer = {0};
+    rc_array_value_push(&ref_outer, value_make_numeric(1), &permanent);
+    rc_array_value_push(&ref_outer, value_make_list(ref_inner.view), &permanent);
+    value reference = value_make_list(ref_outer.view);
+
+    rc_arena_reset(&scratch);   // strand the source storage
+    RC_CHECK_TRUE(value_is_equal(cloned, reference));
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&permanent);
 }
 
 RC_TEST(value, list_is_rc_view_value)

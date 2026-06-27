@@ -11,6 +11,13 @@ add_executable(baron
     scopes.h
     expression.c
     expression.h
+    opcodes.c
+    opcodes.h
+    overlay.c
+    overlay.h
+    assemble.c
+    assemble.h
+    assemble_internal.h
     baron.c
     baron.h
 )

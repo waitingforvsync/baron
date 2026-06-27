@@ -16,6 +16,7 @@ void scopes_init(scopes *s)
     s->node_arena   = rc_arena_make_default();
     s->symbol_arena = rc_arena_make_default();
     s->child_arena  = rc_arena_make_default();
+    s->value_arena  = rc_arena_make_default();
     s->nodes        = rc_array_scope_node_make(0, &s->node_arena);
     s->symbol_pool  = rc_trie_symbol_pool_make(0, &s->symbol_arena);
     s->child_pool   = rc_trie_child_pool_make(0, &s->child_arena);
@@ -27,6 +28,7 @@ void scopes_deinit(scopes *s)
     rc_arena_deinit(&s->node_arena);
     rc_arena_deinit(&s->symbol_arena);
     rc_arena_deinit(&s->child_arena);
+    rc_arena_deinit(&s->value_arena);
 }
 
 uint32_t scopes_make_root(scopes *s)
@@ -73,6 +75,50 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
     return child_index;
 }
 
+uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
+{
+    RC_ASSERT(s != NULL);
+    RC_ASSERT(name.len > 0 && is_leaf_name(name));
+
+    rc_trie_child *kids  = &RC_AT(s->nodes, parent_index).children;
+    uint32_t       found = rc_trie_child_find(kids, name);
+    if (found != RC_INDEX_NONE) {
+        return rc_trie_child_value_get(kids, found);
+    }
+    return scopes_make_child(s, parent_index, name);
+}
+
+uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, uint32_t site)
+{
+    RC_ASSERT(s != NULL);
+
+    // Turn the site into a key no user identifier can spell: a leading '{' (not an
+    // identifier-start char) followed by the decimal offset. Build it on the stack to
+    // probe the child map; only persist the bytes if we actually have to make the scope.
+    char     tmp[12];
+    uint32_t i = sizeof tmp;
+    uint32_t n = site;
+    do {
+        tmp[--i] = (char)('0' + n % 10);
+        n /= 10;
+    } while (n != 0);
+    tmp[--i] = '{';
+    rc_str probe = rc_str_make(tmp + i, sizeof tmp - i);
+
+    rc_trie_child *kids  = &RC_AT(s->nodes, parent_index).children;
+    uint32_t       found = rc_trie_child_find(kids, probe);
+    if (found != RC_INDEX_NONE) {
+        return rc_trie_child_value_get(kids, found);
+    }
+
+    // First sighting (pass one): copy the key into a permanent arena and register it.
+    char *buf = rc_arena_alloc(&s->child_arena, probe.len);
+    for (uint32_t k = 0; k < probe.len; k++) {
+        buf[k] = probe.data[k];
+    }
+    return scopes_make_child(s, parent_index, rc_str_make(buf, probe.len));
+}
+
 bool scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v)
 {
     RC_ASSERT(s != NULL);
@@ -81,12 +127,16 @@ bool scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v)
     rc_trie_symbol *syms  = &RC_AT(s->nodes, scope_index).symbols;
     uint32_t        found = rc_trie_symbol_find(syms, name);
     if (found != RC_INDEX_NONE) {
-        // Already bound: say whether this write actually shifts the value.
-        bool changed = !value_is_equal(rc_trie_symbol_value_get(syms, found), v);
-        rc_trie_symbol_value_set(syms, found, v);
-        return changed;
+        // Already bound: skip the clone when the value has not actually shifted, both to
+        // answer the convergence question and to keep the value arena from growing every
+        // pass. Only a genuine change pays for fresh permanent backing.
+        if (value_is_equal(rc_trie_symbol_value_get(syms, found), v)) {
+            return false;
+        }
+        rc_trie_symbol_value_set(syms, found, value_make_copy(v, &s->value_arena));
+        return true;
     }
-    rc_trie_symbol_add(syms, name, v, &s->symbol_arena);
+    rc_trie_symbol_add(syms, name, value_make_copy(v, &s->value_arena), &s->symbol_arena);
     return false;   // brand new, so there was nothing to change
 }
 
@@ -238,6 +288,37 @@ RC_TEST_STEP(scopes, nested_path_and_shadowing, fix)
     // Shadowing: from b a bare x is b's; from a it falls through to the root's.
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, b, RC_STR("x")), value_make_numeric(2.0)));
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, a, RC_STR("x")), value_make_numeric(1.0)));
+}
+
+RC_TEST_STEP(scopes, set_symbol_clones_into_permanent, fix)
+{
+    // A value built in a throwaway arena must survive that arena being wiped, because
+    // scopes_set_symbol deep-copies it into the scopes' own value arena.
+    rc_arena scratch = rc_arena_make_default();
+    rc_mstr  m = rc_mstr_make(8, &scratch);
+    rc_mstr_append(&m, RC_STR("zip"), &scratch);
+    RC_CHECK_FALSE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("s"), value_make_string(m.view)));
+
+    rc_arena_reset(&scratch);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("s")),
+                                 value_make_string(RC_STR("zip"))));
+    rc_arena_deinit(&scratch);
+}
+
+RC_TEST_STEP(scopes, get_or_make_child_is_idempotent, fix)
+{
+    // Re-walking the same source (named or anonymous) lands on the same scope.
+    uint32_t a = scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("blk"));
+    RC_CHECK(scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("blk")), ==, a);
+
+    uint32_t p = scopes_get_or_make_child_at(&fix->scopes, fix->root, 42);
+    RC_CHECK(scopes_get_or_make_child_at(&fix->scopes, fix->root, 42), ==, p);
+    RC_CHECK_TRUE(p != scopes_get_or_make_child_at(&fix->scopes, fix->root, 99));   // different site, different scope
+
+    // Bindings in the reused scope persist (this is what keeps multi-pass convergence honest).
+    scopes_set_symbol(&fix->scopes, a, RC_STR("inner"), value_make_numeric(7));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("blk.inner")),
+                                 value_make_numeric(7)));
 }
 
 #endif // BARON_TESTS

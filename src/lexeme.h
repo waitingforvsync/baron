@@ -40,8 +40,13 @@ typedef enum lexeme_type {
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)
     lexeme_type_range,                  // '..' / '..<', the range operator
+    lexeme_type_opcode,                 // a 6502 mnemonic (carries the mnemonic id)
+    lexeme_type_keyword,                // a statement directive with a baked-in handler (ORG, '.')
+    lexeme_type_hash,                   // '#', the immediate-operand marker
+    lexeme_type_assign,                 // '=', symbol definition
+    lexeme_type_register,               // A / X / Y, in opcode-operand context
     lexeme_type_error,
-    // deferred until later milestones: keyword, constant
+    // deferred until later milestones: constant
 } lexeme_type;
 
 
@@ -106,8 +111,34 @@ typedef struct lexeme_range {
 } lexeme_range;
 
 
+// A 6502 mnemonic. id is a `mnemonic` enum value, kept as a uint16_t because lexeme.h must
+// not depend on opcodes.h; the operand handler decodes it.
+typedef struct lexeme_opcode {
+    uint16_t id;
+} lexeme_opcode;
+
+
+// A 6502 register named in an operand: the accumulator A, or an index register X / Y. Only
+// meaningful in opcode-operand context (its own token table), where A marks accumulator mode
+// and X / Y mark the index.
+typedef enum reg_name { reg_a, reg_x, reg_y } reg_name;
+typedef struct lexeme_register {
+    reg_name which;
+} lexeme_register;
+
+
+// A statement-level directive (ORG, the '.' label introducer, the '{' scope opener, and later
+// INCLUDE / IF / FOR). The handler parses the rest of the statement itself and returns its
+// outcome by value, so the dispatcher just calls it. Its assembler input/output and container
+// types are only forward-declared here: a function-pointer declaration may use incomplete
+// types by value, so this header stays free of any assembler include. Only the file that builds
+// the token table and calls the handler (assemble.c) needs the complete types.
+struct parse_input;
+struct parse_result;
+struct scopes;
+struct overlay;
 typedef struct lexeme_keyword {
-    // The handler will be a function pointer to the keyword's handler
+    struct parse_result (*handle)(struct parse_input in, struct scopes *s, struct overlay *o, rc_arena scratch);
 } lexeme_keyword;
 
 
@@ -128,6 +159,8 @@ typedef struct lexeme {
         lexeme_binary_op binary_op;
         lexeme_function function;
         lexeme_range range;
+        lexeme_opcode opcode;
+        lexeme_register reg;
         lexeme_keyword keyword;
         lexeme_error error;
     };

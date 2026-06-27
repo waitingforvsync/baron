@@ -56,7 +56,8 @@ typedef struct scope_node {
 typedef struct scopes {
     rc_arena node_arena;     // backs `nodes`
     rc_arena symbol_arena;   // backs `symbol_pool`
-    rc_arena child_arena;    // backs `child_pool`
+    rc_arena child_arena;    // backs `child_pool` and synthetic anonymous-scope keys
+    rc_arena value_arena;    // backs the deep-cloned backing of stored symbol values
     rc_array_scope_node nodes;        // scope index 0 is the root
     rc_trie_symbol_pool symbol_pool;  // shared by every node's `symbols` trie
     rc_trie_child_pool  child_pool;   // shared by every node's `children` trie
@@ -75,12 +76,27 @@ uint32_t scopes_make_root(scopes *s);
 // empty name ({0}) gives an anonymous scope that only its index can reach.
 uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name);
 
+// Get the child of parent_index named `name`, making it if it does not exist yet.
+// Idempotent, so re-walking the same source on a later pass lands on the same scope
+// (and so keeps its symbol bindings) rather than spawning a duplicate. `name` must be
+// a non-empty leaf and is stored as-is, so its bytes must outlive the scopes (a view
+// into the source is fine).
+uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name);
+
+// As above but for an anonymous (unnamed in source) scope, identified by a stable
+// integer `site` - the source offset of its '{'. The site is turned into a synthetic
+// child-map key that no user identifier can spell, so anonymous scopes also keep a
+// stable identity across passes. The key's bytes are owned by the scopes.
+uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, uint32_t site);
+
 // Set leaf `name` to `v` in scope_index - `name` is a plain symbol name, never a
-// dotted path. Returns whether we changed an existing binding: true only if the
-// symbol was already defined and its old value differs from `v`. A brand new
-// symbol (or a write that lands the same value again) returns false. Either way
-// `name` ends up bound to `v`. The "did it change" answer is what a later pass
-// watches to decide whether things have settled.
+// dotted path. The value is deep-cloned into the scopes' permanent arena, so a value
+// built in a caller's scratch arena may be passed safely. Returns whether we changed
+// an existing binding: true only if the symbol was already defined and its old value
+// differs from `v` (compared structurally); a brand new symbol, or a write that lands
+// the same value again, returns false and clones nothing. Either way `name` ends up
+// bound to `v`. The "did it change" answer is what a later pass watches to decide
+// whether things have settled.
 bool scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v);
 
 // Remove leaf `name` (a plain symbol name, not a path) from scope_index. Returns

@@ -9,7 +9,7 @@ BeebAsm 1.x was hastily written many years ago with one goal: to allow BBC BASIC
 Baron is a ground-up redesign and rewrite of BeebAsm, in response to some of the limitations of the original BeebAsm. While much of the original syntax is retained, breaking free of the constraints of BBC BASIC means that a number of new features can be accommodated in a modern style, including strings, lists, named scopes, assisted memory allocation, profiling, user-defined functions, and much more.
 
 ## Building ##
-Baron is written in C17 and builds with [richc](https://github.com/waitingforvsync/richc) as its foundation library, included as a git submodule. You will need Clang, CMake (3.21 or newer) and Ninja.
+Baron is written in C17 and builds with [richc](https://github.com/waitingforvsync/richc) as its foundation library, included as a git submodule. It's tested with Clang, CMake and Ninja but will hopefully build with any major compiler.
 
 Clone with submodules, or initialise them in an existing clone:
 
