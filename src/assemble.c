@@ -333,15 +333,14 @@ static parse_result parse_scope(baron *b, uint32_t source, uint32_t overlay, uin
 }
 
 
-// ---- the multi-pass driver ----
-
-static parse_result run_pass(baron *b, uint32_t source, rc_arena scratch, bool final_pass)
+// A whole source file - the largest parsable item: parse its statements and require they run out
+// at end of input. A leftover '}' is a stray close brace. (parse_scope is a braced block within a
+// file; parse_block is the shared statement loop both rest on.)
+static parse_result parse_file(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
-    overlays_reset_all(&b->overlays);
-    parse_result r = parse_block(b, source, overlays_default, /*scope*/ 0, /*cursor*/ 0, final_pass, scratch);
+    parse_result r = parse_block(b, source, overlay, scope, cursor, final_pass, scratch);
     if (r.error != assemble_error_none) return r;
 
-    // The whole file must run out at end of input; a leftover '}' is a stray close brace.
     rc_str       src = source_files_text(&b->source_files, source);
     lexer_result lr  = lexer_next(src, r.next, statement_tokens);
     if (lr.token.type == lexeme_type_close_brace) {
@@ -349,6 +348,15 @@ static parse_result run_pass(baron *b, uint32_t source, rc_arena scratch, bool f
         r.error_at = lr.next;
     }
     return r;
+}
+
+
+// ---- the multi-pass driver ----
+
+static parse_result run_pass(baron *b, uint32_t source, rc_arena scratch, bool final_pass)
+{
+    overlays_reset_all(&b->overlays);
+    return parse_file(b, source, overlays_default, /*scope*/ 0, /*cursor*/ 0, final_pass, scratch);
 }
 
 // The shared core: run passes over the source already cached at index `source` in b, until the
