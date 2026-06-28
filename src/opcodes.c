@@ -435,12 +435,13 @@ static index_result consume_index(rc_str source, uint32_t cursor)
     };
 }
 
-struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
-                                 uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+struct parse_result opcode_parse(baron *b, mnemonic m, source_pos at,
+                                 uint32_t scope, parse_flags flags, rc_arena scratch)
 {
+    uint32_t source = at.source;
     uint32_t overlay = b->current_overlay;   // the overlay we emit into now (assembler-wide state)
     rc_str src = source_files_text(&b->source_files, source);
-    uint32_t start = cursor;              // just past the mnemonic
+    uint32_t start = at.offset;           // just past the mnemonic
     addr_mode mode;
     int_argument arg = {.type = int_argument_type_known};
     uint32_t  after;                       // past the operand shell, before the separator
@@ -465,10 +466,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
         if (e.error != expr_error_none) {
             return parse_fail(assemble_error_expression, e.error_at);
         }
-        arg = int_argument_make(e.value, final_pass, peek.next);
-        if (arg.type == int_argument_type_error) {
-            return parse_fail(arg.error, arg.error_at);
-        }
+        arg = int_argument_make(e.value, flags.final, peek.next);
         mode = addr_mode_imm;
         after = e.next;
     }
@@ -477,10 +475,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
         if (e.error != expr_error_none) {
             return parse_fail(assemble_error_expression, e.error_at);
         }
-        arg = int_argument_make(e.value, final_pass, peek.next);
-        if (arg.type == int_argument_type_error) {
-            return parse_fail(arg.error, arg.error_at);
-        }
+        arg = int_argument_make(e.value, flags.final, peek.next);
 
         // Closing shell: "(expr,X)" -> indexed-indirect; "(expr),Y" -> indirect-indexed;
         // "(expr)" -> indirect (JMP's ind16, or a CMOS zero-page indirect).
@@ -532,10 +527,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
             if (e.error != expr_error_none) {
                 return parse_fail(assemble_error_expression, e.error_at);
             }
-            arg = int_argument_make(e.value, final_pass, start);
-            if (arg.type == int_argument_type_error) {
-                return parse_fail(arg.error, arg.error_at);
-            }
+            arg = int_argument_make(e.value, flags.final, start);
 
             index_result ix = consume_index(src, e.next);
             if (ix.error != assemble_error_none) {
@@ -553,6 +545,17 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
         }
     }
 
+    // A dead IF branch is parsed for structure only: the operand has been consumed, so just step over
+    // the separator. Everything below - the value error, encoding, emission, range checks and the
+    // forward-reference flag - is the active path.
+    if (!flags.active) {
+        return require_separator(src, after);
+    }
+
+    if (arg.type == int_argument_type_error) {
+        return parse_fail(arg.error, arg.error_at);
+    }
+
     uint16_t cell = opcode_def(m, mode);
     if (cell == 0 || (cell & cmos) != 0) {            // NMOS target: a CMOS-only encoding is unavailable
         return parse_fail(assemble_error_bad_addressing_mode, start);
@@ -566,7 +569,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
             if (arg.type == int_argument_type_known) {
                 // From the address after the instruction (the offset byte we are about to emit).
                 int64_t delta = arg.value - (int64_t)(overlays_pc(&b->overlays, overlay) + 1);
-                if (final_pass && (delta < -128 || delta > 127)) {
+                if (flags.final && (delta < -128 || delta > 127)) {
                     return parse_fail(assemble_error_branch_out_of_range, start);
                 }
                 off = (uint8_t)(int8_t)delta;
@@ -575,14 +578,14 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
         }
         else {
             int64_t lo = (mode == addr_mode_imm) ? -128 : 0;   // immediates may be written signed (#-1)
-            if (arg.type == int_argument_type_known && final_pass && (arg.value < lo || arg.value > 0xFF)) {
+            if (arg.type == int_argument_type_known && flags.final && (arg.value < lo || arg.value > 0xFF)) {
                 return parse_fail(assemble_error_value_out_of_range, start);
             }
             overlays_emit_u8(&b->overlays, overlay, (uint8_t)(arg.value & 0xFF));
         }
     }
     else if (width == 2) {
-        if (arg.type == int_argument_type_known && final_pass && (arg.value < 0 || arg.value > 0xFFFF)) {
+        if (arg.type == int_argument_type_known && flags.final && (arg.value < 0 || arg.value > 0xFFFF)) {
             return parse_fail(assemble_error_value_out_of_range, start);
         }
         overlays_emit_u16(&b->overlays, overlay, (uint16_t)(arg.value & 0xFFFF));

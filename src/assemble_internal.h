@@ -8,6 +8,16 @@
 // The assembler's internal parsing vocabulary, shared between assemble.c (the statement loop and
 // the directives) and opcodes.c (instruction parsing). Not part of the public assemble.h surface.
 
+// Per-statement parse context, threaded by value alongside the cursor. `final` arms the deferred
+// checks (range, undefined-on-final) on the settling pass. `active` says whether a statement's
+// effects apply: inside a false IF branch it is cleared, so the statement is parsed for structure
+// (to find the matching ENDIF) but emits nothing, binds nothing and raises nothing. The two are
+// independent, hence a struct not a bool.
+typedef struct parse_flags {
+    bool final;
+    bool active;
+} parse_flags;
+
 // The outputs of a parse, returned by value for the caller to fold into its own running state.
 // `next` is the cursor past what was consumed; `error`/`error_at` the first hard error;
 // `unresolved` that some operand referenced a not-yet-defined symbol; `changed` that some existing

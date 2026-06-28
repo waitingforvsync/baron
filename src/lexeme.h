@@ -36,6 +36,9 @@ typedef enum lexeme_type {
     lexeme_type_close_bracket,
     lexeme_type_open_brace,
     lexeme_type_close_brace,
+    lexeme_type_elif,                   // ELIF / ELSE / ENDIF: bare markers the IF chain reads, and
+    lexeme_type_else,                   //   that close a statement block from the outside (like '}')
+    lexeme_type_endif,
     lexeme_type_unary_op,
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)
@@ -135,9 +138,11 @@ typedef struct lexeme_register {
 // the token table and calls the handler (assemble.c) needs the complete types.
 typedef struct baron baron;
 typedef struct parse_result parse_result;
+typedef struct parse_flags parse_flags;
+typedef struct source_pos source_pos;
 typedef struct lexeme_keyword {
-    parse_result (*handle)(baron *b, uint32_t source, uint32_t scope,
-                           uint32_t cursor, bool final_pass, rc_arena scratch);
+    parse_result (*handle)(baron *b, source_pos at, uint32_t scope,
+                           parse_flags flags, rc_arena scratch);
 } lexeme_keyword;
 
 

@@ -13,17 +13,18 @@
 // Mutual recursion: a label or a scope reopens the statement loop, and the loop reaches the
 // handlers that may do so. The directive handlers are referenced by the statement table.
 // All the parse functions take the same head: the baron (its scopes / overlays / source files,
-// and the current overlay), then the current source and scope index, the cursor, and final_pass,
-// then scratch by value. Each fetches its source rc_str from b->source_files at the targ.
-static parse_result handle_org(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result handle_skip(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result handle_skipto(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result handle_align(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result parse_scope(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+// and the current overlay), then the current source and scope index, the cursor, and the parse
+// flags, then scratch by value. Each fetches its source rc_str from b->source_files at the top.
+static parse_result handle_org(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_skip(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_skipto(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_align(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_label(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_open_brace(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_if(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result parse_block(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result parse_scope(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result parse_one_statement(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch);
 
 
 // int_argument_make is shared with opcodes.c (both declared in assemble.h); it needs no token
@@ -134,6 +135,10 @@ static const token statement_token_entries[] = {
     {RC_STR("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
     {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
+    {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
+    {RC_STR("elif"),   {.type = lexeme_type_elif}},
+    {RC_STR("else"),   {.type = lexeme_type_else}},
+    {RC_STR("endif"),  {.type = lexeme_type_endif}},
     {RC_STR("."),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_label}}},
     {RC_STR("{"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_open_brace}}},
     {RC_STR("}"),   {.type = lexeme_type_close_brace}},
@@ -165,6 +170,25 @@ static bool is_open_brace(lexeme lx)
     return lx.type == lexeme_type_keyword && lx.keyword.handle == handle_open_brace;
 }
 
+static bool is_elif(lexeme lx)  { return lx.type == lexeme_type_elif; }
+static bool is_else(lexeme lx)  { return lx.type == lexeme_type_else; }
+static bool is_endif(lexeme lx) { return lx.type == lexeme_type_endif; }
+
+// The tokens that close a statement block from the outside: a '}' or one of the IF-chain keywords.
+// parse_block stops at one and leaves it for its caller (a scope, the file, or handle_if) to read.
+static bool is_block_terminator(lexeme lx)
+{
+    return lx.type == lexeme_type_close_brace || is_elif(lx) || is_else(lx) || is_endif(lx);
+}
+
+// The same source position with the cursor moved to `offset` - for the common "recurse a little
+// further along the same source" call.
+static source_pos at_cursor(source_pos at, uint32_t offset)
+{
+    at.offset = offset;
+    return at;
+}
+
 // Fold a sub-parse's outcome into r: take its cursor, OR its flags, adopt its (first) error.
 static parse_result fold(parse_result r, parse_result sub)
 {
@@ -181,121 +205,139 @@ static parse_result fold(parse_result r, parse_result sub)
 
 // ---- directive statements ----
 
-static parse_result handle_org(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_org(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, source);
+    uint32_t source = at.source, cursor = at.offset;
+    rc_str   src    = source_files_text(&b->source_files, source);
     expr_result e = expression_parse(src, cursor, &b->scopes, scope, &scratch);
     if (e.error != expr_error_none) {
         return parse_fail(assemble_error_expression, e.error_at);
     }
 
-    int_argument arg = int_argument_make(e.value, final_pass, cursor);
-    if (arg.type == int_argument_type_error) {
-        return parse_fail(arg.error, arg.error_at);
+    // A dead branch parses the operand but applies nothing - all the effect lives in this block.
+    bool unresolved = false;
+    if (flags.active) {
+        int_argument arg = int_argument_make(e.value, flags.final, cursor);
+        if (arg.type == int_argument_type_error) {
+            return parse_fail(arg.error, arg.error_at);
+        }
+        if (arg.type == int_argument_type_known) {
+            overlays_org(&b->overlays, b->current_overlay, (uint32_t)(arg.value & 0xFFFF));
+        }
+        // An unknown ORG leaves pc as-is this pass; an unresolved argument forces another pass.
+        unresolved = (arg.type == int_argument_type_unresolved);
     }
 
-    if (arg.type == int_argument_type_known) {
-        overlays_org(&b->overlays, b->current_overlay, (uint32_t)(arg.value & 0xFFFF));
-    }
-
-    // An unknown ORG leaves pc as-is this pass; an unresolved argument forces another pass.
     parse_result r = require_separator(src, e.next);
-    r.unresolved = (arg.type == int_argument_type_unresolved);
+    r.unresolved = unresolved;
     return r;
 }
 
 // SKIP n - pad the object code with n zero bytes (advancing pc by n). A negative count would
 // rewind the pointer, which we cannot do; the layout-dependent check is deferred to the final pass.
-static parse_result handle_skip(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_skip(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, source);
+    uint32_t source = at.source, cursor = at.offset;
+    rc_str   src    = source_files_text(&b->source_files, source);
     expr_result e = expression_parse(src, cursor, &b->scopes, scope, &scratch);
     if (e.error != expr_error_none) {
         return parse_fail(assemble_error_expression, e.error_at);
     }
 
-    int_argument arg = int_argument_make(e.value, final_pass, cursor);
-    if (arg.type == int_argument_type_error) {
-        return parse_fail(arg.error, arg.error_at);
-    }
-
-    if (arg.type == int_argument_type_known) {
-        if (arg.value < 0) {
-            if (final_pass) return parse_fail(assemble_error_skip_backwards, cursor);
-        } else {
-            overlays_skip(&b->overlays, b->current_overlay, (uint32_t) arg.value);
+    bool unresolved = false;
+    if (flags.active) {
+        int_argument arg = int_argument_make(e.value, flags.final, cursor);
+        if (arg.type == int_argument_type_error) {
+            return parse_fail(arg.error, arg.error_at);
         }
+        if (arg.type == int_argument_type_known) {
+            if (arg.value < 0) {
+                if (flags.final) return parse_fail(assemble_error_skip_backwards, cursor);
+            } else {
+                overlays_skip(&b->overlays, b->current_overlay, (uint32_t) arg.value);
+            }
+        }
+        unresolved = (arg.type == int_argument_type_unresolved);   // an unknown count emits nothing; forces another pass
     }
 
     parse_result r = require_separator(src, e.next);
-    r.unresolved = (arg.type == int_argument_type_unresolved);   // an unknown count emits nothing this pass; forces another
+    r.unresolved = unresolved;
     return r;
 }
 
 // SKIPTO addr - pad with zeroes until pc reaches addr. Being already past addr is an error,
 // deferred to the final pass since pc only settles once preceding forward references resolve.
-static parse_result handle_skipto(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_skipto(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, source);
+    uint32_t source = at.source, cursor = at.offset;
+    rc_str   src    = source_files_text(&b->source_files, source);
     expr_result e = expression_parse(src, cursor, &b->scopes, scope, &scratch);
     if (e.error != expr_error_none) {
         return parse_fail(assemble_error_expression, e.error_at);
     }
 
-    int_argument arg = int_argument_make(e.value, final_pass, cursor);
-    if (arg.type == int_argument_type_error) {
-        return parse_fail(arg.error, arg.error_at);
-    }
-
-    if (arg.type == int_argument_type_known) {
-        int64_t pc = (int64_t) overlays_pc(&b->overlays, b->current_overlay);
-        if (arg.value < pc) {
-            if (final_pass) return parse_fail(assemble_error_skip_backwards, cursor);
-        } else {
-            overlays_skip(&b->overlays, b->current_overlay, (uint32_t) (arg.value - pc));
+    bool unresolved = false;
+    if (flags.active) {
+        int_argument arg = int_argument_make(e.value, flags.final, cursor);
+        if (arg.type == int_argument_type_error) {
+            return parse_fail(arg.error, arg.error_at);
         }
+        if (arg.type == int_argument_type_known) {
+            int64_t pc = (int64_t) overlays_pc(&b->overlays, b->current_overlay);
+            if (arg.value < pc) {
+                if (flags.final) return parse_fail(assemble_error_skip_backwards, cursor);
+            } else {
+                overlays_skip(&b->overlays, b->current_overlay, (uint32_t) (arg.value - pc));
+            }
+        }
+        unresolved = (arg.type == int_argument_type_unresolved);
     }
 
     parse_result r = require_separator(src, e.next);
-    r.unresolved = (arg.type == int_argument_type_unresolved);
+    r.unresolved = unresolved;
     return r;
 }
 
 // ALIGN n - pad with zeroes until pc is a multiple of n. n < 1 is meaningless (and would divide
 // by zero), so it is an error; the modulo is only evaluated once we know n is sound.
-static parse_result handle_align(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_align(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, source);
+    uint32_t source = at.source, cursor = at.offset;
+    rc_str   src    = source_files_text(&b->source_files, source);
     expr_result e = expression_parse(src, cursor, &b->scopes, scope, &scratch);
     if (e.error != expr_error_none) {
         return parse_fail(assemble_error_expression, e.error_at);
     }
 
-    int_argument arg = int_argument_make(e.value, final_pass, cursor);
-    if (arg.type == int_argument_type_error) {
-        return parse_fail(arg.error, arg.error_at);
-    }
-
-    if (arg.type == int_argument_type_known) {
-        if (arg.value < 1) {
-            if (final_pass) return parse_fail(assemble_error_bad_alignment, cursor);
-        } else {
-            uint32_t n = (uint32_t) arg.value;
-            uint32_t rem = overlays_pc(&b->overlays, b->current_overlay) % n;
-            if (rem != 0) {
-                overlays_skip(&b->overlays, b->current_overlay, n - rem);
+    bool unresolved = false;
+    if (flags.active) {
+        int_argument arg = int_argument_make(e.value, flags.final, cursor);
+        if (arg.type == int_argument_type_error) {
+            return parse_fail(arg.error, arg.error_at);
+        }
+        if (arg.type == int_argument_type_known) {
+            if (arg.value < 1) {
+                if (flags.final) return parse_fail(assemble_error_bad_alignment, cursor);
+            } else {
+                uint32_t n   = (uint32_t) arg.value;
+                uint32_t rem = overlays_pc(&b->overlays, b->current_overlay) % n;
+                if (rem != 0) {
+                    overlays_skip(&b->overlays, b->current_overlay, n - rem);
+                }
             }
         }
+        unresolved = (arg.type == int_argument_type_unresolved);
     }
 
     parse_result r = require_separator(src, e.next);
-    r.unresolved = (arg.type == int_argument_type_unresolved);
+    r.unresolved = unresolved;
     return r;
 }
 
-static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_label(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, source);
+    uint32_t source = at.source, cursor = at.offset;
+    rc_str   src    = source_files_text(&b->source_files, source);
 
     // The label name. A name spelled exactly like a mnemonic would lex as that opcode (the same
     // limitation an assignment target has at statement start) - acceptable, and not worth a
@@ -306,24 +348,25 @@ static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint
     }
     rc_str name = nm.token.identifier.name;
 
-    // Bind name = current pc in the current scope; a moved label drives another pass, and a
-    // second definition of the same name here (a different source position) is a duplicate.    
-    symbol_status st = scopes_set_symbol(
-        &b->scopes,
-        scope,
-        name,
-        value_make_numeric((double)overlays_pc(&b->overlays, b->current_overlay)),
-        (source_pos) {source, cursor}
-    );
-
-    if (st == symbol_status_duplicate) {
-        return parse_fail(assemble_error_duplicate_symbol, cursor);
+    // Bind name = current pc in the current scope; a moved label drives another pass, and a second
+    // definition of the same name here (a different source position) is a duplicate. In a dead branch
+    // we instead REMOVE the name, clearing any binding a live earlier pass left behind.
+    parse_result r = {.next = nm.next};
+    if (flags.active) {
+        symbol_status st = scopes_set_symbol(
+            &b->scopes,
+            scope,
+            name,
+            value_make_numeric((double)overlays_pc(&b->overlays, b->current_overlay)),
+            at
+        );
+        if (st == symbol_status_duplicate) {
+            return parse_fail(assemble_error_duplicate_symbol, cursor);
+        }
+        r.changed = (st == symbol_status_changed);
+    } else {
+        r.changed = scopes_remove_symbol(&b->scopes, scope, name);
     }
-
-    parse_result r = {
-        .next = nm.next,
-        .changed = (st == symbol_status_changed)
-    };
 
     // What follows decides the label's shape. A '{' - optionally one separator away, so it may sit
     // on the next line - makes the label name a scope. Anything else is not the label's to parse: we
@@ -340,18 +383,134 @@ static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint
 
     if (is_open_brace(nb.token)) {
         uint32_t child = scopes_get_or_make_child(&b->scopes, scope, name);
-        return fold(r, parse_scope(b, source, child, nb.next, final_pass, scratch));
+        return fold(r, parse_scope(b, at_cursor(at, nb.next), child, flags, scratch));
     }
 
     return r;   // not a scope - leave the rest of the line to the parent parser
 }
 
-static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_open_brace(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     // The just-passed cursor gives the anonymous scope a stable per-pass identity, so re-walking it
     // on a later pass keeps the same bindings.
-    uint32_t child = scopes_get_or_make_child_at(&b->scopes, scope, (source_pos){ .source = source, .offset = cursor });
-    return parse_scope(b, source, child, cursor, final_pass, scratch);
+    uint32_t child = scopes_get_or_make_child_at(&b->scopes, scope, at);
+    return parse_scope(b, at, child, flags, scratch);
+}
+
+// IF cond ... ELIF cond ... ELSE ... ENDIF, evaluated each pass. IF does not open a scope: labels in
+// the live branch leak to the enclosing scope, and the construct must close (ENDIF) inside the same
+// scope it opened in. ELIF is just an IF in the else position (IF a x ELIF b y ELSE z == IF a x ELSE
+// {IF b y ELSE z}), so this reads that way: one condition picks between a true body, active iff
+// flags.active && the condition holds, and an else body, active iff flags.active && the condition is
+// known FALSE. At most one is live - and neither when the condition cannot yet be evaluated, which
+// owes another pass (a hard error on the final pass). Entered just past the IF - or, via the
+// recursion, the ELIF - at the condition.
+static parse_result handle_if(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    expr_result e = expression_parse(src, at.offset, &b->scopes, scope, &scratch);
+    if (e.error != expr_error_none) {
+        return parse_fail(assemble_error_expression, e.error_at);   // a syntax error always aborts
+    }
+
+    parse_result sep = require_separator(src, e.next);
+    if (sep.error != assemble_error_none) {
+        return sep;
+    }
+
+    // Judge the condition only when the parent is live. if_cond and else_cond are mutually exclusive
+    // (and both false when the condition is unevaluable - then we owe another pass).
+    bool if_cond = false;
+    bool else_cond = false;
+    parse_result acc = {.next = sep.next};
+
+    if (flags.active) {
+        int_argument cond = int_argument_make(e.value, flags.final, at.offset);
+        if (cond.type == int_argument_type_error) {
+            return parse_fail(cond.error, cond.error_at);
+        }
+
+        if (cond.type == int_argument_type_unresolved) {
+            acc.unresolved = true;
+        }
+        else {
+            if_cond = (cond.value != 0);
+            else_cond = !if_cond;
+        }
+    }
+
+    // The condition true body
+    acc = fold(
+        acc,
+        parse_block(
+            b,
+            at_cursor(at, acc.next),
+            scope,
+            (parse_flags) {flags.final, flags.active && if_cond},
+            scratch
+        )
+    );
+
+    if (acc.error != assemble_error_none) {
+        return acc;
+    }
+
+    lexer_result t = lexer_next(src, acc.next, statement_tokens);
+
+    // If the IF block is closed with an ELIF, recurse here
+    if (is_elif(t.token)) {
+        return fold(
+            acc,
+            handle_if(
+                b,
+                at_cursor(at, t.next),
+                scope,
+                (parse_flags) {flags.final, flags.active && else_cond},
+                scratch
+            )
+        );
+    }
+
+    // If it was an ELSE, parse a black with the else_cond. This is not necessarily the inverse of the if_cond,
+    // because the condition may be unevaluable, in which case both branches are dead.
+    if (is_else(t.token)) {
+        // ELSE insists on a separator after it, like the IF condition and ENDIF do.
+        parse_result sep = require_separator(src, t.next);
+        if (sep.error != assemble_error_none) {
+            return sep;
+        }
+
+        acc = fold(
+            acc,
+            parse_block(
+                b,
+                at_cursor(at, sep.next),
+                scope,
+                (parse_flags) {flags.final, flags.active && else_cond},
+                scratch
+            )
+        );
+
+        if (acc.error != assemble_error_none) {
+            return acc;
+        }
+
+        t = lexer_next(src, acc.next, statement_tokens);
+    }
+    
+    // If it was ENDIF, close the IF block here
+    if (is_endif(t.token)) {
+        acc.next = t.next;
+        return fold(acc, require_separator(src, acc.next));
+    }
+
+    // A chain keyword out of place (a second ELSE, an ELIF after ELSE) is unexpected; a '}' or end of
+    // input means there was no ENDIF at all.
+    acc.error = (is_elif(t.token) || is_else(t.token)) ? assemble_error_unexpected_endif
+                                                       : assemble_error_unclosed_if;
+    acc.error_at = acc.next;
+    return acc;
 }
 
 
@@ -365,8 +524,11 @@ static const token_table assign_tokens = RC_VIEW(assign_token_entries);
 
 // `name` is the identifier and `cursor` sits just past it; an assignment defines a symbol and
 // emits nothing.
-static parse_result handle_assignment(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_str name, rc_arena scratch)
+static parse_result handle_assignment(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_str name, rc_arena scratch)
 {
+    uint32_t source = at.source;
+    uint32_t cursor = at.offset;
+
     rc_str src = source_files_text(&b->source_files, source);
     if (is_dotted(name)) {
         return parse_fail(assemble_error_invalid_assignment, cursor);
@@ -382,65 +544,66 @@ static parse_result handle_assignment(baron *b, uint32_t source, uint32_t scope,
         return parse_fail(assemble_error_expression, e.error_at);
     }
 
-    // A second definition of the same name here (a different source position) is a duplicate,
-    // independent of whether the value has resolved yet, so check it first.
-    symbol_status st = scopes_set_symbol(
-        &b->scopes,
-        scope,
-        name,
-        e.value,
-        (source_pos) {source, cursor}
-    );
-
-    if (st == symbol_status_duplicate) {
-        return parse_fail(assemble_error_duplicate_symbol, cursor);
-    }
-
+    // Bind name = value. A second definition of the same name here (a different source position) is a
+    // duplicate. In a dead branch we instead REMOVE the name, clearing a binding a live earlier pass
+    // left behind, and we raise none of the value-dependent errors below.
     parse_result r = {.next = e.next};
-    if (value_is_error(e.value) && e.value.error == value_error_unknown_symbol) {
-        if (final_pass) {
-            return parse_fail(assemble_error_undefined_symbol, eq.next);
-        }
-        r.unresolved = true;   // a forward reference in the value; settles on a later pass
-    }
+    if (flags.active) {
+        symbol_status st = scopes_set_symbol(&b->scopes, scope, name, e.value, at);
 
-    r.changed = (st == symbol_status_changed);
+        if (st == symbol_status_duplicate) {
+            return parse_fail(assemble_error_duplicate_symbol, cursor);
+        }
+
+        if (value_is_error(e.value) && e.value.error == value_error_unknown_symbol) {
+            if (flags.final) {
+                return parse_fail(assemble_error_undefined_symbol, eq.next);
+            }
+            r.unresolved = true;   // a forward reference in the value; settles on a later pass
+        }
+
+        r.changed = (st == symbol_status_changed);
+    }
+    else {
+        r.changed = scopes_remove_symbol(&b->scopes, scope, name);
+    }
+    
     return fold(r, require_separator(src, e.next));
 }
 
 
 // ---- the statement loop ----
 
-static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_one_statement(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, source);
-    lexer_result lr = lexer_next(src, cursor, statement_tokens);
+    rc_str src = source_files_text(&b->source_files, at.source);
+    lexer_result lr = lexer_next(src, at.offset, statement_tokens);
 
     switch (lr.token.type) {
         case lexeme_type_opcode:
-            return opcode_parse(b, (mnemonic)lr.token.opcode.id, source, scope, lr.next, final_pass, scratch);
+            return opcode_parse(b, (mnemonic)lr.token.opcode.id, at_cursor(at, lr.next), scope, flags, scratch);
         case lexeme_type_keyword:
-            return lr.token.keyword.handle(b, source, scope, lr.next, final_pass, scratch);   // ORG, '.', or '{'
+            return lr.token.keyword.handle(b, at_cursor(at, lr.next), scope, flags, scratch);   // ORG, '.', or '{'
         case lexeme_type_identifier:
-            return handle_assignment(b, source, scope, lr.next, final_pass, lr.token.identifier.name, scratch);
+            return handle_assignment(b, at_cursor(at, lr.next), scope, flags, lr.token.identifier.name, scratch);
         default:
-            return parse_fail(assemble_error_unexpected_token, cursor);
+            return parse_fail(assemble_error_unexpected_token, at.offset);
     }
 }
 
 // Parse statements until the block's closer: a '}' or end of input. It stops AT the closer -
 // leaving a '}' unconsumed - and treats neither as an error, because which closer is required
 // depends on the caller: parse_scope wants the '}', run_pass wants end of input.
-static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_block(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, source);
+    rc_str src = source_files_text(&b->source_files, at.source);
 
-    parse_result acc = {.next = cursor};
+    parse_result acc = {.next = at.offset};
     while (acc.error == assemble_error_none) {
         lexer_result lr = lexer_next(src, acc.next, statement_tokens);
 
-        if (lr.token.type == lexeme_type_close_brace) {
-            return acc;                    // stop at the '}', leaving it for the caller to close on
+        if (is_block_terminator(lr.token)) {
+            return acc;                    // stop at the closer, leaving it for the caller
         }
 
         if (lr.token.type == lexeme_type_terminator) {
@@ -452,28 +615,36 @@ static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint3
             continue;
         }
 
-        acc = fold(acc, parse_one_statement(b, source, scope, acc.next, final_pass, scratch));
+        acc = fold(acc, parse_one_statement(b, at_cursor(at, acc.next), scope, flags, scratch));
     }
     return acc;
 }
 
 // A braced block: parse its statements (entered just past the '{') and require the closing '}';
 // reaching end of input first is an unclosed scope.
-static parse_result parse_scope(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_scope(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    parse_result r = parse_block(b, source, scope, cursor, final_pass, scratch);
+    parse_result r = parse_block(b, at, scope, flags, scratch);
+
     if (r.error != assemble_error_none) {
         return r;
     }
 
-    rc_str src = source_files_text(&b->source_files, source);
+    rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lr = lexer_next(src, r.next, statement_tokens);
+
     if (lr.token.type == lexeme_type_close_brace) {
         r.next = lr.next;
         return r;
     }
 
-    r.error = assemble_error_unclosed_scope;
+    if (is_elif(lr.token) || is_else(lr.token) || is_endif(lr.token)) {
+        r.error    = assemble_error_unexpected_endif;
+        r.error_at = lr.next;
+        return r;
+    }
+
+    r.error = assemble_error_unclosed_scope;   // end of input before the '}'
     r.error_at = r.next;
     return r;
 }
@@ -482,17 +653,23 @@ static parse_result parse_scope(baron *b, uint32_t source, uint32_t scope, uint3
 // A whole source file - the largest parsable item: parse its statements and require they run out
 // at end of input. A leftover '}' is a stray close brace. (parse_scope is a braced block within a
 // file; parse_block is the shared statement loop both rest on.)
-static parse_result parse_file(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_file(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    parse_result r = parse_block(b, source, scope, cursor, final_pass, scratch);
+    parse_result r = parse_block(b, at, scope, flags, scratch);
+
     if (r.error != assemble_error_none) {
         return r;
     }
 
-    rc_str src = source_files_text(&b->source_files, source);
+    rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lr = lexer_next(src, r.next, statement_tokens);
+
     if (lr.token.type == lexeme_type_close_brace) {
-        r.error    = assemble_error_unexpected_close_brace;
+        r.error = assemble_error_unexpected_close_brace;
+        r.error_at = lr.next;
+    }
+    else if (is_elif(lr.token) || is_else(lr.token) || is_endif(lr.token)) {
+        r.error = assemble_error_unexpected_endif;
         r.error_at = lr.next;
     }
 
@@ -502,13 +679,19 @@ static parse_result parse_file(baron *b, uint32_t source, uint32_t scope, uint32
 
 // ---- the multi-pass driver ----
 
-static parse_result run_pass(baron *b, uint32_t source, bool final_pass, rc_arena scratch)
+static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_arena scratch)
 {
     overlays_reset_all(&b->overlays);
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
+
     const uint32_t scope = 0;
-    const uint32_t cursor = 0;
-    return parse_file(b, source, scope, cursor, final_pass, scratch);
+    return parse_file(
+        b,
+        (source_pos) {.source = source, .offset = 0},
+        scope,
+        flags,
+        scratch
+    );
 }
 
 // The shared core: run passes over the source already cached at index `source` in b, until the
@@ -517,7 +700,13 @@ static parse_result run_pass(baron *b, uint32_t source, bool final_pass, rc_aren
 static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
 {
     for (uint32_t pass = 1; pass <= ASSEMBLE_MAX_PASSES; pass++) {
-        parse_result r = run_pass(b, source, false, scratch);
+        parse_result r = run_pass(
+            b,
+            source,
+            (parse_flags) {.active = true},
+            scratch
+        );
+
         if (r.error != assemble_error_none) {
             return (assemble_result) {
                 .passes = pass,
@@ -525,9 +714,16 @@ static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
                 .error_at = r.error_at
             };
         }
+
         if (!r.unresolved && !r.changed) {
             // Settled. One more pass with checks armed, to surface any deferred range errors.
-            parse_result fin = run_pass(b, source, true, scratch);
+            parse_result fin = run_pass(
+                b,
+                source,
+                (parse_flags) {.final = true, .active = true},
+                scratch
+            );
+            
             if (fin.error != assemble_error_none) {
                 return (assemble_result) {
                     .passes = pass + 1,
@@ -535,6 +731,7 @@ static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
                     .error_at = fin.error_at
                 };
             }
+
             return (assemble_result) {
                 .code = overlays_code(&b->overlays, overlays_default),
                 .passes = pass + 1
@@ -542,9 +739,15 @@ static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
         }
     }
 
-    // Did not settle within the cap. A final diagnostic pass names a concrete cause (an
-    // undefined symbol) where there is one; otherwise it is genuine oscillation.
-    parse_result diag = run_pass(b, source, true, scratch);
+    // Did not settle within the cap. A final diagnostic pass names a concrete cause (an undefined
+    // symbol) where there is one; otherwise it is genuine oscillation.
+    parse_result diag = run_pass(
+        b,
+        source,
+        (parse_flags) {.final = true, .active = true},
+        scratch
+    );
+
     if (diag.error != assemble_error_none) {
         return (assemble_result) {
             .passes = ASSEMBLE_MAX_PASSES + 1,
@@ -552,6 +755,7 @@ static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
             .error_at = diag.error_at
         };
     }
+
     return (assemble_result) {
         .passes = ASSEMBLE_MAX_PASSES,
         .error = assemble_error_no_convergence
@@ -599,6 +803,8 @@ rc_str assemble_error_name(assemble_error e)
         case assemble_error_bad_alignment:          return RC_STR("bad_alignment");
         case assemble_error_undefined_symbol:       return RC_STR("undefined_symbol");
         case assemble_error_duplicate_symbol:       return RC_STR("duplicate_symbol");
+        case assemble_error_unclosed_if:            return RC_STR("unclosed_if");
+        case assemble_error_unexpected_endif:       return RC_STR("unexpected_endif");
         case assemble_error_expression:             return RC_STR("expression");
         case assemble_error_no_convergence:         return RC_STR("no_convergence");
         case assemble_error_source_load:            return RC_STR("source_load");
@@ -819,6 +1025,82 @@ RC_TEST_STEP(assemble, from_file, fix)
 
     RC_CHECK_TRUE(assemble_file(&fix->b, RC_STR("no_such_file.6502"), fix->scratch).error
                   == assemble_error_source_load);
+}
+
+RC_TEST_STEP(assemble, if_selects_branch, fix)
+{
+    // The active branch emits; the dead one is parsed for structure but produces nothing.
+    RC_CHECK_TRUE(code_is(RESULT("LDA #0 : IF 1 : LDA #2 : ENDIF : LDA #3"),
+                          (uint8_t[]){0xA9, 0x00, 0xA9, 0x02, 0xA9, 0x03}, 6));
+    RC_CHECK_TRUE(code_is(RESULT("LDA #0 : IF 0 : LDA #2 : ENDIF : LDA #3"),
+                          (uint8_t[]){0xA9, 0x00, 0xA9, 0x03}, 4));
+}
+
+RC_TEST_STEP(assemble, if_elif_else_chain, fix)
+{
+    RC_CHECK_TRUE(code_is(RESULT("IF 1 : LDA #1 : ELIF 1 : LDA #2 : ELSE : LDA #3 : ENDIF"),
+                          (uint8_t[]){0xA9, 0x01}, 2));   // first true wins
+    RC_CHECK_TRUE(code_is(RESULT("IF 0 : LDA #1 : ELIF 1 : LDA #2 : ELSE : LDA #3 : ENDIF"),
+                          (uint8_t[]){0xA9, 0x02}, 2));   // the elif
+    RC_CHECK_TRUE(code_is(RESULT("IF 0 : LDA #1 : ELIF 0 : LDA #2 : ELSE : LDA #3 : ENDIF"),
+                          (uint8_t[]){0xA9, 0x03}, 2));   // the else
+}
+
+RC_TEST_STEP(assemble, if_does_not_introduce_scope, fix)
+{
+    // A label set in a live IF branch leaks to the enclosing scope (IF is not a brace).
+    assemble_result r = RESULT("ORG &2000 : IF 1 : .here : ENDIF : LDA here");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xAD, 0x00, 0x20}, 3));
+}
+
+RC_TEST_STEP(assemble, if_wraps_scope_and_nests, fix)
+{
+    RC_CHECK_TRUE(code_is(RESULT("IF 1 : { LDA #5 } : ENDIF"), (uint8_t[]){0xA9, 0x05}, 2));
+    RC_CHECK(RESULT("IF 0 : { LDA #5 } : ENDIF").code.num, ==, 0u);
+    RC_CHECK_TRUE(code_is(RESULT("IF 1 : IF 1 : LDA #7 : ENDIF : ENDIF"), (uint8_t[]){0xA9, 0x07}, 2));
+    RC_CHECK(RESULT("IF 1 : IF 0 : LDA #7 : ENDIF : ENDIF").code.num, ==, 0u);
+    RC_CHECK(RESULT("IF 0 : IF 1 : LDA #7 : ENDIF : ENDIF").code.num, ==, 0u);   // outer dead -> inner dead
+}
+
+RC_TEST_STEP(assemble, if_dead_branch_suppresses_value_errors_but_not_syntax, fix)
+{
+    // A dead branch raises no value/encoding errors...
+    RC_CHECK_TRUE(RESULT("IF 0 : LDA undefined_thing : ENDIF").error == assemble_error_none);
+    RC_CHECK_TRUE(RESULT("IF 0 : TAX #5 : ENDIF").error == assemble_error_none);
+    // ...but a genuine parse error still aborts, even when dead.
+    RC_CHECK_TRUE(RESULT("IF 0 : LDA #1 #2 : ENDIF").error == assemble_error_expected_separator);
+}
+
+RC_TEST_STEP(assemble, if_unknown_condition_defers, fix)
+{
+    // A forward-referenced condition is undecidable on the first pass: both branches stay inactive,
+    // and a later pass takes the right one once it resolves.
+    assemble_result r = RESULT("IF cond : LDA #1 : ENDIF\ncond = 1");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(r.passes >= 2);
+}
+
+RC_TEST_STEP(assemble, if_branch_flip_clears_label, fix)
+{
+    // `gate` is 1 on the pass after `.other` first appears, then 0 once defined(other) sees it - so
+    // `.x` is bound on one pass and must be CLEARED when its branch goes inactive. The remove-on-
+    // inactive rule leaves it undefined; a stale binding would linger.
+    assemble_result r = RESULT("IF gate : .x : ENDIF\ngate = 1 - defined(other)\n.other");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("x"))));
+}
+
+RC_TEST_STEP(assemble, if_framing_errors, fix)
+{
+    RC_CHECK_TRUE(RESULT("IF 1 : LDA #1").error      == assemble_error_unclosed_if);   // no ENDIF
+    RC_CHECK_TRUE(RESULT("{ IF 1 : LDA #1 }").error  == assemble_error_unclosed_if);   // '}' before ENDIF
+    RC_CHECK_TRUE(RESULT("ENDIF").error              == assemble_error_unexpected_endif);
+    RC_CHECK_TRUE(RESULT("ELSE").error               == assemble_error_unexpected_endif);
+    RC_CHECK_TRUE(RESULT("IF 1 : ELSE : ELSE : ENDIF").error == assemble_error_unexpected_endif);
+    RC_CHECK_TRUE(RESULT("IF 0 : ELSE LDA #1 : ENDIF").error == assemble_error_expected_separator);   // ELSE needs a separator
 }
 
 #endif // BARON_TESTS

@@ -68,8 +68,10 @@ uint16_t opcode_def(mnemonic m, addr_mode mode);
 // may use incomplete types by value); opcodes.c includes assemble.h for the full definitions.
 typedef struct baron baron;
 typedef struct parse_result parse_result;
-parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
-                          uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+typedef struct parse_flags parse_flags;
+typedef struct source_pos source_pos;
+parse_result opcode_parse(baron *b, mnemonic m, source_pos at,
+                          uint32_t scope, parse_flags flags, rc_arena scratch);
 
 
 #endif // ifndef BARON_OPCODES_H_
