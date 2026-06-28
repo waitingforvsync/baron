@@ -1,0 +1,49 @@
+# Baron C style. Captures the mechanical rules (indentation, brace placement, pointer
+# binding, cast/brace spacing); it deliberately does NOT reflow lines (ColumnLimit: 0),
+# so hand-chosen line breaks and the multi-pass-friendly long signatures are left alone.
+# Conventions clang-format cannot see - comment voice, callees-before-callers ordering,
+# `while (true)`, going through the rc_* accessors - still live in CLAUDE.md.
+# "Cpp" is clang-format's name for the whole C/C++ family; there is no separate "C"
+# value, so plain C is formatted under Cpp (the C++-specific options simply apply to
+# C constructs - e.g. Cpp11BracedListStyle governs C compound literals).
+Language: Cpp
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+ColumnLimit: 0
+MaxEmptyLinesToKeep: 2
+
+# Functions get their brace on the next line; structs, enums and control statements
+# keep theirs attached (the Linux preset).
+BreakBeforeBraces: Linux
+
+PointerAlignment: Right
+IndentCaseLabels: true
+AlignAfterOpenBracket: DontAlign
+
+# A space after a parenthesised type, whether a cast or a compound literal, and no
+# spaces hugging the braces of a compound initialiser: (int) y, (value) {.type = ...}.
+SpaceAfterCStyleCast: true
+SpaceBeforeCpp11BracedList: true
+Cpp11BracedListStyle: true
+
+# Keep short guard clauses - if (x) return y; - and short function bodies on one line,
+# but never collapse an explicitly braced block onto its opening line. Loops stay broken.
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortBlocksOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: All
+InsertBraces: false
+
+# We group includes by intent, so do not reorder them. Align runs of macros, assignments,
+# declarations and the trailing comments beside them - the look the code already has, now
+# produced automatically rather than by hand.
+SortIncludes: Never
+AlignConsecutiveMacros: Consecutive
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: Consecutive
+AlignTrailingComments: Always
