@@ -203,10 +203,23 @@ static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint
     }
     rc_str name = nm.token.identifier.name;
 
-    // Bind name = current pc in the current scope; a moved label drives another pass.
-    parse_result r = { .next = nm.next };
-    r.changed = scopes_set_symbol(&b->scopes, scope, name,
-                                  value_make_numeric((double)overlays_pc(&b->overlays, b->current_overlay)));
+    // Bind name = current pc in the current scope; a moved label drives another pass, and a
+    // second definition of the same name here (a different source position) is a duplicate.
+    parse_result r = {
+        .next = nm.next
+    };
+    source_pos def = {
+        .source = source,
+        .offset = cursor
+    };
+
+    symbol_status st = scopes_set_symbol(&b->scopes, scope, name,
+                                         value_make_numeric((double)overlays_pc(&b->overlays, b->current_overlay)), def);
+
+    if (st == symbol_status_duplicate) {
+        return parse_fail(assemble_error_duplicate_symbol, cursor);
+    }
+    r.changed = (st == symbol_status_changed);
 
     // What follows decides the label's shape. A '{' names a scope - and may sit on the next line,
     // so a single separator before it is allowed. A bare separator leaves a stand-alone label;
@@ -229,9 +242,9 @@ static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint
 
 static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
-    // cursor is just past the '{'; its offset gives the anonymous scope a stable per-pass identity,
-    // so re-walking it on a later pass keeps the same bindings.
-    uint32_t child = scopes_get_or_make_child_at(&b->scopes, scope, cursor - 1);
+    // The just-passed cursor gives the anonymous scope a stable per-pass identity, so re-walking it
+    // on a later pass keeps the same bindings.
+    uint32_t child = scopes_get_or_make_child_at(&b->scopes, scope, (source_pos){ .source = source, .offset = cursor });
     return parse_scope(b, source, child, cursor, final_pass, scratch);
 }
 
@@ -260,12 +273,27 @@ static parse_result handle_assignment(baron *b, uint32_t source, uint32_t scope,
     expr_result e = expression_parse(src, eq.next, &b->scopes, scope, &scratch);
     if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
 
-    parse_result r = { .next = e.next };
+    // A second definition of the same name here (a different source position) is a duplicate,
+    // independent of whether the value has resolved yet, so check it first.
+    source_pos def = {
+        .source = source,
+        .offset = cursor
+    };
+    symbol_status st  = scopes_set_symbol(&b->scopes, scope, name, e.value, def);
+    if (st == symbol_status_duplicate) {
+        return parse_fail(assemble_error_duplicate_symbol, cursor);
+    }
+
+    parse_result r = {
+        .next = e.next
+    };
     if (value_is_error(e.value) && e.value.error == value_error_unknown_symbol) {
-        if (final_pass) return parse_fail(assemble_error_undefined_symbol, eq.next);
+        if (final_pass) {
+            return parse_fail(assemble_error_undefined_symbol, eq.next);
+        }
         r.unresolved = true;   // a forward reference in the value; settles on a later pass
     }
-    r.changed = scopes_set_symbol(&b->scopes, scope, name, e.value);
+    r.changed = (st == symbol_status_changed);
     return fold(r, require_separator(src, e.next));
 }
 
@@ -293,14 +321,18 @@ static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t scop
 // depends on the caller: parse_scope wants the '}', run_pass wants end of input.
 static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
-    rc_str       src = source_files_text(&b->source_files, source);
-    parse_result acc = { .next = cursor };
+    rc_str src = source_files_text(&b->source_files, source);
+    parse_result acc = {
+        .next = cursor
+    };
+
     while (acc.error == assemble_error_none) {
         lexer_result lr = lexer_next(src, acc.next, statement_tokens);
 
         if (lr.token.type == lexeme_type_close_brace) {
             return acc;                    // stop at the '}', leaving it for the caller to close on
         }
+
         if (lr.token.type == lexeme_type_terminator) {
             if (lexer_at_end(src, lr.next)) {
                 acc.next = lr.next;
@@ -309,6 +341,7 @@ static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint3
             acc.next = lr.next;            // blank statement
             continue;
         }
+
         acc = fold(acc, parse_one_statement(b, source, scope, acc.next, final_pass, scratch));
     }
     return acc;
@@ -319,7 +352,9 @@ static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint3
 static parse_result parse_scope(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
     parse_result r = parse_block(b, source, scope, cursor, final_pass, scratch);
-    if (r.error != assemble_error_none) return r;
+    if (r.error != assemble_error_none) {
+        return r;
+    }
 
     rc_str       src = source_files_text(&b->source_files, source);
     lexer_result lr  = lexer_next(src, r.next, statement_tokens);
@@ -446,6 +481,7 @@ rc_str assemble_error_name(assemble_error e)
         case assemble_error_value_out_of_range:     return RC_STR("value_out_of_range");
         case assemble_error_branch_out_of_range:    return RC_STR("branch_out_of_range");
         case assemble_error_undefined_symbol:       return RC_STR("undefined_symbol");
+        case assemble_error_duplicate_symbol:       return RC_STR("duplicate_symbol");
         case assemble_error_expression:             return RC_STR("expression");
         case assemble_error_no_convergence:         return RC_STR("no_convergence");
         case assemble_error_source_load:            return RC_STR("source_load");
@@ -540,6 +576,20 @@ RC_TEST_STEP(assemble, org_and_labels, fix)
 RC_TEST_STEP(assemble, symbol_definition, fix)
 {
     RC_CHECK_TRUE(code_is(RESULT("n = 5 : LDA #n"), (uint8_t[]){0xA9, 0x05}, 2));
+}
+
+RC_TEST_STEP(assemble, duplicate_symbol_is_rejected, fix)
+{
+    // Two definitions of one name in the same scope - whether labels or assignments - are a
+    // duplicate. Distinct names per snippet, since these share one baron's persistent scopes.
+    RC_CHECK_TRUE(RESULT(".dup NOP : .dup RTS").error == assemble_error_duplicate_symbol);
+    RC_CHECK_TRUE(RESULT("twice = 1 : twice = 2").error == assemble_error_duplicate_symbol);
+}
+
+RC_TEST_STEP(assemble, inner_scope_mirrors_outer_name, fix)
+{
+    // The same name in a nested scope is fine: the inner binding lives in its own scope.
+    RC_CHECK_TRUE(RESULT("x = 1 : { x = 2 }").error == assemble_error_none);
 }
 
 RC_TEST_STEP(assemble, forward_reference_is_order_independent, fix)

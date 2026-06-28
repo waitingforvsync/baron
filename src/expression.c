@@ -1439,7 +1439,7 @@ RC_TEST_STEP(expression, callable_syntax, fix)
 {
     // A named callable needs its '(': a bare name is now a plain identifier, so a function
     // and a like-named variable can coexist.
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("lo"), value_make_numeric(7.0));
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("lo"), value_make_numeric(7.0), (source_pos){0, 0});
     RC_CHECK_TRUE(value_is_equal(VAL("lo"),      value_make_numeric(7.0)));   // the variable
     RC_CHECK_TRUE(value_is_equal(VAL("lo(258)"), value_make_numeric(2.0)));   // the operator (low byte)
     RC_CHECK_TRUE(value_is_error(VAL("abs")));   // a bare function name is just an unknown symbol
@@ -1461,7 +1461,7 @@ RC_TEST_STEP(expression, callable_syntax, fix)
 
 RC_TEST_STEP(expression, symbols, fix)
 {
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0));
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (source_pos){0, 0});
 
     RC_CHECK_TRUE(value_is_equal(VAL("foo+1"), value_make_numeric(43.0)));
     RC_CHECK_TRUE(value_is_error(VAL("bar")));        // unknown symbol -> error value
@@ -1896,7 +1896,7 @@ RC_TEST_STEP(expression, list_functions, fix)
 
 RC_TEST_STEP(expression, defined_lohi_strings, fix)
 {
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0));
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (source_pos){0, 0});
     RC_CHECK_TRUE(value_is_equal(VAL("defined(foo)"), value_make_numeric(1)));   // resolves
     RC_CHECK_TRUE(value_is_equal(VAL("defined(bar)"), value_make_numeric(0)));   // an unknown symbol
 

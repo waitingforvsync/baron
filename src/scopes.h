@@ -2,6 +2,7 @@
 #define BARON_SCOPES_H_
 
 #include "value.h"
+#include "source_pos.h"
 #include "richc/hash.h"
 
 
@@ -13,12 +14,29 @@
 // individual scopes are `scope_node` records, which we hand around by index. Scope
 // 0 is the root.
 
+// A bound symbol: its current value plus the source position that defined it. The
+// position is the binding's identity - the same statement re-walked on a later pass
+// carries the same `def` (so we re-evaluate and watch for a moved value), while a
+// different statement defining the same name in the same scope carries a different
+// `def` (a duplicate). Baron's source is immutable, so a name is bound exactly once.
+typedef struct symbol {
+    value      v;
+    source_pos def;
+} symbol;
+
+// The outcome of binding a symbol: the first enumerator is the no-op default.
+typedef enum symbol_status {
+    symbol_status_unchanged,   // brand new, or identical to last pass: no further pass needed
+    symbol_status_changed,     // same definition, value moved: drives another pass
+    symbol_status_duplicate,   // a different source_pos already owns this name in this scope
+} symbol_status;
+
 // Both maps are keyed by name. We key on the rc_str by content - hashing and
 // comparing the characters, not the pointer - so the same text spelled anywhere in
-// the source lands on the same entry. The symbol map carries a `value`; the child
+// the source lands on the same entry. The symbol map carries a `symbol`; the child
 // map carries a uint32_t scope index.
 #define RC_TRIE_KEY_TYPE   rc_str
-#define RC_TRIE_VALUE_TYPE value
+#define RC_TRIE_VALUE_TYPE symbol
 #define RC_TRIE_NAME       rc_trie_symbol
 #define RC_TRIE_HASH(k)    rc_hash_str(k)
 #define RC_TRIE_EQUAL(a,b) rc_str_is_equal((a), (b))
@@ -37,7 +55,7 @@
 typedef struct scope_node {
     rc_str         name;      // this scope's name; {0} (len 0) if anonymous/root
     uint32_t       parent;    // enclosing scope index; RC_INDEX_NONE for the root
-    rc_trie_symbol symbols;   // symbol name -> value
+    rc_trie_symbol symbols;   // symbol name -> symbol
     rc_trie_child  children;  // child scope name -> child scope index
 } scope_node;
 
@@ -83,22 +101,23 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name);
 // into the source is fine).
 uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name);
 
-// As above but for an anonymous (unnamed in source) scope, identified by a stable
-// integer `site` - the source offset of its '{'. The site is turned into a synthetic
-// child-map key that no user identifier can spell, so anonymous scopes also keep a
-// stable identity across passes. The key is built in a local buffer to probe with, and on
-// a first sighting copied into the scopes' own arena, so its bytes are owned by the scopes.
-uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, uint32_t site);
+// As above but for an anonymous (unnamed in source) scope, identified by the source
+// position `at` of its '{'. The position is turned into a synthetic child-map key that
+// no user identifier can spell, so anonymous scopes also keep a stable identity across
+// passes. The key is built in a local buffer to probe with, and on a first sighting
+// copied into the scopes' own arena, so its bytes are owned by the scopes.
+uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, source_pos at);
 
-// Set leaf `name` to `v` in scope_index - `name` is a plain symbol name, never a
-// dotted path. The value is deep-cloned into the scopes' permanent arena, so a value
-// built in a caller's scratch arena may be passed safely. Returns whether we changed
-// an existing binding: true only if the symbol was already defined and its old value
-// differs from `v` (compared structurally); a brand new symbol, or a write that lands
-// the same value again, returns false and clones nothing. Either way `name` ends up
-// bound to `v`. The "did it change" answer is what a later pass watches to decide
-// whether things have settled.
-bool scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v);
+// Bind leaf `name` to `v` in scope_index, with `def` recording the source position
+// that defines it - `name` is a plain symbol name, never a dotted path. The value is
+// deep-cloned into the scopes' permanent arena (only on a genuine change), so a value
+// built in a caller's scratch arena may be passed safely. The outcome:
+//   - duplicate: a binding already exists under a DIFFERENT `def` - a second definition
+//     of the same name in the same scope. Nothing is mutated; the caller errors.
+//   - changed:   the same definition (matching `def`) re-evaluated to a different value.
+//     This is what a later pass watches to decide whether things have settled.
+//   - unchanged: a brand new symbol, or the same definition landing the same value again.
+symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v, source_pos def);
 
 // Remove leaf `name` (a plain symbol name, not a path) from scope_index. Returns
 // whether it was there to remove.
