@@ -26,6 +26,10 @@ typedef struct value value;
 // A list value is exactly a read-only view of values.
 typedef rc_view_value value_list;
 
+// The most elements a list may be materialised to. Enumerating a huge range (say by subscripting it)
+// would otherwise build an unbounded list; past this it is a value_error_list_too_big instead.
+#define VALUE_LIST_MAX_LENGTH 65536u
+
 
 typedef enum value_error {
     value_error_none,                   // zero/default: no error
@@ -36,6 +40,7 @@ typedef enum value_error {
     value_error_subscript_range,
     value_error_incorrect_parameters,
     value_error_shape_mismatch,         // a ragged operand, or shapes that do not broadcast
+    value_error_list_too_big,           // a list grew past VALUE_LIST_MAX_LENGTH
     value_error_not_implemented,
 } value_error;
 

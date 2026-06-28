@@ -348,6 +348,7 @@ static uint32_t shape_dims(value v, uint32_t dims[], uint32_t max)
     if (!value_is_list(v) || max == 0) {
         return 0;   // a scalar (or we have run out of room): empty shape, rank 0
     }
+    
     dims[0] = v.list.num;   // axis 0 is always just how many things we are holding
     if (v.list.num == 0) {
         return 1;   // empty list: shape {0}, with no elements to descend into
@@ -388,16 +389,20 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
     if (args.num != 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
     if (value_is_error(v)) {
         return v;   // functions get raw args now, so propagate an error operand ourselves
     }
+
     uint32_t dims[MAX_RANK];
     uint32_t rank = shape_dims(v, dims, MAX_RANK);
+
     rc_array_value out = {0};
     for (uint32_t i = 0; i < rank; i++) {
         rc_array_value_push(&out, value_make_numeric((double)dims[i]), arena);
     }
+
     return value_make_list(out.view);
 }
 
@@ -418,11 +423,16 @@ static value range_to_list(value_range r, rc_arena *arena)
     if (!r.has_start || !r.has_end) {
         return value_make_error(value_error_domain);
     }
+
     int64_t step = value_range_step(r);
     rc_array_value out = {0};
     for (int64_t n = r.start; step > 0 ? n <= r.end : n >= r.end; n += step) {
+        if (out.view.num >= VALUE_LIST_MAX_LENGTH) {
+            return value_make_error(value_error_list_too_big);   // stop before an unbounded allocation
+        }
         rc_array_value_push(&out, value_make_numeric((double)n), arena);
     }
+
     return value_make_list(out.view);
 }
 
@@ -458,6 +468,7 @@ static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena
         }
         return value_make_list(out.view);
     }
+
     if (rb < ra) {
         for (uint32_t i = 0; i < a.list.num; i++) {
             rc_array_value_push(&out, apply_binary(op, rc_view_value_get(a.list, i), b, arena), arena);
@@ -471,12 +482,14 @@ static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena
     if (na != nb && na != 1 && nb != 1) {
         return value_make_error(value_error_shape_mismatch);
     }
+
     uint32_t n = (na == 1) ? nb : na;   // (na==1)?nb:na, not max, so 0-length axes work
     for (uint32_t i = 0; i < n; i++) {
         value ai = rc_view_value_get(a.list, na == 1 ? 0 : i);
         value bi = rc_view_value_get(b.list, nb == 1 ? 0 : i);
         rc_array_value_push(&out, apply_binary(op, ai, bi, arena), arena);
     }
+
     return value_make_list(out.view);
 }
 
@@ -488,6 +501,7 @@ static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
     if (value_is_error(v)) {
         return v;
     }
+
     if (value_is_list(v)) {
         rc_array_value out = {0};
         for (uint32_t i = 0; i < v.list.num; i++) {
@@ -495,10 +509,12 @@ static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
         }
         return value_make_list(out.view);
     }
+
     if (value_is_range(v)) {
         // range_to_list carries an unbounded range through as an error, passed straight back.
         return apply_unary(op, range_to_list(v.range, arena), arena);
     }
+
     return op.apply(v, arena);
 }
 
@@ -516,6 +532,7 @@ static uint32_t selector_index(value sel, uint32_t len)
     if (!value_is_numeric(sel) || sel.numeric < 0.0 || sel.numeric >= (double)len) {
         return RC_INDEX_NONE;
     }
+
     uint32_t i = (uint32_t)sel.numeric;
     return (double)i == sel.numeric ? i : RC_INDEX_NONE;   // reject a fractional index
 }
@@ -558,13 +575,16 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
     if (indices.num != 1) {
         return value_make_error(value_error_subscript_range);   // a string takes exactly one axis
     }
+
     value index = rc_view_value_get(indices, 0);
 
     if (value_is_numeric(index)) {
         uint32_t i = selector_index(index, s.len);
+
         if (i == RC_INDEX_NONE) {
             return value_make_error(value_error_subscript_range);
         }
+
         return value_make_string(rc_str_substr(s, i, 1));
     }
 
@@ -574,17 +594,22 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
         for (uint32_t j = 0; j < idx.num; j++) {
             rc_mstr_append_char(&m, s.data[RC_AT(idx, j)], arena);
         }
-    } else if (value_is_list(index)) {
+    }
+    else if (value_is_list(index)) {
         for (uint32_t j = 0; j < index.list.num; j++) {
             uint32_t i = selector_index(rc_view_value_get(index.list, j), s.len);
+
             if (i == RC_INDEX_NONE) {
                 return value_make_error(value_error_subscript_range);
             }
+
             rc_mstr_append_char(&m, s.data[i], arena);
         }
-    } else {
+    }
+    else {
         return value_make_error(value_error_type_mismatch);   // selector not int/range/list
     }
+
     return value_make_string(m.view);
 }
 
@@ -597,18 +622,22 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
     if (value_is_error(v)) {
         return v;
     }
+
     if (indices.num == 0) {
         return v;   // no more selectors: this axis and anything within it taken whole
     }
+
     if (value_is_string(v)) {
         return subscript_string(v.string, indices, arena);
     }
+
     if (value_is_range(v)) {
         v = range_to_list(v.range, arena);   // index a range via its enumeration
         if (value_is_error(v)) {
             return v;   // an unbounded range cannot be enumerated
         }
     }
+
     if (!value_is_list(v)) {
         return value_make_error(value_error_type_mismatch);   // a number is not subscriptable
     }
@@ -622,6 +651,7 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
         if (i == RC_INDEX_NONE) {
             return value_make_error(value_error_subscript_range);
         }
+
         return subscript(rc_view_value_get(v.list, i), rest, arena);
     }
 
@@ -633,18 +663,23 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
             value e = subscript(rc_view_value_get(v.list, RC_AT(idx, j)), rest, arena);
             rc_array_value_push(&out, e, arena);
         }
-    } else if (value_is_list(sel)) {
+    }
+    else if (value_is_list(sel)) {
         for (uint32_t j = 0; j < sel.list.num; j++) {
             uint32_t i = selector_index(rc_view_value_get(sel.list, j), len);
+
             if (i == RC_INDEX_NONE) {
                 return value_make_error(value_error_subscript_range);
             }
+
             value e = subscript(rc_view_value_get(v.list, i), rest, arena);
             rc_array_value_push(&out, e, arena);
         }
-    } else {
+    }
+    else {
         return value_make_error(value_error_type_mismatch);   // selector not int/range/list
     }
+
     return value_make_list(out.view);
 }
 
@@ -675,13 +710,16 @@ static value fold(rc_view_value elems, value (*op)(value, value, rc_arena *), va
 {
     lexeme_binary_op binop = {.apply = op};
     bool has_identity = !value_is_none(identity);
+
     if (!has_identity && elems.num == 0) {
         return value_make_error(value_error_domain);   // an empty reduction with no identity
     }
+
     value acc = has_identity ? identity : rc_view_value_get(elems, 0);
     for (uint32_t i = has_identity ? 0 : 1; i < elems.num; i++) {
         acc = apply_binary(binop, acc, rc_view_value_get(elems, i), arena);
     }
+
     return acc;
 }
 
@@ -692,14 +730,17 @@ static value reduce_axis(value v, uint32_t axis, value (*op)(value, value, rc_ar
     if (!value_is_list(v)) {
         return value_make_error(value_error_subscript_range);   // axis out of range for this branch
     }
+
     if (axis == 0) {
         return fold(v.list, op, identity, arena);
     }
+
     rc_array_value out = {0};
     for (uint32_t i = 0; i < v.list.num; i++) {
         value r = reduce_axis(rc_view_value_get(v.list, i), axis - 1, op, identity, arena);
         rc_array_value_push(&out, r, arena);
     }
+
     return value_make_list(out.view);
 }
 
@@ -710,9 +751,11 @@ static void flatten_into(value v, rc_array_value *out, rc_arena *arena)
         for (uint32_t i = 0; i < v.list.num; i++) {
             flatten_into(rc_view_value_get(v.list, i), out, arena);
         }
-    } else if (value_is_range(v)) {
+    }
+    else if (value_is_range(v)) {
         flatten_into(range_to_list(v.range, arena), out, arena);
-    } else {
+    }
+    else {
         rc_array_value_push(out, v, arena);
     }
 }
@@ -724,13 +767,17 @@ static value reduce(rc_view_value args, value (*op)(value, value, rc_arena *), v
     if (args.num < 1 || args.num > 2) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
     if (value_is_error(v)) {
         return v;
     }
+
     if (value_is_range(v)) {
         v = range_to_list(v.range, arena);
-        if (value_is_error(v)) return v;
+        if (value_is_error(v)) {
+            return v;
+        }
     }
 
     if (args.num == 1) {
@@ -743,6 +790,7 @@ static value reduce(rc_view_value args, value (*op)(value, value, rc_arena *), v
     if (axis == RC_INDEX_NONE) {
         return value_make_error(value_error_subscript_range);
     }
+
     return reduce_axis(v, axis, op, identity, arena);
 }
 
@@ -757,16 +805,25 @@ static value fn_len(rc_view_value args, rc_arena *arena)
     if (args.num != 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
     if (value_is_error(v)) {
         return v;
     }
-    if (value_is_string(v)) return value_make_numeric(v.string.len);
-    if (value_is_list(v))   return value_make_numeric(v.list.num);
+
+    if (value_is_string(v)) {
+        return value_make_numeric(v.string.len);
+    }
+
+    if (value_is_list(v)) {
+        return value_make_numeric(v.list.num);
+    }
+
     if (value_is_range(v)) {
         value l = range_to_list(v.range, arena);
         return value_is_error(l) ? l : value_make_numeric(l.list.num);
     }
+
     return value_make_error(value_error_type_mismatch);   // a scalar has no length
 }
 
@@ -774,11 +831,15 @@ static value fn_len(rc_view_value args, rc_arena *arena)
 static value fn_rank(rc_view_value args, rc_arena *arena)
 {
     (void)arena;
+
     if (args.num != 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
-    return value_is_error(v) ? v : value_make_numeric(rank_of(v));
+    return value_is_error(v) ?
+        v :
+        value_make_numeric(rank_of(v));
 }
 
 // flatten: every leaf, in order, as a single rank-1 list.
@@ -787,10 +848,12 @@ static value fn_flatten(rc_view_value args, rc_arena *arena)
     if (args.num != 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
     if (value_is_error(v)) {
         return v;
     }
+
     rc_array_value out = {0};
     flatten_into(v, &out, arena);
     return value_make_list(out.view);
@@ -801,23 +864,31 @@ static value fn_flatten(rc_view_value args, rc_arena *arena)
 static value fn_concat(rc_view_value args, rc_arena *arena)
 {
     rc_array_value out = {0};
+
     for (uint32_t i = 0; i < args.num; i++) {
         value a = rc_view_value_get(args, i);
+
         if (value_is_error(a)) {
             return a;
         }
+
         if (value_is_range(a)) {
             a = range_to_list(a.range, arena);
-            if (value_is_error(a)) return a;
+            if (value_is_error(a)) {
+                return a;
+            }
         }
+
         if (value_is_list(a)) {
             for (uint32_t j = 0; j < a.list.num; j++) {
                 rc_array_value_push(&out, rc_view_value_get(a.list, j), arena);
             }
-        } else {
+        }
+        else {
             rc_array_value_push(&out, a, arena);
         }
     }
+
     return value_make_list(out.view);
 }
 
@@ -827,25 +898,33 @@ static value fn_concat(rc_view_value args, rc_arena *arena)
 static value fn_zip(rc_view_value args, rc_arena *arena)
 {
     rc_array_value lists = {0};   // the arguments, each coerced to a list
+
     uint32_t n = 0;
     for (uint32_t i = 0; i < args.num; i++) {
         value a = rc_view_value_get(args, i);
+
         if (value_is_error(a)) {
             return a;
         }
+
         if (value_is_range(a)) {
             a = range_to_list(a.range, arena);
-            if (value_is_error(a)) return a;
+            if (value_is_error(a)) {
+                return a;
+            }
         }
+
         if (!value_is_list(a)) {
             return value_make_error(value_error_type_mismatch);
         }
+
         if (i == 0) {
             n = a.list.num;
         }
         else if (a.list.num != n) {
             return value_make_error(value_error_shape_mismatch);   // lengths must match
         }
+
         rc_array_value_push(&lists, a, arena);
     }
 
@@ -854,10 +933,20 @@ static value fn_zip(rc_view_value args, rc_arena *arena)
         rc_array_value tuple = {0};
         for (uint32_t j = 0; j < lists.num; j++) {
             value lst = rc_view_value_get(lists.view, j);
-            rc_array_value_push(&tuple, rc_view_value_get(lst.list, i), arena);
+            rc_array_value_push(
+                &tuple,
+                rc_view_value_get(lst.list, i),
+                arena
+            );
         }
-        rc_array_value_push(&out, value_make_list(tuple.view), arena);
+
+        rc_array_value_push(
+            &out,
+            value_make_list(tuple.view),
+            arena
+        );
     }
+
     return value_make_list(out.view);
 }
 
@@ -867,14 +956,17 @@ static value fn_reverse(rc_view_value args, rc_arena *arena)
     if (args.num != 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
     if (value_is_error(v)) {
         return v;
     }
+
     if (value_is_range(v)) {
         v = range_to_list(v.range, arena);
         if (value_is_error(v)) return v;
     }
+
     if (value_is_string(v)) {
         rc_mstr m = rc_mstr_make(v.string.len, arena);
         for (uint32_t i = v.string.len; i-- > 0; ) {
@@ -882,12 +974,14 @@ static value fn_reverse(rc_view_value args, rc_arena *arena)
         }
         return value_make_string(m.view);
     }
+
     if (value_is_list(v)) {
         // Copy first (the source view may alias shared storage), then reverse in place.
         rc_array_value out = rc_array_value_make_copy(v.list, v.list.num, arena);
         rc_span_value_reverse(out.span);
         return value_make_list(out.view);
     }
+
     return value_make_error(value_error_type_mismatch);
 }
 
@@ -913,14 +1007,17 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
     if (args.num < 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
     if (value_is_error(v)) {
         return v;
     }
+
     if (value_is_range(v)) {
         v = range_to_list(v.range, arena);
         if (value_is_error(v)) return v;
     }
+
     if (!value_is_list(v)) {
         return value_make_error(value_error_type_mismatch);
     }
@@ -928,16 +1025,27 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
     rc_view_value key_path = rc_view_value_get_tail(args, 1);   // the per-element subscript to the key
     uint32_t n = v.list.num;
     rc_array_sort_pair pairs = rc_array_sort_pair_make(n, arena);
+
     for (uint32_t i = 0; i < n; i++) {
         value e = rc_view_value_get(v.list, i);
         value key = subscript(e, key_path, arena);   // an empty path leaves the element itself
+
         if (value_is_error(key)) {
             return key;
         }
+
         if (!value_is_numeric(key)) {
             return value_make_error(value_error_type_mismatch);   // the key must be a number
         }
-        rc_array_sort_pair_push(&pairs, (sort_pair) {.key = key.numeric, .v = e}, arena);
+
+        rc_array_sort_pair_push(
+            &pairs,
+            (sort_pair) {
+                .key = key.numeric,
+                .v = e
+            },
+            arena
+        );
     }
     sort_pairs(pairs.span);
 
@@ -954,9 +1062,11 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
 static value fn_defined(rc_view_value args, rc_arena *arena)
 {
     (void)arena;
+
     if (args.num != 1) {
         return value_make_error(value_error_incorrect_parameters);
     }
+
     value v = rc_view_value_get(args, 0);
     bool unresolved = value_is_error(v) && v.error == value_error_unknown_symbol;
     return value_make_numeric(unresolved ? 0.0 : 1.0);
@@ -1097,6 +1207,7 @@ static expr_result parse_list(const parser *p, uint32_t cursor)
     while (true) {
         // Value-or-'}' position.
         cursor = accept_newline(p, cursor, even_tokens);
+
         lexer_result lr = lexer_next(p->text, cursor, even_tokens);
         if (lr.token.type == lexeme_type_close_brace) {
             return ok(value_make_list(elems.view), lr.next);   // possibly empty
@@ -1107,6 +1218,7 @@ static expr_result parse_list(const parser *p, uint32_t cursor)
         if (e.error != expr_error_none) {
             return e;
         }
+
         rc_array_value_push(&elems, e.value, p->arena);
         cursor = e.next;
 
@@ -1117,9 +1229,11 @@ static expr_result parse_list(const parser *p, uint32_t cursor)
             cursor = lr.next;
             continue;   // a trailing comma simply loops back and finds the '}'
         }
+
         if (lr.token.type == lexeme_type_close_brace) {
             return ok(value_make_list(elems.view), lr.next);
         }
+        
         return fail(expr_error_expected_close_brace, cursor);
     }
 }
@@ -1145,6 +1259,7 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
         if (a.error != expr_error_none) {
             return a;   // a soft expected_expression here (e.g. "f(1,)") is a real error
         }
+
         rc_array_value_push(&args, a.value, p->arena);
         cursor = a.next;
 
@@ -1153,9 +1268,11 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
             cursor = lr.next;
             continue;
         }
+
         if (lr.token.type == lexeme_type_close_paren) {
             return ok(fn.apply(args.view, p->arena), lr.next);
         }
+
         return fail(expr_error_expected_close_paren, cursor);
     }
 }
@@ -1308,6 +1425,7 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                 if (op.precedence < min_prec) {
                     return lhs;   // binds looser than the caller allows: leave it to them
                 }
+
                 // Left-assoc parses its right side one notch higher so a-b-c folds as
                 // (a-b)-c; right-assoc keeps the level so a^b^c folds as a^(b^c).
                 uint8_t next_min = (uint8_t) (op.precedence + (op.associativity == assoc_left ? 1 : 0));
@@ -1316,9 +1434,11 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                 if (rhs.error == expr_error_expected_expression) {
                     return lhs;   // a trailing operator with no operand ("1+3+"): roll it back
                 }
+
                 if (rhs.error != expr_error_none) {
                     return rhs;   // a real error on the right-hand side: propagate
                 }
+
                 lhs.value = apply_binary(op, lhs.value, rhs.value, p->arena);
                 lhs.next  = rhs.next;
                 break;
@@ -1332,6 +1452,7 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                 if (prec_range < min_prec) {
                     return lhs;
                 }
+
                 expr_result rhs = parse_precedence(p, lr.next, prec_range);   // right-assoc: same level
 
                 if (rhs.error == expr_error_expected_expression) {
@@ -1339,9 +1460,11 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                     lhs.next  = lr.next;
                     break;
                 }
+
                 if (rhs.error != expr_error_none) {
                     return rhs;
                 }
+
                 lhs.value = lr.token.range.exclusive
                     ? op_range_excl(lhs.value, rhs.value, p->arena)
                     : op_range(lhs.value, rhs.value, p->arena);
@@ -1355,10 +1478,12 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
                 if (prec_subscript < min_prec) {
                     return lhs;
                 }
+
                 expr_result sub = parse_subscript(p, lhs.value, lr.next);
                 if (sub.error != expr_error_none) {
                     return sub;
                 }
+
                 lhs = sub;
                 break;
             }
@@ -1776,6 +1901,10 @@ RC_TEST_STEP(expression, ranges_errors, fix)
     RC_CHECK_TRUE(value_is_error(VAL("0..3..4..10")));  // inconsistent step (1 then 3)
     RC_CHECK_TRUE(value_is_error(VAL("..2..6")));       // start-open and stepped
     RC_CHECK_TRUE(value_is_error(VAL("bar..9")));       // unknown symbol propagates
+
+    // Enumerating a huge range (here by subscripting it) is capped at VALUE_LIST_MAX_LENGTH.
+    RC_CHECK_TRUE(value_is_equal(VAL("(0..65535)[0]"), value_make_numeric(0)));   // exactly the cap is fine
+    RC_CHECK_TRUE(VAL("(0..65536)[0]").error == value_error_list_too_big);        // one past it
 }
 
 RC_TEST_STEP(expression, subscript, fix)

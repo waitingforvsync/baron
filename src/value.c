@@ -241,6 +241,7 @@ rc_str value_error_name(value_error e)
         case value_error_subscript_range:      return RC_STR("subscript_range");
         case value_error_incorrect_parameters: return RC_STR("incorrect_parameters");
         case value_error_shape_mismatch:       return RC_STR("shape_mismatch");
+        case value_error_list_too_big:         return RC_STR("list_too_big");
         case value_error_not_implemented:      return RC_STR("not_implemented");
     }
 
