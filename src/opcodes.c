@@ -389,7 +389,8 @@ typedef enum index_reg {
 // the smallest available form, so a later pass can confirm it.
 static addr_mode resolve_direct(mnemonic m, index_reg idx, bool known, int64_t addr)
 {
-    addr_mode zp = addr_mode_zp, ab = addr_mode_abs;
+    addr_mode zp = addr_mode_zp;
+    addr_mode ab = addr_mode_abs;
     if (idx == index_x) { zp = addr_mode_zpx; ab = addr_mode_absx; }
     if (idx == index_y) { zp = addr_mode_zpy; ab = addr_mode_absy; }
 
@@ -414,69 +415,100 @@ static index_result consume_index(rc_str source, uint32_t cursor)
 {
     lexer_result a = lexer_next(source, cursor, operand_tokens);
     if (a.token.type != lexeme_type_comma) {
-        return (index_result) { .reg = index_none, .next = cursor };
+        return (index_result) {.reg = index_none, .next = cursor};
     }
+
     lexer_result reg = lexer_next(source, a.next, operand_tokens);
-    if (is_register(reg.token, reg_x)) return (index_result) { .reg = index_x, .next = reg.next };
-    if (is_register(reg.token, reg_y)) return (index_result) { .reg = index_y, .next = reg.next };
-    return (index_result) { .reg = index_none, .next = cursor,
-                            .error = assemble_error_bad_index_register, .error_at = a.next };
+    if (is_register(reg.token, reg_x)) {
+        return (index_result) {.reg = index_x, .next = reg.next};
+    }
+
+    if (is_register(reg.token, reg_y)) {
+        return (index_result) {.reg = index_y, .next = reg.next};
+    }
+
+    return (index_result) {
+        .reg = index_none,
+        .next = cursor,
+        .error = assemble_error_bad_index_register,
+        .error_at = a.next
+    };
 }
 
 struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
                                  uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
     uint32_t overlay = b->current_overlay;   // the overlay we emit into now (assembler-wide state)
-    rc_str    src   = source_files_text(&b->source_files, source);
-    uint32_t  start = cursor;              // just past the mnemonic
+    rc_str src = source_files_text(&b->source_files, source);
+    uint32_t start = cursor;              // just past the mnemonic
     addr_mode mode;
-    int_argument arg = { .type = int_argument_type_known };
+    int_argument arg = {.type = int_argument_type_known};
     uint32_t  after;                       // past the operand shell, before the separator
 
     lexer_result peek = lexer_next(src, start, operand_tokens);
 
     if (peek.token.type == lexeme_type_terminator) {
         // No operand: implied, or accumulator for the shift / read-modify-write mnemonics.
-        if (opcode_def(m, addr_mode_imp) != 0)      { mode = addr_mode_imp; }
-        else if (opcode_def(m, addr_mode_acc) != 0) { mode = addr_mode_acc; }
-        else return parse_fail(assemble_error_missing_operand, start);
+        if (opcode_def(m, addr_mode_imp) != 0) {
+            mode = addr_mode_imp;
+        }
+        else if (opcode_def(m, addr_mode_acc) != 0) {
+            mode = addr_mode_acc;
+        }
+        else {
+            return parse_fail(assemble_error_missing_operand, start);
+        }
         after = start;                     // leave the terminator for require_separator
     }
     else if (peek.token.type == lexeme_type_hash) {
         expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
-        if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
+        if (e.error != expr_error_none) {
+            return parse_fail(assemble_error_expression, e.error_at);
+        }
         arg = int_argument_make(e.value, final_pass, peek.next);
-        if (arg.type == int_argument_type_error) return parse_fail(arg.error, arg.error_at);
-        mode  = addr_mode_imm;
+        if (arg.type == int_argument_type_error) {
+            return parse_fail(arg.error, arg.error_at);
+        }
+        mode = addr_mode_imm;
         after = e.next;
     }
     else if (peek.token.type == lexeme_type_open_paren) {
         expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
-        if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
+        if (e.error != expr_error_none) {
+            return parse_fail(assemble_error_expression, e.error_at);
+        }
         arg = int_argument_make(e.value, final_pass, peek.next);
-        if (arg.type == int_argument_type_error) return parse_fail(arg.error, arg.error_at);
+        if (arg.type == int_argument_type_error) {
+            return parse_fail(arg.error, arg.error_at);
+        }
 
         // Closing shell: "(expr,X)" -> indexed-indirect; "(expr),Y" -> indirect-indexed;
         // "(expr)" -> indirect (JMP's ind16, or a CMOS zero-page indirect).
         lexer_result a = lexer_next(src, e.next, operand_tokens);
         if (a.token.type == lexeme_type_comma) {
             lexer_result reg = lexer_next(src, a.next, operand_tokens);
-            if (!is_register(reg.token, reg_x)) return parse_fail(assemble_error_bad_index_register, a.next);
+            if (!is_register(reg.token, reg_x)) {
+                return parse_fail(assemble_error_bad_index_register, a.next);
+            }
             lexer_result cp = lexer_next(src, reg.next, operand_tokens);
-            if (cp.token.type != lexeme_type_close_paren) return parse_fail(assemble_error_expected_close_paren, reg.next);
-            mode  = addr_mode_indx;
+            if (cp.token.type != lexeme_type_close_paren) {
+                return parse_fail(assemble_error_expected_close_paren, reg.next);
+            }
+            mode = addr_mode_indx;
             after = cp.next;
         }
         else if (a.token.type == lexeme_type_close_paren) {
             lexer_result tail = lexer_next(src, a.next, operand_tokens);
             if (tail.token.type == lexeme_type_comma) {
                 lexer_result reg = lexer_next(src, tail.next, operand_tokens);
-                if (!is_register(reg.token, reg_y)) return parse_fail(assemble_error_bad_index_register, tail.next);
+                if (!is_register(reg.token, reg_y)) {
+                    return parse_fail(assemble_error_bad_index_register, tail.next);
+                }
                 mode  = addr_mode_indy;
                 after = reg.next;
             }
             else {
-                mode  = (opcode_def(m, addr_mode_ind16) != 0) ? addr_mode_ind16 : addr_mode_ind;
+                mode = (opcode_def(m, addr_mode_ind16) != 0) ? addr_mode_ind16 : addr_mode_ind;
                 after = a.next;
             }
         }
@@ -490,19 +522,25 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
         if (is_register(peek.token, reg_a) && opcode_def(m, addr_mode_acc) != 0) {
             lexer_result after_a = lexer_next(src, peek.next, operand_tokens);
             if (after_a.token.type == lexeme_type_terminator) {
-                mode    = addr_mode_acc;
-                after   = peek.next;
+                mode = addr_mode_acc;
+                after = peek.next;
                 handled = true;
             }
         }
         if (!handled) {
             expr_result e = expression_parse(src, start, &b->scopes, scope, &scratch);
-            if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
+            if (e.error != expr_error_none) {
+                return parse_fail(assemble_error_expression, e.error_at);
+            }
             arg = int_argument_make(e.value, final_pass, start);
-            if (arg.type == int_argument_type_error) return parse_fail(arg.error, arg.error_at);
+            if (arg.type == int_argument_type_error) {
+                return parse_fail(arg.error, arg.error_at);
+            }
 
             index_result ix = consume_index(src, e.next);
-            if (ix.error != assemble_error_none) return parse_fail(ix.error, ix.error_at);
+            if (ix.error != assemble_error_none) {
+                return parse_fail(ix.error, ix.error_at);
+            }
 
             // A relative branch takes a bare target; everything else is zero-page/absolute.
             if (opcode_def(m, addr_mode_rel) != 0 && ix.reg == index_none) {
