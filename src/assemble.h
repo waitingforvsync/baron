@@ -26,6 +26,8 @@ typedef enum assemble_error {
     assemble_error_operand_not_numeric,    // an operand evaluated to a string/list/real error
     assemble_error_value_out_of_range,
     assemble_error_branch_out_of_range,
+    assemble_error_skip_backwards,         // SKIP/SKIPTO would move the pointer backwards
+    assemble_error_bad_alignment,          // ALIGN n with n < 1
     assemble_error_undefined_symbol,
     assemble_error_duplicate_symbol,       // a name defined twice in one scope
     assemble_error_expression,             // a parse error inside an operand expression

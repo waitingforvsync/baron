@@ -59,6 +59,16 @@ void overlays_emit_u16(overlays *ovl, uint32_t id, uint16_t w)
     overlays_emit_u8(ovl, id, (uint8_t)(w >> 8));
 }
 
+void overlays_skip(overlays *ovl, uint32_t id, uint32_t count)
+{
+    RC_ASSERT(ovl != NULL);
+    overlay *o = &RC_AT(ovl->nodes, id);
+    for (uint32_t i = 0; i < count; i++) {
+        rc_array_bytes_push(&o->code, 0, &ovl->code_arena);
+    }
+    o->pc += count;
+}
+
 void overlays_reset_all(overlays *ovl)
 {
     RC_ASSERT(ovl != NULL);
@@ -96,6 +106,12 @@ RC_TEST(overlays, emit_org_reset)
     overlays_emit_u8(&ovl, 0, 0xEA);
     RC_CHECK(overlays_pc(&ovl, 0), ==, 0x2001u);
     RC_CHECK(overlays_code(&ovl, 0).num, ==, 4u);
+
+    // SKIP appends that many zero bytes and advances pc by the same.
+    overlays_skip(&ovl, 0, 3);
+    RC_CHECK(overlays_pc(&ovl, 0), ==, 0x2004u);
+    RC_CHECK(overlays_code(&ovl, 0).num, ==, 7u);
+    RC_CHECK((uint32_t)rc_view_bytes_get(overlays_code(&ovl, 0), 4), ==, 0x00u);
 
     // Reset empties every overlay's code and pc but keeps the buffer.
     overlays_reset_all(&ovl);

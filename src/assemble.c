@@ -14,8 +14,11 @@
 // handlers that may do so. The directive handlers are referenced by the statement table.
 // All the parse functions take the same head: the baron (its scopes / overlays / source files,
 // and the current overlay), then the current source and scope index, the cursor, and final_pass,
-// then scratch by value. Each fetches its source rc_str from b->source_files at the top.
+// then scratch by value. Each fetches its source rc_str from b->source_files at the targ.
 static parse_result handle_org(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result handle_skip(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result handle_skipto(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result handle_align(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
 static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
 static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
 static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
@@ -23,27 +26,29 @@ static parse_result parse_scope(baron *b, uint32_t source, uint32_t scope, uint3
 static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
 
 
-// operand_value is shared with opcodes.c (both declared in assemble.h); it needs no token
+// parse_argument_make is shared with opcodes.c (both declared in assemble.h); it needs no token
 // table, so it sits on its own. Pure: it reads v and returns the reduction.
-operand operand_value(value v, bool final_pass, uint32_t at)
+parse_argument parse_argument_make(value v, bool final_pass, uint32_t at)
 {
     if (value_is_numeric(v)) {
-        return (operand) {
-            .known = true,
-            .addr = (int64_t) v.numeric
+        return (parse_argument) {
+            .type = parse_argument_type_known,
+            .value = (int64_t) v.numeric
         };
     }
     if (value_is_error(v) && v.error == value_error_unknown_symbol) {
         if (final_pass) {
-            return (operand) {
+            return (parse_argument) {
+                .type = parse_argument_type_error,
                 .error = assemble_error_undefined_symbol,
                 .error_at = at
             };
         }
-        return (operand) { .unresolved = true };   // a forward reference; settles on a later pass
+        return (parse_argument) { .type = parse_argument_type_unresolved };   // a forward reference; settles later
     }
-    
-    return (operand) {
+
+    return (parse_argument) {
+        .type = parse_argument_type_error,
         .error = assemble_error_operand_not_numeric,
         .error_at = at
     };
@@ -125,7 +130,10 @@ static const token statement_token_entries[] = {
     {RC_STR("trb"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_trb}}},
     {RC_STR("tsb"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tsb}}},
 
-    {RC_STR("org"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_org}}},
+    {RC_STR("org"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_org}}},
+    {RC_STR("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
+    {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
+    {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
     {RC_STR("."),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_label}}},
     {RC_STR("{"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_open_brace}}},
     {RC_STR("}"),   {.type = lexeme_type_close_brace}},
@@ -179,14 +187,85 @@ static parse_result handle_org(baron *b, uint32_t source, uint32_t scope, uint32
     expr_result e   = expression_parse(src, cursor, &b->scopes, scope, &scratch);
     if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
 
-    operand op = operand_value(e.value, final_pass, cursor);
-    if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
-    if (op.known) {
-        overlays_org(&b->overlays, b->current_overlay, (uint32_t)(op.addr & 0xFFFF));
+    parse_argument arg = parse_argument_make(e.value, final_pass, cursor);
+    if (arg.type == parse_argument_type_error) return parse_fail(arg.error, arg.error_at);
+    if (arg.type == parse_argument_type_known) {
+        overlays_org(&b->overlays, b->current_overlay, (uint32_t)(arg.value & 0xFFFF));
     }
-    // An unknown ORG leaves pc as-is this pass; op.unresolved forces another pass.
+    // An unknown ORG leaves pc as-is this pass; an unresolved argument forces another pass.
     parse_result r = require_separator(src, e.next);
-    r.unresolved = op.unresolved;
+    r.unresolved = (arg.type == parse_argument_type_unresolved);
+    return r;
+}
+
+// SKIP n - pad the object code with n zero bytes (advancing pc by n). A negative count would
+// rewind the pointer, which we cannot do; the layout-dependent check is deferred to the final pass.
+static parse_result handle_skip(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+{
+    rc_str      src = source_files_text(&b->source_files, source);
+    expr_result e   = expression_parse(src, cursor, &b->scopes, scope, &scratch);
+    if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
+
+    parse_argument arg = parse_argument_make(e.value, final_pass, cursor);
+    if (arg.type == parse_argument_type_error) return parse_fail(arg.error, arg.error_at);
+    if (arg.type == parse_argument_type_known) {
+        if (arg.value < 0) {
+            if (final_pass) return parse_fail(assemble_error_skip_backwards, cursor);
+        } else {
+            overlays_skip(&b->overlays, b->current_overlay, (uint32_t) arg.value);
+        }
+    }
+    parse_result r = require_separator(src, e.next);
+    r.unresolved = (arg.type == parse_argument_type_unresolved);   // an unknown count emits nothing this pass; forces another
+    return r;
+}
+
+// SKIPTO addr - pad with zeroes until pc reaches addr. Being already past addr is an error,
+// deferred to the final pass since pc only settles once preceding forward references resolve.
+static parse_result handle_skipto(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+{
+    rc_str      src = source_files_text(&b->source_files, source);
+    expr_result e   = expression_parse(src, cursor, &b->scopes, scope, &scratch);
+    if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
+
+    parse_argument arg = parse_argument_make(e.value, final_pass, cursor);
+    if (arg.type == parse_argument_type_error) return parse_fail(arg.error, arg.error_at);
+    if (arg.type == parse_argument_type_known) {
+        int64_t pc = (int64_t) overlays_pc(&b->overlays, b->current_overlay);
+        if (arg.value < pc) {
+            if (final_pass) return parse_fail(assemble_error_skip_backwards, cursor);
+        } else {
+            overlays_skip(&b->overlays, b->current_overlay, (uint32_t) (arg.value - pc));
+        }
+    }
+    parse_result r = require_separator(src, e.next);
+    r.unresolved = (arg.type == parse_argument_type_unresolved);
+    return r;
+}
+
+// ALIGN n - pad with zeroes until pc is a multiple of n. n < 1 is meaningless (and would divide
+// by zero), so it is an error; the modulo is only evaluated once we know n is sound.
+static parse_result handle_align(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+{
+    rc_str      src = source_files_text(&b->source_files, source);
+    expr_result e   = expression_parse(src, cursor, &b->scopes, scope, &scratch);
+    if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
+
+    parse_argument arg = parse_argument_make(e.value, final_pass, cursor);
+    if (arg.type == parse_argument_type_error) return parse_fail(arg.error, arg.error_at);
+    if (arg.type == parse_argument_type_known) {
+        if (arg.value < 1) {
+            if (final_pass) return parse_fail(assemble_error_bad_alignment, cursor);
+        } else {
+            uint32_t n   = (uint32_t) arg.value;
+            uint32_t rem = overlays_pc(&b->overlays, b->current_overlay) % n;
+            if (rem != 0) {
+                overlays_skip(&b->overlays, b->current_overlay, n - rem);
+            }
+        }
+    }
+    parse_result r = require_separator(src, e.next);
+    r.unresolved = (arg.type == parse_argument_type_unresolved);
     return r;
 }
 
@@ -480,6 +559,8 @@ rc_str assemble_error_name(assemble_error e)
         case assemble_error_operand_not_numeric:    return RC_STR("operand_not_numeric");
         case assemble_error_value_out_of_range:     return RC_STR("value_out_of_range");
         case assemble_error_branch_out_of_range:    return RC_STR("branch_out_of_range");
+        case assemble_error_skip_backwards:         return RC_STR("skip_backwards");
+        case assemble_error_bad_alignment:          return RC_STR("bad_alignment");
         case assemble_error_undefined_symbol:       return RC_STR("undefined_symbol");
         case assemble_error_duplicate_symbol:       return RC_STR("duplicate_symbol");
         case assemble_error_expression:             return RC_STR("expression");
@@ -560,7 +641,35 @@ RC_TEST_STEP(assemble, branch_offsets, fix)
     // Backward: target at pc 0, NOP, then BNE back to it. offset = 0 - (1 + 2) = -3 = 0xFD.
     RC_CHECK_TRUE(code_is(RESULT(".t NOP : BNE t"), (uint8_t[]){0xEA, 0xD0, 0xFD}, 3));
     // Forward: BEQ over a following NOP. BEQ at 0, NOP at 2, target = 3, offset = 3 - 2 = 1.
-    RC_CHECK_TRUE(code_is(RESULT("BEQ skip : NOP : .skip"), (uint8_t[]){0xF0, 0x01, 0xEA}, 3));
+    // (`over` not `skip`: SKIP is now a reserved directive keyword, like a mnemonic.)
+    RC_CHECK_TRUE(code_is(RESULT("BEQ over : NOP : .over"), (uint8_t[]){0xF0, 0x01, 0xEA}, 3));
+}
+
+RC_TEST_STEP(assemble, skip_skipto_align, fix)
+{
+    // SKIP n emits n zero bytes.
+    RC_CHECK_TRUE(code_is(RESULT("LDA #1 : SKIP 3 : RTS"), (uint8_t[]) {0xA9, 0x01, 0x00, 0x00, 0x00, 0x60}, 6));
+
+    // SKIPTO addr fills with zeroes until pc reaches addr (0x2001 -> 0x2004 = three bytes).
+    RC_CHECK_TRUE(code_is(RESULT("ORG &2000 : NOP : SKIPTO &2004 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
+    // Already past addr is an error.
+    RC_CHECK_TRUE(RESULT("ORG &2000 : NOP : NOP : SKIPTO &2001").error == assemble_error_skip_backwards);
+
+    // ALIGN n pads up to the next multiple of n (pc 1 -> 4 = three bytes)...
+    RC_CHECK_TRUE(code_is(RESULT("NOP : ALIGN 4 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
+    // ...and is a no-op when pc already sits on the boundary.
+    RC_CHECK_TRUE(code_is(RESULT("ALIGN 4 : NOP"), (uint8_t[]) {0xEA}, 1));
+    // ALIGN 0 is meaningless.
+    RC_CHECK_TRUE(RESULT("ALIGN 0").error == assemble_error_bad_alignment);
+}
+
+RC_TEST_STEP(assemble, skip_advances_pc, fix)
+{
+    // SKIP moves pc, so a label after it sees the advanced address.
+    assemble_result r = RESULT("ORG &2000 : .a SKIP 4 : .b");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("a")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("b")), value_make_numeric(0x2004)));
 }
 
 RC_TEST_STEP(assemble, org_and_labels, fix)

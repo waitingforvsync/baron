@@ -1,6 +1,6 @@
 #include "opcodes.h"
 
-#include "assemble_internal.h"   // parse_result, operand, operand_value, require_separator, parse_fail
+#include "assemble_internal.h"   // parse_result, parse_argument, parse_argument_make, require_separator, parse_fail
 #include "baron.h"               // scopes / overlays / source_files reached through b
 #include "lexer.h"
 #include "expression.h"
@@ -430,7 +430,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
     rc_str    src   = source_files_text(&b->source_files, source);
     uint32_t  start = cursor;              // just past the mnemonic
     addr_mode mode;
-    operand   op    = { .known = true };
+    parse_argument arg = { .type = parse_argument_type_known };
     uint32_t  after;                       // past the operand shell, before the separator
 
     lexer_result peek = lexer_next(src, start, operand_tokens);
@@ -445,16 +445,16 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
     else if (peek.token.type == lexeme_type_hash) {
         expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
         if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
-        op = operand_value(e.value, final_pass, peek.next);
-        if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
+        arg = parse_argument_make(e.value, final_pass, peek.next);
+        if (arg.type == parse_argument_type_error) return parse_fail(arg.error, arg.error_at);
         mode  = addr_mode_imm;
         after = e.next;
     }
     else if (peek.token.type == lexeme_type_open_paren) {
         expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
         if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
-        op = operand_value(e.value, final_pass, peek.next);
-        if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
+        arg = parse_argument_make(e.value, final_pass, peek.next);
+        if (arg.type == parse_argument_type_error) return parse_fail(arg.error, arg.error_at);
 
         // Closing shell: "(expr,X)" -> indexed-indirect; "(expr),Y" -> indirect-indexed;
         // "(expr)" -> indirect (JMP's ind16, or a CMOS zero-page indirect).
@@ -498,8 +498,8 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
         if (!handled) {
             expr_result e = expression_parse(src, start, &b->scopes, scope, &scratch);
             if (e.error != expr_error_none) return parse_fail(assemble_error_expression, e.error_at);
-            op = operand_value(e.value, final_pass, start);
-            if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
+            arg = parse_argument_make(e.value, final_pass, start);
+            if (arg.type == parse_argument_type_error) return parse_fail(arg.error, arg.error_at);
 
             index_result ix = consume_index(src, e.next);
             if (ix.error != assemble_error_none) return parse_fail(ix.error, ix.error_at);
@@ -509,7 +509,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
                 mode = addr_mode_rel;
             }
             else {
-                mode = resolve_direct(m, ix.reg, op.known, op.addr);
+                mode = resolve_direct(m, ix.reg, arg.type == parse_argument_type_known, arg.value);
             }
             after = ix.next;
         }
@@ -525,9 +525,9 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
     if (width == 1) {
         if (mode == addr_mode_rel) {
             uint8_t off = 0;
-            if (op.known) {
+            if (arg.type == parse_argument_type_known) {
                 // From the address after the instruction (the offset byte we are about to emit).
-                int64_t delta = op.addr - (int64_t)(overlays_pc(&b->overlays, overlay) + 1);
+                int64_t delta = arg.value - (int64_t)(overlays_pc(&b->overlays, overlay) + 1);
                 if (final_pass && (delta < -128 || delta > 127)) {
                     return parse_fail(assemble_error_branch_out_of_range, start);
                 }
@@ -537,22 +537,22 @@ struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
         }
         else {
             int64_t lo = (mode == addr_mode_imm) ? -128 : 0;   // immediates may be written signed (#-1)
-            if (op.known && final_pass && (op.addr < lo || op.addr > 0xFF)) {
+            if (arg.type == parse_argument_type_known && final_pass && (arg.value < lo || arg.value > 0xFF)) {
                 return parse_fail(assemble_error_value_out_of_range, start);
             }
-            overlays_emit_u8(&b->overlays, overlay, (uint8_t)(op.addr & 0xFF));
+            overlays_emit_u8(&b->overlays, overlay, (uint8_t)(arg.value & 0xFF));
         }
     }
     else if (width == 2) {
-        if (op.known && final_pass && (op.addr < 0 || op.addr > 0xFFFF)) {
+        if (arg.type == parse_argument_type_known && final_pass && (arg.value < 0 || arg.value > 0xFFFF)) {
             return parse_fail(assemble_error_value_out_of_range, start);
         }
-        overlays_emit_u16(&b->overlays, overlay, (uint16_t)(op.addr & 0xFFFF));
+        overlays_emit_u16(&b->overlays, overlay, (uint16_t)(arg.value & 0xFFFF));
     }
 
     // The separator follows; carry forward whether the operand was a forward reference.
     parse_result r = require_separator(src, after);
-    r.unresolved = op.unresolved;
+    r.unresolved = (arg.type == parse_argument_type_unresolved);
     return r;
 }
 

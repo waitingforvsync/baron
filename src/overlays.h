@@ -42,6 +42,7 @@ rc_view_bytes overlays_code(const overlays *ovl, uint32_t id);
 void overlays_org(overlays *ovl, uint32_t id, uint32_t addr);     // set pc; does not move code
 void overlays_emit_u8(overlays *ovl, uint32_t id, uint8_t b);     // append a byte, pc += 1
 void overlays_emit_u16(overlays *ovl, uint32_t id, uint16_t w);   // little-endian word, pc += 2
+void overlays_skip(overlays *ovl, uint32_t id, uint32_t count);   // append `count` zero bytes, pc += count
 
 // Reset every overlay (pc = 0, code emptied, buffers kept) for a fresh pass.
 void overlays_reset_all(overlays *ovl);
