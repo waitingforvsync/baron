@@ -650,9 +650,11 @@ static parse_result parse_scope(baron *b, source_pos at, uint32_t scope, parse_f
 }
 
 
-// A whole source file - the largest parsable item: parse its statements and require they run out
-// at end of input. A leftover '}' is a stray close brace. (parse_scope is a braced block within a
-// file; parse_block is the shared statement loop both rest on.)
+// A whole source file - the largest parsable item: parse its statements and require they run right
+// out at end of input. parse_block stops only at a block closer or at end of input, so a leftover
+// closer here has nothing to close: a stray '}', or an IF-chain keyword with no IF to match. With
+// those ruled out, end of input is the only thing left (asserted). (parse_scope is a braced block
+// within a file; parse_block is the shared statement loop both rest on.)
 static parse_result parse_file(baron *b, source_pos at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     parse_result r = parse_block(b, at, scope, flags, scratch);
@@ -667,12 +669,16 @@ static parse_result parse_file(baron *b, source_pos at, uint32_t scope, parse_fl
     if (lr.token.type == lexeme_type_close_brace) {
         r.error = assemble_error_unexpected_close_brace;
         r.error_at = lr.next;
-    }
-    else if (is_elif(lr.token) || is_else(lr.token) || is_endif(lr.token)) {
-        r.error = assemble_error_unexpected_endif;
-        r.error_at = lr.next;
+        return r;
     }
 
+    if (is_elif(lr.token) || is_else(lr.token) || is_endif(lr.token)) {
+        r.error = assemble_error_unexpected_endif;
+        r.error_at = lr.next;
+        return r;
+    }
+
+    RC_ASSERT(lexer_at_end(src, r.next));   // parse_block had no other reason to stop
     return r;
 }
 

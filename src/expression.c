@@ -1196,6 +1196,7 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             if (sub.error != expr_error_none) {
                 return sub;   // a soft fail here (e.g. "()") is a genuine error in parens
             }
+            
             return expect_close_paren(p, sub.value, sub.next);
         }
 
@@ -1208,15 +1209,19 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             // operand is parsed at the operator's own precedence (prefix climb).
             if (p->text.data[lr.next - 1] == '(') {
                 expr_result arg = parse_precedence(p, lr.next, 0);
+
                 if (arg.error != expr_error_none) {
                     return arg;   // missing/garbled argument: malformed
                 }
+
                 return expect_close_paren(p, apply_unary(lex.unary_op, arg.value, p->arena), arg.next);
             }
+
             expr_result arg = parse_precedence(p, lr.next, lex.unary_op.precedence);
             if (arg.error != expr_error_none) {
                 return arg;   // nothing to apply the operator to: soft fail bubbles up
             }
+
             return ok(apply_unary(lex.unary_op, arg.value, p->arena), arg.next);
         }
 
@@ -1232,9 +1237,11 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
             if (end.error == expr_error_expected_expression) {
                 return ok(value_make_range_open(lex.range.exclusive), lr.next);
             }
+
             if (end.error != expr_error_none) {
                 return end;
             }
+
             return ok(value_make_range_open_start(end.value, lex.range.exclusive), end.next);
         }
 
@@ -1258,9 +1265,11 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t curso
         if (s.error == expr_error_expected_expression) {
             return fail(expr_error_expected_expression, cursor);   // empty "[]" or a trailing comma
         }
+
         if (s.error != expr_error_none) {
             return s;
         }
+
         rc_array_value_push(&indices, s.value, p->arena);
         cursor = s.next;
 
@@ -1269,9 +1278,11 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t curso
             cursor = lr.next;
             continue;
         }
+
         if (lr.token.type == lexeme_type_close_bracket) {
             return ok(subscript(target, indices.view, p->arena), lr.next);
         }
+
         return fail(expr_error_expected_close_bracket, cursor);
     }
 }
