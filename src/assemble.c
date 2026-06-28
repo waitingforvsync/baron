@@ -12,15 +12,15 @@
 
 // Mutual recursion: a label or a scope reopens the statement loop, and the loop reaches the
 // handlers that may do so. The directive handlers are referenced by the statement table.
-// All the parse functions take the same head: the baron (its scopes / overlays / source files),
-// then the current source / overlay / scope index, the cursor, and final_pass, then scratch by
-// value. Each fetches its source rc_str from b->source_files at the top.
-static parse_result handle_org(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result handle_label(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result parse_block(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result parse_scope(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
-static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+// All the parse functions take the same head: the baron (its scopes / overlays / source files,
+// and the current overlay), then the current source and scope index, the cursor, and final_pass,
+// then scratch by value. Each fetches its source rc_str from b->source_files at the top.
+static parse_result handle_org(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result parse_scope(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
+static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch);
 
 
 // operand_value is shared with opcodes.c (both declared in assemble.h); it needs no token
@@ -173,7 +173,7 @@ static parse_result fold(parse_result r, parse_result sub)
 
 // ---- directive statements ----
 
-static parse_result handle_org(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_org(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
     rc_str      src = source_files_text(&b->source_files, source);
     expr_result e   = expression_parse(src, cursor, &b->scopes, scope, &scratch);
@@ -182,7 +182,7 @@ static parse_result handle_org(baron *b, uint32_t source, uint32_t overlay, uint
     operand op = operand_value(e.value, final_pass, cursor);
     if (op.error != assemble_error_none) return parse_fail(op.error, op.error_at);
     if (op.known) {
-        overlays_org(&b->overlays, overlay, (uint32_t)(op.addr & 0xFFFF));
+        overlays_org(&b->overlays, b->current_overlay, (uint32_t)(op.addr & 0xFFFF));
     }
     // An unknown ORG leaves pc as-is this pass; op.unresolved forces another pass.
     parse_result r = require_separator(src, e.next);
@@ -190,7 +190,7 @@ static parse_result handle_org(baron *b, uint32_t source, uint32_t overlay, uint
     return r;
 }
 
-static parse_result handle_label(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_label(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, source);
 
@@ -206,7 +206,7 @@ static parse_result handle_label(baron *b, uint32_t source, uint32_t overlay, ui
     // Bind name = current pc in the current scope; a moved label drives another pass.
     parse_result r = { .next = nm.next };
     r.changed = scopes_set_symbol(&b->scopes, scope, name,
-                                  value_make_numeric((double)overlays_pc(&b->overlays, overlay)));
+                                  value_make_numeric((double)overlays_pc(&b->overlays, b->current_overlay)));
 
     // What follows decides the label's shape. A '{' names a scope - and may sit on the next line,
     // so a single separator before it is allowed. A bare separator leaves a stand-alone label;
@@ -222,17 +222,17 @@ static parse_result handle_label(baron *b, uint32_t source, uint32_t overlay, ui
 
     if (is_open_brace(nb.token)) {
         uint32_t child = scopes_get_or_make_child(&b->scopes, scope, name);
-        return fold(r, parse_scope(b, source, overlay, child, nb.next, final_pass, scratch));
+        return fold(r, parse_scope(b, source, child, nb.next, final_pass, scratch));
     }
-    return fold(r, parse_one_statement(b, source, overlay, scope, r.next, final_pass, scratch));   // shares line
+    return fold(r, parse_one_statement(b, source, scope, r.next, final_pass, scratch));   // shares line
 }
 
-static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result handle_open_brace(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
     // cursor is just past the '{'; its offset gives the anonymous scope a stable per-pass identity,
     // so re-walking it on a later pass keeps the same bindings.
     uint32_t child = scopes_get_or_make_child_at(&b->scopes, scope, cursor - 1);
-    return parse_scope(b, source, overlay, child, cursor, final_pass, scratch);
+    return parse_scope(b, source, child, cursor, final_pass, scratch);
 }
 
 
@@ -244,8 +244,8 @@ static const token assign_token_entries[] = {
 };
 static const token_table assign_tokens = RC_VIEW(assign_token_entries);
 
-// `name` is the identifier and `cursor` sits just past it; an assignment defines a symbol but
-// emits nothing, so it needs no overlay.
+// `name` is the identifier and `cursor` sits just past it; an assignment defines a symbol and
+// emits nothing.
 static parse_result handle_assignment(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_str name, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, source);
@@ -272,15 +272,15 @@ static parse_result handle_assignment(baron *b, uint32_t source, uint32_t scope,
 
 // ---- the statement loop ----
 
-static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
     rc_str       src = source_files_text(&b->source_files, source);
     lexer_result lr  = lexer_next(src, cursor, statement_tokens);
     switch (lr.token.type) {
         case lexeme_type_opcode:
-            return opcode_parse(b, (mnemonic)lr.token.opcode.id, source, overlay, scope, lr.next, final_pass, scratch);
+            return opcode_parse(b, (mnemonic)lr.token.opcode.id, source, scope, lr.next, final_pass, scratch);
         case lexeme_type_keyword:
-            return lr.token.keyword.handle(b, source, overlay, scope, lr.next, final_pass, scratch);   // ORG, '.', or '{'
+            return lr.token.keyword.handle(b, source, scope, lr.next, final_pass, scratch);   // ORG, '.', or '{'
         case lexeme_type_identifier:
             return handle_assignment(b, source, scope, lr.next, final_pass, lr.token.identifier.name, scratch);
         default:
@@ -291,7 +291,7 @@ static parse_result parse_one_statement(baron *b, uint32_t source, uint32_t over
 // Parse statements until the block's closer: a '}' or end of input. It stops AT the closer -
 // leaving a '}' unconsumed - and treats neither as an error, because which closer is required
 // depends on the caller: parse_scope wants the '}', run_pass wants end of input.
-static parse_result parse_block(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_block(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
     rc_str       src = source_files_text(&b->source_files, source);
     parse_result acc = { .next = cursor };
@@ -309,26 +309,27 @@ static parse_result parse_block(baron *b, uint32_t source, uint32_t overlay, uin
             acc.next = lr.next;            // blank statement
             continue;
         }
-        acc = fold(acc, parse_one_statement(b, source, overlay, scope, acc.next, final_pass, scratch));
+        acc = fold(acc, parse_one_statement(b, source, scope, acc.next, final_pass, scratch));
     }
     return acc;
 }
 
 // A braced block: parse its statements (entered just past the '{') and require the closing '}';
 // reaching end of input first is an unclosed scope.
-static parse_result parse_scope(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_scope(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
-    parse_result r = parse_block(b, source, overlay, scope, cursor, final_pass, scratch);
+    parse_result r = parse_block(b, source, scope, cursor, final_pass, scratch);
     if (r.error != assemble_error_none) return r;
 
     rc_str       src = source_files_text(&b->source_files, source);
     lexer_result lr  = lexer_next(src, r.next, statement_tokens);
-    if (lr.token.type != lexeme_type_close_brace) {
-        r.error    = assemble_error_unclosed_scope;
-        r.error_at = r.next;
+    if (lr.token.type == lexeme_type_close_brace) {
+        r.next = lr.next;
         return r;
     }
-    r.next = lr.next;                      // consume the '}'
+
+    r.error    = assemble_error_unclosed_scope;
+    r.error_at = r.next;
     return r;
 }
 
@@ -336,9 +337,9 @@ static parse_result parse_scope(baron *b, uint32_t source, uint32_t overlay, uin
 // A whole source file - the largest parsable item: parse its statements and require they run out
 // at end of input. A leftover '}' is a stray close brace. (parse_scope is a braced block within a
 // file; parse_block is the shared statement loop both rest on.)
-static parse_result parse_file(baron *b, uint32_t source, uint32_t overlay, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
+static parse_result parse_file(baron *b, uint32_t source, uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
-    parse_result r = parse_block(b, source, overlay, scope, cursor, final_pass, scratch);
+    parse_result r = parse_block(b, source, scope, cursor, final_pass, scratch);
     if (r.error != assemble_error_none) return r;
 
     rc_str       src = source_files_text(&b->source_files, source);
@@ -353,10 +354,11 @@ static parse_result parse_file(baron *b, uint32_t source, uint32_t overlay, uint
 
 // ---- the multi-pass driver ----
 
-static parse_result run_pass(baron *b, uint32_t source, rc_arena scratch, bool final_pass)
+static parse_result run_pass(baron *b, uint32_t source, bool final_pass, rc_arena scratch)
 {
     overlays_reset_all(&b->overlays);
-    return parse_file(b, source, overlays_default, /*scope*/ 0, /*cursor*/ 0, final_pass, scratch);
+    b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
+    return parse_file(b, source, /*scope*/ 0, /*cursor*/ 0, final_pass, scratch);
 }
 
 // The shared core: run passes over the source already cached at index `source` in b, until the
@@ -365,7 +367,7 @@ static parse_result run_pass(baron *b, uint32_t source, rc_arena scratch, bool f
 static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
 {
     for (uint32_t pass = 1; pass <= ASSEMBLE_MAX_PASSES; pass++) {
-        parse_result r = run_pass(b, source, scratch, false);
+        parse_result r = run_pass(b, source, false, scratch);
         if (r.error != assemble_error_none) {
             return (assemble_result) {
                 .passes = pass,
@@ -375,7 +377,7 @@ static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
         }
         if (!r.unresolved && !r.changed) {
             // Settled. One more pass with checks armed, to surface any deferred range errors.
-            parse_result fin = run_pass(b, source, scratch, true);
+            parse_result fin = run_pass(b, source, true, scratch);
             if (fin.error != assemble_error_none) {
                 return (assemble_result) {
                     .passes = pass + 1,
@@ -392,7 +394,7 @@ static assemble_result run_passes(baron *b, uint32_t source, rc_arena scratch)
 
     // Did not settle within the cap. A final diagnostic pass names a concrete cause (an
     // undefined symbol) where there is one; otherwise it is genuine oscillation.
-    parse_result diag = run_pass(b, source, scratch, true);
+    parse_result diag = run_pass(b, source, true, scratch);
     if (diag.error != assemble_error_none) {
         return (assemble_result) {
             .passes = ASSEMBLE_MAX_PASSES + 1,

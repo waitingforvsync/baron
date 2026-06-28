@@ -86,7 +86,8 @@ uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
 // As above but for an anonymous (unnamed in source) scope, identified by a stable
 // integer `site` - the source offset of its '{'. The site is turned into a synthetic
 // child-map key that no user identifier can spell, so anonymous scopes also keep a
-// stable identity across passes. The key's bytes are owned by the scopes.
+// stable identity across passes. The key is built in a local buffer to probe with, and on
+// a first sighting copied into the scopes' own arena, so its bytes are owned by the scopes.
 uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, uint32_t site);
 
 // Set leaf `name` to `v` in scope_index - `name` is a plain symbol name, never a

@@ -9,7 +9,7 @@ void baron_init(baron *b)
     scopes_init(&b->scopes);
     scopes_make_root(&b->scopes);          // the root is scope index 0
     overlays_init(&b->overlays);
-    overlays_make_default(&b->overlays);   // the default is overlay index 0
+    b->current_overlay = overlays_make_default(&b->overlays);   // emit into the default overlay (index 0)
     source_files_init(&b->source_files);
 }
 

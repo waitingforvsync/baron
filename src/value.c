@@ -2,7 +2,6 @@
 
 #include "richc/macros.h"
 #include <math.h>
-#include <stdio.h>
 
 
 value value_make_none(void)
@@ -249,36 +248,6 @@ rc_str value_error_name(value_error e)
 }
 
 
-// Append the decimal text of a signed integer to the mutable string. Built back
-// to front without printf; the magnitude is taken in unsigned to avoid the
-// INT64_MIN negation overflow. Belongs in richc's mstr eventually.
-static void mstr_append_int(rc_mstr *out, int64_t value, rc_arena *arena)
-{
-    char buf[20];               // up to 19 digits for 2^63, plus a possible '-'
-    uint32_t i = sizeof buf;
-    uint64_t mag = (value < 0) ? (uint64_t)0 - (uint64_t)value : (uint64_t)value;
-    do {
-        buf[--i] = (char)('0' + (mag % 10));
-        mag /= 10;
-    } while (mag != 0);
-    if (value < 0) {
-        buf[--i] = '-';
-    }
-    rc_mstr_append(out, rc_str_make(buf + i, sizeof buf - i), arena);
-}
-
-
-// Append a textual representation of a double. Interim: a fixed, compile-time-
-// checked snprintf format, until richc owns proper number formatting.
-static void mstr_append_double(rc_mstr *out, double value, rc_arena *arena)
-{
-    char buf[32];
-    int n = snprintf(buf, sizeof buf, "%g", value);
-    RC_ASSERT(n >= 0 && (uint32_t)n < sizeof buf);
-    rc_mstr_append(out, rc_str_make(buf, (uint32_t)n), arena);
-}
-
-
 void value_format(rc_mstr *out, value v, rc_arena *arena)
 {
     switch (v.type) {
@@ -286,7 +255,7 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
             rc_mstr_append(out, RC_STR("none"), arena);
             return;
         case value_type_numeric:
-            mstr_append_double(out, v.numeric, arena);
+            rc_mstr_append_f64(out, v.numeric, arena);
             return;
         case value_type_string:
             rc_mstr_append_char(out, '"', arena);
@@ -300,15 +269,15 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
             return;
         case value_type_range:
             if (v.range.has_start) {
-                mstr_append_int(out, v.range.start, arena);
+                rc_mstr_append_i64(out, v.range.start, arena);
             }
             rc_mstr_append(out, RC_STR(".."), arena);
             if (v.range.step != 1) {
-                mstr_append_int(out, v.range.step, arena);
+                rc_mstr_append_i64(out, v.range.step, arena);
                 rc_mstr_append(out, RC_STR(".."), arena);
             }
             if (v.range.has_end) {
-                mstr_append_int(out, v.range.end, arena);
+                rc_mstr_append_i64(out, v.range.end, arena);
             }
             return;
         case value_type_list:
@@ -437,28 +406,6 @@ RC_TEST(value, formatting)
     value list = value_make_list((rc_view_value) RC_VIEW(elems));
     value_format(&out, list, &arena);
     RC_CHECK(out.view, ==, RC_STR("{1, 2, 3}"));
-
-    rc_arena_deinit(&arena);
-}
-
-RC_TEST(value, format_int_edges)
-{
-    // Direct check of the integer formatter's tricky cases; the range formatting
-    // test above only exercises small values.
-    rc_arena arena = rc_arena_make_default();
-
-    rc_mstr out = rc_mstr_make(16, &arena);
-    mstr_append_int(&out, 0, &arena);
-    mstr_append_int(&out, -7, &arena);
-    RC_CHECK(out.view, ==, RC_STR("0-7"));
-
-    out = rc_mstr_make(24, &arena);
-    mstr_append_int(&out, INT64_MAX, &arena);
-    RC_CHECK(out.view, ==, RC_STR("9223372036854775807"));
-
-    out = rc_mstr_make(24, &arena);
-    mstr_append_int(&out, INT64_MIN, &arena);
-    RC_CHECK(out.view, ==, RC_STR("-9223372036854775808"));
 
     rc_arena_deinit(&arena);
 }

@@ -423,9 +423,10 @@ static index_result consume_index(rc_str source, uint32_t cursor)
                             .error = assemble_error_bad_index_register, .error_at = a.next };
 }
 
-struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source, uint32_t overlay,
+struct parse_result opcode_parse(baron *b, mnemonic m, uint32_t source,
                                  uint32_t scope, uint32_t cursor, bool final_pass, rc_arena scratch)
 {
+    uint32_t overlay = b->current_overlay;   // the overlay we emit into now (assembler-wide state)
     rc_str    src   = source_files_text(&b->source_files, source);
     uint32_t  start = cursor;              // just past the mnemonic
     addr_mode mode;

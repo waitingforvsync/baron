@@ -1,6 +1,7 @@
 #include "scopes.h"
 
 #include "richc/macros.h"
+#include "richc/mstr.h"
 
 
 // A symbol or scope name is a single identifier: it must carry no path separator.
@@ -92,31 +93,29 @@ uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, uint32_t 
 {
     RC_ASSERT(s != NULL);
 
-    // Turn the site into a key no user identifier can spell: a leading '{' (not an
-    // identifier-start char) followed by the decimal offset. Build it on the stack to
-    // probe the child map; only persist the bytes if we actually have to make the scope.
-    char     tmp[12];
-    uint32_t i = sizeof tmp;
-    uint32_t n = site;
-    do {
-        tmp[--i] = (char)('0' + n % 10);
-        n /= 10;
-    } while (n != 0);
-    tmp[--i] = '{';
-    rc_str probe = rc_str_make(tmp + i, sizeof tmp - i);
+    // Turn the site into a key no user identifier can spell: a leading '@' (not an
+    // identifier-start char) followed by the decimal offset. The widest uint32 is ten
+    // digits, so this local buffer always holds the key plus its terminator and the
+    // appends never grow - hence the NULL arena. Only the first sighting copies the bytes
+    // into the scopes' own arena.
+    char storage[32];
+    rc_mstr try_name = {
+        .data = storage,
+        .len = 0,
+        .cap = sizeof storage
+    };
+    rc_mstr_append_char(&try_name, '@', NULL);
+    rc_mstr_append_u32(&try_name, site, NULL);
 
     rc_trie_child *kids  = &RC_AT(s->nodes, parent_index).children;
-    uint32_t       found = rc_trie_child_find(kids, probe);
+    uint32_t       found = rc_trie_child_find(kids, try_name.view);
     if (found != RC_INDEX_NONE) {
         return rc_trie_child_value_get(kids, found);
     }
 
-    // First sighting (pass one): copy the key into a permanent arena and register it.
-    char *buf = rc_arena_alloc(&s->child_arena, probe.len);
-    for (uint32_t k = 0; k < probe.len; k++) {
-        buf[k] = probe.data[k];
-    }
-    return scopes_make_child(s, parent_index, rc_str_make(buf, probe.len));
+    // First sighting (pass one): persist the key in the permanent child arena and register it.
+    rc_str name = rc_mstr_from_str(try_name.view, 0, &s->child_arena).view;
+    return scopes_make_child(s, parent_index, name);
 }
 
 bool scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v)
