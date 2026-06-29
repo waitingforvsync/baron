@@ -1160,4 +1160,28 @@ RC_TEST_STEP(assemble, if_forward_ref_contradiction_does_not_converge, fix)
     RC_CHECK_TRUE(r.error == assemble_error_no_convergence);
 }
 
+RC_TEST_STEP(assemble, nested_if_forward_ref, fix)
+{
+    // Both an outer and an inner IF test the forward label `end`. The fixed code after the conditional
+    // block (LDX/LDY) keeps `end` high: pass 1 emits nothing in the stuck branches, leaving end at 6,
+    // which already clears both thresholds - so on the next pass both NOPs come in and end settles at 8.
+    assemble_result r = RESULT("LDA #0 : IF end >= 4 : NOP : IF end >= 6 : NOP : ENDIF : ENDIF : LDX #1 : LDY #2 : .end : RTS");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xA9, 0x00, 0xEA, 0xEA, 0xA2, 0x01, 0xA0, 0x02, 0x60}, 9));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("end")), value_make_numeric(8)));
+}
+
+RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
+{
+    // The "make this block end at address X" idiom: ORG is computed from a label defined AFTER it, so
+    // the 8-byte block sits at &0FF8..&0FFF and progend lands exactly on &1000. ORG is unresolved on
+    // the first pass (progstart/progend unknown) and settles once they do; JMP progstart then carries
+    // the relocated address. (Code itself still fills the output from index 0.)
+    assemble_result r = RESULT("ORG &1000 - (progend - progstart) : .progstart LDA #&41 : JSR &FFEE : JMP progstart : .progend");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xA9, 0x41, 0x20, 0xEE, 0xFF, 0x4C, 0xF8, 0x0F}, 8));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("progstart")), value_make_numeric(0x0FF8)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("progend")), value_make_numeric(0x1000)));
+}
+
 #endif // BARON_TESTS
