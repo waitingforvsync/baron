@@ -11,14 +11,14 @@ typedef struct lexer_result {
 } lexer_result;
 
 
-// Lex one lexeme from text starting at offset cursor, consulting tt for the
+// Lex one lexeme from text starting at offset pos, consulting tt for the
 // context-specific operators and keywords. Stateless: returns the lexeme and the
 // offset to continue from. At end of input it returns a terminator without
 // advancing, so repeated calls at the end stay put.
-lexer_result lexer_next(rc_str text, uint32_t cursor, token_table tt);
+lexer_result lexer_next(rc_str text, uint32_t pos, token_table tt);
 
-// True when cursor is at the end of text.
-bool lexer_at_end(rc_str text, uint32_t cursor);
+// True when pos is at the end of text.
+bool lexer_at_end(rc_str text, uint32_t pos);
 
 
 #endif // ifndef BARON_LEXER_H_

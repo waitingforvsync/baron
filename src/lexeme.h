@@ -139,9 +139,9 @@ typedef struct lexeme_register {
 typedef struct baron baron;
 typedef struct parse_result parse_result;
 typedef struct parse_flags parse_flags;
-typedef struct source_pos source_pos;
+typedef struct cursor cursor;
 typedef struct lexeme_keyword {
-    parse_result (*handle)(baron *b, source_pos at, uint32_t scope,
+    parse_result (*handle)(baron *b, cursor at, uint32_t scope,
                            parse_flags flags, rc_arena scratch);
 } lexeme_keyword;
 

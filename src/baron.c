@@ -32,7 +32,7 @@ RC_TEST(baron, init_set_get)
     baron_init(&b);
 
     // baron_init already made the root at scope index 0.
-    RC_CHECK_TRUE(scopes_set_symbol(&b.scopes, 0, RC_STR("answer"), value_make_numeric(42.0), (source_pos){0, 0}) == symbol_status_unchanged);
+    RC_CHECK_TRUE(scopes_set_symbol(&b.scopes, 0, RC_STR("answer"), value_make_numeric(42.0), (cursor){0, 0}) == symbol_status_unchanged);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&b.scopes, 0, RC_STR("answer")), value_make_numeric(42.0)));
 
     baron_deinit(&b);

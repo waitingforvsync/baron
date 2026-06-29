@@ -435,13 +435,13 @@ static index_result consume_index(rc_str source, uint32_t cursor)
     };
 }
 
-struct parse_result opcode_parse(baron *b, mnemonic m, source_pos at,
+struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
                                  uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     uint32_t source = at.source;
     uint32_t overlay = b->current_overlay;   // the overlay we emit into now (assembler-wide state)
     rc_str src = source_files_text(&b->source_files, source);
-    uint32_t start = at.offset;           // just past the mnemonic
+    uint32_t start = at.pos;              // just past the mnemonic
     addr_mode mode;
     int_argument arg = {.type = int_argument_type_known};
     uint32_t  after;                       // past the operand shell, before the separator

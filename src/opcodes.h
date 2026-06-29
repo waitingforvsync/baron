@@ -69,8 +69,8 @@ uint16_t opcode_def(mnemonic m, addr_mode mode);
 typedef struct baron baron;
 typedef struct parse_result parse_result;
 typedef struct parse_flags parse_flags;
-typedef struct source_pos source_pos;
-parse_result opcode_parse(baron *b, mnemonic m, source_pos at,
+typedef struct cursor cursor;
+parse_result opcode_parse(baron *b, mnemonic m, cursor at,
                           uint32_t scope, parse_flags flags, rc_arena scratch);
 
 

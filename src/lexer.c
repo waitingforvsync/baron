@@ -5,8 +5,8 @@
 
 // ---- character predicates ----
 
-static bool is_eof(rc_str text, uint32_t cursor)  { return cursor == text.len; }
-static char at(rc_str text, uint32_t cursor)      { RC_ASSERT(cursor < text.len); return text.data[cursor]; }
+static bool is_eof(rc_str text, uint32_t pos)  { return pos == text.len; }
+static char at(rc_str text, uint32_t pos)      { RC_ASSERT(pos < text.len); return text.data[pos]; }
 
 static bool is_whitespace(char c)    { return c == ' ' || c == '\t' || c == '\r'; }
 static bool is_newline(char c)       { return c == '\n'; }
@@ -76,216 +76,216 @@ static lexer_result make_error(lexer_error error, uint32_t next)
 
 // ---- whitespace, comments, terminators ----
 
-static uint32_t skip_comment(rc_str text, uint32_t cursor)
+static uint32_t skip_comment(rc_str text, uint32_t pos)
 {
     // Comments run to end of line (the newline is left for the terminator) or EOF.
     // Colon separators don't terminate comments
-    RC_ASSERT(!is_eof(text, cursor) && is_comment_start(at(text, cursor)));
+    RC_ASSERT(!is_eof(text, pos) && is_comment_start(at(text, pos)));
 
-    while (!is_eof(text, cursor) && !is_newline(at(text, cursor))) {
-        cursor++;
+    while (!is_eof(text, pos) && !is_newline(at(text, pos))) {
+        pos++;
     }
-    return cursor;
+    return pos;
 }
 
-static uint32_t skip_whitespace(rc_str text, uint32_t cursor)
+static uint32_t skip_whitespace(rc_str text, uint32_t pos)
 {
     // Skip whitespace and any trailing comments
-    while (!is_eof(text, cursor) && is_whitespace(at(text, cursor))) {
-        cursor++;
+    while (!is_eof(text, pos) && is_whitespace(at(text, pos))) {
+        pos++;
     }
 
-    if (!is_eof(text, cursor) && is_comment_start(at(text, cursor))) {
-        cursor = skip_comment(text, cursor);
+    if (!is_eof(text, pos) && is_comment_start(at(text, pos))) {
+        pos = skip_comment(text, pos);
     }
 
-    return cursor;
+    return pos;
 }
 
 // Coalesce a run of ':' / newline (and the whitespace/comments between them) into a
 // single terminator lexeme. We enter at the first terminator character. The lexeme's
 // `newline` flag is true only when the whole run was newlines; a ':' makes it the
 // hard kind that a list will not skip over (as does EOF, handled separately).
-static lexer_result lex_terminator(rc_str text, uint32_t cursor)
+static lexer_result lex_terminator(rc_str text, uint32_t pos)
 {
-    RC_ASSERT(!is_eof(text, cursor) && is_terminator(at(text, cursor)));
+    RC_ASSERT(!is_eof(text, pos) && is_terminator(at(text, pos)));
 
     bool only_newlines = true;
     do {
-        if (at(text, cursor) == ':') {
+        if (at(text, pos) == ':') {
             only_newlines = false;
         }
-        cursor = skip_whitespace(text, cursor + 1);
+        pos = skip_whitespace(text, pos + 1);
     }
-    while (!is_eof(text, cursor) && is_terminator(at(text, cursor)));
+    while (!is_eof(text, pos) && is_terminator(at(text, pos)));
 
     return make_result(
         (lexeme) {
             .type = lexeme_type_terminator,
             .terminator = { .newline = only_newlines }
         },
-        cursor
+        pos
     );
 }
 
 
 // ---- number literals (hand-rolled; destined for richc) ----
 
-static lexer_result lex_decimal(rc_str text, uint32_t cursor)
+static lexer_result lex_decimal(rc_str text, uint32_t pos)
 {
-    // We enter with cursor at a digit.
-    RC_ASSERT(!is_eof(text, cursor) && is_digit(at(text, cursor)));
+    // We enter with pos at a digit.
+    RC_ASSERT(!is_eof(text, pos) && is_digit(at(text, pos)));
 
     double result = 0.0;
     do {
-        if (result > (DBL_MAX - (at(text, cursor) - '0')) / 10.0) {
-            return make_error(lexer_error_numeric_overflow, cursor);
+        if (result > (DBL_MAX - (at(text, pos) - '0')) / 10.0) {
+            return make_error(lexer_error_numeric_overflow, pos);
         }
-        result = result * 10.0 + (at(text, cursor) - '0');
-        cursor++;
+        result = result * 10.0 + (at(text, pos) - '0');
+        pos++;
     }
-    while (!is_eof(text, cursor) && is_digit(at(text, cursor)));
+    while (!is_eof(text, pos) && is_digit(at(text, pos)));
 
     // Fractional part, only if there is a digit after the '.'
     // There's a subtlety here: we don't want to consume a '.' if it is not followed by a digit, so
     // that it can be parsed as a potential range operator (..)
-    if (!is_eof(text, cursor) && at(text, cursor) == '.') {
-        if (!is_eof(text, cursor + 1) && is_digit(at(text, cursor + 1))) {
+    if (!is_eof(text, pos) && at(text, pos) == '.') {
+        if (!is_eof(text, pos + 1) && is_digit(at(text, pos + 1))) {
             double divide = 1.0;
             bool underflow = false;
-            cursor++;  // consume '.'
-            while (!is_eof(text, cursor) && is_digit(at(text, cursor))) {
-                underflow |= (result > (DBL_MAX - (at(text, cursor) - '0')) / 10.0);
+            pos++;  // consume '.'
+            while (!is_eof(text, pos) && is_digit(at(text, pos))) {
+                underflow |= (result > (DBL_MAX - (at(text, pos) - '0')) / 10.0);
                 if (!underflow) {
-                    result = result * 10.0 + (at(text, cursor) - '0');
+                    result = result * 10.0 + (at(text, pos) - '0');
                     divide *= 10.0;
                 }
-                cursor++;  // keep consuming digits even once precision is exhausted
+                pos++;  // keep consuming digits even once precision is exhausted
             }
             result /= divide;
         }
     }
 
-    return make_numeric(result, cursor);
+    return make_numeric(result, pos);
 }
 
 
-static lexer_result lex_hex(rc_str text, uint32_t cursor)
+static lexer_result lex_hex(rc_str text, uint32_t pos)
 {
-    // We enter with cursor at the first hex digit after the prefix
-    if (is_eof(text, cursor) || !is_hex_digit(at(text, cursor))) {
-        return make_error(lexer_error_bad_hex_literal, cursor);
+    // We enter with pos at the first hex digit after the prefix
+    if (is_eof(text, pos) || !is_hex_digit(at(text, pos))) {
+        return make_error(lexer_error_bad_hex_literal, pos);
     }
 
-    uint32_t start = cursor;
+    uint32_t start = pos;
     uint32_t result = 0;
     do {
         if (result > 0x0FFFFFFFu) {
-            // @todo: don't abort immediately - flag the overflow and keep consuming digits so the cursor is at the end of the token
+            // @todo: don't abort immediately - flag the overflow and keep consuming digits so the pos is at the end of the token
             return make_error(lexer_error_numeric_overflow, start - 1);
         }
-        result = (result << 4) | hex_value(at(text, cursor));
-        cursor++;
+        result = (result << 4) | hex_value(at(text, pos));
+        pos++;
     }
-    while (!is_eof(text, cursor) && is_hex_digit(at(text, cursor)));
+    while (!is_eof(text, pos) && is_hex_digit(at(text, pos)));
 
-    return make_numeric((double)result, cursor);
+    return make_numeric((double)result, pos);
 }
 
-static lexer_result lex_binary(rc_str text, uint32_t cursor)
+static lexer_result lex_binary(rc_str text, uint32_t pos)
 {
-    // We enter with cursor at the first binary digit after the prefix
-    if (is_eof(text, cursor) || !is_bin_digit(at(text, cursor))) {
-        return make_error(lexer_error_bad_binary_literal, cursor);
+    // We enter with pos at the first binary digit after the prefix
+    if (is_eof(text, pos) || !is_bin_digit(at(text, pos))) {
+        return make_error(lexer_error_bad_binary_literal, pos);
     }
 
-    uint32_t start = cursor;
+    uint32_t start = pos;
     uint32_t result = 0;
     do {
         if (result > 0x7FFFFFFFu) {
-            // @todo: don't abort immediately - flag the overflow and keep consuming digits so the cursor is at the end of the token
+            // @todo: don't abort immediately - flag the overflow and keep consuming digits so the pos is at the end of the token
             return make_error(lexer_error_numeric_overflow, start - 1);
         }
-        result = (result << 1) | (uint32_t)(at(text, cursor) - '0');
-        cursor++;
+        result = (result << 1) | (uint32_t)(at(text, pos) - '0');
+        pos++;
     }
-    while (!is_eof(text, cursor) && is_bin_digit(at(text, cursor)));
+    while (!is_eof(text, pos) && is_bin_digit(at(text, pos)));
 
-    return make_numeric((double)result, cursor);
+    return make_numeric((double)result, pos);
 }
 
-static lexer_result lex_char(rc_str text, uint32_t cursor)
+static lexer_result lex_char(rc_str text, uint32_t pos)
 {
-    // cursor is at quoted character. Expect X' - one char then a closing quote.
-    if (is_eof(text, cursor) || is_newline(at(text, cursor)) || at(text, cursor) == '\'' || is_eof(text, cursor + 1) || at(text, cursor + 1) != '\'') {
-        return make_error(lexer_error_bad_char_literal, cursor);
+    // pos is at quoted character. Expect X' - one char then a closing quote.
+    if (is_eof(text, pos) || is_newline(at(text, pos)) || at(text, pos) == '\'' || is_eof(text, pos + 1) || at(text, pos + 1) != '\'') {
+        return make_error(lexer_error_bad_char_literal, pos);
     }
-    return make_numeric((double)(uint8_t)at(text, cursor), cursor + 2);
+    return make_numeric((double)(uint8_t)at(text, pos), pos + 2);
 }
 
 
 // ---- string literals ----
 
-static lexer_result lex_string(rc_str text, uint32_t cursor)
+static lexer_result lex_string(rc_str text, uint32_t pos)
 {
-    // cursor is past the operning quote. A doubled quote ("") is an escaped quote and
+    // pos is past the operning quote. A doubled quote ("") is an escaped quote and
     // keeps the string going; we record that the raw text needs unescaping later.
     bool contains_quotes = false;
 
-    uint32_t start = cursor;
+    uint32_t start = pos;
     while (true) {
         do {
-            if (is_eof(text, cursor) || is_newline(text.data[cursor])) {
-                return make_error(lexer_error_unterminated_string, cursor - 1);
+            if (is_eof(text, pos) || is_newline(text.data[pos])) {
+                return make_error(lexer_error_unterminated_string, pos - 1);
             }
         }
-        while (text.data[cursor++] != '\"');
+        while (text.data[pos++] != '\"');
 
-        if (is_eof(text, cursor) || text.data[cursor] != '\"') {
+        if (is_eof(text, pos) || text.data[pos] != '\"') {
             break;
         }
 
         contains_quotes = true;
-        cursor++;
+        pos++;
     }
 
     return make_result(
         (lexeme) {
             .type = contains_quotes ? lexeme_type_escaped_string_literal : lexeme_type_string_literal,
             .string_literal = {
-                .ref = rc_str_substr(text, start, cursor - start - 1)
+                .ref = rc_str_substr(text, start, pos - start - 1)
             }
         },
-        cursor
+        pos
     );
 }
 
 
 // ---- identifiers (possibly dotted) ----
 
-static uint32_t scan_segment(rc_str text, uint32_t cursor)
+static uint32_t scan_segment(rc_str text, uint32_t pos)
 {
-    // cursor is at an identifier-start char.
-    RC_ASSERT(!is_eof(text, cursor) && is_ident_start(at(text, cursor)));
+    // pos is at an identifier-start char.
+    RC_ASSERT(!is_eof(text, pos) && is_ident_start(at(text, pos)));
 
     do {
-        cursor++;
+        pos++;
     }
-    while (!is_eof(text, cursor) && is_ident_char(at(text, cursor)));
+    while (!is_eof(text, pos) && is_ident_char(at(text, pos)));
 
-    return cursor;
+    return pos;
 }
 
 // Scan ident('.' ident)*, consuming a '.' only when an identifier-start follows
 // (so `a.b` is one identifier, but `a..b` stops at `a`).
-static uint32_t scan_dotted_identifier(rc_str text, uint32_t cursor)
+static uint32_t scan_dotted_identifier(rc_str text, uint32_t pos)
 {
-    cursor = scan_segment(text, cursor);
-    while (!is_eof(text, cursor) && at(text, cursor) == '.'
-           && !is_eof(text, cursor + 1) && is_ident_start(at(text, cursor + 1))) {
-        cursor = scan_segment(text, cursor + 1);
+    pos = scan_segment(text, pos);
+    while (!is_eof(text, pos) && at(text, pos) == '.'
+           && !is_eof(text, pos + 1) && is_ident_start(at(text, pos + 1))) {
+        pos = scan_segment(text, pos + 1);
     }
-    return cursor;
+    return pos;
 }
 
 static lexer_result make_identifier(rc_str text, uint32_t start, uint32_t end)
@@ -304,82 +304,82 @@ static lexer_result make_identifier(rc_str text, uint32_t start, uint32_t end)
 
 // ---- main ----
 
-lexer_result lexer_next(rc_str text, uint32_t cursor, token_table tt)
+lexer_result lexer_next(rc_str text, uint32_t pos, token_table tt)
 {
     RC_ASSERT(rc_str_is_valid(text));
     RC_ASSERT(rc_view_token_is_valid(tt));
 
     // First skip over whitespace and any trailing comment
-    cursor = skip_whitespace(text, cursor);
+    pos = skip_whitespace(text, pos);
 
-    // If reached end of file, return a terminator and don't advance the cursor
-    if (is_eof(text, cursor)) {
-        return make_simple(lexeme_type_terminator, cursor);
+    // If reached end of file, return a terminator and don't advance the pos
+    if (is_eof(text, pos)) {
+        return make_simple(lexeme_type_terminator, pos);
     }
 
-    char c = at(text, cursor);
+    char c = at(text, pos);
 
     // If reached the end of the line, or a separator, return a separator lexeme
     if (is_terminator(c)) {
-        return lex_terminator(text, cursor);
+        return lex_terminator(text, pos);
     }
 
     // Parse string literals
     if (c == '"') {
-        return lex_string(text, cursor + 1);
+        return lex_string(text, pos + 1);
     }
 
     // Parse a decimal number literal
     if (is_digit(c)) {
-        return lex_decimal(text, cursor);
+        return lex_decimal(text, pos);
     }
 
     // Parse a hex number literal
     if (is_hex_prefix(c)) {
-        return lex_hex(text, cursor + 1);
+        return lex_hex(text, pos + 1);
     }
 
     // Parse a binary number literal
     if (is_bin_prefix(c)) {
-        return lex_binary(text, cursor + 1);
+        return lex_binary(text, pos + 1);
     }
 
     // Parse a character literal
     if (c == '\'') {
-        return lex_char(text, cursor + 1);
+        return lex_char(text, pos + 1);
     }
 
     // Parse a comma (commas are commas regardless of context)
     if (c == ',') {
-        return make_simple(lexeme_type_comma, cursor + 1);
+        return make_simple(lexeme_type_comma, pos + 1);
     }
 
     // Operators / keywords from the context table. An identifier starting here
     // wins if it is longer than the matched token (so ANDY beats the AND token).
-    uint32_t tok = token_table_find(tt, rc_str_skip(text, cursor));
+    uint32_t tok = token_table_find(tt, rc_str_skip(text, pos));
     if (tok != RC_INDEX_NONE) {
         rc_str name = rc_view_token_get(tt, tok).name;
         if (is_ident_start(c)) {
-            uint32_t end = scan_dotted_identifier(text, cursor);
-            if (end - cursor > name.len) {
-                return make_identifier(text, cursor, end);
+            uint32_t end = scan_dotted_identifier(text, pos);
+            if (end - pos > name.len) {
+                return make_identifier(text, pos, end);
             }
         }
-        return make_result(rc_view_token_get(tt, tok).lexeme, cursor + name.len);
+        return make_result(rc_view_token_get(tt, tok).lexeme, pos + name.len);
     }
 
     // Identifier is the last resort.
     if (is_ident_start(c)) {
-        return make_identifier(text, cursor, scan_dotted_identifier(text, cursor));
+        return make_identifier(text, pos, scan_dotted_identifier(text, pos));
     }
 
-    return make_error(lexer_error_unexpected_char, cursor);
+    return make_error(lexer_error_unexpected_char, pos);
 }
 
 
-bool lexer_at_end(rc_str text, uint32_t cursor)
+bool lexer_at_end(rc_str text, uint32_t pos)
 {
-    return is_eof(text, cursor);
+    return is_eof(text, pos);
 }
 
 

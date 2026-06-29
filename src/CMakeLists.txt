@@ -7,7 +7,7 @@ add_executable(baron
     token.h
     lexer.c
     lexer.h
-    source_pos.h
+    cursor.h
     scopes.c
     scopes.h
     expression.c

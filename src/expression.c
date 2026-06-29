@@ -1167,66 +1167,66 @@ static const token_table even_tokens = RC_VIEW(even_entries);
 static const token_table odd_tokens  = RC_VIEW(odd_entries);
 
 
-// Require a ')' at cursor (lexed from operator position). On success returns v with
-// the cursor past the ')'; otherwise an expected_close_paren error.
-static expr_result expect_close_paren(const parser *p, value v, uint32_t cursor)
+// Require a ')' at pos (lexed from operator position). On success returns v with
+// the pos past the ')'; otherwise an expected_close_paren error.
+static expr_result expect_close_paren(const parser *p, value v, uint32_t pos)
 {
-    lexer_result rp = lexer_next(p->text, cursor, odd_tokens);
+    lexer_result rp = lexer_next(p->text, pos, odd_tokens);
     if (rp.token.type != lexeme_type_close_paren) {
-        return fail(expr_error_expected_close_paren, cursor);
+        return fail(expr_error_expected_close_paren, pos);
     }
     return ok(v, rp.next);
 }
 
 // parse_operand and parse_precedence are mutually recursive, so one of the pair must
 // be declared ahead; everything else below is defined in call order (callees first).
-static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t min_prec);
+static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_prec);
 
 // Accept a newline if one is here (a list literal treats newlines as whitespace),
-// returning the cursor past it, else the cursor unchanged. The lexer coalesces a run
+// returning the pos past it, else the pos unchanged. The lexer coalesces a run
 // of newlines into one terminator, so there is only ever one to skip. We lex with `tt`
 // so the caller can re-lex the same spot for whatever it expects there; a ':' or EOF
 // lexes as a hard terminator and is left in place, so an unclosed list is reported.
-static uint32_t accept_newline(const parser *p, uint32_t cursor, token_table tt)
+static uint32_t accept_newline(const parser *p, uint32_t pos, token_table tt)
 {
-    lexer_result lr = lexer_next(p->text, cursor, tt);
+    lexer_result lr = lexer_next(p->text, pos, tt);
     if (lr.token.type == lexeme_type_terminator && lr.token.terminator.newline) {
         return lr.next;
     }
-    return cursor;
+    return pos;
 }
 
 // Parse a list literal from just after the '{': comma-separated element expressions
 // (nested lists allowed, empty allowed), with newlines ignored inside the braces. We
 // gather the elements in the parser's scratch arena and wrap that view - no copy,
 // since a value is a non-owning handle.
-static expr_result parse_list(const parser *p, uint32_t cursor)
+static expr_result parse_list(const parser *p, uint32_t pos)
 {
     rc_array_value elems = {0};
 
     while (true) {
         // Value-or-'}' position.
-        cursor = accept_newline(p, cursor, even_tokens);
+        pos = accept_newline(p, pos, even_tokens);
 
-        lexer_result lr = lexer_next(p->text, cursor, even_tokens);
+        lexer_result lr = lexer_next(p->text, pos, even_tokens);
         if (lr.token.type == lexeme_type_close_brace) {
             return ok(value_make_list(elems.view), lr.next);   // possibly empty
         }
 
         // One element, a full expression. A soft fail here (e.g. "{,}") is a real error.
-        expr_result e = parse_precedence(p, cursor, 0);
+        expr_result e = parse_precedence(p, pos, 0);
         if (e.error != expr_error_none) {
             return e;
         }
 
         rc_array_value_push(&elems, e.value, p->arena);
-        cursor = e.next;
+        pos = e.next;
 
         // Separator position: after any newline we want a ',' or '}'.
-        cursor = accept_newline(p, cursor, odd_tokens);
-        lr = lexer_next(p->text, cursor, odd_tokens);
+        pos = accept_newline(p, pos, odd_tokens);
+        lr = lexer_next(p->text, pos, odd_tokens);
         if (lr.token.type == lexeme_type_comma) {
-            cursor = lr.next;
+            pos = lr.next;
             continue;   // a trailing comma simply loops back and finds the '}'
         }
 
@@ -1234,7 +1234,7 @@ static expr_result parse_list(const parser *p, uint32_t cursor)
             return ok(value_make_list(elems.view), lr.next);
         }
         
-        return fail(expr_error_expected_close_brace, cursor);
+        return fail(expr_error_expected_close_brace, pos);
     }
 }
 
@@ -1242,30 +1242,30 @@ static expr_result parse_list(const parser *p, uint32_t cursor)
 // comma-separated expressions up to the ')', then hand the raw arguments to the function's
 // handler, which validates the count and types and decides how to treat errors (most
 // propagate, defined() inspects). An empty list is allowed; a missing ')' is committed.
-static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t cursor)
+static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t pos)
 {
-    RC_ASSERT(cursor > 0 && p->text.data[cursor - 1] == '(');   // the '(' is part of the function token
+    RC_ASSERT(pos > 0 && p->text.data[pos - 1] == '(');   // the '(' is part of the function token
 
     rc_array_value args = {0};
 
     // An immediate ')' is an empty argument list.
-    lexer_result lr = lexer_next(p->text, cursor, odd_tokens);
+    lexer_result lr = lexer_next(p->text, pos, odd_tokens);
     if (lr.token.type == lexeme_type_close_paren) {
         return ok(fn.apply(args.view, p->arena), lr.next);
     }
 
     while (true) {
-        expr_result a = parse_precedence(p, cursor, 0);
+        expr_result a = parse_precedence(p, pos, 0);
         if (a.error != expr_error_none) {
             return a;   // a soft expected_expression here (e.g. "f(1,)") is a real error
         }
 
         rc_array_value_push(&args, a.value, p->arena);
-        cursor = a.next;
+        pos = a.next;
 
-        lr = lexer_next(p->text, cursor, odd_tokens);
+        lr = lexer_next(p->text, pos, odd_tokens);
         if (lr.token.type == lexeme_type_comma) {
-            cursor = lr.next;
+            pos = lr.next;
             continue;
         }
 
@@ -1273,16 +1273,16 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
             return ok(fn.apply(args.view, p->arena), lr.next);
         }
 
-        return fail(expr_error_expected_close_paren, cursor);
+        return fail(expr_error_expected_close_paren, pos);
     }
 }
 
 // Parse one operand: a literal, a symbol, a parenthesised group, a prefixed unary
 // expression, a function call, or a list literal. A lexeme that cannot begin an
 // operand is a soft expected_expression failure, leaving the caller to decide.
-static expr_result parse_operand(const parser *p, uint32_t cursor)
+static expr_result parse_operand(const parser *p, uint32_t pos)
 {
-    lexer_result lr = lexer_next(p->text, cursor, even_tokens);
+    lexer_result lr = lexer_next(p->text, pos, even_tokens);
     lexeme lex = lr.token;
 
     switch (lex.type) {
@@ -1364,7 +1364,7 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
 
         default:
             // A terminator, a stray close paren, a lexer error: no operand here.
-            return fail(expr_error_expected_expression, cursor);
+            return fail(expr_error_expected_expression, pos);
     }
 }
 
@@ -1373,14 +1373,14 @@ static expr_result parse_operand(const parser *p, uint32_t cursor)
 // and a bare .. all work, each stopping cleanly at the ',' or ']'). Newlines are not
 // skipped - a subscript is an inline postfix. An empty '[]', a trailing comma, or a
 // missing ']' is a committed error; index/type problems become propagating error values.
-static expr_result parse_subscript(const parser *p, value target, uint32_t cursor)
+static expr_result parse_subscript(const parser *p, value target, uint32_t pos)
 {
     rc_array_value indices = {0};
 
     while (true) {
-        expr_result s = parse_precedence(p, cursor, 0);
+        expr_result s = parse_precedence(p, pos, 0);
         if (s.error == expr_error_expected_expression) {
-            return fail(expr_error_expected_expression, cursor);   // empty "[]" or a trailing comma
+            return fail(expr_error_expected_expression, pos);   // empty "[]" or a trailing comma
         }
 
         if (s.error != expr_error_none) {
@@ -1388,11 +1388,11 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t curso
         }
 
         rc_array_value_push(&indices, s.value, p->arena);
-        cursor = s.next;
+        pos = s.next;
 
-        lexer_result lr = lexer_next(p->text, cursor, odd_tokens);
+        lexer_result lr = lexer_next(p->text, pos, odd_tokens);
         if (lr.token.type == lexeme_type_comma) {
-            cursor = lr.next;
+            pos = lr.next;
             continue;
         }
 
@@ -1400,16 +1400,16 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t curso
             return ok(subscript(target, indices.view, p->arena), lr.next);
         }
 
-        return fail(expr_error_expected_close_bracket, cursor);
+        return fail(expr_error_expected_close_bracket, pos);
     }
 }
 
 // Parse an expression whose operators bind at least as tightly as min_prec, folding
 // left-to-right. Stops (greedily) at the first lexeme that is not a usable binary
-// operator, returning the value so far and the cursor before that lexeme.
-static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t min_prec)
+// operator, returning the value so far and the pos before that lexeme.
+static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_prec)
 {
-    expr_result lhs = parse_operand(p, cursor);
+    expr_result lhs = parse_operand(p, pos);
     if (lhs.error != expr_error_none) {
         return lhs;   // could not even get the first operand
     }
@@ -1494,7 +1494,7 @@ static expr_result parse_precedence(const parser *p, uint32_t cursor, uint8_t mi
     }
 }
 
-expr_result expression_parse(rc_str text, uint32_t cursor,
+expr_result expression_parse(rc_str text, uint32_t pos,
                              const scopes *s, uint32_t scope_index, rc_arena *arena)
 {
     RC_ASSERT(rc_str_is_valid(text));
@@ -1507,7 +1507,7 @@ expr_result expression_parse(rc_str text, uint32_t cursor,
         .arena = arena
     };
 
-    return parse_precedence(&p, cursor, 0);
+    return parse_precedence(&p, pos, 0);
 }
 
 
@@ -1575,7 +1575,7 @@ RC_TEST_STEP(expression, callable_syntax, fix)
 {
     // A named callable needs its '(': a bare name is now a plain identifier, so a function
     // and a like-named variable can coexist.
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("lo"), value_make_numeric(7.0), (source_pos){0, 0});
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("lo"), value_make_numeric(7.0), (cursor){0, 0});
     RC_CHECK_TRUE(value_is_equal(VAL("lo"),      value_make_numeric(7.0)));   // the variable
     RC_CHECK_TRUE(value_is_equal(VAL("lo(258)"), value_make_numeric(2.0)));   // the operator (low byte)
     RC_CHECK_TRUE(value_is_error(VAL("abs")));   // a bare function name is just an unknown symbol
@@ -1597,7 +1597,7 @@ RC_TEST_STEP(expression, callable_syntax, fix)
 
 RC_TEST_STEP(expression, symbols, fix)
 {
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (source_pos){0, 0});
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (cursor){0, 0});
 
     RC_CHECK_TRUE(value_is_equal(VAL("foo+1"), value_make_numeric(43.0)));
     RC_CHECK_TRUE(value_is_error(VAL("bar")));        // unknown symbol -> error value
@@ -2036,7 +2036,7 @@ RC_TEST_STEP(expression, list_functions, fix)
 
 RC_TEST_STEP(expression, defined_lohi_strings, fix)
 {
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (source_pos){0, 0});
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (cursor){0, 0});
     RC_CHECK_TRUE(value_is_equal(VAL("defined(foo)"), value_make_numeric(1)));   // resolves
     RC_CHECK_TRUE(value_is_equal(VAL("defined(bar)"), value_make_numeric(0)));   // an unknown symbol
 

@@ -2,7 +2,7 @@
 #define BARON_SCOPES_H_
 
 #include "value.h"
-#include "source_pos.h"
+#include "cursor.h"
 #include "richc/hash.h"
 
 
@@ -21,14 +21,14 @@
 // `def` (a duplicate). Baron's source is immutable, so a name is bound exactly once.
 typedef struct symbol {
     value      v;
-    source_pos def;
+    cursor def;
 } symbol;
 
 // The outcome of binding a symbol: the first enumerator is the no-op default.
 typedef enum symbol_status {
     symbol_status_unchanged,   // brand new, or identical to last pass: no further pass needed
     symbol_status_changed,     // same definition, value moved: drives another pass
-    symbol_status_duplicate,   // a different source_pos already owns this name in this scope
+    symbol_status_duplicate,   // a different cursor already owns this name in this scope
 } symbol_status;
 
 // Both maps are keyed by name. We key on the rc_str by content - hashing and
@@ -106,7 +106,7 @@ uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
 // no user identifier can spell, so anonymous scopes also keep a stable identity across
 // passes. The key is built in a local buffer to probe with, and on a first sighting
 // copied into the scopes' own arena, so its bytes are owned by the scopes.
-uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, source_pos at);
+uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, cursor at);
 
 // Bind leaf `name` to `v` in scope_index, with `def` recording the source position
 // that defines it - `name` is a plain symbol name, never a dotted path. The value is
@@ -117,7 +117,7 @@ uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, source_po
 //   - changed:   the same definition (matching `def`) re-evaluated to a different value.
 //     This is what a later pass watches to decide whether things have settled.
 //   - unchanged: a brand new symbol, or the same definition landing the same value again.
-symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v, source_pos def);
+symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v, cursor def);
 
 // Remove leaf `name` (a plain symbol name, not a path) from scope_index. Returns
 // whether it was there to remove.
