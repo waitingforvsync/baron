@@ -1129,4 +1129,35 @@ RC_TEST_STEP(assemble, if_framing_errors, fix)
     RC_CHECK_TRUE(RESULT("IF 0 : ELSE LDA #1 : ENDIF").error == assemble_error_expected_separator);   // ELSE needs a separator
 }
 
+// The next three exercise an IF condition that depends on a forward reference whose own size depends
+// on the layout the condition controls - a fixed-point search over passes.
+
+RC_TEST_STEP(assemble, if_forward_ref_condition_settles, fix)
+{
+    // `LDA fwdlabel` starts absolute (fwdlabel unknown), so the first guess lands fwdlabel at 6; once it
+    // shrinks to zero-page, fwdlabel settles at 5, making `fwdlabel = 6` false - the block is skipped.
+    assemble_result r = RESULT("LDA #1 : IF fwdlabel = 6 : LDA #2 : JSR &FFEE : ENDIF : NOP : LDA fwdlabel : .fwdlabel : RTS");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xA9, 0x01, 0xEA, 0xA5, 0x05, 0x60}, 6));
+}
+
+RC_TEST_STEP(assemble, if_forward_ref_both_fixed_points_valid, fix)
+{
+    // Both "taken" (fwdlabel=10) and "skipped" (fwdlabel=5) are self-consistent fixed points. We
+    // converge to whichever our first guess lands on: an unresolved operand resolves to zero-page
+    // optimistically (smallest), so fwdlabel starts at 5, `5 > 5` is false, and we settle on skipped.
+    assemble_result r = RESULT("LDA #1 : IF fwdlabel > 5 : LDA #2 : JSR &FFEE : ENDIF : NOP : LDA fwdlabel : .fwdlabel : RTS");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xA9, 0x01, 0xEA, 0xA5, 0x05, 0x60}, 6));
+}
+
+RC_TEST_STEP(assemble, if_forward_ref_contradiction_does_not_converge, fix)
+{
+    // `fwdlabel = 5` is a contradiction: skipping the block puts fwdlabel at 5 (so the condition is
+    // true, contradicting the skip); taking it puts fwdlabel at 10 (so the condition is false). The
+    // layout flips between the two forever and never settles.
+    assemble_result r = RESULT("LDA #1 : IF fwdlabel = 5 : LDA #2 : JSR &FFEE : ENDIF : NOP : LDA fwdlabel : .fwdlabel : RTS");
+    RC_CHECK_TRUE(r.error == assemble_error_no_convergence);
+}
+
 #endif // BARON_TESTS
