@@ -39,6 +39,7 @@ typedef enum lexeme_type {
     lexeme_type_elif,                   // ELIF / ELSE / ENDIF: bare markers the IF chain reads, and
     lexeme_type_else,                   //   that close a statement block from the outside (like '}')
     lexeme_type_endif,
+    lexeme_type_next,                   // NEXT: the bare marker that closes a FOR body (like ENDIF for IF)
     lexeme_type_unary_op,
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)

@@ -44,4 +44,10 @@ expr_result expression_parse(rc_str text, uint32_t cursor,
                              const scopes *s, uint32_t scope_index, rc_arena *arena);
 
 
+// Enumerate a (bounded) range into a fresh list in arena, capped at VALUE_LIST_MAX_LENGTH. An
+// unbounded range yields a domain error, an oversized one value_error_list_too_big. FOR uses this to
+// walk a range sequence; internally it is also how the operators coerce a range to its elements.
+value range_to_list(value_range r, rc_arena *arena);
+
+
 #endif // ifndef BARON_EXPRESSION_H_

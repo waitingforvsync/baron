@@ -74,8 +74,8 @@ typedef struct scope_node {
 typedef struct scopes {
     rc_arena node_arena;     // backs `nodes`
     rc_arena symbol_arena;   // backs `symbol_pool`
-    rc_arena child_arena;    // backs `child_pool` and synthetic anonymous-scope keys
-    rc_arena value_arena;    // backs the deep-cloned backing of stored symbol values
+    rc_arena child_arena;    // backs `child_pool` alone, so the pool is its sole tenant and grows in place
+    rc_arena value_arena;    // backs deep-cloned symbol values and owned scope-name keys
     rc_array_scope_node nodes;        // scope index 0 is the root
     rc_trie_symbol_pool symbol_pool;  // shared by every node's `symbols` trie
     rc_trie_child_pool  child_pool;   // shared by every node's `children` trie
@@ -96,17 +96,11 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name);
 
 // Get the child of parent_index named `name`, making it if it does not exist yet.
 // Idempotent, so re-walking the same source on a later pass lands on the same scope
-// (and so keeps its symbol bindings) rather than spawning a duplicate. `name` must be
-// a non-empty leaf and is stored as-is, so its bytes must outlive the scopes (a view
-// into the source is fine).
+// (and so keeps its symbol bindings) rather than spawning a duplicate. `name` is
+// non-empty; on a first sighting its bytes are copied into the scopes' own arena, so
+// the caller may pass a scratch view (an anonymous scope is given a synthetic key the
+// caller builds, e.g. "@source:pos", which no user identifier can spell).
 uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name);
-
-// As above but for an anonymous (unnamed in source) scope, identified by the source
-// position `at` of its '{'. The position is turned into a synthetic child-map key that
-// no user identifier can spell, so anonymous scopes also keep a stable identity across
-// passes. The key is built in a local buffer to probe with, and on a first sighting
-// copied into the scopes' own arena, so its bytes are owned by the scopes.
-uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, cursor at);
 
 // Bind leaf `name` to `v` in scope_index, with `def` recording the source position
 // that defines it - `name` is a plain symbol name, never a dotted path. The value is

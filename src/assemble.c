@@ -22,6 +22,7 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
 static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -142,6 +143,8 @@ static const token statement_token_entries[] = {
     {RC_STR("elif"),   {.type = lexeme_type_elif}},
     {RC_STR("else"),   {.type = lexeme_type_else}},
     {RC_STR("endif"),  {.type = lexeme_type_endif}},
+    {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
+    {RC_STR("next"),   {.type = lexeme_type_next}},
     {RC_STR("}"),      {.type = lexeme_type_close_brace}},
 };
 static const token_table statement_tokens = RC_VIEW(statement_token_entries);
@@ -177,12 +180,14 @@ static bool is_open_brace(lexeme lx)
 static bool is_elif(lexeme lx)  { return lx.type == lexeme_type_elif; }
 static bool is_else(lexeme lx)  { return lx.type == lexeme_type_else; }
 static bool is_endif(lexeme lx) { return lx.type == lexeme_type_endif; }
+static bool is_next(lexeme lx)  { return lx.type == lexeme_type_next; }
 
-// The tokens that close a statement block from the outside: a '}' or one of the IF-chain keywords.
-// parse_block stops at one and leaves it for its caller (a scope, the file, or handle_if) to read.
+// The tokens that close a statement block from the outside: a '}', one of the IF-chain keywords, or
+// FOR's NEXT. parse_block stops at one and leaves it for its caller (a scope, the file, handle_if, or
+// handle_for) to read.
 static bool is_block_terminator(lexeme lx)
 {
-    return lx.type == lexeme_type_close_brace || is_elif(lx) || is_else(lx) || is_endif(lx);
+    return lx.type == lexeme_type_close_brace || is_elif(lx) || is_else(lx) || is_endif(lx) || is_next(lx);
 }
 
 // The same source cursor with its offset moved to `pos` - for the common "recurse a little further
@@ -411,11 +416,37 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
     return r;   // not a scope - leave the rest of the line to the parent parser
 }
 
+// Build a scope key no user identifier can spell - '@' source ':' pos - into the caller's fixed buffer.
+// '@' and ':' are not identifier characters, so the key never collides with a real name. FOR appends a
+// further ':' iteration; the brace handler uses it as-is. Each u32 is at most ten digits, so the buffer
+// never needs to grow (hence the NULL arena); scopes_get_or_make_child owns a copy on first sighting.
+static rc_mstr anon_scope_key(char *storage, uint32_t cap, cursor at)
+{
+    rc_mstr m = {.data = storage, .len = 0, .cap = cap};
+    rc_mstr_append_char(&m, '@', NULL);
+    rc_mstr_append_u32(&m, at.source, NULL);
+    rc_mstr_append_char(&m, ':', NULL);
+    rc_mstr_append_u32(&m, at.pos, NULL);
+    return m;
+}
+
+// The key for one FOR iteration: the FOR's site key (anon_scope_key) plus ':' iteration, so iteration i
+// has a stable identity across passes (and body labels are private to it, never colliding across iters).
+static rc_mstr anon_for_scope_key(char *storage, uint32_t cap, cursor at, uint32_t iteration)
+{
+    rc_mstr m = anon_scope_key(storage, cap, at);
+    rc_mstr_append_char(&m, ':', NULL);
+    rc_mstr_append_u32(&m, iteration, NULL);
+    return m;
+}
+
 static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     // The just-passed pos gives the anonymous scope a stable per-pass identity, so re-walking it
     // on a later pass keeps the same bindings.
-    uint32_t child = scopes_get_or_make_child_at(&b->scopes, scope, at);
+    char storage[64];
+    rc_mstr key = anon_scope_key(storage, sizeof storage, at);
+    uint32_t child = scopes_get_or_make_child(&b->scopes, scope, key.view);
     return parse_scope(b, at, child, flags, scratch);
 }
 
@@ -592,6 +623,99 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse
 }
 
 
+// ---- the FOR loop ----
+
+// FOR <var> = <range-or-list> : ... : NEXT, evaluated each pass. Each iteration runs the body once with
+// <var> bound to that element in its own per-iteration child scope, so body labels never collide across
+// iterations. An empty sequence (e.g. {} or 5..<5) runs the body once inactive - zero bytes, no error.
+// A sequence whose count is not yet known (a forward reference) does the same and forces another pass;
+// on the final pass that is a hard undefined_symbol. Like IF, FOR opens no scope of its own for the loop
+// control (only the per-iteration body scopes) and must close (NEXT) inside the scope it began in.
+static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    // The loop variable: a bare identifier (a dotted path cannot be a binding target).
+    lexer_result var = lexer_next(src, at.pos, statement_tokens);
+    if (var.token.type != lexeme_type_identifier || is_dotted(var.token.identifier.name)) {
+        return parse_fail(assemble_error_expected_label_name, at.pos);
+    }
+    rc_str name = var.token.identifier.name;
+
+    lexer_result eq = lexer_next(src, var.next, assign_tokens);
+    if (eq.token.type != lexeme_type_assign) {
+        return parse_fail(assemble_error_expected_assign, var.next);
+    }
+
+    expr_result e = expression_parse(src, eq.next, &b->scopes, scope, &scratch);
+    if (e.error != expr_error_none) {
+        return parse_fail(assemble_error_expression, e.error_at);
+    }
+
+    parse_result sep = require_separator(src, e.next);
+    if (sep.error != assemble_error_none) {
+        return sep;
+    }
+    uint32_t body_start = sep.next;
+
+    // Reduce the sequence to its element list, but only when the parent is live (a dead FOR evaluates
+    // nothing, like IF). iterate stays false for an empty list, an unresolved count, or a dead parent.
+    bool iterate = false;
+    bool unresolved = false;
+    rc_view_value items = {0};
+    if (flags.active) {
+        value seq = e.value;
+        if (value_is_error(seq) && seq.error == value_error_unknown_symbol) {
+            if (flags.final) {
+                return parse_fail(assemble_error_undefined_symbol, eq.next);
+            }
+            unresolved = true;   // the count is not known yet; defer and try again next pass
+        }
+        else {
+            if (value_is_range(seq)) {
+                seq = range_to_list(seq.range, &scratch);
+            }
+            if (value_is_list(seq)) {
+                items = seq.list;
+                iterate = (items.num > 0);   // an empty list is legal: it runs the body zero times
+            }
+            else {
+                return parse_fail(assemble_error_not_iterable, eq.next);   // scalar/string/none, or a range error
+            }
+        }
+    }
+
+    // Run the body: once per element when iterating, otherwise a single inactive structural pass (which
+    // is also how we locate NEXT). Every pass re-walks the same body span and returns .next at NEXT.
+    uint32_t count = iterate ? items.num : 1;
+    bool active_body = iterate;   // iterate implies flags.active; empty / unresolved / dead parse inactive
+    parse_result acc = {.next = body_start, .unresolved = unresolved};
+    for (uint32_t i = 0; i < count && acc.error == assemble_error_none; i++) {
+        char storage[64];
+        rc_mstr key = anon_for_scope_key(storage, sizeof storage, at, i);
+        uint32_t child = scopes_get_or_make_child(&b->scopes, scope, key.view);
+        if (iterate) {
+            scopes_set_symbol(&b->scopes, child, name, rc_view_value_get(items, i), at);
+        }
+        acc = fold(acc, parse_block(b, cursor_at(at, body_start), child,
+                                    (parse_flags) {flags.final, active_body}, scratch));
+    }
+    if (acc.error != assemble_error_none) {
+        return acc;
+    }
+
+    // Close with NEXT, which insists on a separator after it (like ENDIF).
+    lexer_result t = lexer_next(src, acc.next, statement_tokens);
+    if (is_next(t.token)) {
+        acc.next = t.next;
+        return fold(acc, require_separator(src, acc.next));
+    }
+    acc.error = assemble_error_unclosed_for;   // a '}' / end of input / foreign keyword before NEXT
+    acc.error_at = acc.next;
+    return acc;
+}
+
+
 // ---- the statement loop ----
 
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
@@ -664,6 +788,12 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags
         return r;
     }
 
+    if (is_next(lr.token)) {
+        r.error    = assemble_error_unexpected_next;
+        r.error_at = lr.next;
+        return r;
+    }
+
     r.error = assemble_error_unclosed_scope;   // end of input before the '}'
     r.error_at = r.next;
     return r;
@@ -672,9 +802,9 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags
 
 // A whole source file - the largest parsable item: parse its statements and require they run right
 // out at end of input. parse_block stops only at a block closer or at end of input, so a leftover
-// closer here has nothing to close: a stray '}', or an IF-chain keyword with no IF to match. With
-// those ruled out, end of input is the only thing left (asserted). (parse_scope is a braced block
-// within a file; parse_block is the shared statement loop both rest on.)
+// closer here has nothing to close: a stray '}', an IF-chain keyword with no IF, or a NEXT with no
+// FOR. With those ruled out, end of input is the only thing left (asserted). (parse_scope is a braced
+// block within a file; parse_block is the shared statement loop both rest on.)
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     parse_result r = parse_block(b, at, scope, flags, scratch);
@@ -694,6 +824,12 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags 
 
     if (is_elif(lr.token) || is_else(lr.token) || is_endif(lr.token)) {
         r.error = assemble_error_unexpected_endif;
+        r.error_at = lr.next;
+        return r;
+    }
+
+    if (is_next(lr.token)) {
+        r.error = assemble_error_unexpected_next;
         r.error_at = lr.next;
         return r;
     }
@@ -831,6 +967,9 @@ rc_str assemble_error_name(assemble_error e)
         case assemble_error_duplicate_symbol:       return RC_STR("duplicate_symbol");
         case assemble_error_unclosed_if:            return RC_STR("unclosed_if");
         case assemble_error_unexpected_endif:       return RC_STR("unexpected_endif");
+        case assemble_error_unclosed_for:           return RC_STR("unclosed_for");
+        case assemble_error_unexpected_next:        return RC_STR("unexpected_next");
+        case assemble_error_not_iterable:           return RC_STR("not_iterable");
         case assemble_error_expression:             return RC_STR("expression");
         case assemble_error_no_convergence:         return RC_STR("no_convergence");
         case assemble_error_source_load:            return RC_STR("source_load");
@@ -1182,6 +1321,68 @@ RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
     RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xA9, 0x41, 0x20, 0xEE, 0xFF, 0x4C, 0xF8, 0x0F}, 8));
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("progstart")), value_make_numeric(0x0FF8)));
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("progend")), value_make_numeric(0x1000)));
+}
+
+RC_TEST_STEP(assemble, for_repeats_body, fix)
+{
+    // FOR runs its body once per element, emitting a fresh copy each time.
+    RC_CHECK_TRUE(code_is(RESULT("FOR i = 0..2 : NOP : NEXT"), (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+    // An exclusive range is the same minus its endpoint.
+    RC_CHECK_TRUE(code_is(RESULT("FOR i = 0..<3 : NOP : NEXT"), (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+}
+
+RC_TEST_STEP(assemble, for_binds_loop_variable, fix)
+{
+    // The loop variable holds the current element, visible to the body. 0..3 is inclusive (4 elements).
+    RC_CHECK_TRUE(code_is(RESULT("FOR i = 0..3 : LDA #i : NEXT"),
+                          (uint8_t[]){0xA9, 0x00, 0xA9, 0x01, 0xA9, 0x02, 0xA9, 0x03}, 8));
+    // A list literal drives the loop just as a range does.
+    RC_CHECK_TRUE(code_is(RESULT("FOR x = {10, 20, 30} : LDA #x : NEXT"),
+                          (uint8_t[]){0xA9, 0x0A, 0xA9, 0x14, 0xA9, 0x1E}, 6));
+}
+
+RC_TEST_STEP(assemble, for_iteration_has_its_own_scope, fix)
+{
+    // A label in the body is redefined every iteration; each iteration's private scope keeps that from
+    // being a duplicate.
+    assemble_result r = RESULT("FOR i = 0..2 : .lbl NOP : NEXT");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+}
+
+RC_TEST_STEP(assemble, for_nests, fix)
+{
+    // Two iterations of two iterations: four bodies.
+    RC_CHECK_TRUE(code_is(RESULT("FOR i = 0..1 : FOR j = 0..1 : NOP : NEXT : NEXT"),
+                          (uint8_t[]){0xEA, 0xEA, 0xEA, 0xEA}, 4));
+}
+
+RC_TEST_STEP(assemble, for_empty_sequence_runs_zero_times, fix)
+{
+    // An empty sequence is legal and assembles the body zero times (no error): the surrounding code is
+    // emitted as if the FOR were absent. Both the empty list literal and a non-ascending exclusive range.
+    RC_CHECK_TRUE(code_is(RESULT("LDA #0 : FOR i = {} : NOP : NEXT : LDA #1"),
+                          (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
+    RC_CHECK_TRUE(code_is(RESULT("LDA #0 : FOR i = 5..<5 : NOP : NEXT : LDA #1"),
+                          (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
+}
+
+RC_TEST_STEP(assemble, for_forward_ref_count_defers, fix)
+{
+    // When the count depends on a forward reference, the FOR runs zero times on the first pass and
+    // re-expands once the bound resolves.
+    assemble_result r = RESULT("FOR i = 0..n : NOP : NEXT\nn = 2");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+    RC_CHECK_TRUE(r.passes >= 2);
+}
+
+RC_TEST_STEP(assemble, for_framing_and_sequence_errors, fix)
+{
+    RC_CHECK_TRUE(RESULT("FOR i = 0..2 : NOP").error == assemble_error_unclosed_for);   // no NEXT
+    RC_CHECK_TRUE(RESULT("NEXT").error                == assemble_error_unexpected_next);
+    RC_CHECK_TRUE(RESULT("FOR i = 5 : NOP : NEXT").error  == assemble_error_not_iterable);   // a scalar is not a sequence
+    RC_CHECK_TRUE(RESULT("FOR i = 5.. : NOP : NEXT").error == assemble_error_not_iterable);  // an unbounded range cannot be counted
 }
 
 #endif // BARON_TESTS

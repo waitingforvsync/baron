@@ -132,7 +132,7 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
     }
     if (exclusive) {
         if (start >= end) {
-            return value_make_error(value_error_domain);   // '..<' must be a non-empty ascent
+            return value_make_list((rc_view_value) {0});   // '..<' that does not ascend is a legal empty sequence
         }
         end -= 1;
     }

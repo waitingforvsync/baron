@@ -418,7 +418,8 @@ typedef struct parser {
 
 // Expand a bounded range into its rank-1 list of numeric values; an unbounded range has
 // no end to count to, so it cannot be enumerated and yields a domain error instead.
-static value range_to_list(value_range r, rc_arena *arena)
+// Declared in expression.h (FOR walks a range with it).
+value range_to_list(value_range r, rc_arena *arena)
 {
     if (!r.has_start || !r.has_end) {
         return value_make_error(value_error_domain);
@@ -1853,6 +1854,10 @@ RC_TEST_STEP(expression, ranges_two_value, fix)
     RC_CHECK_TRUE(range_is(VAL("4..1"),   4, 1, 0));     // descending
     RC_CHECK_TRUE(range_is(VAL("5..5"),   5, 5, 0));     // single element
     RC_CHECK_TRUE(range_is(VAL("0..<10"), 0, 9, 0));     // exclusive end
+
+    // An exclusive range that does not ascend is a legal EMPTY list, not an error.
+    RC_CHECK_TRUE(value_is_list(VAL("5..<5")) && VAL("5..<5").list.num == 0);
+    RC_CHECK_TRUE(value_is_list(VAL("4..<1")) && VAL("4..<1").list.num == 0);   // descending exclusive
 }
 
 RC_TEST_STEP(expression, ranges_stepped, fix)
@@ -1893,8 +1898,6 @@ RC_TEST_STEP(expression, ranges_errors, fix)
 {
     RC_CHECK_TRUE(value_is_error(VAL("1..3..0")));      // not monotonic
     RC_CHECK_TRUE(value_is_error(VAL("0..3.5")));       // non-integer endpoint
-    RC_CHECK_TRUE(value_is_error(VAL("5..<5")));        // empty
-    RC_CHECK_TRUE(value_is_error(VAL("4..<1")));        // empty (descending exclusive)
     RC_CHECK_TRUE(value_is_error(VAL("0..<2..6")));     // '<' on the wrong separator
     RC_CHECK_TRUE(value_is_error(VAL("(1..2)..3")));    // a range can't be a start
     RC_CHECK_TRUE(value_is_error(VAL("1..3..6..9")));   // inconsistent step (2 then 3)

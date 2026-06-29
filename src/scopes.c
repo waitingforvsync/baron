@@ -51,7 +51,8 @@ uint32_t scopes_make_root(scopes *s)
 uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
 {
     RC_ASSERT(s != NULL);
-    RC_ASSERT(name.len == 0 || is_leaf_name(name));   // a name, if given, is a single identifier
+    // A real (source) child name is a single identifier; a synthetic anonymous-scope key the caller
+    // builds ('@source:pos...') deliberately is not, so we only insist the bytes outlive the scopes.
 
     uint32_t child_index = rc_array_scope_node_push(
         &s->nodes,
@@ -79,45 +80,18 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
 uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
 {
     RC_ASSERT(s != NULL);
-    RC_ASSERT(name.len > 0 && is_leaf_name(name));
+    RC_ASSERT(name.len > 0);
 
     rc_trie_child *kids  = &RC_AT(s->nodes, parent_index).children;
-    uint32_t       found = rc_trie_child_find(kids, name);
-    if (found != RC_INDEX_NONE) {
-        return rc_trie_child_value_get(kids, found);
-    }
-    return scopes_make_child(s, parent_index, name);
-}
-
-uint32_t scopes_get_or_make_child_at(scopes *s, uint32_t parent_index, cursor at)
-{
-    RC_ASSERT(s != NULL);
-
-    // Turn the source position into a key no user identifier can spell: a leading '@'
-    // (not an identifier-start char), the source index, a ':' separator (also not an
-    // identifier char), then the offset. Each uint32 is at most ten digits, so this local
-    // buffer always holds the key plus its terminator and the appends never grow - hence
-    // the NULL arena. Only the first sighting copies the bytes into the scopes' own arena.
-    char storage[32];
-    rc_mstr try_name = {
-        .data = storage,
-        .len = 0,
-        .cap = sizeof storage
-    };
-    rc_mstr_append_char(&try_name, '@', NULL);
-    rc_mstr_append_u32(&try_name, at.source, NULL);
-    rc_mstr_append_char(&try_name, ':', NULL);
-    rc_mstr_append_u32(&try_name, at.pos, NULL);
-
-    rc_trie_child *kids  = &RC_AT(s->nodes, parent_index).children;
-    uint32_t       found = rc_trie_child_find(kids, try_name.view);
+    uint32_t       found = rc_trie_child_find(kids, name);   // probe with the caller's (maybe scratch) view
     if (found != RC_INDEX_NONE) {
         return rc_trie_child_value_get(kids, found);
     }
 
-    // First sighting (pass one): persist the key in the permanent child arena and register it.
-    rc_str name = rc_mstr_from_str(try_name.view, 0, &s->child_arena).view;
-    return scopes_make_child(s, parent_index, name);
+    // First sighting: own the key so the caller may hand us a scratch buffer. It goes in value_arena
+    // (not child_arena) to leave the child_pool the sole tenant of its arena, free to grow in place.
+    rc_str owned = rc_mstr_from_str(name, name.len, &s->value_arena).view;
+    return scopes_make_child(s, parent_index, owned);
 }
 
 symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v, cursor def)
@@ -331,13 +305,15 @@ RC_TEST_STEP(scopes, set_symbol_clones_into_permanent, fix)
 
 RC_TEST_STEP(scopes, get_or_make_child_is_idempotent, fix)
 {
-    // Re-walking the same source (named or anonymous) lands on the same scope.
+    // Re-walking the same source lands on the same scope, for a real name and for a synthetic
+    // anonymous key (which the caller now builds; '@source:pos' is not a leaf name, so this also
+    // exercises the relaxed-assert path).
     uint32_t a = scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("blk"));
     RC_CHECK(scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("blk")), ==, a);
 
-    uint32_t p = scopes_get_or_make_child_at(&fix->scopes, fix->root, (cursor){0, 42});
-    RC_CHECK(scopes_get_or_make_child_at(&fix->scopes, fix->root, (cursor){0, 42}), ==, p);
-    RC_CHECK_TRUE(p != scopes_get_or_make_child_at(&fix->scopes, fix->root, (cursor){0, 99}));   // different site, different scope
+    uint32_t p = scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("@0:42"));
+    RC_CHECK(scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("@0:42")), ==, p);
+    RC_CHECK_TRUE(p != scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("@0:99")));   // different site, different scope
 
     // Bindings in the reused scope persist (this is what keeps multi-pass convergence honest).
     scopes_set_symbol(&fix->scopes, a, RC_STR("inner"), value_make_numeric(7), (cursor){0, 90});
