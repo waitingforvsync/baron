@@ -87,9 +87,7 @@ typedef struct lexeme_constant {
 
 typedef struct lexeme_unary_op {
     value (*apply)(value v, rc_arena *arena);
-    uint8_t precedence;                 // its operand is parsed at this precedence,
-                                        // so -2^2 is -(2^2) and a future LO/HI can
-                                        // swallow the whole expression that follows
+    uint8_t precedence;   // its operand is parsed at this precedence, so -2^2 is -(2^2)
 } lexeme_unary_op;
 
 

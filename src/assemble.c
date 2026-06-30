@@ -19,6 +19,7 @@ static parse_result handle_org(baron *b, cursor at, uint32_t scope, parse_flags 
 static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -150,6 +151,8 @@ static const token statement_token_entries[] = {
     {RC_STR("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
     {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
+    {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
+    {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR("elif"),   {.type = lexeme_type_closer, .closer = {closer_elif,  assemble_error_unexpected_elif}}},
@@ -362,6 +365,89 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
     parse_result r = require_separator(src, e.next);
     r.unresolved = unresolved;
     return r;
+}
+
+// Emit one value's bytes into the current overlay, for EQUB / EQUS. A string goes character by
+// character; a range is enumerated; a list is descended (so nested lists and ranges flatten out);
+// anything else is a single byte via int_argument_make, where a forward reference emits a 0 placeholder
+// and asks for another pass. Returns .error/.error_at on failure and .unresolved when a value defers
+// (its .next is unused). A dead branch emits nothing and raises nothing - mirroring inactive statements.
+static parse_result emit_data(baron *b, value v, parse_flags flags, uint32_t at, rc_arena scratch)
+{
+    if (!flags.active) {
+        return (parse_result) {0};
+    }
+
+    if (value_is_string(v)) {
+        for (uint32_t i = 0; i < v.string.len; i++) {
+            overlays_emit_u8(&b->overlays, b->current_overlay, (uint8_t) v.string.data[i]);
+        }
+        return (parse_result) {0};
+    }
+
+    if (value_is_range(v)) {
+        return emit_data(b, range_to_list(v.range, &scratch), flags, at, scratch);   // enumerated to a list (or an error leaf)
+    }
+
+    if (value_is_list(v)) {
+        parse_result acc = {0};
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            parse_result em = emit_data(b, rc_view_value_get(v.list, i), flags, at, scratch);
+            if (em.error != assemble_error_none) {
+                return em;
+            }
+            acc.unresolved |= em.unresolved;
+        }
+        return acc;
+    }
+
+    // A numeric, a forward reference, or some other error value - one byte either way.
+    int_argument arg = int_argument_make(v, flags.final, at);
+    if (arg.type == int_argument_type_error) {
+        return parse_fail(arg.error, arg.error_at);
+    }
+    if (arg.type == int_argument_type_unresolved) {
+        overlays_emit_u8(&b->overlays, b->current_overlay, 0);   // placeholder; its size is assumed one byte
+        return (parse_result) {.unresolved = true};
+    }
+    // We allow signed bytes, so the byte-sized window is -255..255; checked only once everything settles.
+    if (flags.final && (arg.value < -255 || arg.value > 255)) {
+        return parse_fail(assemble_error_value_out_of_range, at);
+    }
+    overlays_emit_u8(&b->overlays, b->current_overlay, (uint8_t) (arg.value & 0xFF));
+    return (parse_result) {0};
+}
+
+// EQUB / EQUS: a comma-separated list of values, each emitted as bytes (see emit_data). The two
+// spellings are aliases - both take numbers, strings, ranges and lists alike.
+static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+    bool unresolved = false;
+
+    while (true) {
+        expr_result e = expression_parse(src, pos, &b->scopes, scope, &scratch);
+        if (e.error != expr_error_none) {
+            return parse_fail(assemble_error_expression, e.error_at);
+        }
+
+        parse_result em = emit_data(b, e.value, flags, pos, scratch);
+        if (em.error != assemble_error_none) {
+            return em;
+        }
+        unresolved |= em.unresolved;
+
+        lexer_result lr = lexer_next(src, e.next, statement_tokens);
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;   // another value follows
+        }
+
+        parse_result r = require_separator(src, e.next);
+        r.unresolved = unresolved;
+        return r;   // end of the list: a terminator or '}'
+    }
 }
 
 static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
@@ -1376,6 +1462,64 @@ RC_TEST_STEP(assemble, for_framing_and_sequence_errors, fix)
     RC_CHECK_TRUE(RESULT("NEXT").error                == assemble_error_unexpected_next);
     RC_CHECK_TRUE(RESULT("FOR i = 5 : NOP : NEXT").error  == assemble_error_not_iterable);   // a scalar is not a sequence
     RC_CHECK_TRUE(RESULT("FOR i = 5.. : NOP : NEXT").error == assemble_error_not_iterable);  // an unbounded range cannot be counted
+}
+
+RC_TEST_STEP(assemble, equb_emits_bytes, fix)
+{
+    RC_CHECK_TRUE(code_is(RESULT("EQUB 1, 2, 3"), (uint8_t[]){0x01, 0x02, 0x03}, 3));
+    RC_CHECK_TRUE(code_is(RESULT("EQUB &FF"),     (uint8_t[]){0xFF}, 1));
+    RC_CHECK_TRUE(code_is(RESULT("EQUB 255"),     (uint8_t[]){0xFF}, 1));
+}
+
+RC_TEST_STEP(assemble, equb_allows_signed_bytes, fix)
+{
+    // Negative numbers are allowed in -255..255; we emit the low byte.
+    RC_CHECK_TRUE(code_is(RESULT("EQUB -1"),   (uint8_t[]){0xFF}, 1));
+    RC_CHECK_TRUE(code_is(RESULT("EQUB -255"), (uint8_t[]){0x01}, 1));
+    RC_CHECK_TRUE(RESULT("EQUB 256").error  == assemble_error_value_out_of_range);
+    RC_CHECK_TRUE(RESULT("EQUB -256").error == assemble_error_value_out_of_range);
+}
+
+RC_TEST_STEP(assemble, equs_and_equb_are_aliases, fix)
+{
+    // EQUS spells out a string char-by-char...
+    RC_CHECK_TRUE(code_is(RESULT("EQUS \"ABC\""), (uint8_t[]){0x41, 0x42, 0x43}, 3));
+    // ...but takes numbers too, and EQUB takes strings - they are the same directive.
+    RC_CHECK_TRUE(code_is(RESULT("EQUS 65, 66"),  (uint8_t[]){0x41, 0x42}, 2));
+    RC_CHECK_TRUE(code_is(RESULT("EQUB \"Hi\", 0"), (uint8_t[]){0x48, 0x69, 0x00}, 3));
+}
+
+RC_TEST_STEP(assemble, equb_ranges_and_lists, fix)
+{
+    RC_CHECK_TRUE(code_is(RESULT("EQUB 1..3"),  (uint8_t[]){0x01, 0x02, 0x03}, 3));
+    RC_CHECK_TRUE(code_is(RESULT("EQUB 0..<3"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
+    // A list is flattened (nested lists and ranges descend); a string element stays whole.
+    RC_CHECK_TRUE(code_is(RESULT("EQUB {1, 2, 3}"),       (uint8_t[]){0x01, 0x02, 0x03}, 3));
+    RC_CHECK_TRUE(code_is(RESULT("EQUB {1, {2, 3}, 4}"),  (uint8_t[]){0x01, 0x02, 0x03, 0x04}, 4));
+    RC_CHECK_TRUE(code_is(RESULT("EQUB {1, \"Hi\", 2}"),  (uint8_t[]){0x01, 0x48, 0x69, 0x02}, 4));
+}
+
+RC_TEST_STEP(assemble, equb_advances_pc, fix)
+{
+    // The three bytes move pc, so a label after them sees the advanced address.
+    assemble_result r = RESULT("ORG &2000 : EQUB 1, 2, 3 : .here");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2003)));
+}
+
+RC_TEST_STEP(assemble, equb_forward_reference, fix)
+{
+    // A forward reference is one byte (a placeholder until it resolves): end - start = 1.
+    assemble_result r = RESULT(".start EQUB end - start : .end");
+    RC_CHECK_TRUE(r.error == assemble_error_none);
+    RC_CHECK_TRUE(code_is(r, (uint8_t[]){0x01}, 1));
+    RC_CHECK_TRUE(r.passes >= 2);
+}
+
+RC_TEST_STEP(assemble, equb_dead_branch_emits_nothing, fix)
+{
+    RC_CHECK_TRUE(code_is(RESULT("LDA #0 : IF 0 : EQUB 1, 2, 3 : ENDIF : LDA #1"),
+                          (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
 }
 
 #endif // BARON_TESTS
