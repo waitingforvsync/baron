@@ -36,10 +36,8 @@ typedef enum lexeme_type {
     lexeme_type_close_bracket,
     lexeme_type_open_brace,
     lexeme_type_close_brace,
-    lexeme_type_elif,                   // ELIF / ELSE / ENDIF: bare markers the IF chain reads, and
-    lexeme_type_else,                   //   that close a statement block from the outside (like '}')
-    lexeme_type_endif,
-    lexeme_type_next,                   // NEXT: the bare marker that closes a FOR body (like ENDIF for IF)
+    lexeme_type_closer,                 // a statement-block closer: '}', an IF-chain keyword
+                                        //   (ELIF/ELSE/ENDIF), or FOR's NEXT (carries a closer id)
     lexeme_type_unary_op,
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)
@@ -122,6 +120,16 @@ typedef struct lexeme_opcode {
 } lexeme_opcode;
 
 
+// A statement-block closer: '}', an IF-chain keyword (ELIF/ELSE/ENDIF) or FOR's NEXT. `id` is a
+// `closer_kind` saying which one (so handle_if / handle_for / parse_scope can dispatch); `unexpected`
+// is the `assemble_error` to raise when the closer turns up with nothing to match. Both are held as
+// fixed-width ints - the same trick as lexeme_opcode - so lexeme.h depends on neither header.
+typedef struct lexeme_closer {
+    uint8_t  id;
+    uint16_t unexpected;
+} lexeme_closer;
+
+
 // A 6502 register named in an operand: the accumulator A, or an index register X / Y. Only
 // meaningful in opcode-operand context (its own token table), where A marks accumulator mode
 // and X / Y mark the index.
@@ -167,6 +175,7 @@ typedef struct lexeme {
         lexeme_opcode opcode;
         lexeme_register reg;
         lexeme_keyword keyword;
+        lexeme_closer closer;
         lexeme_error error;
     };
 } lexeme;

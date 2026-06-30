@@ -31,7 +31,9 @@ typedef enum assemble_error {
     assemble_error_undefined_symbol,
     assemble_error_duplicate_symbol,       // a name defined twice in one scope
     assemble_error_unclosed_if,            // IF reached '}' or end of input before ENDIF
-    assemble_error_unexpected_endif,       // ELIF / ELSE / ENDIF with no IF to match
+    assemble_error_unexpected_elif,        // ELIF with no IF to match
+    assemble_error_unexpected_else,        // ELSE with no IF to match
+    assemble_error_unexpected_endif,       // ENDIF with no IF to match
     assemble_error_unclosed_for,           // FOR reached '}' or end of input before NEXT
     assemble_error_unexpected_next,        // NEXT with no FOR to match
     assemble_error_not_iterable,           // a FOR sequence that is neither a list nor a range

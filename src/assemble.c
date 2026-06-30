@@ -60,8 +60,19 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
 
 // ---- the statement token table and the framing it drives ----
 
+// Which block closer a lexeme_type_closer is. '}' ends a '{ }' scope, ELIF/ELSE/ENDIF the IF chain,
+// NEXT a FOR body. parse_block stops at any of them; the handler that owns the block (parse_scope,
+// handle_if, handle_for) dispatches on the id, and reports closer.unexpected for one it did not want.
+typedef enum closer_kind {
+    closer_brace,
+    closer_elif,
+    closer_else,
+    closer_endif,
+    closer_next,
+} closer_kind;
+
 // Pre-combined: every mnemonic (its own lexeme type, carrying the id) plus the statement
-// directives (ORG, the '.' label introducer, the '{' scope opener) and the '}' closer. '#' and
+// directives (ORG, the '.' label introducer, the '{' scope opener) and the block closers. '#' and
 // '=' never start a statement, so they live in the operand / assignment tables instead
 // (operand_tokens is in opcodes.c, next to the operand parser).
 static const token statement_token_entries[] = {
@@ -140,12 +151,12 @@ static const token statement_token_entries[] = {
     {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
     {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
-    {RC_STR("elif"),   {.type = lexeme_type_elif}},
-    {RC_STR("else"),   {.type = lexeme_type_else}},
-    {RC_STR("endif"),  {.type = lexeme_type_endif}},
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
-    {RC_STR("next"),   {.type = lexeme_type_next}},
-    {RC_STR("}"),      {.type = lexeme_type_close_brace}},
+    {RC_STR("elif"),   {.type = lexeme_type_closer, .closer = {closer_elif,  assemble_error_unexpected_elif}}},
+    {RC_STR("else"),   {.type = lexeme_type_closer, .closer = {closer_else,  assemble_error_unexpected_else}}},
+    {RC_STR("endif"),  {.type = lexeme_type_closer, .closer = {closer_endif, assemble_error_unexpected_endif}}},
+    {RC_STR("next"),   {.type = lexeme_type_closer, .closer = {closer_next,  assemble_error_unexpected_next}}},
+    {RC_STR("}"),      {.type = lexeme_type_closer, .closer = {closer_brace, assemble_error_unexpected_close_brace}}},
 };
 static const token_table statement_tokens = RC_VIEW(statement_token_entries);
 
@@ -159,7 +170,7 @@ parse_result require_separator(rc_str source, uint32_t pos)
         return (parse_result) { .next = r.next };
     }
 
-    if (r.token.type == lexeme_type_close_brace) {
+    if (r.token.type == lexeme_type_closer && r.token.closer.id == closer_brace) {
         return (parse_result) { .next = pos };   // '}' closes the statement; parse_block consumes it
     }
 
@@ -177,17 +188,11 @@ static bool is_open_brace(lexeme lx)
     return lx.type == lexeme_type_keyword && lx.keyword.handle == handle_open_brace;
 }
 
-static bool is_elif(lexeme lx)  { return lx.type == lexeme_type_elif; }
-static bool is_else(lexeme lx)  { return lx.type == lexeme_type_else; }
-static bool is_endif(lexeme lx) { return lx.type == lexeme_type_endif; }
-static bool is_next(lexeme lx)  { return lx.type == lexeme_type_next; }
-
-// The tokens that close a statement block from the outside: a '}', one of the IF-chain keywords, or
-// FOR's NEXT. parse_block stops at one and leaves it for its caller (a scope, the file, handle_if, or
+// parse_block stops at any block closer and leaves it for its caller (a scope, the file, handle_if, or
 // handle_for) to read.
 static bool is_block_terminator(lexeme lx)
 {
-    return lx.type == lexeme_type_close_brace || is_elif(lx) || is_else(lx) || is_endif(lx) || is_next(lx);
+    return lx.type == lexeme_type_closer;
 }
 
 // The same source cursor with its offset moved to `pos` - for the common "recurse a little further
@@ -512,7 +517,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
     lexer_result t = lexer_next(src, acc.next, statement_tokens);
 
     // If the IF block is closed with an ELIF, recurse here
-    if (is_elif(t.token)) {
+    if (t.token.type == lexeme_type_closer && t.token.closer.id == closer_elif) {
         return fold(
             acc,
             handle_if(
@@ -527,7 +532,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
 
     // If it was an ELSE, parse a black with the else_cond. This is not necessarily the inverse of the if_cond,
     // because the condition may be unevaluable, in which case both branches are dead.
-    if (is_else(t.token)) {
+    if (t.token.type == lexeme_type_closer && t.token.closer.id == closer_else) {
         // ELSE insists on a separator after it, like the IF condition and ENDIF do.
         parse_result sep = require_separator(src, t.next);
         if (sep.error != assemble_error_none) {
@@ -552,17 +557,19 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
         // Now read the token after the ELSE block, which must be ENDIF. The ELSE body is always the last
         t = lexer_next(src, acc.next, statement_tokens);
     }
-    
+
     // If it was ENDIF, close the IF block here
-    if (is_endif(t.token)) {
+    if (t.token.type == lexeme_type_closer && t.token.closer.id == closer_endif) {
         acc.next = t.next;
         return fold(acc, require_separator(src, acc.next));
     }
 
-    // A chain keyword out of place (a second ELSE, an ELIF after ELSE) is unexpected; a '}' or end of
-    // input means there was no ENDIF at all.
-    acc.error = (is_elif(t.token) || is_else(t.token)) ? assemble_error_unexpected_endif
-                                                       : assemble_error_unclosed_if;
+    // A chain keyword out of place (a second ELSE, an ELIF after ELSE) is unexpected - raise its own
+    // error; any other closer ('}', NEXT) or end of input means there was no ENDIF at all.
+    acc.error = t.token.type == lexeme_type_closer
+                    && (t.token.closer.id == closer_elif || t.token.closer.id == closer_else)
+                ? (assemble_error) t.token.closer.unexpected
+                : assemble_error_unclosed_if;
     acc.error_at = acc.next;
     return acc;
 }
@@ -706,7 +713,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
 
     // Close with NEXT, which insists on a separator after it (like ENDIF).
     lexer_result t = lexer_next(src, acc.next, statement_tokens);
-    if (is_next(t.token)) {
+    if (t.token.type == lexeme_type_closer && t.token.closer.id == closer_next) {
         acc.next = t.next;
         return fold(acc, require_separator(src, acc.next));
     }
@@ -777,19 +784,12 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lr = lexer_next(src, r.next, statement_tokens);
 
-    if (lr.token.type == lexeme_type_close_brace) {
-        r.next = lr.next;
-        return r;
-    }
-
-    if (is_elif(lr.token) || is_else(lr.token) || is_endif(lr.token)) {
-        r.error    = assemble_error_unexpected_endif;
-        r.error_at = lr.next;
-        return r;
-    }
-
-    if (is_next(lr.token)) {
-        r.error    = assemble_error_unexpected_next;
+    if (lr.token.type == lexeme_type_closer) {
+        if (lr.token.closer.id == closer_brace) {   // the '}' we were waiting for
+            r.next = lr.next;
+            return r;
+        }
+        r.error    = (assemble_error) lr.token.closer.unexpected;   // an IF/FOR closer with nothing to close
         r.error_at = lr.next;
         return r;
     }
@@ -816,20 +816,8 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags 
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lr = lexer_next(src, r.next, statement_tokens);
 
-    if (lr.token.type == lexeme_type_close_brace) {
-        r.error = assemble_error_unexpected_close_brace;
-        r.error_at = lr.next;
-        return r;
-    }
-
-    if (is_elif(lr.token) || is_else(lr.token) || is_endif(lr.token)) {
-        r.error = assemble_error_unexpected_endif;
-        r.error_at = lr.next;
-        return r;
-    }
-
-    if (is_next(lr.token)) {
-        r.error = assemble_error_unexpected_next;
+    if (lr.token.type == lexeme_type_closer) {   // any closer at file scope has nothing to close
+        r.error = (assemble_error) lr.token.closer.unexpected;
         r.error_at = lr.next;
         return r;
     }
@@ -966,6 +954,8 @@ rc_str assemble_error_name(assemble_error e)
         case assemble_error_undefined_symbol:       return RC_STR("undefined_symbol");
         case assemble_error_duplicate_symbol:       return RC_STR("duplicate_symbol");
         case assemble_error_unclosed_if:            return RC_STR("unclosed_if");
+        case assemble_error_unexpected_elif:        return RC_STR("unexpected_elif");
+        case assemble_error_unexpected_else:        return RC_STR("unexpected_else");
         case assemble_error_unexpected_endif:       return RC_STR("unexpected_endif");
         case assemble_error_unclosed_for:           return RC_STR("unclosed_for");
         case assemble_error_unexpected_next:        return RC_STR("unexpected_next");
@@ -1263,8 +1253,11 @@ RC_TEST_STEP(assemble, if_framing_errors, fix)
     RC_CHECK_TRUE(RESULT("IF 1 : LDA #1").error      == assemble_error_unclosed_if);   // no ENDIF
     RC_CHECK_TRUE(RESULT("{ IF 1 : LDA #1 }").error  == assemble_error_unclosed_if);   // '}' before ENDIF
     RC_CHECK_TRUE(RESULT("ENDIF").error              == assemble_error_unexpected_endif);
-    RC_CHECK_TRUE(RESULT("ELSE").error               == assemble_error_unexpected_endif);
-    RC_CHECK_TRUE(RESULT("IF 1 : ELSE : ELSE : ENDIF").error == assemble_error_unexpected_endif);
+    RC_CHECK_TRUE(RESULT("ELIF 1 : ENDIF").error     == assemble_error_unexpected_elif);   // each closer its own error
+    RC_CHECK_TRUE(RESULT("ELSE").error               == assemble_error_unexpected_else);
+    RC_CHECK_TRUE(RESULT("IF 1 : ELIF 1 : ELIF 2 : ENDIF").error == assemble_error_none);    // ELIF chain is fine
+    RC_CHECK_TRUE(RESULT("IF 1 : ELSE : ELIF 1 : ENDIF").error == assemble_error_unexpected_elif);   // ELIF after ELSE
+    RC_CHECK_TRUE(RESULT("IF 1 : ELSE : ELSE : ENDIF").error == assemble_error_unexpected_else);     // second ELSE
     RC_CHECK_TRUE(RESULT("IF 0 : ELSE LDA #1 : ENDIF").error == assemble_error_expected_separator);   // ELSE needs a separator
 }
 
