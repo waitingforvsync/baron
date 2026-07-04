@@ -35,6 +35,7 @@ typedef enum error_type {
     error_type_unexpected_endif,      // ENDIF with no IF to match
     error_type_unclosed_for,          // FOR reached '}' or end of input before NEXT
     error_type_unexpected_next,       // NEXT with no FOR to match
+    error_type_reserved_constant,     // a built-in constant (TRUE/FALSE/PI) used as a statement / assignment target
 
     // Semantic: the statement parses, but its meaning is wrong.
     error_type_bad_addressing_mode,   // the mnemonic has no encoding for that operand shape

@@ -41,6 +41,7 @@ typedef enum lexeme_type {
     lexeme_type_unary_op,
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)
+    lexeme_type_constant,               // a pure named constant (TRUE, FALSE, PI): a niladic value
     lexeme_type_range,                  // '..' / '..<', the range operator
     lexeme_type_opcode,                 // a 6502 mnemonic (carries the mnemonic id)
     lexeme_type_keyword,                // a statement directive with a baked-in handler (ORG, '.')
@@ -48,7 +49,6 @@ typedef enum lexeme_type {
     lexeme_type_assign,                 // '=', symbol definition
     lexeme_type_register,               // A / X / Y, in opcode-operand context
     lexeme_type_error,
-    // deferred until later milestones: constant
 } lexeme_type;
 
 
@@ -80,8 +80,11 @@ typedef struct lexeme_identifier {
 } lexeme_identifier;
 
 
+// A pure named constant (TRUE, FALSE, PI). Its handler is niladic: the value depends on nothing, so it
+// takes no arguments and needs no arena. Impure constants (the current PC, RAND) will want a richer
+// signature and are a separate milestone.
 typedef struct lexeme_constant {
-    // The handler will be a function pointer to the constant's evaluation function.
+    value (*handle)(void);
 } lexeme_constant;
 
 

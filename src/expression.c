@@ -1074,10 +1074,18 @@ static value fn_defined(rc_view_value args, rc_arena *arena)
 }
 
 
+// ---- pure named constants ----
+// Niladic: each just hands back its value. Booleans are numbers (1 / 0), the same shape comparisons and IF
+// already speak. Impure ones (the PC, RAND) will need a different signature and are a later milestone.
+static value const_true(void)  { return value_make_numeric(1.0); }
+static value const_false(void) { return value_make_numeric(0.0); }
+static value const_pi(void)    { return value_make_numeric(3.14159265358979323846); }
+
+
 // ---- the two context tables ----
 // EVEN: lexed where an operand is expected (the start, after a binary op, after an
 // open paren). Numbers/strings/identifiers come from the lexer itself, so the table
-// only carries the leading operators, the functions, and the open paren.
+// only carries the leading operators, the functions, the constants, and the open paren.
 static const token even_entries[] = {
     {RC_STR("("),     {.type = lexeme_type_open_paren}},
     {RC_STR("{"),     {.type = lexeme_type_open_brace}},            // begins a list literal
@@ -1129,6 +1137,12 @@ static const token even_entries[] = {
     {RC_STR("min("),     {.type = lexeme_type_function, .function = {.apply = fn_min}}},
     {RC_STR("max("),     {.type = lexeme_type_function, .function = {.apply = fn_max}}},
     {RC_STR("defined("), {.type = lexeme_type_function, .function = {.apply = fn_defined}}},
+
+    // Pure named constants. Bare words, so a longer identifier still wins (PI vs PICKLE), exactly like the
+    // word operators (div / mod / and) in the odd table.
+    {RC_STR("true"),  {.type = lexeme_type_constant, .constant = {.handle = const_true}}},
+    {RC_STR("false"), {.type = lexeme_type_constant, .constant = {.handle = const_false}}},
+    {RC_STR("pi"),    {.type = lexeme_type_constant, .constant = {.handle = const_pi}}},
 };
 
 // ODD: lexed where a binary operator is expected (after an operand). The close paren
@@ -1308,6 +1322,9 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
             // propagates, so a forward reference can resolve on a later pass.
             return ok(value_is_none(v) ? value_make_error(error_type_unknown_symbol) : v, lr.next);
         }
+
+        case lexeme_type_constant:
+            return ok(lex.constant.handle(), lr.next);
 
         case lexeme_type_open_paren: {
             expr_result sub = parse_precedence(p, lr.next, 0);
@@ -1555,6 +1572,22 @@ RC_TEST_STEP(expression, arithmetic_and_precedence, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("2^3^2"),   value_make_numeric(512.0)));  // right assoc
     RC_CHECK_TRUE(value_is_equal(VAL("(1+2)*3"), value_make_numeric(9.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("7/2"),     value_make_numeric(3.5)));
+}
+
+RC_TEST_STEP(expression, constants, fix)
+{
+    // Pure named constants evaluate to their value, case-insensitively (booleans are numbers).
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE"),  value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("FALSE"), value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("PI"),    value_make_numeric(3.14159265358979323846)));
+    RC_CHECK_TRUE(value_is_equal(VAL("true"),  value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("Pi"),    value_make_numeric(3.14159265358979323846)));
+    // They compose like any other operand.
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE and FALSE"), value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("2*PI"), value_make_numeric(2.0 * 3.14159265358979323846)));
+    // A longer identifier still wins: PICKLE is a symbol (here unbound), not PI followed by CKLE.
+    value pickle = VAL("PICKLE");
+    RC_CHECK_TRUE(value_is_error(pickle) && pickle.error == error_type_unknown_symbol);
 }
 
 RC_TEST_STEP(expression, unary, fix)

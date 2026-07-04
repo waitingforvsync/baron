@@ -26,6 +26,7 @@ rc_str error_type_name(error_type e)
         case error_type_unexpected_endif:        return RC_STR("ENDIF without a matching IF");
         case error_type_unclosed_for:            return RC_STR("Unclosed FOR: expected NEXT");
         case error_type_unexpected_next:         return RC_STR("NEXT without a matching FOR");
+        case error_type_reserved_constant:       return RC_STR("TRUE, FALSE and PI are built-in constants and cannot be redefined");
         case error_type_bad_addressing_mode:     return RC_STR("This instruction has no such addressing mode");
         case error_type_operand_not_numeric:     return RC_STR("Operand is not a number");
         case error_type_value_out_of_range:      return RC_STR("Value out of range");

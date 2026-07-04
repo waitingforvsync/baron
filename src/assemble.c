@@ -27,6 +27,7 @@ static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse
 static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -186,6 +187,11 @@ static const token statement_token_entries[] = {
     {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
+    // The pure expression constants are reserved at statement start too, so `pi = 5` is rejected rather than
+    // quietly binding a shadowed symbol. Three near-identical rows, but it is only three tokens.
+    {RC_STR("true"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
+    {RC_STR("false"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
+    {RC_STR("pi"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
     {RC_STR("elif"),   {.type = lexeme_type_closer, .closer = {closer_elif,  error_type_unexpected_elif}}},
     {RC_STR("else"),   {.type = lexeme_type_closer, .closer = {closer_else,  error_type_unexpected_else}}},
     {RC_STR("endif"),  {.type = lexeme_type_closer, .closer = {closer_endif, error_type_unexpected_endif}}},
@@ -932,6 +938,18 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_fl
 }
 
 
+// TRUE / FALSE / PI are expression constants, reserved so that a name always resolves to the constant.
+// Meeting one at statement start is someone assigning to it (pi = 5) or otherwise misusing it as a name -
+// a fatal error, the same way a name that clashes with a mnemonic is rejected.
+static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    (void) scope;
+    (void) flags;
+    (void) scratch;
+    return syntax_error(b, error_type_reserved_constant, cursor_at(at, at.pos));
+}
+
+
 // ---- the statement loop ----
 
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
@@ -1667,6 +1685,21 @@ RC_TEST_STEP(assemble, warnings_do_not_fail_assembly, fix)
     // A vector that does not straddle a page boundary is silent.
     RC_CHECK_TRUE(code_is(&fix->b, ASM("JMP (&1234)"), (uint8_t[]){0x6C, 0x34, 0x12}, 3));
     RC_CHECK(fix->b.diagnostics.num, ==, 0u);
+}
+
+RC_TEST_STEP(assemble, named_constants, fix)
+{
+    // A pure constant flows through the operand path like any number...
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #TRUE"),  (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #FALSE"), (uint8_t[]){0xA9, 0x00}, 2));
+    // ...and serves as an IF condition.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF TRUE : LDA #1 : ELSE : LDA #2 : ENDIF"),  (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF FALSE : LDA #1 : ELSE : LDA #2 : ENDIF"), (uint8_t[]){0xA9, 0x02}, 2));
+    // The constants are reserved: you cannot redefine one (it would otherwise bind a symbol shadowed by the
+    // constant in every expression).
+    RC_CHECK_TRUE(ERR("PI = 5") == error_type_reserved_constant);
+    RC_CHECK_TRUE(ERR("TRUE = 1") == error_type_reserved_constant);
+    RC_CHECK_TRUE(ERR("FALSE = 0") == error_type_reserved_constant);
 }
 
 // INCLUDE tests give the top source an explicit slash-free name: ASM names a source after its own text,
