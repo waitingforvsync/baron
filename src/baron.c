@@ -28,21 +28,21 @@ void baron_error(baron *b, error_type code, cursor at)
 {
     RC_ASSERT(b != NULL);
     rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = diagnostic_error}, &b->diag_arena);
+        (diagnostic) {.code = code, .at = at, .severity = severity_error}, &b->diag_arena);
 }
 
-void baron_warning(baron *b, error_type code, cursor at)
+void baron_warning(baron *b, error_type code, cursor at, uint8_t severity)
 {
-    RC_ASSERT(b != NULL);
+    RC_ASSERT(b != NULL && severity != severity_error);   // a warning is a positive level; 0 would fail the assemble
     rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = diagnostic_warning}, &b->diag_arena);
+        (diagnostic) {.code = code, .at = at, .severity = severity}, &b->diag_arena);
 }
 
 bool baron_has_errors(const baron *b)
 {
     RC_ASSERT(b != NULL);
     for (uint32_t i = 0; i < b->diagnostics.num; i++) {
-        if (rc_view_diagnostic_get(b->diagnostics.view, i).severity == diagnostic_error) {
+        if (rc_view_diagnostic_get(b->diagnostics.view, i).severity == severity_error) {
             return true;
         }
     }

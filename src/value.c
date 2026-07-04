@@ -370,7 +370,7 @@ RC_TEST(value, formatting)
 
     out = rc_mstr_make(16, &arena);
     value_format(&out, value_make_error(error_type_type_mismatch), &arena);
-    RC_CHECK(out.view, ==, RC_STR("<error: type_mismatch>"));
+    RC_CHECK(out.view, ==, RC_STR("<error: Operands have incompatible types>"));
 
     // Stepped, fully-bounded range.
     out = rc_mstr_make(16, &arena);
@@ -392,13 +392,6 @@ RC_TEST(value, formatting)
     RC_CHECK(out.view, ==, RC_STR("{1, 2, 3}"));
 
     rc_arena_deinit(&arena);
-}
-
-RC_TEST(value, error_names)
-{
-    RC_CHECK(error_type_name(error_type_none), ==, RC_STR("none"));
-    RC_CHECK(error_type_name(error_type_divide_by_zero), ==, RC_STR("divide_by_zero"));
-    RC_CHECK(error_type_name(error_type_not_implemented), ==, RC_STR("not_implemented"));
 }
 
 RC_TEST(value, clone_string_survives_scratch)

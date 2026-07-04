@@ -121,6 +121,11 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, va
 // whether it was there to remove.
 bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name);
 
+// The source position that defined leaf `name` in scope_index ALONE (no parent walk, no dotted
+// path) - the `def` cursor scopes_set_symbol recorded - or cursor_none() if the name is not bound
+// here. Used to point a duplicate-symbol error back at the binding it collides with.
+cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
+
 // Look a symbol up, starting from scope_index. A bare name walks up the parent
 // chain and takes the nearest enclosing definition. A dotted path (a.b.sym) finds
 // its head the same way, then descends the rest strictly through the child maps

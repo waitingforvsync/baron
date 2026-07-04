@@ -595,7 +595,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         // NMOS hardware bug: an indirect JMP through a vector whose low byte is at $xxFF fetches the high
         // byte from $xx00, not the next page. Legal but almost always a mistake, so warn (not an error).
         if (mode == addr_mode_ind16 && arg.type == int_argument_type_known && (arg.value & 0xFF) == 0xFF) {
-            semantic_warning(b, flags, error_type_jmp_indirect_page_cross, cursor_at(at, start));
+            semantic_warning(b, flags, error_type_jmp_indirect_page_cross, cursor_at(at, start), severity_warning);
         }
         overlays_emit_u16(&b->overlays, overlay, (uint16_t)(arg.value & 0xFFFF));
     }

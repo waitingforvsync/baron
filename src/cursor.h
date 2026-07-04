@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "richc/macros.h"   // RC_INDEX_NONE
 
 
 // A position in a source: the source file index plus a byte offset into it. It is the parser's
@@ -16,6 +17,18 @@ typedef struct cursor {
 static inline bool cursor_is_equal(cursor a, cursor b)
 {
     return a.source == b.source && a.pos == b.pos;
+}
+
+// The "no such position" cursor - RC_INDEX_NONE in both fields - returned where a cursor lookup can miss
+// (a real source offset is never RC_INDEX_NONE), so we return it by value rather than via an out-param.
+static inline cursor cursor_none(void)
+{
+    return (cursor) {.source = RC_INDEX_NONE, .pos = RC_INDEX_NONE};
+}
+
+static inline bool cursor_is_none(cursor c)
+{
+    return c.pos == RC_INDEX_NONE;
 }
 
 // The same source cursor with its offset moved to `pos` - the common "same source, a little further

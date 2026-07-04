@@ -26,12 +26,12 @@ typedef struct baron {
 void baron_init(baron *b);
 void baron_deinit(baron *b);
 
-// Append a diagnostic to b's list. baron_error records a failing error (fatal syntax or recoverable
-// semantic); baron_warning records a harmless warning. baron_has_errors reports whether any
+// Append a diagnostic to b's list. baron_error records a failing error (severity 0); baron_warning
+// records a harmless warning at a positive `severity` level. baron_has_errors reports whether any
 // error-severity diagnostic is present - the pass driver fails the assemble exactly when it is, so
-// warnings alone leave it succeeding (and stay in the list for the caller to read).
+// warnings alone leave it succeeding (and stay in the list for the caller to read / filter by level).
 void baron_error(baron *b, error_type code, cursor at);
-void baron_warning(baron *b, error_type code, cursor at);
+void baron_warning(baron *b, error_type code, cursor at, uint8_t severity);
 bool baron_has_errors(const baron *b);
 
 

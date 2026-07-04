@@ -138,6 +138,17 @@ bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name)
     return rc_trie_symbol_delete(&RC_AT(s->nodes, scope_index).symbols, name);
 }
 
+cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
+{
+    RC_ASSERT(s != NULL && is_leaf_name(name));
+
+    rc_trie_symbol *syms  = &RC_AT(s->nodes, scope_index).symbols;
+    uint32_t        found = rc_trie_symbol_find(syms, name);
+    return found == RC_INDEX_NONE
+               ? cursor_none()
+               : rc_trie_symbol_value_get(syms, found).def;
+}
+
 value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
 {
     RC_ASSERT(s != NULL);

@@ -44,9 +44,10 @@ parse_result syntax_error(baron *b, error_type code, cursor at);
 // diagnostics array and fails the assemble at the end.
 void semantic_error(baron *b, parse_flags flags, error_type code, cursor at);
 
-// Record a warning into b->diagnostics, gated exactly like semantic_error (settling pass, live
-// branch). Unlike an error it does not fail the assemble - it just rides along for the caller to see.
-void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at);
+// Record a warning into b->diagnostics at a positive `severity` level, gated exactly like semantic_error
+// (settling pass, live branch). Unlike an error it does not fail the assemble - it just rides along for
+// the caller to see (and to filter by warning level).
+void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity);
 
 // An integer argument reduced for emission: one of three mutually-exclusive outcomes, so a single
 // tag rather than a clutch of bools. `value` is the integer (valid only when known); `error` /

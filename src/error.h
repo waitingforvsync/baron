@@ -45,6 +45,7 @@ typedef enum error_type {
     error_type_bad_alignment,         // ALIGN n with n < 1
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
+    error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding
     error_type_not_iterable,          // a FOR sequence that is neither a list nor a range
 
     // Value-evaluation errors: produced by the expression evaluator, carried inside a value.

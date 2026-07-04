@@ -77,10 +77,10 @@ void semantic_error(baron *b, parse_flags flags, error_type code, cursor at)
     }
 }
 
-void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at)
+void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity)
 {
     if (flags.final && flags.active) {
-        baron_warning(b, code, at);
+        baron_warning(b, code, at, severity);
     }
 }
 
@@ -506,6 +506,10 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
 
         if (st == symbol_status_duplicate) {
             semantic_error(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos));
+            cursor original = scopes_symbol_def(&b->scopes, scope, name);
+            if (!cursor_is_none(original)) {
+                semantic_error(b, flags, error_type_original_definition, original);   // point at the first binding
+            }
         }
         r.changed = (st == symbol_status_changed);
     }
@@ -728,6 +732,10 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse
 
         if (st == symbol_status_duplicate) {
             semantic_error(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos));
+            cursor original = scopes_symbol_def(&b->scopes, scope, name);
+            if (!cursor_is_none(original)) {
+                semantic_error(b, flags, error_type_original_definition, original);   // point at the first binding
+            }
         }
         else {
             if (value_is_error(e.value)) {
@@ -1082,7 +1090,7 @@ static error_type first_error(baron *b)
 {
     for (uint32_t i = 0; i < b->diagnostics.num; i++) {
         diagnostic d = rc_view_diagnostic_get(b->diagnostics.view, i);
-        if (d.severity == diagnostic_error) {
+        if (d.severity == severity_error) {
             return d.code;
         }
     }
@@ -1542,6 +1550,23 @@ RC_TEST_STEP(assemble, errors_accumulate, fix)
     RC_CHECK_TRUE(rc_view_diagnostic_get(fix->b.diagnostics.view, 2).code == error_type_bad_addressing_mode);
     // A syntax (fatal) error, by contrast, aborts the whole assemble with just itself.
     RC_CHECK((ASM("} ENDIF NEXT"), fix->b.diagnostics.num), ==, 1u);
+}
+
+RC_TEST_STEP(assemble, duplicate_symbol_signposts_original, fix)
+{
+    // A duplicate raises the error at the redefinition AND a companion note pointing back at the first
+    // binding (both severity-0 errors, so both always show). The note's location precedes the error's.
+    RC_CHECK_TRUE(ASM(".dup NOP : .dup RTS") == 0);
+    RC_CHECK(fix->b.diagnostics.num, ==, 2u);
+    diagnostic err  = rc_view_diagnostic_get(fix->b.diagnostics.view, 0);
+    diagnostic note = rc_view_diagnostic_get(fix->b.diagnostics.view, 1);
+    RC_CHECK_TRUE(err.code == error_type_duplicate_symbol);
+    RC_CHECK_TRUE(note.code == error_type_original_definition);
+    RC_CHECK_TRUE(note.at.pos < err.at.pos);   // the original sits earlier in the source than the redefinition
+    // Same for assignments.
+    RC_CHECK_TRUE(ERR("twice = 1 : twice = 2") == error_type_duplicate_symbol);
+    RC_CHECK(fix->b.diagnostics.num, ==, 2u);
+    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->b.diagnostics.view, 1).code == error_type_original_definition);
 }
 
 RC_TEST_STEP(assemble, failure_clears_outputs, fix)
