@@ -47,6 +47,9 @@ typedef enum error_type {
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding
     error_type_not_iterable,          // a FOR sequence that is neither a list nor a range
+    error_type_expected_filename,     // INCLUDE's operand did not evaluate to a string
+    error_type_include_too_deep,      // INCLUDE recursion hit the depth cap - a cyclic include, most likely
+    error_type_included_from,         // the companion frame: points at the INCLUDE that pulled in a failing file
 
     // Value-evaluation errors: produced by the expression evaluator, carried inside a value.
     error_type_divide_by_zero,

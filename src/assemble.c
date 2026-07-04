@@ -3,11 +3,13 @@
 #include "opcodes.h"
 #include "lexer.h"
 #include "expression.h"
+#include "file_utils.h"          // INCLUDE's path resolution
 #include "baron.h"               // the owner type the tests assemble into
 #include "richc/macros.h"
 
 
 #define ASSEMBLE_MAX_PASSES 100u
+#define ASSEMBLE_MAX_INCLUDE_DEPTH 64u   // a runaway / cyclic INCLUDE is caught here before the C stack gives out
 
 
 // Mutual recursion: a label or a scope reopens the statement loop, and the loop reaches the
@@ -24,7 +26,9 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
 static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 
@@ -181,6 +185,7 @@ static const token statement_token_entries[] = {
     {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
+    {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
     {RC_STR("elif"),   {.type = lexeme_type_closer, .closer = {closer_elif,  error_type_unexpected_elif}}},
     {RC_STR("else"),   {.type = lexeme_type_closer, .closer = {closer_else,  error_type_unexpected_else}}},
     {RC_STR("endif"),  {.type = lexeme_type_closer, .closer = {closer_endif, error_type_unexpected_endif}}},
@@ -855,6 +860,78 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
 }
 
 
+// ---- INCLUDE ----
+
+// INCLUDE "file" splices another source in at this point - textually, so its code emits into the current
+// overlay at the current pc and its symbols bind into the current scope (no scope of its own). We re-parse
+// the included file every pass, exactly like the rest of the statement stream, so forward references cross
+// the boundary freely. The filename is resolved relative to THIS file's directory (see file_path_resolve).
+static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    // The filename is a string operand, evaluated on the spot - we load the file this very pass, so a
+    // forward-referenced name is no use to us (it stays an error value, and we grumble about it below).
+    expr_result e = expression_parse(src, at.pos, &b->scopes, scope, &scratch);
+    if (e.error != expr_error_none) {
+        return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+    }
+
+    // The pull-in's own outcome: it stays empty unless we actually load a file. A dead branch swallows the
+    // filename and the separator but pulls in nothing at all.
+    parse_result pulled = {0};
+    if (flags.active) {
+        if (value_is_string(e.value)) {
+            if (b->include_depth >= ASSEMBLE_MAX_INCLUDE_DEPTH) {
+                semantic_error(b, flags, error_type_include_too_deep, cursor_at(at, at.pos));
+            }
+            else {
+                rc_str base = source_files_name(&b->source_files, at.source);
+                rc_str path = file_path_resolve(base, e.value.string, &scratch);   // source_files keeps its own copy
+                uint32_t inc_source = source_files_add_file(&b->source_files, path);
+                if (inc_source == RC_INDEX_NONE) {
+                    semantic_error(b, flags, error_type_source_load, cursor_at(at, at.pos));
+                }
+                else {
+                    uint32_t errors_before = baron_error_count(b);
+                    b->include_depth++;
+                    pulled = parse_file(b, (cursor) {.source = inc_source, .pos = 0}, scope, flags, scratch);
+                    b->include_depth--;
+                    if (pulled.fatal) {
+                        return pulled;   // a broken statement stream in the included file aborts the whole assemble
+                    }
+                    // If the file we just pulled in raised any errors, drop a breadcrumb pointing back at this
+                    // INCLUDE. It lands AFTER the file's own errors, so the list reads innermost-first.
+                    if (baron_error_count(b) > errors_before) {
+                        semantic_error(b, flags, error_type_included_from, cursor_at(at, at.pos));
+                    }
+                }
+            }
+        }
+        else if (value_is_error(e.value) && e.value.error == error_type_unknown_symbol) {
+            // A forward-referenced filename: defer, exactly like a forward address. We pull in nothing this
+            // pass; once the name binds on a later pass the string resolves and the file loads. Still unknown
+            // on the final pass means it never will be (a name defined only inside the file it would name), so
+            // we call it out then.
+            if (flags.final) {
+                semantic_error(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos));
+            }
+            else {
+                pulled.unresolved = true;
+            }
+        }
+        else {
+            // A number, a list, some other eval error: this is never going to name a file.
+            semantic_error(b, flags, error_type_expected_filename, cursor_at(at, at.pos));
+        }
+    }
+
+    // Carry the pull-in's unresolved/changed up so the driver runs another pass if it must, and carry on in
+    // THIS file at the separator just past the filename.
+    return fold(pulled, require_separator(b, cursor_at(at, e.next)));
+}
+
+
 // ---- the statement loop ----
 
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
@@ -959,6 +1036,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 {
     overlays_reset_all(&b->overlays);
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
+    b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
 
     const uint32_t scope = 0;
     return parse_file(
@@ -1589,6 +1667,78 @@ RC_TEST_STEP(assemble, warnings_do_not_fail_assembly, fix)
     // A vector that does not straddle a page boundary is silent.
     RC_CHECK_TRUE(code_is(&fix->b, ASM("JMP (&1234)"), (uint8_t[]){0x6C, 0x34, 0x12}, 3));
     RC_CHECK(fix->b.diagnostics.num, ==, 0u);
+}
+
+// INCLUDE tests give the top source an explicit slash-free name: ASM names a source after its own text,
+// which would drop the include's own slashes into the cache key and wreck the relative-path peel. Each
+// step gets a fresh baron, so the one name "top" never collides.
+#define INC(src) assemble_string(&fix->b, RC_STR("top"), RC_STR(src), fix->scratch)
+
+RC_TEST_STEP(assemble, include_splices_file, fix)
+{
+    // INCLUDE pulls the file in textually: its instruction emits right here, and its label binds in THIS
+    // scope (no scope of its own).
+    uint32_t passes = INC("include \"inc_child.6502\"");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA2, 0x02}, 2));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("child")), value_make_numeric(0)));
+}
+
+RC_TEST_STEP(assemble, include_resolves_relative_to_includer, fix)
+{
+    // sub/mid.6502 does its own INCLUDE "leaf.6502" - resolved against sub/, not the top file's directory.
+    uint32_t passes = INC("include \"sub/mid.6502\"");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA0, 0x03, 0xEA}, 3));
+}
+
+RC_TEST_STEP(assemble, include_joins_the_multi_pass, fix)
+{
+    // `target` sits after the include, so its address depends on the included file's two bytes - it only
+    // settles once the include is part of the pass loop. JMP is fixed-width, so this converges cleanly.
+    uint32_t passes = INC("jmp target : include \"inc_fwd_child.6502\" : .target rts");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0x4C, 0x05, 0x00, 0xEA, 0xEA, 0x60}, 6));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("target")), value_make_numeric(5)));
+}
+
+RC_TEST_STEP(assemble, include_reports_included_from_frame, fix)
+{
+    // The included file has an out-of-range immediate. That error surfaces, followed by a frame pointing
+    // back at the INCLUDE - so a failure inside an include names both the real site and how we reached it.
+    RC_CHECK(INC("include \"inc_bad_child.6502\""), ==, 0u);
+    RC_CHECK_TRUE(has_diag(&fix->b, error_type_value_out_of_range));
+    RC_CHECK_TRUE(has_diag(&fix->b, error_type_included_from));
+}
+
+RC_TEST_STEP(assemble, include_missing_file_is_an_error, fix)
+{
+    RC_CHECK(INC("include \"no_such_baron_file.6502\""), ==, 0u);
+    RC_CHECK_TRUE(has_diag(&fix->b, error_type_source_load));
+}
+
+RC_TEST_STEP(assemble, include_forward_declared_filename, fix)
+{
+    // The filename is a symbol only bound AFTER the INCLUDE: it defers on pass 1 (like a forward address)
+    // and the file loads once the name settles.
+    uint32_t passes = INC("include fname : fname = \"inc_child.6502\"");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA2, 0x02}, 2));
+    // A name that never binds (nothing defines it) is an undefined symbol at the INCLUDE, not a hang.
+    RC_CHECK(assemble_string(&fix->b, RC_STR("top2"), RC_STR("include missing_name"), fix->scratch), ==, 0u);
+    RC_CHECK_TRUE(has_diag(&fix->b, error_type_undefined_symbol));
+}
+
+RC_TEST_STEP(assemble, include_in_dead_branch_is_skipped, fix)
+{
+    // A dead INCLUDE never even goes looking for its file, so a missing include under IF 0 assembles clean.
+    uint32_t passes = INC("if 0 : include \"no_such_baron_file.6502\" : endif");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK(fix->b.diagnostics.num, ==, 0u);
+}
+
+RC_TEST_STEP(assemble, include_cycle_is_caught, fix)
+{
+    // inc_cycle.6502 includes itself; the depth cap stops the recursion rather than blowing the C stack.
+    uint32_t passes = assemble_file(&fix->b, RC_STR("inc_cycle.6502"), fix->scratch);
+    RC_CHECK(passes, ==, 0u);
+    RC_CHECK_TRUE(has_diag(&fix->b, error_type_include_too_deep));
 }
 
 #endif // BARON_TESTS

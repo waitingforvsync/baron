@@ -20,6 +20,8 @@ add_executable(baron
     overlays.h
     source_files.c
     source_files.h
+    file_utils.c
+    file_utils.h
     assemble.c
     assemble.h
     assemble_internal.h

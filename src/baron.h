@@ -21,6 +21,7 @@ typedef struct baron {
     rc_arena            diag_arena;    // backs the diagnostics array (reset per assemble)
     rc_array_diagnostic diagnostics;   // errors from the last assemble; empty means it succeeded
     uint32_t            current_overlay;   // the overlay statements emit into now
+    uint32_t            include_depth;     // how many INCLUDEs deep the parser is now, to catch runaway recursion
 } baron;
 
 void baron_init(baron *b);
@@ -32,6 +33,10 @@ void baron_deinit(baron *b);
 // warnings alone leave it succeeding (and stay in the list for the caller to read / filter by level).
 void baron_error(baron *b, error_type code, cursor at);
 void baron_warning(baron *b, error_type code, cursor at, uint8_t severity);
+
+// The count of error-severity (level 0) diagnostics recorded so far. baron_has_errors is just this being
+// non-zero; INCLUDE also uses it to tell whether an included file added any errors of its own.
+uint32_t baron_error_count(const baron *b);
 bool baron_has_errors(const baron *b);
 
 
