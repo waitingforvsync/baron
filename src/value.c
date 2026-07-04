@@ -19,7 +19,7 @@ value value_make_string(rc_str s)
     return (value) {.type = value_type_string, .string = s};
 }
 
-value value_make_error(value_error e)
+value value_make_error(error_type e)
 {
     return (value) {.type = value_type_error, .error = e};
 }
@@ -76,11 +76,11 @@ static value range_int(value v, int64_t *out)
         return v;
     }
     if (!value_is_numeric(v)) {
-        return value_make_error(value_error_type_mismatch);
+        return value_make_error(error_type_type_mismatch);
     }
     double d = v.numeric;
     if (floor(d) != d || d < (double)INT64_MIN || d > (double)INT64_MAX) {
-        return value_make_error(value_error_domain);   // not a whole number (or out of range / NaN)
+        return value_make_error(error_type_domain);   // not a whole number (or out of range / NaN)
     }
     *out = (int64_t)d;
     return value_make_none();
@@ -104,21 +104,21 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
         // Stepped form a..(b..c): the inner range's start is our second element, so the
         // step is fixed at (second - start) and the inner end becomes our end.
         if (exclusive) {
-            return value_make_error(value_error_domain);   // '<' must sit on the final separator
+            return value_make_error(error_type_domain);   // '<' must sit on the final separator
         }
         value_range r = rhs.range;
         if (!r.has_start) {
-            return value_make_error(value_error_domain);   // ..(..x) makes no sense as a start
+            return value_make_error(error_type_domain);   // ..(..x) makes no sense as a start
         }
         int64_t step = r.start - start;
         if (step == 0 || (r.step != 0 && r.step != step)) {
-            return value_make_error(value_error_domain);   // zero or inconsistent step
+            return value_make_error(error_type_domain);   // zero or inconsistent step
         }
         if (!r.has_end) {
             return value_make_range((value_range) {.start = start, .step = step, .has_start = true});
         }
         if (sign64(r.end - r.start) != sign64(step)) {
-            return value_make_error(value_error_domain);   // the end does not continue the same way
+            return value_make_error(error_type_domain);   // the end does not continue the same way
         }
         int64_t end = start + step * ((r.end - start) / step);   // canonical last element
         return value_make_range((value_range) {.start = start, .end = end, .step = step, .has_start = true, .has_end = true});
@@ -142,7 +142,7 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
 value value_make_range_open_end(value lhs, bool exclusive)
 {
     if (exclusive) {
-        return value_make_error(value_error_domain);   // 'a..<' has nothing to exclude
+        return value_make_error(error_type_domain);   // 'a..<' has nothing to exclude
     }
     int64_t start;
     value err = range_int(lhs, &start);
@@ -230,23 +230,6 @@ bool value_is_equal(value a, value b)
 }
 
 
-rc_str value_error_name(value_error e)
-{
-    switch (e) {
-        case value_error_none:                 return RC_STR("none");
-        case value_error_divide_by_zero:       return RC_STR("divide_by_zero");
-        case value_error_domain:               return RC_STR("domain");
-        case value_error_unknown_symbol:       return RC_STR("unknown_symbol");
-        case value_error_type_mismatch:        return RC_STR("type_mismatch");
-        case value_error_subscript_range:      return RC_STR("subscript_range");
-        case value_error_incorrect_parameters: return RC_STR("incorrect_parameters");
-        case value_error_shape_mismatch:       return RC_STR("shape_mismatch");
-        case value_error_list_too_big:         return RC_STR("list_too_big");
-        case value_error_not_implemented:      return RC_STR("not_implemented");
-    }
-
-    RC_UNREACHABLE();
-}
 
 
 void value_format(rc_mstr *out, value v, rc_arena *arena)
@@ -265,7 +248,7 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
             return;
         case value_type_error:
             rc_mstr_append(out, RC_STR("<error: "), arena);
-            rc_mstr_append(out, value_error_name(v.error), arena);
+            rc_mstr_append(out, error_type_name(v.error), arena);
             rc_mstr_append_char(out, '>', arena);
             return;
         case value_type_range:
@@ -315,7 +298,7 @@ RC_TEST(value, constructors_and_predicates)
     RC_CHECK_TRUE(value_is_string(str));
     RC_CHECK(str.string, ==, RC_STR("hi"));
 
-    value err = value_make_error(value_error_divide_by_zero);
+    value err = value_make_error(error_type_divide_by_zero);
     RC_CHECK_TRUE(value_is_error(err));
     RC_CHECK_FALSE(value_is_numeric(err));
 }
@@ -386,7 +369,7 @@ RC_TEST(value, formatting)
     RC_CHECK(out.view, ==, RC_STR("\"hi\""));
 
     out = rc_mstr_make(16, &arena);
-    value_format(&out, value_make_error(value_error_type_mismatch), &arena);
+    value_format(&out, value_make_error(error_type_type_mismatch), &arena);
     RC_CHECK(out.view, ==, RC_STR("<error: type_mismatch>"));
 
     // Stepped, fully-bounded range.
@@ -413,9 +396,9 @@ RC_TEST(value, formatting)
 
 RC_TEST(value, error_names)
 {
-    RC_CHECK(value_error_name(value_error_none), ==, RC_STR("none"));
-    RC_CHECK(value_error_name(value_error_divide_by_zero), ==, RC_STR("divide_by_zero"));
-    RC_CHECK(value_error_name(value_error_not_implemented), ==, RC_STR("not_implemented"));
+    RC_CHECK(error_type_name(error_type_none), ==, RC_STR("none"));
+    RC_CHECK(error_type_name(error_type_divide_by_zero), ==, RC_STR("divide_by_zero"));
+    RC_CHECK(error_type_name(error_type_not_implemented), ==, RC_STR("not_implemented"));
 }
 
 RC_TEST(value, clone_string_survives_scratch)

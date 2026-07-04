@@ -18,5 +18,13 @@ static inline bool cursor_is_equal(cursor a, cursor b)
     return a.source == b.source && a.pos == b.pos;
 }
 
+// The same source cursor with its offset moved to `pos` - the common "same source, a little further
+// along" step, and the way a handler builds an error location from its own cursor plus an offset.
+static inline cursor cursor_at(cursor at, uint32_t pos)
+{
+    at.pos = pos;
+    return at;
+}
+
 
 #endif // ifndef BARON_CURSOR_H_

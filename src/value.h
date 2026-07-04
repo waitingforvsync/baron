@@ -4,6 +4,7 @@
 #include "richc/arena.h"
 #include "richc/mstr.h"
 #include "richc/str.h"
+#include "error.h"   // error_type, the shared diagnostic vocabulary
 
 
 // The single value type flowing through Baron's expression machinery. It is a
@@ -27,22 +28,10 @@ typedef struct value value;
 typedef rc_view_value value_list;
 
 // The most elements a list may be materialised to. Enumerating a huge range (say by subscripting it)
-// would otherwise build an unbounded list; past this it is a value_error_list_too_big instead.
+// would otherwise build an unbounded list; past this it is a error_type_list_too_big instead.
 #define VALUE_LIST_MAX_LENGTH 65536u
 
 
-typedef enum value_error {
-    value_error_none,                   // zero/default: no error
-    value_error_divide_by_zero,
-    value_error_domain,
-    value_error_unknown_symbol,
-    value_error_type_mismatch,
-    value_error_subscript_range,
-    value_error_incorrect_parameters,
-    value_error_shape_mismatch,         // a ragged operand, or shapes that do not broadcast
-    value_error_list_too_big,           // a list grew past VALUE_LIST_MAX_LENGTH
-    value_error_not_implemented,
-} value_error;
 
 
 typedef enum value_type {
@@ -75,7 +64,7 @@ struct value {
         rc_str      string;             // view into source or arena; concat allocates
         value_list  list;               // rc_view_value: const value *, num
         value_range range;
-        value_error error;
+        error_type  error;
     };
 };
 
@@ -90,7 +79,7 @@ struct value {
 value value_make_none(void);
 value value_make_numeric(double n);
 value value_make_string(rc_str s);
-value value_make_error(value_error e);
+value value_make_error(error_type e);
 value value_make_range(value_range r);
 value value_make_list(rc_view_value items);    // wraps the view; does not copy
 
@@ -130,7 +119,6 @@ bool value_is_compound(value v);   // list or range: gathers other values
 bool value_is_equal(value a, value b);
 
 // Diagnostics.
-rc_str value_error_name(value_error e);
 void value_format(rc_mstr *out, value v, rc_arena *arena);
 
 

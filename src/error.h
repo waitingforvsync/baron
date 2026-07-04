@@ -1,0 +1,73 @@
+#ifndef BARON_ERROR_H_
+#define BARON_ERROR_H_
+
+#include "richc/str.h"   // rc_str
+
+
+// The single diagnostic vocabulary, shared by every layer. The expression evaluator emits the
+// value-evaluation codes (divide_by_zero, domain, ...) straight into a value; the assembler emits the
+// rest - lexical/structural, semantic, driver and warnings - into its diagnostics. One enum, so a
+// value's error surfaces as an assembler diagnostic with no translation step. (The expression PARSE
+// errors - a missing close paren and the like - keep their own expr_error enum: they are structural to
+// the expression grammar, not values that flow, and are wrapped as error_type_expression.)
+//
+// error_type_none is the zero default (no error). error_type_unknown_symbol is the transient "not
+// bound yet" that a lookup yields - it may still resolve on a later pass; once the assembler judges it
+// final it records the definitive error_type_undefined_symbol instead.
+typedef enum error_type {
+    error_type_none,
+
+    // Lexical / structural: the statement stream is malformed (a fatal parse).
+    error_type_unexpected_token,
+    error_type_unexpected_close_brace,
+    error_type_unclosed_scope,
+    error_type_expected_separator,
+    error_type_expected_label_name,
+    error_type_invalid_assignment,    // a dotted path on the left of '='
+    error_type_expected_assign,       // a bare identifier statement with no '='
+    error_type_expected_close_paren,
+    error_type_bad_index_register,    // expected X or Y after a ','
+    error_type_missing_operand,
+    error_type_expression,            // a parse error inside an operand expression
+    error_type_unclosed_if,           // IF reached '}' or end of input before ENDIF
+    error_type_unexpected_elif,       // ELIF with no IF to match
+    error_type_unexpected_else,       // ELSE with no IF to match
+    error_type_unexpected_endif,      // ENDIF with no IF to match
+    error_type_unclosed_for,          // FOR reached '}' or end of input before NEXT
+    error_type_unexpected_next,       // NEXT with no FOR to match
+
+    // Semantic: the statement parses, but its meaning is wrong.
+    error_type_bad_addressing_mode,   // the mnemonic has no encoding for that operand shape
+    error_type_operand_not_numeric,   // an operand evaluated to a string / list where a number was needed
+    error_type_value_out_of_range,
+    error_type_branch_out_of_range,
+    error_type_skip_backwards,        // SKIP / SKIPTO would move the pointer backwards
+    error_type_bad_alignment,         // ALIGN n with n < 1
+    error_type_undefined_symbol,      // a reference still unresolved on the final pass
+    error_type_duplicate_symbol,      // a name defined twice in one scope
+    error_type_not_iterable,          // a FOR sequence that is neither a list nor a range
+
+    // Value-evaluation errors: produced by the expression evaluator, carried inside a value.
+    error_type_divide_by_zero,
+    error_type_domain,
+    error_type_unknown_symbol,        // not bound yet: a forward reference, may resolve on a later pass
+    error_type_type_mismatch,
+    error_type_subscript_range,
+    error_type_incorrect_parameters,
+    error_type_shape_mismatch,        // a ragged operand, or shapes that do not broadcast
+    error_type_list_too_big,          // a list grew past VALUE_LIST_MAX_LENGTH
+    error_type_not_implemented,
+
+    // Driver.
+    error_type_no_convergence,
+    error_type_source_load,           // a source file could not be read
+
+    // Warnings (recorded with diagnostic_warning; harmless, they do not fail the assemble).
+    error_type_jmp_indirect_page_cross,   // JMP (&xxFF): the NMOS vector-fetch page-wrap bug
+} error_type;
+
+// A short lowercase name for a code (its enumerator tail), for diagnostics and tests.
+rc_str error_type_name(error_type e);
+
+
+#endif // ifndef BARON_ERROR_H_

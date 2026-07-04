@@ -1,6 +1,6 @@
 #include "opcodes.h"
 
-#include "assemble_internal.h"   // parse_result, int_argument, int_argument_make, require_separator, parse_fail
+#include "assemble_internal.h"   // parse_result, int_argument, require_separator, syntax_error, semantic_error
 #include "baron.h"               // scopes / overlays / source_files reached through b
 #include "lexer.h"
 #include "expression.h"
@@ -407,7 +407,7 @@ static addr_mode resolve_direct(mnemonic m, index_reg idx, bool known, int64_t a
 typedef struct index_result {
     index_reg      reg;
     uint32_t       next;        // the separator position when there is no index
-    assemble_error error;
+    error_type     error;
     uint32_t       error_at;
 } index_result;
 
@@ -430,7 +430,7 @@ static index_result consume_index(rc_str source, uint32_t cursor)
     return (index_result) {
         .reg = index_none,
         .next = cursor,
-        .error = assemble_error_bad_index_register,
+        .error = error_type_bad_index_register,
         .error_at = a.next
     };
 }
@@ -457,14 +457,14 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
             mode = addr_mode_acc;
         }
         else {
-            return parse_fail(assemble_error_missing_operand, start);
+            return syntax_error(b, error_type_missing_operand, cursor_at(at, start));
         }
         after = start;                     // leave the terminator for require_separator
     }
     else if (peek.token.type == lexeme_type_hash) {
         expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
         if (e.error != expr_error_none) {
-            return parse_fail(assemble_error_expression, e.error_at);
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
         arg = int_argument_make(e.value, flags.final, peek.next);
         mode = addr_mode_imm;
@@ -473,7 +473,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     else if (peek.token.type == lexeme_type_open_paren) {
         expr_result e = expression_parse(src, peek.next, &b->scopes, scope, &scratch);
         if (e.error != expr_error_none) {
-            return parse_fail(assemble_error_expression, e.error_at);
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
         arg = int_argument_make(e.value, flags.final, peek.next);
 
@@ -483,11 +483,11 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         if (a.token.type == lexeme_type_comma) {
             lexer_result reg = lexer_next(src, a.next, operand_tokens);
             if (!is_register(reg.token, reg_x)) {
-                return parse_fail(assemble_error_bad_index_register, a.next);
+                return syntax_error(b, error_type_bad_index_register, cursor_at(at, a.next));
             }
             lexer_result cp = lexer_next(src, reg.next, operand_tokens);
             if (cp.token.type != lexeme_type_close_paren) {
-                return parse_fail(assemble_error_expected_close_paren, reg.next);
+                return syntax_error(b, error_type_expected_close_paren, cursor_at(at, reg.next));
             }
             mode = addr_mode_indx;
             after = cp.next;
@@ -497,7 +497,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
             if (tail.token.type == lexeme_type_comma) {
                 lexer_result reg = lexer_next(src, tail.next, operand_tokens);
                 if (!is_register(reg.token, reg_y)) {
-                    return parse_fail(assemble_error_bad_index_register, tail.next);
+                    return syntax_error(b, error_type_bad_index_register, cursor_at(at, tail.next));
                 }
                 mode  = addr_mode_indy;
                 after = reg.next;
@@ -508,7 +508,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
             }
         }
         else {
-            return parse_fail(assemble_error_expected_close_paren, e.next);
+            return syntax_error(b, error_type_expected_close_paren, cursor_at(at, e.next));
         }
     }
     else {
@@ -525,13 +525,13 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         if (!handled) {
             expr_result e = expression_parse(src, start, &b->scopes, scope, &scratch);
             if (e.error != expr_error_none) {
-                return parse_fail(assemble_error_expression, e.error_at);
+                return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
             }
             arg = int_argument_make(e.value, flags.final, start);
 
             index_result ix = consume_index(src, e.next);
-            if (ix.error != assemble_error_none) {
-                return parse_fail(ix.error, ix.error_at);
+            if (ix.error != error_type_none) {
+                return syntax_error(b, ix.error, cursor_at(at, ix.error_at));
             }
 
             // A relative branch takes a bare target; everything else is zero-page/absolute.
@@ -549,16 +549,20 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     // the separator. Everything below - the value error, encoding, emission, range checks and the
     // forward-reference flag - is the active path.
     if (!flags.active) {
-        return require_separator(src, after);
+        return require_separator(b, cursor_at(at, after));
     }
 
+    // A value that can never be an address is recoverable: record it and emit a best-effort 0 operand,
+    // so the instruction keeps its size and the layout still settles.
     if (arg.type == int_argument_type_error) {
-        return parse_fail(arg.error, arg.error_at);
+        semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));
     }
 
     uint16_t cell = opcode_def(m, mode);
     if (cell == 0 || (cell & cmos) != 0) {            // NMOS target: a CMOS-only encoding is unavailable
-        return parse_fail(assemble_error_bad_addressing_mode, start);
+        // No encoding for this operand shape: record it and emit nothing (a stable zero-byte best effort).
+        semantic_error(b, flags, error_type_bad_addressing_mode, cursor_at(at, start));
+        return require_separator(b, cursor_at(at, after));
     }
     overlays_emit_u8(&b->overlays, overlay, (uint8_t)(cell & 0xFF));
 
@@ -569,30 +573,35 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
             if (arg.type == int_argument_type_known) {
                 // From the address after the instruction (the offset byte we are about to emit).
                 int64_t delta = arg.value - (int64_t)(overlays_pc(&b->overlays, overlay) + 1);
-                if (flags.final && (delta < -128 || delta > 127)) {
-                    return parse_fail(assemble_error_branch_out_of_range, start);
+                if (delta < -128 || delta > 127) {
+                    semantic_error(b, flags, error_type_branch_out_of_range, cursor_at(at, start));
                 }
-                off = (uint8_t)(int8_t)delta;
+                off = (uint8_t)(int8_t)delta;   // best-effort: the low byte of the (out-of-range) delta
             }
             overlays_emit_u8(&b->overlays, overlay, off);
         }
         else {
             int64_t lo = (mode == addr_mode_imm) ? -128 : 0;   // immediates may be written signed (#-1)
-            if (arg.type == int_argument_type_known && flags.final && (arg.value < lo || arg.value > 0xFF)) {
-                return parse_fail(assemble_error_value_out_of_range, start);
+            if (arg.type == int_argument_type_known && (arg.value < lo || arg.value > 0xFF)) {
+                semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, start));
             }
             overlays_emit_u8(&b->overlays, overlay, (uint8_t)(arg.value & 0xFF));
         }
     }
     else if (width == 2) {
-        if (arg.type == int_argument_type_known && flags.final && (arg.value < 0 || arg.value > 0xFFFF)) {
-            return parse_fail(assemble_error_value_out_of_range, start);
+        if (arg.type == int_argument_type_known && (arg.value < 0 || arg.value > 0xFFFF)) {
+            semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, start));
+        }
+        // NMOS hardware bug: an indirect JMP through a vector whose low byte is at $xxFF fetches the high
+        // byte from $xx00, not the next page. Legal but almost always a mistake, so warn (not an error).
+        if (mode == addr_mode_ind16 && arg.type == int_argument_type_known && (arg.value & 0xFF) == 0xFF) {
+            semantic_warning(b, flags, error_type_jmp_indirect_page_cross, cursor_at(at, start));
         }
         overlays_emit_u16(&b->overlays, overlay, (uint16_t)(arg.value & 0xFFFF));
     }
 
     // The separator follows; carry forward whether the operand was a forward reference.
-    parse_result r = require_separator(src, after);
+    parse_result r = require_separator(b, cursor_at(at, after));
     r.unresolved = (arg.type == int_argument_type_unresolved);
     return r;
 }

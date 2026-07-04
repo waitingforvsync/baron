@@ -11,6 +11,8 @@ void baron_init(baron *b)
     overlays_init(&b->overlays);
     b->current_overlay = overlays_make_default(&b->overlays);   // emit into the default overlay (index 0)
     source_files_init(&b->source_files);
+    b->diag_arena  = rc_arena_make_default();
+    b->diagnostics = rc_array_diagnostic_make(0, &b->diag_arena);
 }
 
 void baron_deinit(baron *b)
@@ -19,6 +21,32 @@ void baron_deinit(baron *b)
     scopes_deinit(&b->scopes);
     overlays_deinit(&b->overlays);
     source_files_deinit(&b->source_files);
+    rc_arena_deinit(&b->diag_arena);
+}
+
+void baron_error(baron *b, error_type code, cursor at)
+{
+    RC_ASSERT(b != NULL);
+    rc_array_diagnostic_push(&b->diagnostics,
+        (diagnostic) {.code = code, .at = at, .severity = diagnostic_error}, &b->diag_arena);
+}
+
+void baron_warning(baron *b, error_type code, cursor at)
+{
+    RC_ASSERT(b != NULL);
+    rc_array_diagnostic_push(&b->diagnostics,
+        (diagnostic) {.code = code, .at = at, .severity = diagnostic_warning}, &b->diag_arena);
+}
+
+bool baron_has_errors(const baron *b)
+{
+    RC_ASSERT(b != NULL);
+    for (uint32_t i = 0; i < b->diagnostics.num; i++) {
+        if (rc_view_diagnostic_get(b->diagnostics.view, i).severity == diagnostic_error) {
+            return true;
+        }
+    }
+    return false;
 }
 
 

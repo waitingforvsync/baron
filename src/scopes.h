@@ -86,6 +86,10 @@ typedef struct scopes {
 void scopes_init(scopes *s);
 void scopes_deinit(scopes *s);
 
+// Empty the tree back to a bare root (index 0), reclaiming everything. Used to discard the
+// half-built symbol table when an assemble fails, so no stale bindings are read afterwards.
+void scopes_reset(scopes *s);
+
 // Make the root scope (index 0). Call it once, before anything else.
 uint32_t scopes_make_root(scopes *s);
 

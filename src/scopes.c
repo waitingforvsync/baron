@@ -32,6 +32,16 @@ void scopes_deinit(scopes *s)
     rc_arena_deinit(&s->value_arena);
 }
 
+void scopes_reset(scopes *s)
+{
+    RC_ASSERT(s != NULL);
+    // The tries squirrel pointers back into the pools, so we cannot cheaply truncate: tear the whole
+    // thing down and stand a fresh, empty tree back up (a bare root at index 0). Only runs on failure.
+    scopes_deinit(s);
+    scopes_init(s);
+    scopes_make_root(s);
+}
+
 uint32_t scopes_make_root(scopes *s)
 {
     RC_ASSERT(s != NULL);
