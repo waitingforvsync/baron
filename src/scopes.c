@@ -127,7 +127,11 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, va
         rc_trie_symbol_value_set(syms, found, (symbol){ value_make_copy(v, &s->value_arena), def });
         return symbol_status_changed;
     }
-    rc_trie_symbol_add(syms, name, (symbol){ value_make_copy(v, &s->value_arena), def }, &s->symbol_arena);
+    // First binding: own the key in value_arena too, so the caller may hand us a scratch view - a local
+    // label's synthetic '@source:pos' key has no backing in the source text. Only the add path copies (a
+    // later pass finds the key by content and reuses it), so this is one copy per symbol, not per pass.
+    rc_str owned = rc_mstr_from_str(name, name.len, &s->value_arena).view;
+    rc_trie_symbol_add(syms, owned, (symbol){ value_make_copy(v, &s->value_arena), def }, &s->symbol_arena);
     return symbol_status_unchanged;   // brand new, so there was nothing to converge from
 }
 
@@ -205,6 +209,60 @@ value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
 }
 
 
+// The running state of a local-label scan: which reference we are resolving, and the best candidate so far.
+typedef struct local_label_search {
+    uint32_t source;    // the reference's source; a candidate in another source is not comparable
+    uint32_t use_pos;   // the reference's position; we want the nearest label either side of it
+    bool     forward;   // '@+' (nearest label after) when true, '@-' (nearest before) when false
+    bool     found;     // whether `result` / `best_pos` hold a candidate yet
+    uint32_t best_pos;  // the def position of the best candidate so far
+    value    result;    // that candidate's value
+} local_label_search;
+
+// One trie entry: keep it only if it is a local label ('@'-prefixed key) defined in the same source, then
+// let it displace the current best when it is nearer to the reference on the correct side. We compare by the
+// DEFINITION position (sym.def.pos), never by the value, so an ORG between two labels cannot reorder them.
+static void local_label_visit(local_label_search *search, rc_trie_symbol *t, uint32_t index)
+{
+    rc_str key = rc_trie_symbol_key_get(t, index);
+    if (!rc_str_starts_with(key, RC_STR("@"))) {
+        return;   // an ordinary named symbol, not a local label
+    }
+    symbol sym = rc_trie_symbol_value_get(t, index);
+    if (sym.def.source != search->source) {
+        return;   // defined in a different source: positions are not comparable
+    }
+    uint32_t pos = sym.def.pos;
+    bool nearer = search->forward
+                      ? (pos > search->use_pos && (!search->found || pos < search->best_pos))
+                      : (pos < search->use_pos && (!search->found || pos > search->best_pos));
+    if (nearer) {
+        search->found    = true;
+        search->best_pos = pos;
+        search->result   = sym.v;
+    }
+}
+
+#define RC_TRIE_FOREACH_TYPE          symbol
+#define RC_TRIE_FOREACH_CTX           local_label_search
+#define RC_TRIE_FOREACH_FUNC(c, t, i) local_label_visit(c, t, i)
+#include "richc/template/algorithm/hash_trie_foreach.h"   // rc_trie_foreach_symbol
+
+value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t source, uint32_t use_pos, bool forward)
+{
+    RC_ASSERT(s != NULL);
+    local_label_search search = {
+        .source  = source,
+        .use_pos = use_pos,
+        .forward = forward,
+    };
+    rc_trie_foreach_symbol(&RC_AT(s->nodes, scope_index).symbols, &search);
+    // No candidate: report it as an unknown symbol, so an unresolved @- / @+ defers like any forward
+    // reference (and becomes undefined_symbol on the final pass if it never binds).
+    return search.found ? search.result : value_make_error(error_type_unknown_symbol);
+}
+
+
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
@@ -257,6 +315,35 @@ RC_TEST_STEP(scopes, duplicate_symbol, fix)
     uint32_t child = scopes_make_child(&fix->scopes, fix->root, RC_STR("inner"));
     RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, child, RC_STR("dup"), value_make_numeric(3.0), (cursor){0, 9}) == symbol_status_unchanged);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, child, RC_STR("dup")), value_make_numeric(3.0)));
+}
+
+RC_TEST_STEP(scopes, find_local_label, fix)
+{
+    scopes  *sc   = &fix->scopes;
+    uint32_t root = fix->root;
+
+    // Three local labels in one scope under the unspellable "@source:pos" keys, defined at ascending
+    // positions. Their VALUES are deliberately not in position order (an ORG could do this), to prove the
+    // scan orders by the definition cursor, not by the value. A plain symbol at pos 25 must be ignored.
+    scopes_set_symbol(sc, root, RC_STR("@0:10"), value_make_numeric(0x2000), (cursor){0, 10});
+    scopes_set_symbol(sc, root, RC_STR("@0:20"), value_make_numeric(0x1000), (cursor){0, 20});
+    scopes_set_symbol(sc, root, RC_STR("@0:30"), value_make_numeric(0x3000), (cursor){0, 30});
+    scopes_set_symbol(sc, root, RC_STR("plain"), value_make_numeric(0x9999), (cursor){0, 25});
+
+    // From pos 25: nearest-before (@-) is @0:20 (value 0x1000); nearest-after (@+) is @0:30 (0x3000).
+    RC_CHECK_TRUE(value_is_equal(scopes_find_local_label(sc, root, 0, 25, false), value_make_numeric(0x1000)));
+    RC_CHECK_TRUE(value_is_equal(scopes_find_local_label(sc, root, 0, 25, true),  value_make_numeric(0x3000)));
+
+    // From pos 15: @- is @0:10 (0x2000), @+ is @0:20 (0x1000) - lower value, but the next one along.
+    RC_CHECK_TRUE(value_is_equal(scopes_find_local_label(sc, root, 0, 15, false), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(value_is_equal(scopes_find_local_label(sc, root, 0, 15, true),  value_make_numeric(0x1000)));
+
+    // Before the first (@-) and after the last (@+): nothing qualifies -> an unknown-symbol error value.
+    RC_CHECK_TRUE(value_is_error(scopes_find_local_label(sc, root, 0, 5,  false)));
+    RC_CHECK_TRUE(value_is_error(scopes_find_local_label(sc, root, 0, 35, true)));
+
+    // A reference in a different source finds no comparable candidates here.
+    RC_CHECK_TRUE(value_is_error(scopes_find_local_label(sc, root, 1, 25, false)));
 }
 
 RC_TEST_STEP(scopes, remove, fix)

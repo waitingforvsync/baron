@@ -81,7 +81,7 @@ parse_result require_separator(baron *b, cursor at);
 // Evaluate one expression in the assembler's current context: symbols from `scope`, plus the live PC of the
 // current overlay. The single place that projects `baron` into an expr_env, so no call site rebuilds it.
 // Defined in assemble.c (it reaches into b's overlays); shared with opcodes.c.
-expr_result eval(baron *b, rc_str src, uint32_t pos, uint32_t scope, rc_arena scratch);
+expr_result eval(baron *b, cursor at, uint32_t scope, rc_arena scratch);
 
 
 #endif // ifndef BARON_ASSEMBLE_INTERNAL_H_

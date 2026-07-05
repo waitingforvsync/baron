@@ -133,5 +133,14 @@ cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 // value_make_none() if nothing matches.
 value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path);
 
+// Resolve a LOCAL label reference (@- / @+) made at (source, use_pos) inside scope_index. Local labels are
+// ordinary symbols bound under an unspellable "@source:pos" key; we scan this scope's symbols ALONE (no parent
+// walk - locals do not leak across scopes), keep the '@'-prefixed keys defined in the same `source`, and pick
+// the nearest by DEFINITION position: the largest def.pos < use_pos for a backward '@-' (forward == false), or
+// the smallest def.pos > use_pos for a forward '@+' (forward == true). Ordering is by source position, never
+// by value, so an ORG between two local labels cannot reorder them. Hands back the winner's value, or an
+// unknown-symbol error value when none qualifies (so an unresolved @- / @+ defers like any forward reference).
+value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t source, uint32_t use_pos, bool forward);
+
 
 #endif // ifndef BARON_SCOPES_H_

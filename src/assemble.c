@@ -23,6 +23,7 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_fla
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -177,6 +178,7 @@ static const token statement_token_entries[] = {
     {RC_STR("tsb"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tsb}}},
 
     {RC_STR("."),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_label}}},
+    {RC_STR(".@"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_local_label}}},
     {RC_STR("{"),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_open_brace}}},
     {RC_STR("org"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_org}}},
     {RC_STR("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
@@ -219,16 +221,20 @@ parse_result require_separator(baron *b, cursor at)
 }
 
 // The one place that projects baron into an expr_env: symbols from `scope`, the live PC of the current
-// overlay. Every directive / operand evaluates through here, so no call site rebuilds the environment and
-// the expression parser never sees baron. Shared with opcodes.c.
-expr_result eval(baron *b, rc_str src, uint32_t pos, uint32_t scope, rc_arena scratch)
+// overlay, and the reference's own position (`at`) for the impure @- / @+ locals. Every directive / operand
+// evaluates through here, so no call site rebuilds the environment and the expression parser never sees
+// baron. The cursor's source+pos double as the parse start and the use site. Shared with opcodes.c.
+expr_result eval(baron *b, cursor at, uint32_t scope, rc_arena scratch)
 {
+    rc_str src = source_files_text(&b->source_files, at.source);
     expr_env env = {
         .scopes      = &b->scopes,
         .scope_index = scope,
         .pc          = overlays_pc(&b->overlays, b->current_overlay),
+        .source      = at.source,
+        .offset      = at.pos,
     };
-    return expression_parse(src, pos, &env, &scratch);
+    return expression_parse(src, at.pos, &env, &scratch);
 }
 
 static bool is_dotted(rc_str name)
@@ -266,9 +272,8 @@ static parse_result fold(parse_result r, parse_result sub)
 
 static parse_result handle_org(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, src, at.pos, scope, scratch);
+    expr_result e = eval(b, at, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -299,9 +304,8 @@ static parse_result handle_org(baron *b, cursor at, uint32_t scope, parse_flags 
 // rewind the pointer, which we cannot do; the layout-dependent check is deferred to the final pass.
 static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, src, at.pos, scope, scratch);
+    expr_result e = eval(b, at, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -336,9 +340,8 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
 // deferred to the final pass since pc only settles once preceding forward references resolve.
 static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, src, at.pos, scope, scratch);
+    expr_result e = eval(b, at, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -375,9 +378,8 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_fla
 // by zero), so it is an error; the modulo is only evaluated once we know n is sound.
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, src, at.pos, scope, scratch);
+    expr_result e = eval(b, at, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -470,7 +472,7 @@ static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags
     bool unresolved = false;
 
     while (true) {
-        expr_result e = eval(b, src, pos, scope, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -587,6 +589,33 @@ static rc_mstr anon_for_scope_key(char *storage, uint32_t cap, cursor at, uint32
     return m;
 }
 
+// A local label '.@': an anonymous marker at the current PC that @- / @+ branch to. We reuse anon_scope_key
+// to give it an unspellable per-position key in the ordinary symbol table, so it converges, clears on a dead
+// branch, and defers a forward @+ exactly as a named label would. Its cursor is unique per '.@', so it can
+// never be a duplicate. A '.@' is a whole statement with nothing following it, so we consume just the token
+// and leave the rest of the line to the statement loop.
+static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    (void) scratch;
+    char storage[64];
+    rc_mstr key = anon_scope_key(storage, sizeof storage, at);
+
+    parse_result r = {.next = at.pos};
+    if (flags.active) {
+        symbol_status st = scopes_set_symbol(
+            &b->scopes,
+            scope,
+            key.view,
+            value_make_numeric((double) overlays_pc(&b->overlays, b->current_overlay)),
+            at);
+        r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
+    }
+    else {
+        r.changed = scopes_remove_symbol(&b->scopes, scope, key.view);   // dead branch: clear a prior binding
+    }
+    return r;
+}
+
 static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     // The just-passed pos gives the anonymous scope a stable per-pass identity, so re-walking it
@@ -609,7 +638,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, src, at.pos, scope, scratch);
+    expr_result e = eval(b, at, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));   // a syntax error always aborts
     }
@@ -737,7 +766,7 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse
         return syntax_error(b, error_type_expected_assign, cursor_at(at, at.pos));   // not an assignment: malformed
     }
 
-    expr_result e = eval(b, src, eq.next, scope, scratch);
+    expr_result e = eval(b, cursor_at(at, eq.next), scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -807,7 +836,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
         return syntax_error(b, error_type_expected_assign, cursor_at(at, var.next));
     }
 
-    expr_result e = eval(b, src, eq.next, scope, scratch);
+    expr_result e = eval(b, cursor_at(at, eq.next), scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -887,11 +916,10 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
 // the boundary freely. The filename is resolved relative to THIS file's directory (see file_path_resolve).
 static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    rc_str src = source_files_text(&b->source_files, at.source);
 
     // The filename is a string operand, evaluated on the spot - we load the file this very pass, so a
     // forward-referenced name is no use to us (it stays an error value, and we grumble about it below).
-    expr_result e = eval(b, src, at.pos, scope, scratch);
+    expr_result e = eval(b, at, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -1305,6 +1333,53 @@ RC_TEST_STEP(assemble, org_and_labels, fix)
     RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x01}, 2));
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")),
                                  value_make_numeric(0x2002)));
+}
+
+RC_TEST_STEP(assemble, local_label_backward, fix)
+{
+    // .@ marks a spot; @- is the nearest .@ before the reference. Same shape as branch_offsets' .t/BNE:
+    // target at pc 0, NOP, then BNE back to it -> offset 0 - (1 + 2) = -3 = 0xFD.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM(".@ NOP : BNE @-"), (uint8_t[]){0xEA, 0xD0, 0xFD}, 3));
+}
+
+RC_TEST_STEP(assemble, local_label_forward, fix)
+{
+    // @+ is the nearest .@ AFTER the reference - a forward reference, so it only resolves once the later
+    // .@ has bound on an earlier pass. BEQ at 0, NOP at 2, .@ at pc 3 -> offset 3 - 2 = 1.
+    uint32_t passes = ASM("BEQ @+ : NOP : .@");
+    RC_CHECK_TRUE(passes >= 2);                                                   // pass 1 defers @+, a later pass resolves it
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xF0, 0x01, 0xEA}, 3));
+}
+
+RC_TEST_STEP(assemble, local_label_orders_by_cursor_not_value, fix)
+{
+    // Two .@ with an ORG between them, so their VALUES run counter to source order (&34 then &12). @- picks
+    // the TEXTUALLY previous .@ (the second one, value &12) - proving the scan orders by definition position,
+    // not by the address the label captured. EQUB emits that value's low byte: 0x12, not 0x34.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("ORG &34 : .@ : ORG &12 : .@ : EQUB @-"), (uint8_t[]){0x12}, 1));
+}
+
+RC_TEST_STEP(assemble, local_labels_are_scoped, fix)
+{
+    // Local labels do not leak across scopes: a .@ outside a brace block is invisible to @- inside it, so
+    // the reference never resolves -> undefined on the final pass.
+    RC_CHECK_TRUE(ERR(".@ : { EQUB @- }") == error_type_undefined_symbol);
+}
+
+RC_TEST_STEP(assemble, local_label_unmatched_is_undefined, fix)
+{
+    // @- with no preceding .@, and @+ with no following .@, are both genuinely unresolvable.
+    RC_CHECK_TRUE(ERR("EQUB @-") == error_type_undefined_symbol);
+    RC_CHECK_TRUE(ERR("EQUB @+") == error_type_undefined_symbol);
+}
+
+RC_TEST_STEP(assemble, local_label_per_for_iteration, fix)
+{
+    // Each FOR iteration gets its own scope, so the body's .@ is private to that iteration and @- finds it
+    // there - three independent back-branches, with no duplicate-label collision across iterations.
+    uint32_t passes = ASM("FOR n = 1..3 : .@ NOP : BNE @- : NEXT");
+    RC_CHECK_TRUE(code_is(&fix->b, passes,
+        (uint8_t[]){0xEA, 0xD0, 0xFD, 0xEA, 0xD0, 0xFD, 0xEA, 0xD0, 0xFD}, 9));
 }
 
 RC_TEST_STEP(assemble, symbol_definition, fix)

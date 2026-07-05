@@ -2,7 +2,7 @@
 
 #include "scopes.h"   // scopes_get_symbol (expression.h only forward-declares scopes)
 #include "lexer.h"
-#include "random.h"   // the RND stream
+#include "richc/random.h"   // the RND stream
 #include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
 #include "richc/macros.h"
 #include <math.h>
@@ -230,11 +230,11 @@ static value op_pos(value v, rc_arena *arena)
 // called by the assembler's pass driver). That is what keeps RND reproducible pass-to-pass, so an assembly
 // that uses it can still reach a fixpoint - a draw's value depends only on its position in the pass's parse.
 #define EXPR_RANDOM_SEED 0u
-static prng expr_prng;
+static rc_random expr_prng;
 
 void expression_reset_random(void)
 {
-    prng_seed(&expr_prng, EXPR_RANDOM_SEED);
+    expr_prng = rc_random_make(EXPR_RANDOM_SEED);
 }
 
 // RND(n) -> one integer in [0, n). A unary op, so apply_unary maps it element-wise over a list/range (each
@@ -248,7 +248,7 @@ static value fn_rnd(value v, rc_arena *arena)
     if (bound <= 0) {
         return value_make_error(error_type_domain);   // no 0..n-1 range for n <= 0
     }
-    return value_make_numeric((double)((uint64_t)prng_next(&expr_prng) % (uint64_t)bound));
+    return value_make_numeric((double)((uint64_t)rc_random_next(&expr_prng) % (uint64_t)bound));
 }
 
 static value fn_abs(value v, rc_arena *arena)
@@ -1145,6 +1145,12 @@ static value const_false(const expr_env *env) { (void) env; return value_make_nu
 static value const_pi(const expr_env *env)    { (void) env; return value_make_numeric(3.14159265358979323846); }
 static value const_pc(const expr_env *env)    { return value_make_numeric((double) env->pc); }
 
+// The local labels: @- is the nearest '.@' before this reference, @+ the nearest after, resolved against the
+// current scope by source position (see scopes_find_local_label). An unresolved one comes back as an
+// unknown-symbol error, so a forward @+ defers across passes like any forward reference.
+static value const_prev_local(const expr_env *env) { return scopes_find_local_label(env->scopes, env->scope_index, env->source, env->offset, false); }
+static value const_next_local(const expr_env *env) { return scopes_find_local_label(env->scopes, env->scope_index, env->source, env->offset, true ); }
+
 
 // ---- the two context tables ----
 // EVEN: lexed where an operand is expected (the start, after a binary op, after an
@@ -1212,6 +1218,11 @@ static const token even_entries[] = {
     {RC_STR("pi"),    {.type = lexeme_type_constant, .constant = {.handle = const_pi}}},
     {RC_STR("*"),     {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
     {RC_STR("P%"),    {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
+
+    // Local-label references. '@' is not an identifier character, so these two-char tokens never collide with
+    // a name; longest-prefix matching takes '@-' / '@+' whole.
+    {RC_STR("@-"),    {.type = lexeme_type_constant, .constant = {.handle = const_prev_local}}},
+    {RC_STR("@+"),    {.type = lexeme_type_constant, .constant = {.handle = const_next_local}}},
 };
 
 // ODD: lexed where a binary operator is expected (after an operand). The close paren

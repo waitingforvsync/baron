@@ -43,7 +43,9 @@ typedef struct expr_result {
 typedef struct expr_env {
     const scopes *scopes;
     uint32_t      scope_index;
-    uint32_t      pc;            // current program counter, for * / P% (carried now, read in a later step)
+    uint32_t      pc;            // current program counter, for * / P%
+    uint32_t      source;        // the reference's source, and...
+    uint32_t      offset;        // ...its position, together the use site - for the local labels @- / @+
 } expr_env;
 
 
@@ -55,7 +57,7 @@ expr_result expression_parse(rc_str text, uint32_t cursor, const expr_env *env, 
 
 // Reseed the RND stream to its fixed starting point. The multi-pass driver calls this at the start of every
 // pass, so RND draws are reproducible pass-to-pass (and run-to-run) rather than drifting - which is what lets
-// an assembly that uses RND converge. See RND / the prng module.
+// an assembly that uses RND converge. See RND / richc/random.h (rc_random).
 void expression_reset_random(void);
 
 

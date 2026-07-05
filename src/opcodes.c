@@ -462,7 +462,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         after = start;                     // leave the terminator for require_separator
     }
     else if (peek.token.type == lexeme_type_hash) {
-        expr_result e = eval(b, src, peek.next, scope, scratch);
+        expr_result e = eval(b, cursor_at(at, peek.next), scope, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -471,7 +471,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         after = e.next;
     }
     else if (peek.token.type == lexeme_type_open_paren) {
-        expr_result e = eval(b, src, peek.next, scope, scratch);
+        expr_result e = eval(b, cursor_at(at, peek.next), scope, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -523,7 +523,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
             }
         }
         if (!handled) {
-            expr_result e = eval(b, src, start, scope, scratch);
+            expr_result e = eval(b, cursor_at(at, start), scope, scratch);
             if (e.error != expr_error_none) {
                 return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
             }
