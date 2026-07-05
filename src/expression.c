@@ -410,10 +410,9 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
 // ---- the parser ----
 // The invariants for one parse, bundled so the recursive helpers stay readable.
 typedef struct parser {
-    rc_str        text;
-    const scopes *scopes;
-    uint32_t      scope_index;
-    rc_arena     *arena;
+    rc_str          text;
+    const expr_env *env;
+    rc_arena       *arena;
 } parser;
 
 // Expand a bounded range into its rank-1 list of numeric values; an unbounded range has
@@ -1074,12 +1073,13 @@ static value fn_defined(rc_view_value args, rc_arena *arena)
 }
 
 
-// ---- pure named constants ----
-// Niladic: each just hands back its value. Booleans are numbers (1 / 0), the same shape comparisons and IF
-// already speak. Impure ones (the PC, RAND) will need a different signature and are a later milestone.
-static value const_true(void)  { return value_make_numeric(1.0); }
-static value const_false(void) { return value_make_numeric(0.0); }
-static value const_pi(void)    { return value_make_numeric(3.14159265358979323846); }
+// ---- named constants ----
+// Each hands back its value given the evaluation environment. The pure ones ignore it; const_pc reads the
+// live PC. Booleans are numbers (1 / 0), the same shape comparisons and IF already speak.
+static value const_true(const expr_env *env)  { (void) env; return value_make_numeric(1.0); }
+static value const_false(const expr_env *env) { (void) env; return value_make_numeric(0.0); }
+static value const_pi(const expr_env *env)    { (void) env; return value_make_numeric(3.14159265358979323846); }
+static value const_pc(const expr_env *env)    { return value_make_numeric((double) env->pc); }
 
 
 // ---- the two context tables ----
@@ -1138,11 +1138,14 @@ static const token even_entries[] = {
     {RC_STR("max("),     {.type = lexeme_type_function, .function = {.apply = fn_max}}},
     {RC_STR("defined("), {.type = lexeme_type_function, .function = {.apply = fn_defined}}},
 
-    // Pure named constants. Bare words, so a longer identifier still wins (PI vs PICKLE), exactly like the
-    // word operators (div / mod / and) in the odd table.
+    // Named constants. The bare words behave like the word operators (div / mod / and): a longer identifier
+    // still wins, so PI vs PICKLE. The PC constant is '*' in operand position (multiply lives in the odd
+    // table, so there is no clash), with P% as the BBC Micro spelling.
     {RC_STR("true"),  {.type = lexeme_type_constant, .constant = {.handle = const_true}}},
     {RC_STR("false"), {.type = lexeme_type_constant, .constant = {.handle = const_false}}},
     {RC_STR("pi"),    {.type = lexeme_type_constant, .constant = {.handle = const_pi}}},
+    {RC_STR("*"),     {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
+    {RC_STR("P%"),    {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
 };
 
 // ODD: lexed where a binary operator is expected (after an operand). The close paren
@@ -1317,14 +1320,14 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
         }
 
         case lexeme_type_identifier: {
-            value v = scopes_get_symbol(p->scopes, p->scope_index, lex.identifier.name);
+            value v = scopes_get_symbol(p->env->scopes, p->env->scope_index, lex.identifier.name);
             // Not found is not a parse error: it becomes an error value that
             // propagates, so a forward reference can resolve on a later pass.
             return ok(value_is_none(v) ? value_make_error(error_type_unknown_symbol) : v, lr.next);
         }
 
         case lexeme_type_constant:
-            return ok(lex.constant.handle(), lr.next);
+            return ok(lex.constant.handle(p->env), lr.next);
 
         case lexeme_type_open_paren: {
             expr_result sub = parse_precedence(p, lr.next, 0);
@@ -1512,16 +1515,14 @@ static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_p
     }
 }
 
-expr_result expression_parse(rc_str text, uint32_t pos,
-                             const scopes *s, uint32_t scope_index, rc_arena *arena)
+expr_result expression_parse(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena)
 {
     RC_ASSERT(rc_str_is_valid(text));
-    RC_ASSERT(s != NULL);
+    RC_ASSERT(env != NULL && env->scopes != NULL);
 
     parser p = {
         .text = text,
-        .scopes = s,
-        .scope_index = scope_index,
+        .env = env,
         .arena = arena
     };
 
@@ -1555,7 +1556,7 @@ RC_TEST_GROUP_DEINIT(expression, fix)
 }
 
 // Parse a source literal from offset 0 in the fixture's root scope.
-#define RESULT(src) expression_parse(RC_STR(src), 0, &fix->scopes, 0, &fix->arena)
+#define RESULT(src) expression_parse(RC_STR(src), 0, &(expr_env){.scopes = &fix->scopes, .scope_index = 0, .pc = 0}, &fix->arena)
 #define VAL(src)    RESULT(src).value
 
 // A bounded range with the expected start/end/step.
@@ -1588,6 +1589,12 @@ RC_TEST_STEP(expression, constants, fix)
     // A longer identifier still wins: PICKLE is a symbol (here unbound), not PI followed by CKLE.
     value pickle = VAL("PICKLE");
     RC_CHECK_TRUE(value_is_error(pickle) && pickle.error == error_type_unknown_symbol);
+    // The PC constant reads env->pc (0 in this fixture); P% is its BBC Micro alias. Multiply still works,
+    // because '*' as an operator is lexed from the odd table.
+    RC_CHECK_TRUE(value_is_equal(VAL("*"),   value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("P%"),  value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("*+1"), value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("2*3"), value_make_numeric(6.0)));
 }
 
 RC_TEST_STEP(expression, unary, fix)

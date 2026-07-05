@@ -1,9 +1,10 @@
 #ifndef BARON_ASSEMBLE_INTERNAL_H_
 #define BARON_ASSEMBLE_INTERNAL_H_
 
-#include "assemble.h"   // error_type, diagnostic, rc_str, rc_arena
-#include "value.h"      // value (int_argument_make's input)
-#include "cursor.h"     // cursor (an error's location, and require_separator's position)
+#include "assemble.h"     // error_type, diagnostic, rc_str, rc_arena
+#include "value.h"        // value (int_argument_make's input)
+#include "cursor.h"       // cursor (an error's location, and require_separator's position)
+#include "expression.h"   // expr_result / expr_env (eval's return + the context it builds)
 
 
 // The assembler's internal parsing vocabulary, shared between assemble.c (the statement loop and
@@ -76,6 +77,11 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at);
 // in `.next`; a missing separator is a fatal (syntax) error, recorded into b and flagged in `.fatal`.
 // Defined in assemble.c (it reads the statement table); shared with opcodes.c.
 parse_result require_separator(baron *b, cursor at);
+
+// Evaluate one expression in the assembler's current context: symbols from `scope`, plus the live PC of the
+// current overlay. The single place that projects `baron` into an expr_env, so no call site rebuilds it.
+// Defined in assemble.c (it reaches into b's overlays); shared with opcodes.c.
+expr_result eval(baron *b, rc_str src, uint32_t pos, uint32_t scope, rc_arena scratch);
 
 
 #endif // ifndef BARON_ASSEMBLE_INTERNAL_H_

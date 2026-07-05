@@ -80,11 +80,12 @@ typedef struct lexeme_identifier {
 } lexeme_identifier;
 
 
-// A pure named constant (TRUE, FALSE, PI). Its handler is niladic: the value depends on nothing, so it
-// takes no arguments and needs no arena. Impure constants (the current PC, RAND) will want a richer
-// signature and are a separate milestone.
+// A named constant (TRUE, FALSE, PI, and the PC constants * / P%). The handler is given the evaluation
+// environment so an impure constant can read live assembler state (the PC); pure ones ignore it. Only the
+// pointer is needed, so expr_env stays forward-declared and lexeme.h keeps clear of expression.h.
+typedef struct expr_env expr_env;
 typedef struct lexeme_constant {
-    value (*handle)(void);
+    value (*handle)(const expr_env *env);
 } lexeme_constant;
 
 

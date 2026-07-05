@@ -218,6 +218,19 @@ parse_result require_separator(baron *b, cursor at)
     return syntax_error(b, error_type_expected_separator, at);
 }
 
+// The one place that projects baron into an expr_env: symbols from `scope`, the live PC of the current
+// overlay. Every directive / operand evaluates through here, so no call site rebuilds the environment and
+// the expression parser never sees baron. Shared with opcodes.c.
+expr_result eval(baron *b, rc_str src, uint32_t pos, uint32_t scope, rc_arena scratch)
+{
+    expr_env env = {
+        .scopes      = &b->scopes,
+        .scope_index = scope,
+        .pc          = overlays_pc(&b->overlays, b->current_overlay),
+    };
+    return expression_parse(src, pos, &env, &scratch);
+}
+
 static bool is_dotted(rc_str name)
 {
     return rc_str_find_first(name, RC_STR(".")) != RC_INDEX_NONE;
@@ -255,7 +268,7 @@ static parse_result handle_org(baron *b, cursor at, uint32_t scope, parse_flags 
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = expression_parse(src, at.pos, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, at.pos, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -288,7 +301,7 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = expression_parse(src, at.pos, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, at.pos, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -325,7 +338,7 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_fla
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = expression_parse(src, at.pos, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, at.pos, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -364,7 +377,7 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = expression_parse(src, at.pos, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, at.pos, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -457,7 +470,7 @@ static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags
     bool unresolved = false;
 
     while (true) {
-        expr_result e = expression_parse(src, pos, &b->scopes, scope, &scratch);
+        expr_result e = eval(b, src, pos, scope, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -596,7 +609,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = expression_parse(src, at.pos, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, at.pos, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));   // a syntax error always aborts
     }
@@ -724,7 +737,7 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse
         return syntax_error(b, error_type_expected_assign, cursor_at(at, at.pos));   // not an assignment: malformed
     }
 
-    expr_result e = expression_parse(src, eq.next, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, eq.next, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -794,7 +807,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
         return syntax_error(b, error_type_expected_assign, cursor_at(at, var.next));
     }
 
-    expr_result e = expression_parse(src, eq.next, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, eq.next, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -878,7 +891,7 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_fl
 
     // The filename is a string operand, evaluated on the spot - we load the file this very pass, so a
     // forward-referenced name is no use to us (it stays an error value, and we grumble about it below).
-    expr_result e = expression_parse(src, at.pos, &b->scopes, scope, &scratch);
+    expr_result e = eval(b, src, at.pos, scope, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -1700,6 +1713,22 @@ RC_TEST_STEP(assemble, named_constants, fix)
     RC_CHECK_TRUE(ERR("PI = 5") == error_type_reserved_constant);
     RC_CHECK_TRUE(ERR("TRUE = 1") == error_type_reserved_constant);
     RC_CHECK_TRUE(ERR("FALSE = 0") == error_type_reserved_constant);
+}
+
+RC_TEST_STEP(assemble, pc_constant, fix)
+{
+    // '*' (and its BBC Micro alias P%) is the current PC. It is evaluated before the instruction emits, so
+    // JMP * is the classic jump-to-self.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("ORG &2000 : JMP *"),  (uint8_t[]){0x4C, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("ORG &2000 : JMP P%"), (uint8_t[]){0x4C, 0x00, 0x20}, 3));
+    // Mid-program it reads the live PC: after LDA #0 (two bytes), * is org+2.
+    uint32_t passes = ASM("ORG &2000 : LDA #0 : here = * : RTS");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x00, 0x60}, 3));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2002)));
+    // A comma list evaluates one element at a time, so the PC advances between them (org 0 here: 0, 1, 2)...
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB *, *, *"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
+    // ...but a list literal is one value computed at one instant, so every * is the same PC.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB {*, *, *}"), (uint8_t[]){0x00, 0x00, 0x00}, 3));
 }
 
 // INCLUDE tests give the top source an explicit slash-free name: ASM names a source after its own text,

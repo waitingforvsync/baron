@@ -37,11 +37,20 @@ typedef struct expr_result {
 } expr_result;
 
 
-// Parse and evaluate one expression from text starting at cursor, looking symbols
-// up from scope_index in s. arena backs any value that needs to allocate (none of
-// the numeric operators do yet). See the header comment for the greedy semantics.
-expr_result expression_parse(rc_str text, uint32_t cursor,
-                             const scopes *s, uint32_t scope_index, rc_arena *arena);
+// The environment one expression evaluates in: symbol resolution plus the live assembler state an impure
+// value needs. Passed by const pointer; the evaluator never sees `baron`. It grows fields over time (the
+// PC's write offset, the current overlay's base, ...) without ever gaining a baron dependency.
+typedef struct expr_env {
+    const scopes *scopes;
+    uint32_t      scope_index;
+    uint32_t      pc;            // current program counter, for * / P% (carried now, read in a later step)
+} expr_env;
+
+
+// Parse and evaluate one expression from text starting at cursor, resolving symbols and reading live
+// assembler state through env. arena backs any value that needs to allocate (none of the numeric operators
+// do yet). See the header comment for the greedy semantics.
+expr_result expression_parse(rc_str text, uint32_t cursor, const expr_env *env, rc_arena *arena);
 
 
 // Enumerate a (bounded) range into a fresh list in arena, capped at VALUE_LIST_MAX_LENGTH. An
