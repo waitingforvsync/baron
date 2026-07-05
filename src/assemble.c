@@ -1068,6 +1068,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     overlays_reset_all(&b->overlays);
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
+    expression_reset_random();               // replay the same RND stream every pass, so RND can converge
 
     const uint32_t scope = 0;
     return parse_file(
@@ -1729,6 +1730,35 @@ RC_TEST_STEP(assemble, pc_constant, fix)
     RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB *, *, *"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
     // ...but a list literal is one value computed at one instant, so every * is the same PC.
     RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB {*, *, *}"), (uint8_t[]){0x00, 0x00, 0x00}, 3));
+}
+
+RC_TEST_STEP(assemble, random, fix)
+{
+    // full fills a run on its own; RND(1) is always 0, so the broadcast idiom RND(full(n,1)) is n zeroes.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB full(4, &FF)"),      (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB RND(1), RND(1)"),    (uint8_t[]){0x00, 0x00}, 2));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB RND(full(4, 1))"),   (uint8_t[]){0x00, 0x00, 0x00, 0x00}, 4));
+
+    // The definitive reset test: the same source assembles to the same bytes twice. Without the per-pass
+    // reseed the second run's stream would continue from where the first left off and diverge.
+    uint32_t p1 = ASM("EQUB RND(full(3, 200))");
+    rc_view_bytes first = obj(&fix->b);
+    RC_CHECK_TRUE(p1 != 0 && first.num == 3);
+    uint8_t saved[3];
+    for (uint32_t i = 0; i < 3; i++) {
+        saved[i] = rc_view_bytes_get(first, i);
+    }
+    uint32_t p2 = ASM("EQUB RND(full(3, 200))");
+    rc_view_bytes second = obj(&fix->b);
+    RC_CHECK_TRUE(p2 != 0 && second.num == 3);
+    for (uint32_t i = 0; i < 3; i++) {
+        RC_CHECK(rc_view_bytes_get(second, i), ==, saved[i]);
+    }
+
+    // A larger draw list converges and stays in-range; RND(0) has no range and is a domain error.
+    uint32_t p8 = ASM("EQUB RND(full(8, 256))");
+    RC_CHECK_TRUE(p8 != 0 && obj(&fix->b).num == 8);
+    RC_CHECK_TRUE((ASM("EQUB RND(0)"), has_diag(&fix->b, error_type_domain)));
 }
 
 // INCLUDE tests give the top source an explicit slash-free name: ASM names a source after its own text,

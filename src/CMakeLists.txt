@@ -22,6 +22,8 @@ add_executable(baron
     source_files.h
     file_utils.c
     file_utils.h
+    random.c
+    random.h
     assemble.c
     assemble.h
     assemble_internal.h

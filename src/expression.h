@@ -53,6 +53,12 @@ typedef struct expr_env {
 expr_result expression_parse(rc_str text, uint32_t cursor, const expr_env *env, rc_arena *arena);
 
 
+// Reseed the RND stream to its fixed starting point. The multi-pass driver calls this at the start of every
+// pass, so RND draws are reproducible pass-to-pass (and run-to-run) rather than drifting - which is what lets
+// an assembly that uses RND converge. See RND / the prng module.
+void expression_reset_random(void);
+
+
 // Enumerate a (bounded) range into a fresh list in arena, capped at VALUE_LIST_MAX_LENGTH. An
 // unbounded range yields a domain error, an oversized one error_type_list_too_big. FOR uses this to
 // walk a range sequence; internally it is also how the operators coerce a range to its elements.

@@ -2,6 +2,7 @@
 
 #include "scopes.h"   // scopes_get_symbol (expression.h only forward-declares scopes)
 #include "lexer.h"
+#include "random.h"   // the RND stream
 #include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
 #include "richc/macros.h"
 #include <math.h>
@@ -221,6 +222,33 @@ static value op_pos(value v, rc_arena *arena)
     (void)arena;
     NEEDS_NUM(value_is_numeric(v));
     return v;
+}
+
+
+// ---- RND: the one impure builtin ----
+// A module-static stream, reseeded to a fixed point at the start of every pass (expression_reset_random,
+// called by the assembler's pass driver). That is what keeps RND reproducible pass-to-pass, so an assembly
+// that uses it can still reach a fixpoint - a draw's value depends only on its position in the pass's parse.
+#define EXPR_RANDOM_SEED 0u
+static prng expr_prng;
+
+void expression_reset_random(void)
+{
+    prng_seed(&expr_prng, EXPR_RANDOM_SEED);
+}
+
+// RND(n) -> one integer in [0, n). A unary op, so apply_unary maps it element-wise over a list/range (each
+// element supplying its own bound) and screens error values first - this only ever sees one scalar, and
+// draws exactly once, so the number of draws tracks the number of outputs (structurally determined).
+static value fn_rnd(value v, rc_arena *arena)
+{
+    (void)arena;
+    NEEDS_NUM(value_is_numeric(v));
+    int64_t bound = (int64_t)v.numeric;   // truncate toward zero: RND(2.9) == RND(2)
+    if (bound <= 0) {
+        return value_make_error(error_type_domain);   // no 0..n-1 range for n <= 0
+    }
+    return value_make_numeric((double)((uint64_t)prng_next(&expr_prng) % (uint64_t)bound));
 }
 
 static value fn_abs(value v, rc_arena *arena)
@@ -842,6 +870,42 @@ static value fn_rank(rc_view_value args, rc_arena *arena)
         value_make_numeric(rank_of(v));
 }
 
+// full(count, value): a list of `count` copies of value (NumPy's full(shape, fill_value)). value may be
+// anything - full(3, {1,2}) is three copies of the pair. Handy on its own (EQUB full(16, &FF) fills a run),
+// and the way to make N uniform draws: RND(full(N, 256)).
+static value fn_full(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 2) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    value count = rc_view_value_get(args, 0);
+    value fill  = rc_view_value_get(args, 1);
+    if (value_is_error(count)) {
+        return count;
+    }
+    if (value_is_error(fill)) {
+        return fill;                                     // propagate a forward reference / eval error
+    }
+    if (!value_is_numeric(count)) {
+        return value_make_error(error_type_type_mismatch);
+    }
+
+    int64_t n = (int64_t)count.numeric;                  // truncate toward zero
+    if (n < 0) {
+        return value_make_error(error_type_domain);
+    }
+    if (n > VALUE_LIST_MAX_LENGTH) {
+        return value_make_error(error_type_list_too_big);   // the same cap ranges use
+    }
+
+    rc_array_value out = rc_array_value_make((uint32_t)n, arena);
+    for (int64_t i = 0; i < n; i++) {
+        rc_array_value_push(&out, fill, arena);   // the same value handle n times; deep-copied on promote / emit
+    }
+    return value_make_list(out.view);
+}
+
 // flatten: every leaf, in order, as a single rank-1 list.
 static value fn_flatten(rc_view_value args, rc_arena *arena)
 {
@@ -1108,6 +1172,7 @@ static const token even_entries[] = {
     {RC_STR("lo("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo}}},
     {RC_STR("hi("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi}}},
     {RC_STR("sqrt("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sqrt}}},
+    {RC_STR("rnd("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_rnd}}},   // one random in [0,n); broadcasts
     {RC_STR("not("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_not}}},
     {RC_STR("int("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
     {RC_STR("floor("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
@@ -1127,6 +1192,7 @@ static const token even_entries[] = {
     {RC_STR("shape("),   {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
     {RC_STR("len("),     {.type = lexeme_type_function, .function = {.apply = fn_len}}},
     {RC_STR("rank("),    {.type = lexeme_type_function, .function = {.apply = fn_rank}}},
+    {RC_STR("full("),    {.type = lexeme_type_function, .function = {.apply = fn_full}}},
     {RC_STR("flatten("), {.type = lexeme_type_function, .function = {.apply = fn_flatten}}},
     {RC_STR("concat("),  {.type = lexeme_type_function, .function = {.apply = fn_concat}}},
     {RC_STR("zip("),      {.type = lexeme_type_function, .function = {.apply = fn_zip}}},
@@ -1595,6 +1661,43 @@ RC_TEST_STEP(expression, constants, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("P%"),  value_make_numeric(0.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("*+1"), value_make_numeric(1.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("2*3"), value_make_numeric(6.0)));
+}
+
+RC_TEST_STEP(expression, random, fix)
+{
+    expression_reset_random();
+
+    // RND(1) is always 0 - the only integer in [0,1) - regardless of the seed.
+    RC_CHECK_TRUE(value_is_equal(VAL("RND(1)"), value_make_numeric(0)));
+    // A scalar draw is a number in range.
+    value r = VAL("RND(256)");
+    RC_CHECK_TRUE(value_is_numeric(r) && r.numeric >= 0 && r.numeric < 256);
+
+    // full builds a list of copies...
+    value sevens[] = {value_make_numeric(7), value_make_numeric(7), value_make_numeric(7)};
+    RC_CHECK_TRUE(value_is_equal(VAL("full(3, 7)"), value_make_list((rc_view_value) RC_VIEW(sevens))));
+    value empty = VAL("full(0, 9)");
+    RC_CHECK_TRUE(value_is_list(empty) && empty.list.num == 0);
+
+    // ...and RND broadcasts over it: N draws, each in range.
+    value draws = VAL("RND(full(4, 256))");
+    RC_CHECK_TRUE(value_is_list(draws) && draws.list.num == 4);
+    for (uint32_t i = 0; i < draws.list.num; i++) {
+        value e = rc_view_value_get(draws.list, i);
+        RC_CHECK_TRUE(value_is_numeric(e) && e.numeric >= 0 && e.numeric < 256);
+    }
+
+    // Reproducible from a reset: the same seed replays the same draw.
+    expression_reset_random();
+    value a = VAL("RND(1000)");
+    expression_reset_random();
+    value b = VAL("RND(1000)");
+    RC_CHECK_TRUE(value_is_equal(a, b));
+
+    // Errors.
+    RC_CHECK_TRUE(value_is_error(VAL("RND(0)")));        // no 0..n-1 range -> domain
+    RC_CHECK_TRUE(value_is_error(VAL("full(-1, 0)")));   // negative count -> domain
+    RC_CHECK_TRUE(value_is_error(VAL("full(1)")));       // one arg -> incorrect_parameters
 }
 
 RC_TEST_STEP(expression, unary, fix)
