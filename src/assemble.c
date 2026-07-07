@@ -1126,7 +1126,7 @@ static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flag
     uint32_t index = macros_index_for_name(&b->macros, name);
 
     // The signature: slots up to the terminator MACRO insists on. Built in the manager arena, stored as a view.
-    rc_array_macro_slot slots = rc_array_macro_slot_make(4, &b->macros.arena);
+    rc_array_macro_slot slots = rc_array_macro_slot_make(8, b->macros.arena);
     uint32_t pos = nm.next;
     while (true) {
         lexer_result s = lexer_next(src, pos, base_statement_tokens);
@@ -1136,18 +1136,18 @@ static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flag
         }
         if (s.token.type == lexeme_type_identifier) {
             rc_array_macro_slot_push(&slots,
-                (macro_slot) {.type = macro_slot_param, .name = s.token.identifier.name}, &b->macros.arena);
+                (macro_slot) {.type = macro_slot_param, .name = s.token.identifier.name}, b->macros.arena);
         }
         else if (s.token.type == lexeme_type_string_literal || s.token.type == lexeme_type_escaped_string_literal) {
             uint32_t id = macros_intern_literal(&b->macros, index, s.token.string_literal.ref);
             rc_array_macro_slot_push(&slots,
-                (macro_slot) {.type = macro_slot_literal, .literal_id = id}, &b->macros.arena);
+                (macro_slot) {.type = macro_slot_literal, .literal_id = id}, b->macros.arena);
         }
         else if (s.token.type == lexeme_type_comma) {
             // The comma is its own slot: the lexer yields lexeme_type_comma intrinsically (never via a token
             // table), so a comma can never be matched through the literal table - it is handled directly.
             rc_array_macro_slot_push(&slots,
-                (macro_slot) {.type = macro_slot_comma}, &b->macros.arena);
+                (macro_slot) {.type = macro_slot_comma}, b->macros.arena);
         }
         else if (s.token.type == lexeme_type_closer) {
             return syntax_error(b, error_type_expected_separator, cursor_at(at, pos));   // ENDMACRO / '}' before a separator
@@ -1236,7 +1236,7 @@ static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_f
     if (lp.token.type != lexeme_type_open_paren) {
         return syntax_error(b, error_type_expected_function_params, cursor_at(at, nm.next));
     }
-    rc_array_rc_str params = rc_array_rc_str_make(4, &b->functions.arena);
+    rc_array_rc_str params = rc_array_rc_str_make(8, b->functions.arena);
     uint32_t pos = lp.next;
     lexer_result t = lexer_next(src, pos, func_paren_tokens);
     if (t.token.type != lexeme_type_close_paren) {
@@ -1244,7 +1244,7 @@ static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_f
             if (t.token.type != lexeme_type_identifier) {
                 return syntax_error(b, error_type_expected_function_params, cursor_at(at, pos));
             }
-            rc_array_rc_str_push(&params, t.token.identifier.name, &b->functions.arena);
+            rc_array_rc_str_push(&params, t.token.identifier.name, b->functions.arena);
             pos = t.next;
             t = lexer_next(src, pos, func_paren_tokens);
             if (t.token.type == lexeme_type_close_paren) {
@@ -1553,17 +1553,19 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags 
 
 static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_arena scratch)
 {
-    overlays_reset_all(&b->overlays);
+    // The per-pass arena backs overlays, macros and functions - a fresh projection of the source each pass.
+    // Reset it once, then rebuild all three stores into it (overlays gets a fresh default overlay; the two
+    // token tables are reseeded from their static bases, with room for per-name tokens).
+    rc_arena_reset(b->per_pass);
+    overlays_reset(&b->overlays);
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
     b->function_depth  = 0;                  // ditto for FUNCTION recursion (balanced by the evaluator)
     expression_reset_random();               // replay the same RND stream every pass, so RND can converge
 
-    // The macro / function stores and their dynamic token tables are a fresh projection of the source each
-    // pass: reset each store, reseeding its table from the static base (with room for per-name tokens).
-    macros_reset(&b->macros, base_statement_tokens, 64);
-    functions_reset(&b->functions, expression_operand_base(), 64);
+    macros_reset(&b->macros, base_statement_tokens, 128);
+    functions_reset(&b->functions, expression_operand_base(), 128);
 
     const uint32_t scope = 0;
     return parse_file(
@@ -1579,7 +1581,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 // to consume; only the diagnostics remain. Returns 0, the failure signal the entry points hand back.
 static uint32_t assemble_failed(baron *b)
 {
-    overlays_reset_all(&b->overlays);
+    overlays_reset(&b->overlays);   // a fresh, empty default overlay - so a failed read hands back no code
     scopes_reset(&b->scopes);
     return 0;
 }
@@ -1619,23 +1621,51 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
     return assemble_failed(b);
 }
 
-uint32_t assemble_string(baron *b, rc_str name, rc_str text, rc_arena scratch)
+// Turn a finished baron into the read-only snapshot the caller keeps. The object code lives in the per_pass
+// arena (the final pass's overlay), diagnostics in permanent; the symbol table is flattened out of the live
+// scope tree into permanent HERE, while that tree is still standing (it dies with `b` the moment we return).
+static baron_result harvest(baron *b, baron_arenas *a, uint32_t passes)
 {
-    RC_ASSERT(b != NULL);
-    rc_array_diagnostic_reset(&b->diagnostics);
-    return run_passes(b, source_files_add_string(&b->source_files, name, text), scratch);
+    return (baron_result) {
+        .passes      = passes,
+        .code        = overlays_code(&b->overlays, overlays_default),
+        .diagnostics = b->diagnostics.view,
+        .symbols     = scopes_flatten(&b->scopes, &a->permanent, a->scratch),
+    };
 }
 
-uint32_t assemble_file(baron *b, rc_str path, rc_arena scratch)
+value baron_result_symbol(const baron_result *r, rc_str path)
 {
-    RC_ASSERT(b != NULL);
-    rc_array_diagnostic_reset(&b->diagnostics);
-    uint32_t source = source_files_add_file(&b->source_files, path);
-    if (source == RC_INDEX_NONE) {
-        baron_error(b, error_type_source_load, (cursor) {0});
-        return assemble_failed(b);
+    RC_ASSERT(r != NULL);
+    for (uint32_t i = 0; i < r->symbols.num; i++) {
+        symbol_entry e = rc_view_symbol_entry_get(r->symbols, i);
+        if (rc_str_is_equal(e.path, path)) {
+            return e.v;
+        }
     }
-    return run_passes(b, source, scratch);
+    return value_make_none();
+}
+
+baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
+{
+    RC_ASSERT(arenas != NULL);
+    baron b;
+    baron_init(&b, arenas);   // a fresh machine borrowing the caller's arenas
+    uint32_t source = source_files_add_string(&b.source_files, name, text);
+    return harvest(&b, arenas, run_passes(&b, source, arenas->scratch));
+}
+
+baron_result assemble_file(baron_arenas *arenas, rc_str path)
+{
+    RC_ASSERT(arenas != NULL);
+    baron b;
+    baron_init(&b, arenas);
+    uint32_t source = source_files_add_file(&b.source_files, path);
+    if (source == RC_INDEX_NONE) {
+        baron_error(&b, error_type_source_load, (cursor) {0});
+        return harvest(&b, arenas, assemble_failed(&b));   // assemble_failed clears outputs and returns 0
+    }
+    return harvest(&b, arenas, run_passes(&b, source, arenas->scratch));
 }
 
 
@@ -1644,45 +1674,37 @@ uint32_t assemble_file(baron *b, rc_str path, rc_arena scratch)
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
+#include "richc/mstr.h"   // the stress test builds a big source with rc_mstr
 
 RC_TEST_GROUP_DATA(assemble) {
-    baron    b;
-    rc_arena scratch;
+    baron_arenas arenas;
+    baron_result r;      // the last assemble's snapshot; the helpers below read it back
 };
 
 RC_TEST_GROUP_INIT(assemble, fix)
 {
-    baron_init(&fix->b);
-    fix->scratch = rc_arena_make_default();
+    fix->arenas = baron_arenas_make();
 }
 
 RC_TEST_GROUP_DEINIT(assemble, fix)
 {
-    baron_deinit(&fix->b);
-    rc_arena_deinit(&fix->scratch);
+    baron_arenas_deinit(&fix->arenas);
 }
 
-// Name each test source after its own text, so distinct snippets get distinct source-cache entries
-// (the cache is keyed by name) even though they share one baron across the step. ASM assembles a
-// snippet and yields the pass count (0 on failure); object code, symbols and diagnostics are then read
-// back from fix->b.
-#define ASM(src) assemble_string(&fix->b, RC_STR(src), RC_STR(src), fix->scratch)
+// Assemble a snippet, stash its result in fix->r, and yield the pass count (0 on failure). Each call is an
+// independent assemble on the shared arenas, so distinct snippets need no distinct names. Object code,
+// symbols and diagnostics are then read back from fix->r via the helpers.
+#define ASM(src) (fix->r = assemble_string(&fix->arenas, RC_STR(src), RC_STR(src)), fix->r.passes)
 
-// The default overlay's current object code.
-static rc_view_bytes obj(baron *b)
+// Whether a clean assemble (passes != 0) laid down exactly these bytes. `passes` is taken explicitly so a
+// call can wrap ASM directly - code_is(&fix->r, ASM(src), exp, n) - reading the freshly stashed result.
+static bool code_is(const baron_result *r, uint32_t passes, const uint8_t *exp, uint32_t n)
 {
-    return overlays_code(&b->overlays, overlays_default);
-}
-
-// Whether a clean assemble (passes != 0) laid down exactly these bytes.
-static bool code_is(baron *b, uint32_t passes, const uint8_t *exp, uint32_t n)
-{
-    rc_view_bytes code = obj(b);
-    if (passes == 0 || code.num != n) {
+    if (passes == 0 || r->code.num != n) {
         return false;
     }
     for (uint32_t i = 0; i < n; i++) {
-        if (rc_view_bytes_get(code, i) != exp[i]) {
+        if (rc_view_bytes_get(r->code, i) != exp[i]) {
             return false;
         }
     }
@@ -1691,10 +1713,10 @@ static bool code_is(baron *b, uint32_t passes, const uint8_t *exp, uint32_t n)
 
 // The first error-severity diagnostic's code (error_type_none if the assemble raised no error).
 // Warnings are skipped, so a snippet that succeeds with only warnings still reports none.
-static error_type first_error(baron *b)
+static error_type first_error(const baron_result *r)
 {
-    for (uint32_t i = 0; i < b->diagnostics.num; i++) {
-        diagnostic d = rc_view_diagnostic_get(b->diagnostics.view, i);
+    for (uint32_t i = 0; i < r->diagnostics.num; i++) {
+        diagnostic d = rc_view_diagnostic_get(r->diagnostics, i);
         if (d.severity == severity_error) {
             return d.code;
         }
@@ -1703,13 +1725,13 @@ static error_type first_error(baron *b)
 }
 
 // Assemble and yield that first error code - the common "what error did this snippet raise?" check.
-#define ERR(src) (ASM(src), first_error(&fix->b))
+#define ERR(src) ((void)ASM(src), first_error(&fix->r))
 
 // Whether any recorded diagnostic - of any severity - carries this code.
-static bool has_diag(baron *b, error_type code)
+static bool has_diag(const baron_result *r, error_type code)
 {
-    for (uint32_t i = 0; i < b->diagnostics.num; i++) {
-        if (rc_view_diagnostic_get(b->diagnostics.view, i).code == code) {
+    for (uint32_t i = 0; i < r->diagnostics.num; i++) {
+        if (rc_view_diagnostic_get(r->diagnostics, i).code == code) {
             return true;
         }
     }
@@ -1718,37 +1740,37 @@ static bool has_diag(baron *b, error_type code)
 
 RC_TEST_STEP(assemble, addressing_modes, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #0"),       (uint8_t[]) {0xA9, 0x00}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA &70"),      (uint8_t[]) {0xA5, 0x70}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA &2000"),    (uint8_t[]) {0xAD, 0x00, 0x20}, 3));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA &70,X"),    (uint8_t[]) {0xB5, 0x70}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA &2000,X"),  (uint8_t[]) {0xBD, 0x00, 0x20}, 3));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDX &70,Y"),    (uint8_t[]) {0xB6, 0x70}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA (&70),Y"),  (uint8_t[]) {0xB1, 0x70}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("STA (&70,X)"),  (uint8_t[]) {0x81, 0x70}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("JMP (&1234)"),  (uint8_t[]) {0x6C, 0x34, 0x12}, 3));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("JMP &70"),      (uint8_t[]) {0x4C, 0x70, 0x00}, 3));   // no zp JMP
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("ASL"),          (uint8_t[]) {0x0A}, 1));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("ASL A"),        (uint8_t[]) {0x0A}, 1));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("NOP"),          (uint8_t[]) {0xEA}, 1));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("STA &70"),      (uint8_t[]) {0x85, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #0"),       (uint8_t[]) {0xA9, 0x00}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA &70"),      (uint8_t[]) {0xA5, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA &2000"),    (uint8_t[]) {0xAD, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA &70,X"),    (uint8_t[]) {0xB5, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA &2000,X"),  (uint8_t[]) {0xBD, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDX &70,Y"),    (uint8_t[]) {0xB6, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA (&70),Y"),  (uint8_t[]) {0xB1, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("STA (&70,X)"),  (uint8_t[]) {0x81, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("JMP (&1234)"),  (uint8_t[]) {0x6C, 0x34, 0x12}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("JMP &70"),      (uint8_t[]) {0x4C, 0x70, 0x00}, 3));   // no zp JMP
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ASL"),          (uint8_t[]) {0x0A}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ASL A"),        (uint8_t[]) {0x0A}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("NOP"),          (uint8_t[]) {0xEA}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("STA &70"),      (uint8_t[]) {0x85, 0x70}, 2));
 }
 
 RC_TEST_STEP(assemble, multiple_statements, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #1 : STA &70 : RTS"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #1 : STA &70 : RTS"),
                           (uint8_t[]){0xA9, 0x01, 0x85, 0x70, 0x60}, 5));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #1\nSTA &70\nRTS"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #1\nSTA &70\nRTS"),
                           (uint8_t[]){0xA9, 0x01, 0x85, 0x70, 0x60}, 5));
 }
 
 RC_TEST_STEP(assemble, branch_offsets, fix)
 {
     // Backward: target at pc 0, NOP, then BNE back to it. offset = 0 - (1 + 2) = -3 = 0xFD.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM(".t NOP : BNE t"), (uint8_t[]){0xEA, 0xD0, 0xFD}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(".t NOP : BNE t"), (uint8_t[]){0xEA, 0xD0, 0xFD}, 3));
     // Forward: BEQ over a following NOP. BEQ at 0, NOP at 2, target = 3, offset = 3 - 2 = 1.
     // (`over` not `skip`: SKIP is now a reserved directive keyword, like a mnemonic.)
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("BEQ over : NOP : .over"), (uint8_t[]){0xF0, 0x01, 0xEA}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BEQ over : NOP : .over"), (uint8_t[]){0xF0, 0x01, 0xEA}, 3));
 }
 
 RC_TEST_STEP(assemble, branch_to_shadowed_forward_label, fix)
@@ -1759,7 +1781,7 @@ RC_TEST_STEP(assemble, branch_to_shadowed_forward_label, fix)
     // time the layout settles the near inner label is bound and the branch is in range (offset 0).
     uint32_t passes = ASM(".label { SKIP 256 : BEQ label : .label }");
     RC_CHECK_TRUE(passes != 0);
-    rc_view_bytes code = obj(&fix->b);
+    rc_view_bytes code = fix->r.code;
     RC_CHECK(code.num, ==, 258u);                                  // 256 skipped + BEQ (2 bytes)
     RC_CHECK((uint32_t)rc_view_bytes_get(code, 256), ==, 0xF0u);   // BEQ opcode
     RC_CHECK((uint32_t)rc_view_bytes_get(code, 257), ==, 0x00u);   // resolves near: branch to the next byte
@@ -1768,17 +1790,17 @@ RC_TEST_STEP(assemble, branch_to_shadowed_forward_label, fix)
 RC_TEST_STEP(assemble, skip_skipto_align, fix)
 {
     // SKIP n emits n zero bytes.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #1 : SKIP 3 : RTS"), (uint8_t[]) {0xA9, 0x01, 0x00, 0x00, 0x00, 0x60}, 6));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #1 : SKIP 3 : RTS"), (uint8_t[]) {0xA9, 0x01, 0x00, 0x00, 0x00, 0x60}, 6));
 
     // SKIPTO addr fills with zeroes until pc reaches addr (0x2001 -> 0x2004 = three bytes).
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("ORG &2000 : NOP : SKIPTO &2004 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &2000 : NOP : SKIPTO &2004 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
     // Already past addr is an error.
     RC_CHECK_TRUE(ERR("ORG &2000 : NOP : NOP : SKIPTO &2001") == error_type_skip_backwards);
 
     // ALIGN n pads up to the next multiple of n (pc 1 -> 4 = three bytes)...
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("NOP : ALIGN 4 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("NOP : ALIGN 4 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
     // ...and is a no-op when pc already sits on the boundary.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("ALIGN 4 : NOP"), (uint8_t[]) {0xEA}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ALIGN 4 : NOP"), (uint8_t[]) {0xEA}, 1));
     // ALIGN 0 is meaningless.
     RC_CHECK_TRUE(ERR("ALIGN 0") == error_type_bad_alignment);
 }
@@ -1788,8 +1810,8 @@ RC_TEST_STEP(assemble, skip_advances_pc, fix)
     // SKIP moves pc, so a label after it sees the advanced address.
     uint32_t passes = ASM("ORG &2000 : .a SKIP 4 : .b");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("a")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("b")), value_make_numeric(0x2004)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("a")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("b")), value_make_numeric(0x2004)));
 }
 
 RC_TEST_STEP(assemble, org_and_labels, fix)
@@ -1797,8 +1819,8 @@ RC_TEST_STEP(assemble, org_and_labels, fix)
     // ORG sets the label's value but not where code lands (code still fills from index 0).
     uint32_t passes = ASM("ORG &2000 : LDA #1 : .here");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x01}, 2));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")),
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")),
                                  value_make_numeric(0x2002)));
 }
 
@@ -1806,7 +1828,7 @@ RC_TEST_STEP(assemble, local_label_backward, fix)
 {
     // .@ marks a spot; @- is the nearest .@ before the reference. Same shape as branch_offsets' .t/BNE:
     // target at pc 0, NOP, then BNE back to it -> offset 0 - (1 + 2) = -3 = 0xFD.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM(".@ NOP : BNE @-"), (uint8_t[]){0xEA, 0xD0, 0xFD}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(".@ NOP : BNE @-"), (uint8_t[]){0xEA, 0xD0, 0xFD}, 3));
 }
 
 RC_TEST_STEP(assemble, local_label_forward, fix)
@@ -1815,7 +1837,7 @@ RC_TEST_STEP(assemble, local_label_forward, fix)
     // .@ has bound on an earlier pass. BEQ at 0, NOP at 2, .@ at pc 3 -> offset 3 - 2 = 1.
     uint32_t passes = ASM("BEQ @+ : NOP : .@");
     RC_CHECK_TRUE(passes >= 2);                                                   // pass 1 defers @+, a later pass resolves it
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xF0, 0x01, 0xEA}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xF0, 0x01, 0xEA}, 3));
 }
 
 RC_TEST_STEP(assemble, local_label_orders_by_cursor_not_value, fix)
@@ -1823,7 +1845,7 @@ RC_TEST_STEP(assemble, local_label_orders_by_cursor_not_value, fix)
     // Two .@ with an ORG between them, so their VALUES run counter to source order (&34 then &12). @- picks
     // the TEXTUALLY previous .@ (the second one, value &12) - proving the scan orders by definition position,
     // not by the address the label captured. EQUB emits that value's low byte: 0x12, not 0x34.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("ORG &34 : .@ : ORG &12 : .@ : EQUB @-"), (uint8_t[]){0x12}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &34 : .@ : ORG &12 : .@ : EQUB @-"), (uint8_t[]){0x12}, 1));
 }
 
 RC_TEST_STEP(assemble, local_labels_are_scoped, fix)
@@ -1845,13 +1867,13 @@ RC_TEST_STEP(assemble, local_label_per_for_iteration, fix)
     // Each FOR iteration gets its own scope, so the body's .@ is private to that iteration and @- finds it
     // there - three independent back-branches, with no duplicate-label collision across iterations.
     uint32_t passes = ASM("FOR n = 1..3 : .@ NOP : BNE @- : NEXT");
-    RC_CHECK_TRUE(code_is(&fix->b, passes,
+    RC_CHECK_TRUE(code_is(&fix->r, passes,
         (uint8_t[]){0xEA, 0xD0, 0xFD, 0xEA, 0xD0, 0xFD, 0xEA, 0xD0, 0xFD}, 9));
 }
 
 RC_TEST_STEP(assemble, symbol_definition, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("n = 5 : LDA #n"), (uint8_t[]){0xA9, 0x05}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("n = 5 : LDA #n"), (uint8_t[]){0xA9, 0x05}, 2));
 }
 
 RC_TEST_STEP(assemble, duplicate_symbol_is_rejected, fix)
@@ -1873,21 +1895,21 @@ RC_TEST_STEP(assemble, forward_reference_is_order_independent, fix)
     // A forward reference to a zero-page value converges to zero-page, the same as if it had
     // been defined first.
     uint32_t passes = ASM("LDA foo : foo = &70");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA5, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA5, 0x70}, 2));
     RC_CHECK_TRUE(passes >= 2u);
 }
 
 RC_TEST_STEP(assemble, forward_reference_to_absolute, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA foo : foo = &2000"), (uint8_t[]){0xAD, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA foo : foo = &2000"), (uint8_t[]){0xAD, 0x00, 0x20}, 3));
 }
 
 RC_TEST_STEP(assemble, named_scope_dotted_access, fix)
 {
     RC_CHECK_TRUE(ASM("ORG &2000 : .routine { .core LDA #0 } : x = routine.core") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("x")),
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")),
                                  value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("routine.core")),
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("routine.core")),
                                  value_make_numeric(0x2000)));
 }
 
@@ -1895,14 +1917,14 @@ RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)
 {
     // The naming brace may sit on the next line (or after a ':').
     RC_CHECK_TRUE(ASM("ORG &2000\n.routine\n{\n.core LDA #0\n}\nx = routine.core") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("routine.core")),
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("routine.core")),
                                  value_make_numeric(0x2000)));
 }
 
 RC_TEST_STEP(assemble, anonymous_scope_is_private, fix)
 {
     RC_CHECK_TRUE(ASM("{ y = 5 }") != 0);
-    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("y"))));
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("y"))));
 }
 
 RC_TEST_STEP(assemble, label_does_not_own_following_statement, fix)
@@ -1910,7 +1932,7 @@ RC_TEST_STEP(assemble, label_does_not_own_following_statement, fix)
     // A label hands control straight back: a '}' may sit on the same line right after it (the label
     // no longer swallows what follows), and the inner label still binds to the current pc.
     RC_CHECK_TRUE(ASM("ORG &2000 : .r { .e }") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("r.e")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r.e")), value_make_numeric(0x2000)));
 }
 
 RC_TEST_STEP(assemble, errors, fix)
@@ -1927,29 +1949,29 @@ RC_TEST_STEP(assemble, errors, fix)
 RC_TEST_STEP(assemble, from_file, fix)
 {
     // src/test/sample.6502 (copied next to the tests by CMake) holds "LDA #1 : RTS".
-    uint32_t passes = assemble_file(&fix->b, RC_STR("sample.6502"), fix->scratch);
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x01, 0x60}, 3));
+    uint32_t passes = (fix->r = assemble_file(&fix->arenas, RC_STR("sample.6502"))).passes;
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x01, 0x60}, 3));
 
-    RC_CHECK_TRUE((assemble_file(&fix->b, RC_STR("no_such_file.6502"), fix->scratch),
-                   first_error(&fix->b)) == error_type_source_load);
+    RC_CHECK_TRUE((fix->r = assemble_file(&fix->arenas, RC_STR("no_such_file.6502")),
+                   first_error(&fix->r)) == error_type_source_load);
 }
 
 RC_TEST_STEP(assemble, if_selects_branch, fix)
 {
     // The active branch emits; the dead one is parsed for structure but produces nothing.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #0 : IF 1 : LDA #2 : ENDIF : LDA #3"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #0 : IF 1 : LDA #2 : ENDIF : LDA #3"),
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x02, 0xA9, 0x03}, 6));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #0 : IF 0 : LDA #2 : ENDIF : LDA #3"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #0 : IF 0 : LDA #2 : ENDIF : LDA #3"),
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x03}, 4));
 }
 
 RC_TEST_STEP(assemble, if_elif_else_chain, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF 1 : LDA #1 : ELIF 1 : LDA #2 : ELSE : LDA #3 : ENDIF"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 1 : LDA #1 : ELIF 1 : LDA #2 : ELSE : LDA #3 : ENDIF"),
                           (uint8_t[]){0xA9, 0x01}, 2));   // first true wins
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF 0 : LDA #1 : ELIF 1 : LDA #2 : ELSE : LDA #3 : ENDIF"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 0 : LDA #1 : ELIF 1 : LDA #2 : ELSE : LDA #3 : ENDIF"),
                           (uint8_t[]){0xA9, 0x02}, 2));   // the elif
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF 0 : LDA #1 : ELIF 0 : LDA #2 : ELSE : LDA #3 : ENDIF"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 0 : LDA #1 : ELIF 0 : LDA #2 : ELSE : LDA #3 : ENDIF"),
                           (uint8_t[]){0xA9, 0x03}, 2));   // the else
 }
 
@@ -1958,17 +1980,17 @@ RC_TEST_STEP(assemble, if_does_not_introduce_scope, fix)
     // A label set in a live IF branch leaks to the enclosing scope (IF is not a brace).
     uint32_t passes = ASM("ORG &2000 : IF 1 : .here : ENDIF : LDA here");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xAD, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xAD, 0x00, 0x20}, 3));
 }
 
 RC_TEST_STEP(assemble, if_wraps_scope_and_nests, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF 1 : { LDA #5 } : ENDIF"), (uint8_t[]){0xA9, 0x05}, 2));
-    RC_CHECK((ASM("IF 0 : { LDA #5 } : ENDIF"), obj(&fix->b).num), ==, 0u);
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF 1 : IF 1 : LDA #7 : ENDIF : ENDIF"), (uint8_t[]){0xA9, 0x07}, 2));
-    RC_CHECK((ASM("IF 1 : IF 0 : LDA #7 : ENDIF : ENDIF"), obj(&fix->b).num), ==, 0u);
-    RC_CHECK((ASM("IF 0 : IF 1 : LDA #7 : ENDIF : ENDIF"), obj(&fix->b).num), ==, 0u);   // outer dead -> inner dead
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 1 : { LDA #5 } : ENDIF"), (uint8_t[]){0xA9, 0x05}, 2));
+    RC_CHECK(((void)ASM("IF 0 : { LDA #5 } : ENDIF"), fix->r.code.num), ==, 0u);
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 1 : IF 1 : LDA #7 : ENDIF : ENDIF"), (uint8_t[]){0xA9, 0x07}, 2));
+    RC_CHECK(((void)ASM("IF 1 : IF 0 : LDA #7 : ENDIF : ENDIF"), fix->r.code.num), ==, 0u);
+    RC_CHECK(((void)ASM("IF 0 : IF 1 : LDA #7 : ENDIF : ENDIF"), fix->r.code.num), ==, 0u);   // outer dead -> inner dead
 }
 
 RC_TEST_STEP(assemble, if_dead_branch_suppresses_value_errors_but_not_syntax, fix)
@@ -1986,7 +2008,7 @@ RC_TEST_STEP(assemble, if_unknown_condition_defers, fix)
     // and a later pass takes the right one once it resolves.
     uint32_t passes = ASM("IF cond : LDA #1 : ENDIF\ncond = 1");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x01}, 2));
     RC_CHECK_TRUE(passes >= 2u);
 }
 
@@ -1996,7 +2018,7 @@ RC_TEST_STEP(assemble, if_branch_flip_clears_label, fix)
     // `.x` is bound on one pass and must be CLEARED when its branch goes inactive. The remove-on-
     // inactive rule leaves it undefined; a stale binding would linger.
     RC_CHECK_TRUE(ASM("IF gate : .x : ENDIF\ngate = 1 - defined(other)\n.other") != 0);
-    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("x"))));
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("x"))));
 }
 
 RC_TEST_STEP(assemble, dead_branch_does_not_clobber_live_binding, fix)
@@ -2004,10 +2026,10 @@ RC_TEST_STEP(assemble, dead_branch_does_not_clobber_live_binding, fix)
     // The inactive ELSE assigns `blah` too; it must NOT delete the live IF branch's binding (each dead-branch
     // assignment clears only what it owns). Likewise a dead branch must leave an OUTER binding of the name intact.
     RC_CHECK_TRUE(ASM("IF 1 : blah = 2 : ELSE : blah = 3 : ENDIF") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("blah")), value_make_numeric(2)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("blah")), value_make_numeric(2)));
 
     RC_CHECK_TRUE(ASM("x = 1\nIF 0 : x = 2 : ENDIF") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("x")), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(1)));
 }
 
 RC_TEST_STEP(assemble, if_framing_errors, fix)
@@ -2031,7 +2053,7 @@ RC_TEST_STEP(assemble, if_forward_ref_condition_settles, fix)
     // `LDA fwdlabel` starts absolute (fwdlabel unknown), so the first guess lands fwdlabel at 6; once it
     // shrinks to zero-page, fwdlabel settles at 5, making `fwdlabel = 6` false - the block is skipped.
     uint32_t passes = ASM("LDA #1 : IF fwdlabel = 6 : LDA #2 : JSR &FFEE : ENDIF : NOP : LDA fwdlabel : .fwdlabel : RTS");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x01, 0xEA, 0xA5, 0x05, 0x60}, 6));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x01, 0xEA, 0xA5, 0x05, 0x60}, 6));
 }
 
 RC_TEST_STEP(assemble, if_forward_ref_both_fixed_points_valid, fix)
@@ -2040,7 +2062,7 @@ RC_TEST_STEP(assemble, if_forward_ref_both_fixed_points_valid, fix)
     // converge to whichever our first guess lands on: an unresolved operand resolves to zero-page
     // optimistically (smallest), so fwdlabel starts at 5, `5 > 5` is false, and we settle on skipped.
     uint32_t passes = ASM("LDA #1 : IF fwdlabel > 5 : LDA #2 : JSR &FFEE : ENDIF : NOP : LDA fwdlabel : .fwdlabel : RTS");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x01, 0xEA, 0xA5, 0x05, 0x60}, 6));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x01, 0xEA, 0xA5, 0x05, 0x60}, 6));
 }
 
 RC_TEST_STEP(assemble, if_forward_ref_contradiction_does_not_converge, fix)
@@ -2058,8 +2080,8 @@ RC_TEST_STEP(assemble, nested_if_forward_ref, fix)
     // block (LDX/LDY) keeps `end` high: pass 1 emits nothing in the stuck branches, leaving end at 6,
     // which already clears both thresholds - so on the next pass both NOPs come in and end settles at 8.
     uint32_t passes = ASM("LDA #0 : IF end >= 4 : NOP : IF end >= 6 : NOP : ENDIF : ENDIF : LDX #1 : LDY #2 : .end : RTS");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x00, 0xEA, 0xEA, 0xA2, 0x01, 0xA0, 0x02, 0x60}, 9));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("end")), value_make_numeric(8)));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x00, 0xEA, 0xEA, 0xA2, 0x01, 0xA0, 0x02, 0x60}, 9));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("end")), value_make_numeric(8)));
 }
 
 RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
@@ -2069,26 +2091,26 @@ RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
     // the first pass (progstart/progend unknown) and settles once they do; JMP progstart then carries
     // the relocated address. (Code itself still fills the output from index 0.)
     uint32_t passes = ASM("ORG &1000 - (progend - progstart) : .progstart LDA #&41 : JSR &FFEE : JMP progstart : .progend");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x41, 0x20, 0xEE, 0xFF, 0x4C, 0xF8, 0x0F}, 8));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("progstart")), value_make_numeric(0x0FF8)));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("progend")), value_make_numeric(0x1000)));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x41, 0x20, 0xEE, 0xFF, 0x4C, 0xF8, 0x0F}, 8));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("progstart")), value_make_numeric(0x0FF8)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("progend")), value_make_numeric(0x1000)));
 }
 
 RC_TEST_STEP(assemble, for_repeats_body, fix)
 {
     // FOR runs its body once per element, emitting a fresh copy each time.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("FOR i = 0..2 : NOP : NEXT"), (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR i = 0..2 : NOP : NEXT"), (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
     // An exclusive range is the same minus its endpoint.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("FOR i = 0..<3 : NOP : NEXT"), (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR i = 0..<3 : NOP : NEXT"), (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
 }
 
 RC_TEST_STEP(assemble, for_binds_loop_variable, fix)
 {
     // The loop variable holds the current element, visible to the body. 0..3 is inclusive (4 elements).
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("FOR i = 0..3 : LDA #i : NEXT"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR i = 0..3 : LDA #i : NEXT"),
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x01, 0xA9, 0x02, 0xA9, 0x03}, 8));
     // A list literal drives the loop just as a range does.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("FOR x = {10, 20, 30} : LDA #x : NEXT"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR x = {10, 20, 30} : LDA #x : NEXT"),
                           (uint8_t[]){0xA9, 0x0A, 0xA9, 0x14, 0xA9, 0x1E}, 6));
 }
 
@@ -2097,13 +2119,13 @@ RC_TEST_STEP(assemble, for_iteration_has_its_own_scope, fix)
     // A label in the body is redefined every iteration; each iteration's private scope keeps that from
     // being a duplicate.
     uint32_t passes = ASM("FOR i = 0..2 : .lbl NOP : NEXT");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
 }
 
 RC_TEST_STEP(assemble, for_nests, fix)
 {
     // Two iterations of two iterations: four bodies.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("FOR i = 0..1 : FOR j = 0..1 : NOP : NEXT : NEXT"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR i = 0..1 : FOR j = 0..1 : NOP : NEXT : NEXT"),
                           (uint8_t[]){0xEA, 0xEA, 0xEA, 0xEA}, 4));
 }
 
@@ -2111,9 +2133,9 @@ RC_TEST_STEP(assemble, for_empty_sequence_runs_zero_times, fix)
 {
     // An empty sequence is legal and assembles the body zero times (no error): the surrounding code is
     // emitted as if the FOR were absent. Both the empty list literal and a non-ascending exclusive range.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #0 : FOR i = {} : NOP : NEXT : LDA #1"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #0 : FOR i = {} : NOP : NEXT : LDA #1"),
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #0 : FOR i = 5..<5 : NOP : NEXT : LDA #1"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #0 : FOR i = 5..<5 : NOP : NEXT : LDA #1"),
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
 }
 
@@ -2122,7 +2144,7 @@ RC_TEST_STEP(assemble, for_forward_ref_count_defers, fix)
     // When the count depends on a forward reference, the FOR runs zero times on the first pass and
     // re-expands once the bound resolves.
     uint32_t passes = ASM("FOR i = 0..n : NOP : NEXT\nn = 2");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xEA, 0xEA, 0xEA}, 3));
     RC_CHECK_TRUE(passes >= 2u);
 }
 
@@ -2136,16 +2158,16 @@ RC_TEST_STEP(assemble, for_framing_and_sequence_errors, fix)
 
 RC_TEST_STEP(assemble, equb_emits_bytes, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB 1, 2, 3"), (uint8_t[]){0x01, 0x02, 0x03}, 3));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB &FF"),     (uint8_t[]){0xFF}, 1));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB 255"),     (uint8_t[]){0xFF}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB 1, 2, 3"), (uint8_t[]){0x01, 0x02, 0x03}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB &FF"),     (uint8_t[]){0xFF}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB 255"),     (uint8_t[]){0xFF}, 1));
 }
 
 RC_TEST_STEP(assemble, equb_allows_signed_bytes, fix)
 {
     // Negative numbers are allowed in -255..255; we emit the low byte.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB -1"),   (uint8_t[]){0xFF}, 1));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB -255"), (uint8_t[]){0x01}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB -1"),   (uint8_t[]){0xFF}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB -255"), (uint8_t[]){0x01}, 1));
     RC_CHECK_TRUE(ERR("EQUB 256")  == error_type_value_out_of_range);
     RC_CHECK_TRUE(ERR("EQUB -256") == error_type_value_out_of_range);
 }
@@ -2153,81 +2175,81 @@ RC_TEST_STEP(assemble, equb_allows_signed_bytes, fix)
 RC_TEST_STEP(assemble, equs_and_equb_are_aliases, fix)
 {
     // EQUS spells out a string char-by-char...
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUS \"ABC\""), (uint8_t[]){0x41, 0x42, 0x43}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUS \"ABC\""), (uint8_t[]){0x41, 0x42, 0x43}, 3));
     // ...but takes numbers too, and EQUB takes strings - they are the same directive.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUS 65, 66"),  (uint8_t[]){0x41, 0x42}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB \"Hi\", 0"), (uint8_t[]){0x48, 0x69, 0x00}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUS 65, 66"),  (uint8_t[]){0x41, 0x42}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB \"Hi\", 0"), (uint8_t[]){0x48, 0x69, 0x00}, 3));
 }
 
 RC_TEST_STEP(assemble, equb_ranges_and_lists, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB 1..3"),  (uint8_t[]){0x01, 0x02, 0x03}, 3));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB 0..<3"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB 1..3"),  (uint8_t[]){0x01, 0x02, 0x03}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB 0..<3"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
     // A list is flattened (nested lists and ranges descend); a string element stays whole.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB {1, 2, 3}"),       (uint8_t[]){0x01, 0x02, 0x03}, 3));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB {1, {2, 3}, 4}"),  (uint8_t[]){0x01, 0x02, 0x03, 0x04}, 4));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB {1, \"Hi\", 2}"),  (uint8_t[]){0x01, 0x48, 0x69, 0x02}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB {1, 2, 3}"),       (uint8_t[]){0x01, 0x02, 0x03}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB {1, {2, 3}, 4}"),  (uint8_t[]){0x01, 0x02, 0x03, 0x04}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB {1, \"Hi\", 2}"),  (uint8_t[]){0x01, 0x48, 0x69, 0x02}, 4));
 }
 
 RC_TEST_STEP(assemble, equb_advances_pc, fix)
 {
     // The three bytes move pc, so a label after them sees the advanced address.
     RC_CHECK_TRUE(ASM("ORG &2000 : EQUB 1, 2, 3 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2003)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2003)));
 }
 
 RC_TEST_STEP(assemble, equb_forward_reference, fix)
 {
     // A forward reference is one byte (a placeholder until it resolves): end - start = 1.
     uint32_t passes = ASM(".start EQUB end - start : .end");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0x01}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x01}, 1));
     RC_CHECK_TRUE(passes >= 2u);
 }
 
 RC_TEST_STEP(assemble, equb_dead_branch_emits_nothing, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #0 : IF 0 : EQUB 1, 2, 3 : ENDIF : LDA #1"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #0 : IF 0 : EQUB 1, 2, 3 : ENDIF : LDA #1"),
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
 }
 
 RC_TEST_STEP(assemble, equw_emits_little_endian_words, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW &1234"),   (uint8_t[]){0x34, 0x12}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 1, 2"),    (uint8_t[]){0x01, 0x00, 0x02, 0x00}, 4));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 258"),     (uint8_t[]){0x02, 0x01}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW &1234"),   (uint8_t[]){0x34, 0x12}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW 1, 2"),    (uint8_t[]){0x01, 0x00, 0x02, 0x00}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW 258"),     (uint8_t[]){0x02, 0x01}, 2));
     // Ranges and lists flatten, each element a 16-bit word.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 0..2"),        (uint8_t[]){0x00, 0x00, 0x01, 0x00, 0x02, 0x00}, 6));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW {1, {2, 3}}"), (uint8_t[]){0x01, 0x00, 0x02, 0x00, 0x03, 0x00}, 6));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW 0..2"),        (uint8_t[]){0x00, 0x00, 0x01, 0x00, 0x02, 0x00}, 6));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW {1, {2, 3}}"), (uint8_t[]){0x01, 0x00, 0x02, 0x00, 0x03, 0x00}, 6));
 }
 
 RC_TEST_STEP(assemble, equw_signed_range_and_pc, fix)
 {
     // Signed window is -65535..65535; we emit the low word.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW -1"),     (uint8_t[]){0xFF, 0xFF}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 65535"),  (uint8_t[]){0xFF, 0xFF}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW -1"),     (uint8_t[]){0xFF, 0xFF}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW 65535"),  (uint8_t[]){0xFF, 0xFF}, 2));
     RC_CHECK_TRUE(ERR("EQUW 65536")  == error_type_value_out_of_range);
     RC_CHECK_TRUE(ERR("EQUW -65536") == error_type_value_out_of_range);
     // Each word advances pc by 2; a label after two words sees +4.
     RC_CHECK_TRUE(ASM("ORG &2000 : EQUW 1, 2 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2004)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2004)));
     // A forward reference is a 2-byte placeholder, so end - start = 2.
     uint32_t passes = ASM(".start EQUW end - start : .end");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0x02, 0x00}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x02, 0x00}, 2));
     RC_CHECK_TRUE(passes >= 2u);
 }
 
 RC_TEST_STEP(assemble, equd_emits_little_endian_dwords, fix)
 {
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD &12345678"), (uint8_t[]){0x78, 0x56, 0x34, 0x12}, 4));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD 1, 2"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUD &12345678"), (uint8_t[]){0x78, 0x56, 0x34, 0x12}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUD 1, 2"),
                           (uint8_t[]){0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 8));
     // Signed window is -(2^32-1)..(2^32-1); we emit the low dword.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD -1"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD 4294967295"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUD -1"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUD 4294967295"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
     RC_CHECK_TRUE(ERR("EQUD 4294967296") == error_type_value_out_of_range);
     // Each dword advances pc by 4.
     RC_CHECK_TRUE(ASM("ORG &2000 : EQUD 1 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2004)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2004)));
 }
 
 RC_TEST_STEP(assemble, value_errors_promote_to_specific_codes, fix)
@@ -2247,12 +2269,12 @@ RC_TEST_STEP(assemble, errors_accumulate, fix)
     // Several independent semantic errors are all reported (not just the first), in source order.
     uint32_t passes = ASM("EQUB 256 : EQUB 257 : TAX #5");
     RC_CHECK_TRUE(passes == 0);
-    RC_CHECK(fix->b.diagnostics.num, ==, 3u);
-    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->b.diagnostics.view, 0).code == error_type_value_out_of_range);
-    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->b.diagnostics.view, 1).code == error_type_value_out_of_range);
-    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->b.diagnostics.view, 2).code == error_type_bad_addressing_mode);
+    RC_CHECK(fix->r.diagnostics.num, ==, 3u);
+    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->r.diagnostics, 0).code == error_type_value_out_of_range);
+    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->r.diagnostics, 1).code == error_type_value_out_of_range);
+    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->r.diagnostics, 2).code == error_type_bad_addressing_mode);
     // A syntax (fatal) error, by contrast, aborts the whole assemble with just itself.
-    RC_CHECK((ASM("} ENDIF NEXT"), fix->b.diagnostics.num), ==, 1u);
+    RC_CHECK(((void)ASM("} ENDIF NEXT"), fix->r.diagnostics.num), ==, 1u);
 }
 
 RC_TEST_STEP(assemble, duplicate_symbol_signposts_original, fix)
@@ -2260,25 +2282,25 @@ RC_TEST_STEP(assemble, duplicate_symbol_signposts_original, fix)
     // A duplicate raises the error at the redefinition AND a companion note pointing back at the first
     // binding (both severity-0 errors, so both always show). The note's location precedes the error's.
     RC_CHECK_TRUE(ASM(".dup NOP : .dup RTS") == 0);
-    RC_CHECK(fix->b.diagnostics.num, ==, 2u);
-    diagnostic err  = rc_view_diagnostic_get(fix->b.diagnostics.view, 0);
-    diagnostic note = rc_view_diagnostic_get(fix->b.diagnostics.view, 1);
+    RC_CHECK(fix->r.diagnostics.num, ==, 2u);
+    diagnostic err  = rc_view_diagnostic_get(fix->r.diagnostics, 0);
+    diagnostic note = rc_view_diagnostic_get(fix->r.diagnostics, 1);
     RC_CHECK_TRUE(err.code == error_type_duplicate_symbol);
     RC_CHECK_TRUE(note.code == error_type_original_definition);
     RC_CHECK_TRUE(note.at.pos < err.at.pos);   // the original sits earlier in the source than the redefinition
     // Same for assignments.
     RC_CHECK_TRUE(ERR("twice = 1 : twice = 2") == error_type_duplicate_symbol);
-    RC_CHECK(fix->b.diagnostics.num, ==, 2u);
-    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->b.diagnostics.view, 1).code == error_type_original_definition);
+    RC_CHECK(fix->r.diagnostics.num, ==, 2u);
+    RC_CHECK_TRUE(rc_view_diagnostic_get(fix->r.diagnostics, 1).code == error_type_original_definition);
 }
 
 RC_TEST_STEP(assemble, failure_clears_outputs, fix)
 {
     // A failed assemble hands back no object code and no symbols - only the diagnostics remain.
     RC_CHECK_TRUE(ASM("ORG &2000 : .lbl LDA #0 : TAX #5") == 0);   // TAX #5 has no encoding
-    RC_CHECK(obj(&fix->b).num, ==, 0u);
-    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("lbl"))));
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_bad_addressing_mode));
+    RC_CHECK(fix->r.code.num, ==, 0u);
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("lbl"))));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_bad_addressing_mode));
 }
 
 RC_TEST_STEP(assemble, warnings_do_not_fail_assembly, fix)
@@ -2286,22 +2308,22 @@ RC_TEST_STEP(assemble, warnings_do_not_fail_assembly, fix)
     // JMP (&xxFF) is legal but trips the NMOS vector-fetch page-wrap bug: a warning, not an error, so the
     // assemble still succeeds and emits the three bytes - the warning just rides along in the diagnostics.
     uint32_t passes = ASM("JMP (&12FF)");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0x6C, 0xFF, 0x12}, 3));
-    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);   // no error-severity diagnostic
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_jmp_indirect_page_cross));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x6C, 0xFF, 0x12}, 3));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // no error-severity diagnostic
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_jmp_indirect_page_cross));
     // A vector that does not straddle a page boundary is silent.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("JMP (&1234)"), (uint8_t[]){0x6C, 0x34, 0x12}, 3));
-    RC_CHECK(fix->b.diagnostics.num, ==, 0u);
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("JMP (&1234)"), (uint8_t[]){0x6C, 0x34, 0x12}, 3));
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
 }
 
 RC_TEST_STEP(assemble, named_constants, fix)
 {
     // A pure constant flows through the operand path like any number...
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #TRUE"),  (uint8_t[]){0xA9, 0x01}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("LDA #FALSE"), (uint8_t[]){0xA9, 0x00}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #TRUE"),  (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #FALSE"), (uint8_t[]){0xA9, 0x00}, 2));
     // ...and serves as an IF condition.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF TRUE : LDA #1 : ELSE : LDA #2 : ENDIF"),  (uint8_t[]){0xA9, 0x01}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("IF FALSE : LDA #1 : ELSE : LDA #2 : ENDIF"), (uint8_t[]){0xA9, 0x02}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF TRUE : LDA #1 : ELSE : LDA #2 : ENDIF"),  (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF FALSE : LDA #1 : ELSE : LDA #2 : ENDIF"), (uint8_t[]){0xA9, 0x02}, 2));
     // The constants are reserved: you cannot redefine one (it would otherwise bind a symbol shadowed by the
     // constant in every expression).
     RC_CHECK_TRUE(ERR("PI = 5") == error_type_reserved_constant);
@@ -2313,36 +2335,36 @@ RC_TEST_STEP(assemble, pc_constant, fix)
 {
     // '*' (and its BBC Micro alias P%) is the current PC. It is evaluated before the instruction emits, so
     // JMP * is the classic jump-to-self.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("ORG &2000 : JMP *"),  (uint8_t[]){0x4C, 0x00, 0x20}, 3));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("ORG &2000 : JMP P%"), (uint8_t[]){0x4C, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &2000 : JMP *"),  (uint8_t[]){0x4C, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &2000 : JMP P%"), (uint8_t[]){0x4C, 0x00, 0x20}, 3));
     // Mid-program it reads the live PC: after LDA #0 (two bytes), * is org+2.
     uint32_t passes = ASM("ORG &2000 : LDA #0 : here = * : RTS");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA9, 0x00, 0x60}, 3));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2002)));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x00, 0x60}, 3));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2002)));
     // A comma list evaluates one element at a time, so the PC advances between them (org 0 here: 0, 1, 2)...
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB *, *, *"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB *, *, *"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
     // ...but a list literal is one value computed at one instant, so every * is the same PC.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB {*, *, *}"), (uint8_t[]){0x00, 0x00, 0x00}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB {*, *, *}"), (uint8_t[]){0x00, 0x00, 0x00}, 3));
 }
 
 RC_TEST_STEP(assemble, random, fix)
 {
     // full fills a run on its own; RND(1) is always 0, so the broadcast idiom RND(full(n,1)) is n zeroes.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB full(4, &FF)"),      (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB RND(1), RND(1)"),    (uint8_t[]){0x00, 0x00}, 2));
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUB RND(full(4, 1))"),   (uint8_t[]){0x00, 0x00, 0x00, 0x00}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB full(4, &FF)"),      (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB RND(1), RND(1)"),    (uint8_t[]){0x00, 0x00}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB RND(full(4, 1))"),   (uint8_t[]){0x00, 0x00, 0x00, 0x00}, 4));
 
     // The definitive reset test: the same source assembles to the same bytes twice. Without the per-pass
     // reseed the second run's stream would continue from where the first left off and diverge.
     uint32_t p1 = ASM("EQUB RND(full(3, 200))");
-    rc_view_bytes first = obj(&fix->b);
+    rc_view_bytes first = fix->r.code;
     RC_CHECK_TRUE(p1 != 0 && first.num == 3);
     uint8_t saved[3];
     for (uint32_t i = 0; i < 3; i++) {
         saved[i] = rc_view_bytes_get(first, i);
     }
     uint32_t p2 = ASM("EQUB RND(full(3, 200))");
-    rc_view_bytes second = obj(&fix->b);
+    rc_view_bytes second = fix->r.code;
     RC_CHECK_TRUE(p2 != 0 && second.num == 3);
     for (uint32_t i = 0; i < 3; i++) {
         RC_CHECK(rc_view_bytes_get(second, i), ==, saved[i]);
@@ -2350,29 +2372,29 @@ RC_TEST_STEP(assemble, random, fix)
 
     // A larger draw list converges and stays in-range; RND(0) has no range and is a domain error.
     uint32_t p8 = ASM("EQUB RND(full(8, 256))");
-    RC_CHECK_TRUE(p8 != 0 && obj(&fix->b).num == 8);
-    RC_CHECK_TRUE((ASM("EQUB RND(0)"), has_diag(&fix->b, error_type_domain)));
+    RC_CHECK_TRUE(p8 != 0 && fix->r.code.num == 8);
+    RC_CHECK_TRUE(((void)ASM("EQUB RND(0)"), has_diag(&fix->r, error_type_domain)));
 }
 
 // INCLUDE tests give the top source an explicit slash-free name: ASM names a source after its own text,
-// which would drop the include's own slashes into the cache key and wreck the relative-path peel. Each
-// step gets a fresh baron, so the one name "top" never collides.
-#define INC(src) assemble_string(&fix->b, RC_STR("top"), RC_STR(src), fix->scratch)
+// which would drop the include's own slashes into the cache key and wreck the relative-path peel. Like ASM,
+// this stashes the result in fix->r and yields the pass count.
+#define INC(src) (fix->r = assemble_string(&fix->arenas, RC_STR("top"), RC_STR(src)), fix->r.passes)
 
 RC_TEST_STEP(assemble, include_splices_file, fix)
 {
     // INCLUDE pulls the file in textually: its instruction emits right here, and its label binds in THIS
     // scope (no scope of its own).
     uint32_t passes = INC("include \"inc_child.6502\"");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA2, 0x02}, 2));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("child")), value_make_numeric(0)));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA2, 0x02}, 2));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("child")), value_make_numeric(0)));
 }
 
 RC_TEST_STEP(assemble, include_resolves_relative_to_includer, fix)
 {
     // sub/mid.6502 does its own INCLUDE "leaf.6502" - resolved against sub/, not the top file's directory.
     uint32_t passes = INC("include \"sub/mid.6502\"");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA0, 0x03, 0xEA}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA0, 0x03, 0xEA}, 3));
 }
 
 RC_TEST_STEP(assemble, include_joins_the_multi_pass, fix)
@@ -2380,8 +2402,8 @@ RC_TEST_STEP(assemble, include_joins_the_multi_pass, fix)
     // `target` sits after the include, so its address depends on the included file's two bytes - it only
     // settles once the include is part of the pass loop. JMP is fixed-width, so this converges cleanly.
     uint32_t passes = INC("jmp target : include \"inc_fwd_child.6502\" : .target rts");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0x4C, 0x05, 0x00, 0xEA, 0xEA, 0x60}, 6));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("target")), value_make_numeric(5)));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x4C, 0x05, 0x00, 0xEA, 0xEA, 0x60}, 6));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("target")), value_make_numeric(5)));
 }
 
 RC_TEST_STEP(assemble, include_reports_included_from_frame, fix)
@@ -2389,14 +2411,14 @@ RC_TEST_STEP(assemble, include_reports_included_from_frame, fix)
     // The included file has an out-of-range immediate. That error surfaces, followed by a frame pointing
     // back at the INCLUDE - so a failure inside an include names both the real site and how we reached it.
     RC_CHECK(INC("include \"inc_bad_child.6502\""), ==, 0u);
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_value_out_of_range));
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_included_from));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_value_out_of_range));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_included_from));
 }
 
 RC_TEST_STEP(assemble, include_missing_file_is_an_error, fix)
 {
     RC_CHECK(INC("include \"no_such_baron_file.6502\""), ==, 0u);
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_source_load));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_source_load));
 }
 
 RC_TEST_STEP(assemble, include_forward_declared_filename, fix)
@@ -2404,10 +2426,10 @@ RC_TEST_STEP(assemble, include_forward_declared_filename, fix)
     // The filename is a symbol only bound AFTER the INCLUDE: it defers on pass 1 (like a forward address)
     // and the file loads once the name settles.
     uint32_t passes = INC("include fname : fname = \"inc_child.6502\"");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0xA2, 0x02}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA2, 0x02}, 2));
     // A name that never binds (nothing defines it) is an undefined symbol at the INCLUDE, not a hang.
-    RC_CHECK(assemble_string(&fix->b, RC_STR("top2"), RC_STR("include missing_name"), fix->scratch), ==, 0u);
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_undefined_symbol));
+    RC_CHECK((fix->r = assemble_string(&fix->arenas, RC_STR("top2"), RC_STR("include missing_name"))).passes, ==, 0u);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_undefined_symbol));
 }
 
 RC_TEST_STEP(assemble, include_in_dead_branch_is_skipped, fix)
@@ -2415,15 +2437,15 @@ RC_TEST_STEP(assemble, include_in_dead_branch_is_skipped, fix)
     // A dead INCLUDE never even goes looking for its file, so a missing include under IF 0 assembles clean.
     uint32_t passes = INC("if 0 : include \"no_such_baron_file.6502\" : endif");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK(fix->b.diagnostics.num, ==, 0u);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
 }
 
 RC_TEST_STEP(assemble, include_cycle_is_caught, fix)
 {
     // inc_cycle.6502 includes itself; the depth cap stops the recursion rather than blowing the C stack.
-    uint32_t passes = assemble_file(&fix->b, RC_STR("inc_cycle.6502"), fix->scratch);
+    uint32_t passes = (fix->r = assemble_file(&fix->arenas, RC_STR("inc_cycle.6502"))).passes;
     RC_CHECK(passes, ==, 0u);
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_include_too_deep));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_include_too_deep));
 }
 
 RC_TEST_STEP(assemble, incbin_splices_file_bytes, fix)
@@ -2434,10 +2456,10 @@ RC_TEST_STEP(assemble, incbin_splices_file_bytes, fix)
     RC_CHECK_TRUE(rc_file_save_binary(RC_STR("blob.bin"),
                   (rc_view_bytes) {.data = blob, .num = (uint32_t) sizeof blob}) == RC_FILE_OK);
 
-    uint32_t passes = assemble_string(&fix->b, RC_STR("t"),
-                          RC_STR("ORG &2000 : incbin \"blob.bin\" : .after"), fix->scratch);
-    RC_CHECK_TRUE(code_is(&fix->b, passes, blob, (uint32_t) sizeof blob));
-    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("after")),
+    uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("t"),
+                          RC_STR("ORG &2000 : incbin \"blob.bin\" : .after"))).passes;
+    RC_CHECK_TRUE(code_is(&fix->r, passes, blob, (uint32_t) sizeof blob));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("after")),
                                  value_make_numeric(0x2000 + sizeof blob)));
 
     rc_file_delete(RC_STR("blob.bin"));
@@ -2447,23 +2469,23 @@ RC_TEST_STEP(assemble, incbin_missing_file_is_fatal, fix)
 {
     // A missing file cannot be recovered from (the output would be the wrong size), so it is fatal.
     RC_CHECK(INC("incbin \"no_such_blob.bin\""), ==, 0u);
-    RC_CHECK_TRUE(first_error(&fix->b) == error_type_source_load);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_source_load);
 }
 
 RC_TEST_STEP(assemble, macro_expands_body, fix)
 {
     // A directive body with a value parameter.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("MACRO PAD n : SKIP n : ENDMACRO\nPAD 3"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("MACRO PAD n : SKIP n : ENDMACRO\nPAD 3"),
                           (uint8_t[]) {0x00, 0x00, 0x00}, 3));
     // Instructions with the parameter woven through the operands.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("MACRO ST16 a : LDA #0 : STA a : STA a+1 : ENDMACRO\nST16 &70"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("MACRO ST16 a : LDA #0 : STA a : STA a+1 : ENDMACRO\nST16 &70"),
                           (uint8_t[]) {0xA9, 0x00, 0x85, 0x70, 0x85, 0x71}, 6));
 }
 
 RC_TEST_STEP(assemble, macro_overload_by_arity, fix)
 {
     // TWO a, b and TWO a are distinct overloads; the call picks by the number of arguments.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("MACRO TWO a, b : EQUB a : EQUB b : ENDMACRO\n"
             "MACRO TWO a : EQUB a : EQUB a : ENDMACRO\n"
             "TWO 5, 6\nTWO 9"),
@@ -2473,7 +2495,7 @@ RC_TEST_STEP(assemble, macro_overload_by_arity, fix)
 RC_TEST_STEP(assemble, macro_overload_by_literal_token, fix)
 {
     // The immediate form carries a "#" literal; ADD 1, #2 picks it, ADD 1, 2 the two-argument form.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("MACRO ADD a, \"#\" b : EQUB a : EQUB b : ENDMACRO\n"
             "MACRO ADD a, b : EQUB a : EQUB &FF : ENDMACRO\n"
             "ADD 1, #2\nADD 1, 2"),
@@ -2484,7 +2506,7 @@ RC_TEST_STEP(assemble, macro_matches_tokens_before_expressions, fix)
 {
     // LAX "(" addr ")" outranks LAX addr, so a parenthesised call takes the token form even though the
     // bare form's greedy expression would also swallow (5).
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("MACRO LAX \"(\" addr \")\" : EQUB addr : EQUB &EE : ENDMACRO\n"
             "MACRO LAX addr : EQUB addr : ENDMACRO\n"
             "LAX (5)\nLAX 7"),
@@ -2496,23 +2518,23 @@ RC_TEST_STEP(assemble, macro_forward_referenced_argument, fix)
     // The argument is a symbol defined AFTER the call: it defers, then resolves on a later pass.
     uint32_t passes = ASM("MACRO W a : EQUB a : ENDMACRO\nW later\nlater = 5");
     RC_CHECK_TRUE(passes >= 2);
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0x05}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x05}, 1));
 }
 
 RC_TEST_STEP(assemble, macro_body_labels_are_per_invocation, fix)
 {
     // A body that defines a label, invoked twice: each expansion has its own scope, so no duplicate.
     uint32_t passes = ASM("MACRO M : .here : NOP : ENDMACRO\nM\nM");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0xEA, 0xEA}, 2));
-    RC_CHECK_FALSE(has_diag(&fix->b, error_type_duplicate_symbol));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0xEA, 0xEA}, 2));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_duplicate_symbol));
 }
 
 RC_TEST_STEP(assemble, macro_bounded_self_recursion, fix)
 {
     // FILL n recurses with an IF base case; the recursive call goes inactive at n == 0 and stops.
     uint32_t passes = ASM("MACRO FILL n : IF n > 0 : EQUB n : FILL n-1 : ENDIF : ENDMACRO\nFILL 3");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0x03, 0x02, 0x01}, 3));
-    RC_CHECK_FALSE(has_diag(&fix->b, error_type_macro_too_deep));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x03, 0x02, 0x01}, 3));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_macro_too_deep));
 }
 
 RC_TEST_STEP(assemble, macro_mutual_recursion_via_forward_declaration, fix)
@@ -2523,8 +2545,8 @@ RC_TEST_STEP(assemble, macro_mutual_recursion_via_forward_declaration, fix)
                           "MACRO PONG n : IF n > 0 : EQUB n : PING n-1 : ENDIF : ENDMACRO\n"
                           "MACRO PING n : IF n > 0 : EQUB n : PONG n-1 : ENDIF : ENDMACRO\n"
                           "PING 3");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0x03, 0x02, 0x01}, 3));
-    RC_CHECK_FALSE(has_diag(&fix->b, error_type_duplicate_signature));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x03, 0x02, 0x01}, 3));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_duplicate_signature));
 }
 
 RC_TEST_STEP(assemble, macro_error_breadcrumb, fix)
@@ -2532,8 +2554,8 @@ RC_TEST_STEP(assemble, macro_error_breadcrumb, fix)
     // A body whose EQUB overflows raises value_out_of_range at the definition, then an expanded_from
     // frame at the call site.
     ASM("MACRO BIG x : EQUB x : ENDMACRO\nBIG 300");
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_value_out_of_range));
-    RC_CHECK_TRUE(has_diag(&fix->b, error_type_expanded_from));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_value_out_of_range));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_expanded_from));
 }
 
 RC_TEST_STEP(assemble, macro_framing_and_call_errors, fix)
@@ -2559,17 +2581,17 @@ RC_TEST_STEP(assemble, macro_framing_and_call_errors, fix)
 RC_TEST_STEP(assemble, function_single_line, fix)
 {
     // A one-line value function, called in an operand position.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("FUNCTION sqr(x) = x*x\nEQUB sqr(5)"), (uint8_t[]) {25}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION sqr(x) = x*x\nEQUB sqr(5)"), (uint8_t[]) {25}, 1));
     // The parameter woven through a bigger expression (`and` is baron's bitwise AND; `lo` is a builtin, so `low`).
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("FUNCTION low(w) = w and &FF\nEQUB low(&1234)"), (uint8_t[]) {0x34}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION low(w) = w and &FF\nEQUB low(&1234)"), (uint8_t[]) {0x34}, 1));
     // Lexical scope: a body sees a global defined where the function was written.
-    RC_CHECK_TRUE(code_is(&fix->b, ASM("k = 10\nFUNCTION addk(x) = x + k\nEQUB addk(5)"), (uint8_t[]) {15}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("k = 10\nFUNCTION addk(x) = x + k\nEQUB addk(5)"), (uint8_t[]) {15}, 1));
 }
 
 RC_TEST_STEP(assemble, function_multiline_if, fix)
 {
     // A body with an IF choosing the top-level return, plus a function-local assignment.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("FUNCTION clamp(x) : IF x > 9 : r = 9 : ELSE : r = x : ENDIF : = r\nEQUB clamp(20)\nEQUB clamp(3)"),
         (uint8_t[]) {9, 3}, 2));
 }
@@ -2579,14 +2601,14 @@ RC_TEST_STEP(assemble, function_recursive_gcd, fix)
     // Euclid's algorithm, recursive, with a function-local and a top-level return.
     uint32_t passes = ASM("FUNCTION gcd(a, b) : IF b = 0 : r = a : ELSE : r = gcd(b, a mod b) : ENDIF : = r\n"
                           "EQUB gcd(48, 36)\nEQUB gcd(1071, 462)");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {12, 21}, 2));
-    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);   // no runaway-recursion trip
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {12, 21}, 2));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // no runaway-recursion trip
 }
 
 RC_TEST_STEP(assemble, function_overload_by_arity, fix)
 {
     // area(w) and area(w,h): the call picks the overload by argument count.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("FUNCTION area(w) = w*w\nFUNCTION area(w, h) = w*h\nEQUB area(3)\nEQUB area(3, 4)"),
         (uint8_t[]) {9, 12}, 2));
 }
@@ -2599,20 +2621,20 @@ RC_TEST_STEP(assemble, function_mutual_recursion_via_forward_declaration, fix)
                           "FUNCTION is_even(n) : IF n = 0 : r = 1 : ELSE : r = is_odd(n - 1)  : ENDIF : = r\n"
                           "FUNCTION is_odd(n)  : IF n = 0 : r = 0 : ELSE : r = is_even(n - 1) : ENDIF : = r\n"
                           "EQUB is_even(10)\nEQUB is_odd(7)\nEQUB is_even(3)");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {1, 1, 0}, 3));
-    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {1, 1, 0}, 3));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 RC_TEST_STEP(assemble, function_recursive_list, fix)
 {
     // A recursive fold over a list to a scalar.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("FUNCTION rsum(xs) : IF len(xs) = 0 : r = 0 : ELSE : r = xs[0] + rsum(xs[1..]) : ENDIF : = r\n"
             "EQUB rsum({1, 2, 3, 4})"),
         (uint8_t[]) {10}, 1));
 
     // A recursive build of a NEW list (reverse), emitted as bytes.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("FUNCTION rrev(xs) : IF len(xs) = 0 : r = xs : ELSE : r = concat(rrev(xs[1..]), {xs[0]}) : ENDIF : = r\n"
             "EQUB rrev({1, 2, 3})"),
         (uint8_t[]) {3, 2, 1}, 3));
@@ -2622,7 +2644,7 @@ RC_TEST_STEP(assemble, function_recursive_quicksort, fix)
 {
     // Quicksort, in functions: two recursive partition helpers and a recursive sort that sorts
     // both partitions, using variadic concat, unbounded-range tails xs[1..], and empty / singleton list literals.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("FUNCTION lt(xs, p)                          \n\
                  IF len(xs) = 0                          \n\
                      r = {}                              \n\
@@ -2660,17 +2682,17 @@ RC_TEST_STEP(assemble, function_forward_referenced_argument, fix)
 {
     // An argument that is a forward reference resolves over passes, like any operand.
     uint32_t passes = ASM("FUNCTION sqr(x) = x*x\nEQUB sqr(later)\nlater = 5");
-    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {25}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {25}, 1));
     RC_CHECK(passes, >=, 2u);
 }
 
 RC_TEST_STEP(assemble, function_scope_is_per_invocation, fix)
 {
     // A body local, and two calls: each invocation gets its own child scope, so the local does not collide.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("FUNCTION dbl(x) : y = x + x : = y\nEQUB dbl(3)\nEQUB dbl(4)"),
         (uint8_t[]) {6, 8}, 2));
-    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);   // no duplicate_symbol across the two calls
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // no duplicate_symbol across the two calls
 }
 
 RC_TEST_STEP(assemble, function_scoping_is_lexical, fix)
@@ -2679,10 +2701,10 @@ RC_TEST_STEP(assemble, function_scoping_is_lexical, fix)
     // the global g = 7; `caller` binds its OWN param g = 99 and calls usesg. Lexical scoping means usesg
     // resolves g to the root global (7), NOT the caller's g (99) - so caller(99) is 0 + 7 = 7. Dynamic
     // scoping would leak the caller's 99. This is the load-bearing check that scoping is lexical.
-    RC_CHECK_TRUE(code_is(&fix->b,
+    RC_CHECK_TRUE(code_is(&fix->r,
         ASM("g = 7\nFUNCTION usesg(x) = x + g\nFUNCTION caller(g) = usesg(0)\nEQUB caller(99)"),
         (uint8_t[]) {7}, 1));
-    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 RC_TEST_STEP(assemble, function_call_and_definition_errors, fix)
@@ -2700,6 +2722,38 @@ RC_TEST_STEP(assemble, function_call_and_definition_errors, fix)
     // A function cannot be named after a mnemonic, nor after a builtin operand function.
     RC_CHECK_TRUE(ERR("FUNCTION nop(x) = 1") == error_type_function_name_reserved);
     RC_CHECK_TRUE(ERR("FUNCTION lo(x) = x") == error_type_function_name_reserved);
+}
+
+RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
+{
+    // Push the permanent arena well past its initial reserves so its scope nodes and symbol pool have to
+    // grow and relocate mid-assembly, then confirm nothing dangles: every symbol is still addressable by
+    // name once the containers have moved. This is the safety net for the whole indices-not-pointers
+    // invariant behind the arena merge - a big FOR mints one child scope per iteration (unspellable names),
+    // and hundreds of top-level labels swell the global symbol trie.
+    rc_arena build = rc_arena_make_default();
+    rc_mstr  src   = rc_mstr_make(64 * 1024, &build);
+
+    rc_mstr_append(&src, RC_STR("ORG 0\n"), &build);
+    // Each iteration binds its own `n` in a per-iteration scope and emits a byte, so pc keeps advancing.
+    rc_mstr_append(&src, RC_STR("FOR n = 0..1999\nEQUB 42\nNEXT\n"), &build);
+    // Hundreds of distinct global labels, all sitting at pc 2000 (nothing emits between them).
+    for (uint32_t i = 0; i < 500; i++) {
+        rc_mstr_append(&src, RC_STR(".lbl"), &build);
+        rc_mstr_append_u32(&src, i, &build);
+        rc_mstr_append_char(&src, '\n', &build);
+    }
+    rc_mstr_append(&src, RC_STR("last = &BEEF\n"), &build);
+
+    uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("stress"), src.view)).passes;
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK(fix->r.code.num, ==, 2000u);   // 2000 bytes from the loop; the labels emit nothing
+    // A symbol bound last, after every relocation, is still correct...
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("last")), value_make_numeric(0xBEEF)));
+    // ...as is a label from the middle of the run (they all resolve to the post-loop pc).
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("lbl250")), value_make_numeric(2000)));
+
+    rc_arena_deinit(&build);
 }
 
 #endif // BARON_TESTS

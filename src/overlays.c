@@ -3,28 +3,26 @@
 #include "richc/macros.h"
 
 
-void overlays_init(overlays *ovl)
+enum {
+    overlays_nodes_reserve = 64,        // 64 ROM banks / sections is a very large project
+    overlay_code_reserve   = 0x10000,   // 64 KB: the hard 6502 ceiling, so a code buffer never grows within a pass
+};
+
+void overlays_init(overlays *ovl, rc_arena *per_pass)
 {
-    RC_ASSERT(ovl != NULL);
-    ovl->node_arena = rc_arena_make_default();
-    ovl->code_arena = rc_arena_make_default();
-    ovl->nodes      = rc_array_overlay_make(0, &ovl->node_arena);
+    RC_ASSERT(ovl != NULL && per_pass != NULL);
+    ovl->arena = per_pass;          // borrowed; baron owns it
+    ovl->nodes = (rc_array_overlay) {0};   // overlays_reset builds the list each pass
 }
 
-void overlays_deinit(overlays *ovl)
+void overlays_reset(overlays *ovl)
 {
     RC_ASSERT(ovl != NULL);
-    rc_arena_deinit(&ovl->node_arena);
-    rc_arena_deinit(&ovl->code_arena);
-}
-
-uint32_t overlays_make_default(overlays *ovl)
-{
-    RC_ASSERT(ovl != NULL && rc_array_overlay_is_empty(&ovl->nodes));   // the default is the first overlay
-    return rc_array_overlay_push(
+    ovl->nodes = rc_array_overlay_make(overlays_nodes_reserve, ovl->arena);
+    rc_array_overlay_push(                                   // the default overlay is index 0
         &ovl->nodes,
-        (overlay) { .code = rc_array_bytes_make(0, &ovl->code_arena) },
-        &ovl->node_arena);
+        (overlay) { .code = rc_array_bytes_make(overlay_code_reserve, ovl->arena) },
+        ovl->arena);
 }
 
 uint32_t overlays_pc(const overlays *ovl, uint32_t id)
@@ -49,7 +47,7 @@ void overlays_emit_u8(overlays *ovl, uint32_t id, uint8_t b)
 {
     RC_ASSERT(ovl != NULL);
     overlay *o = &RC_AT(ovl->nodes, id);
-    rc_array_bytes_push(&o->code, b, &ovl->code_arena);
+    rc_array_bytes_push(&o->code, b, ovl->arena);
     o->pc += 1;
 }
 
@@ -64,21 +62,10 @@ void overlays_skip(overlays *ovl, uint32_t id, uint32_t count)
     RC_ASSERT(ovl != NULL);
     overlay *o = &RC_AT(ovl->nodes, id);
     for (uint32_t i = 0; i < count; i++) {
-        rc_array_bytes_push(&o->code, 0, &ovl->code_arena);
+        rc_array_bytes_push(&o->code, 0, ovl->arena);
     }
     o->pc += count;
 }
-
-void overlays_reset_all(overlays *ovl)
-{
-    RC_ASSERT(ovl != NULL);
-    for (uint32_t i = 0; i < ovl->nodes.num; i++) {
-        overlay *o = &RC_AT(ovl->nodes, i);
-        o->pc = 0;
-        rc_array_bytes_reset(&o->code);   // keep the buffer; refilled from the start each pass
-    }
-}
-
 
 #ifdef BARON_TESTS
 
@@ -86,9 +73,10 @@ void overlays_reset_all(overlays *ovl)
 
 RC_TEST(overlays, emit_org_reset)
 {
+    rc_arena arena = rc_arena_make_default();
     overlays ovl;
-    overlays_init(&ovl);
-    RC_CHECK(overlays_make_default(&ovl), ==, 0u);
+    overlays_init(&ovl, &arena);
+    overlays_reset(&ovl);   // builds the default overlay at index 0
 
     overlays_emit_u8(&ovl, 0, 0xA9);
     RC_CHECK(overlays_pc(&ovl, 0), ==, 1u);
@@ -113,12 +101,12 @@ RC_TEST(overlays, emit_org_reset)
     RC_CHECK(overlays_code(&ovl, 0).num, ==, 7u);
     RC_CHECK((uint32_t)rc_view_bytes_get(overlays_code(&ovl, 0), 4), ==, 0x00u);
 
-    // Reset empties every overlay's code and pc but keeps the buffer.
-    overlays_reset_all(&ovl);
+    // Reset rebuilds a fresh default overlay: pc 0, empty code.
+    overlays_reset(&ovl);
     RC_CHECK(overlays_pc(&ovl, 0), ==, 0u);
     RC_CHECK(overlays_code(&ovl, 0).num, ==, 0u);
 
-    overlays_deinit(&ovl);
+    rc_arena_deinit(&arena);
 }
 
 #endif // BARON_TESTS

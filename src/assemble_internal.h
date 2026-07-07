@@ -10,6 +10,10 @@
 // The assembler's internal parsing vocabulary, shared between assemble.c (the statement loop and
 // the directives) and opcodes.c (instruction parsing). Not part of the public assemble.h surface.
 
+// `baron` is the internal machine (defined in baron.h); the public assemble.h no longer names it, so the
+// shared parse vocabulary forward-declares it here for the handler signatures below.
+typedef struct baron baron;
+
 // Per-statement parse context, threaded by value alongside the cursor. `final` arms the deferred
 // checks (range, undefined-on-final) on the settling pass. `active` says whether a statement's
 // effects apply: inside a false IF branch it is cleared, so the statement is parsed for structure

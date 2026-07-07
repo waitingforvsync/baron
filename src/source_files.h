@@ -23,13 +23,11 @@ typedef struct source_file {
 // `scopes` and `overlays`. It owns the cached names and contents (in its own arenas), so a source
 // added from a transient string or path stays valid for the manager's lifetime.
 typedef struct source_files {
-    rc_arena             node_arena;   // backs the nodes array
-    rc_arena             text_arena;   // backs the cached names and contents
+    rc_arena            *arena;   // BORROWED: baron's permanent arena, backs the nodes AND the cached names/text
     rc_array_source_file nodes;
 } source_files;
 
-void source_files_init(source_files *sf);
-void source_files_deinit(source_files *sf);
+void source_files_init(source_files *sf, rc_arena *permanent);
 
 // Both add functions are keyed by name: if a source is already registered under the name, its
 // existing index is returned and nothing is added (the cache holds one entry per name).

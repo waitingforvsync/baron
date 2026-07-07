@@ -3,46 +3,57 @@
 #include "richc/macros.h"
 
 
-void baron_init(baron *b)
+enum { baron_per_pass_reserve = 64u * 1024 * 1024 };   // one pass of overlays/macros/functions is small
+
+baron_arenas baron_arenas_make(void)
 {
-    RC_ASSERT(b != NULL);
-    scopes_init(&b->scopes);
-    scopes_make_root(&b->scopes);          // the root is scope index 0
-    overlays_init(&b->overlays);
-    b->current_overlay = overlays_make_default(&b->overlays);   // emit into the default overlay (index 0)
-    source_files_init(&b->source_files);
-    macros_init(&b->macros);   // owns the dynamic statement-token table; run_pass seeds it from the base each pass
-    functions_init(&b->functions);   // owns the dynamic operand-token table; run_pass seeds it from the base each pass
+    return (baron_arenas) {
+        .permanent = rc_arena_make_default(),
+        .per_pass  = rc_arena_make(baron_per_pass_reserve),
+        .scratch   = rc_arena_make_default(),
+    };
+}
+
+void baron_arenas_deinit(baron_arenas *a)
+{
+    RC_ASSERT(a != NULL);
+    rc_arena_deinit(&a->permanent);
+    rc_arena_deinit(&a->per_pass);
+    rc_arena_deinit(&a->scratch);
+}
+
+void baron_init(baron *b, baron_arenas *a)
+{
+    RC_ASSERT(b != NULL && a != NULL);
+    b->permanent = &a->permanent;   // borrowed: the arenas stay the caller's to free
+    b->per_pass  = &a->per_pass;
+
+    scopes_init(&b->scopes, &a->permanent);
+    scopes_make_root(&b->scopes);              // the root is scope index 0
+    overlays_init(&b->overlays, &a->per_pass);   // the default overlay is (re)made per pass by overlays_reset
+    b->current_overlay = overlays_default;
+    source_files_init(&b->source_files, &a->permanent);
+    macros_init(&b->macros, &a->per_pass);         // run_pass reseeds its store + token table each pass
+    functions_init(&b->functions, &a->per_pass);   // ditto for the operand table
+
     b->include_depth  = 0;
     b->macro_depth    = 0;
     b->function_depth = 0;
-    b->diag_arena  = rc_arena_make_default();
-    b->diagnostics = rc_array_diagnostic_make(0, &b->diag_arena);
-}
-
-void baron_deinit(baron *b)
-{
-    RC_ASSERT(b != NULL);
-    scopes_deinit(&b->scopes);
-    overlays_deinit(&b->overlays);
-    source_files_deinit(&b->source_files);
-    macros_deinit(&b->macros);   // also frees the statement-token table, which lives in the macros arena
-    functions_deinit(&b->functions);   // also frees the operand-token table, which lives in the functions arena
-    rc_arena_deinit(&b->diag_arena);
+    b->diagnostics    = rc_array_diagnostic_make(256, &a->permanent);
 }
 
 void baron_error(baron *b, error_type code, cursor at)
 {
     RC_ASSERT(b != NULL);
     rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = severity_error}, &b->diag_arena);
+        (diagnostic) {.code = code, .at = at, .severity = severity_error}, b->permanent);
 }
 
 void baron_warning(baron *b, error_type code, cursor at, uint8_t severity)
 {
     RC_ASSERT(b != NULL && severity != severity_error);   // a warning is a positive level; 0 would fail the assemble
     rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = severity}, &b->diag_arena);
+        (diagnostic) {.code = code, .at = at, .severity = severity}, b->permanent);
 }
 
 uint32_t baron_error_count(const baron *b)
@@ -69,14 +80,15 @@ bool baron_has_errors(const baron *b)
 
 RC_TEST(baron, init_set_get)
 {
+    baron_arenas arenas = baron_arenas_make();
     baron b;
-    baron_init(&b);
+    baron_init(&b, &arenas);
 
     // baron_init already made the root at scope index 0.
     RC_CHECK_TRUE(scopes_set_symbol(&b.scopes, 0, RC_STR("answer"), value_make_numeric(42.0), (cursor){0, 0}) == symbol_status_unchanged);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&b.scopes, 0, RC_STR("answer")), value_make_numeric(42.0)));
 
-    baron_deinit(&b);
+    baron_arenas_deinit(&arenas);
 }
 
 #endif // BARON_TESTS

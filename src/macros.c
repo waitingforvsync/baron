@@ -3,34 +3,27 @@
 #include "richc/macros.h"
 
 
-// Generous starting capacities so the shared arena rarely reallocates mid-pass (interleaved growth of
-// several arrays in one arena is correct but copies, so we lean on reserve to avoid it).
+// Generous starting capacities so the per_pass arena rarely reallocates mid-pass (interleaved growth of
+// several arrays in one arena is correct but copies). Floored at 8.
 enum {
-    macros_list_reserve      = 16,
-    macro_literals_reserve   = 4,
-    macro_signatures_reserve = 2,
+    macros_list_reserve      = 128,
+    macro_literals_reserve   = 8,
+    macro_signatures_reserve = 8,
 };
 
-void macros_init(macros *m)
+void macros_init(macros *m, rc_arena *per_pass)
 {
-    RC_ASSERT(m != NULL);
-    m->arena           = rc_arena_make_default();
-    m->list            = rc_array_macro_make(macros_list_reserve, &m->arena);
+    RC_ASSERT(m != NULL && per_pass != NULL);
+    m->arena            = per_pass;             // borrowed; baron owns it
+    m->list             = (rc_array_macro) {0};   // macros_reset builds the store each pass
     m->statement_tokens = (rc_array_token) {0};   // macros_reset seeds it from the base each pass
-}
-
-void macros_deinit(macros *m)
-{
-    RC_ASSERT(m != NULL);
-    rc_arena_deinit(&m->arena);   // frees the list, the sub-arrays AND statement_tokens (all in this arena)
 }
 
 void macros_reset(macros *m, token_table base, uint32_t reserve_extra)
 {
     RC_ASSERT(m != NULL);
-    rc_arena_reset(&m->arena);   // reclaim everything - the list, the sub-arrays, the promoted slot views
-    m->list             = rc_array_macro_make(macros_list_reserve, &m->arena);
-    m->statement_tokens = rc_array_token_make_copy(base, base.num + reserve_extra, &m->arena);
+    m->list             = rc_array_macro_make(macros_list_reserve, m->arena);
+    m->statement_tokens = rc_array_token_make_copy(base, base.num + reserve_extra, m->arena);
 }
 
 token_table macros_statement_tokens(const macros *m)
@@ -53,7 +46,7 @@ uint32_t macros_index_for_name(macros *m, rc_str name)
     rc_array_token_push(
         &m->statement_tokens,
         (token) {.name = name, .lexeme = {.type = lexeme_type_macro, .macro = {.index = index}}},
-        &m->arena);
+        m->arena);
     return index;
 }
 
@@ -61,10 +54,10 @@ uint32_t macros_add(macros *m)
 {
     RC_ASSERT(m != NULL);
     macro entry = {
-        .literal_table = rc_array_token_make(macro_literals_reserve, &m->arena),
-        .signatures    = rc_array_macro_signature_make(macro_signatures_reserve, &m->arena),
+        .literal_table = rc_array_token_make(macro_literals_reserve, m->arena),
+        .signatures    = rc_array_macro_signature_make(macro_signatures_reserve, m->arena),
     };
-    return rc_array_macro_push(&m->list, entry, &m->arena);
+    return rc_array_macro_push(&m->list, entry, m->arena);
 }
 
 macro *macros_at(macros *m, uint32_t index)
@@ -85,7 +78,7 @@ uint32_t macros_intern_literal(macros *m, uint32_t index, rc_str text)
     rc_array_token_push(
         &e->literal_table,
         (token) {.name = text, .lexeme = {.type = lexeme_type_macro_literal, .macro_literal = {.id = id}}},
-        &m->arena);
+        m->arena);
     return id;
 }
 
@@ -162,7 +155,7 @@ macro_add_status macros_add_signature(macros *m, uint32_t index, rc_view_macro_s
            && !macro_signature_before(ns.slots, rc_array_macro_signature_get(&e->signatures, pos).slots)) {
         pos++;
     }
-    rc_array_macro_signature_insert(&e->signatures, pos, ns, &m->arena);
+    rc_array_macro_signature_insert(&e->signatures, pos, ns, m->arena);
     return macro_add_inserted;
 }
 
@@ -187,8 +180,9 @@ RC_TEST(macros, ordering_literal_before_param)
     macro_slot paren[] = {t_literal(0), t_param(), t_literal(1)};
     macro_slot bare[]  = {t_param()};
 
+    rc_arena arena = rc_arena_make_default();
     macros m;
-    macros_init(&m);
+    macros_init(&m, &arena);
     uint32_t lax = macros_add(&m);
 
     // Register the bare one FIRST, so a correct sort must reorder it after the literal-led one.
@@ -201,15 +195,16 @@ RC_TEST(macros, ordering_literal_before_param)
     RC_CHECK_TRUE(rc_view_macro_slot_get(rc_array_macro_signature_get(&e->signatures, 0).slots, 0).type == macro_slot_literal);
     RC_CHECK_TRUE(rc_view_macro_slot_get(rc_array_macro_signature_get(&e->signatures, 1).slots, 0).type == macro_slot_param);
 
-    macros_deinit(&m);
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST(macros, forward_declaration_fill_and_duplicate)
 {
     macro_slot one[] = {t_param()};
 
+    rc_arena arena = rc_arena_make_default();
     macros m;
-    macros_init(&m);
+    macros_init(&m, &arena);
     uint32_t a = macros_add(&m);
 
     // A forward declaration (empty body) then its fill-in is not a duplicate.
@@ -222,13 +217,14 @@ RC_TEST(macros, forward_declaration_fill_and_duplicate)
     RC_CHECK_TRUE(macros_add_signature(&m, a, t_sig(one, 1), (cursor){0, 80}, true) == macro_add_duplicate);
     RC_CHECK(rc_array_macro_signature_get(&macros_at(&m, a)->signatures, 0).body.pos, ==, 40u);
 
-    macros_deinit(&m);
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST(macros, intern_literal_dedupes)
 {
+    rc_arena arena = rc_arena_make_default();
     macros m;
-    macros_init(&m);
+    macros_init(&m, &arena);
     uint32_t a = macros_add(&m);
 
     uint32_t hash1 = macros_intern_literal(&m, a, RC_STR("#"));
@@ -238,13 +234,14 @@ RC_TEST(macros, intern_literal_dedupes)
     RC_CHECK_TRUE(hash1 != comma);
     RC_CHECK(macros_at(&m, a)->literal_table.num, ==, 2u);
 
-    macros_deinit(&m);
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST(macros, reset_empties)
 {
+    rc_arena arena = rc_arena_make_default();
     macros m;
-    macros_init(&m);
+    macros_init(&m, &arena);
     macros_add(&m);
     macros_add(&m);
     RC_CHECK(m.list.num, ==, 2u);
@@ -252,7 +249,7 @@ RC_TEST(macros, reset_empties)
     RC_CHECK(m.list.num, ==, 0u);
     // The store is usable again after a reset.
     RC_CHECK(macros_add(&m), ==, 0u);
-    macros_deinit(&m);
+    rc_arena_deinit(&arena);
 }
 
 #endif // BARON_TESTS

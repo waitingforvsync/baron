@@ -16,22 +16,37 @@
 // never scoped by braces or files - so it lives here rather than being threaded. Output and options
 // pile in later. Set it up in place and leave it put - its `scopes` holds tries that point back into
 // its own pools (which is also why an assemble takes a `baron *`: it cannot be returned by value).
+// `baron` is now an INTERNAL detail: it is built on the stack inside assemble_string / assemble_file,
+// BORROWING the caller's three arenas (a `baron_arenas`), run, and discarded - the caller sees only the
+// harvested `baron_result`, never this struct. The two borrowed pointers are all it needs: `permanent`
+// to push diagnostics into, `per_pass` to reset at the top of each pass. scratch is threaded by value
+// straight from the arenas into the pass loop, so it is not stored here. The subsystems below borrow
+// `permanent` (scopes / source_files) or `per_pass` (overlays / macros / functions) in turn.
 typedef struct baron {
+    rc_arena           *permanent;   // BORROWED from baron_arenas: scopes/symbols, source text, diagnostics
+    rc_arena           *per_pass;    // BORROWED from baron_arenas: overlays, macros, functions (reset each pass)
     scopes              scopes;
     overlays            overlays;
     source_files        source_files;
     macros              macros;            // the macro store (and its dynamic statement-token table), rebuilt each pass
     functions           functions;         // the user-FUNCTION store (and its dynamic operand-token table), rebuilt each pass
-    rc_arena            diag_arena;    // backs the diagnostics array (reset per assemble)
-    rc_array_diagnostic diagnostics;   // errors from the last assemble; empty means it succeeded
+    rc_array_diagnostic diagnostics;   // errors from the last assemble (in permanent); empty means it succeeded
     uint32_t            current_overlay;   // the overlay statements emit into now
     uint32_t            include_depth;     // how many INCLUDEs deep the parser is now, to catch runaway recursion
     uint32_t            macro_depth;       // how many macro expansions deep, to catch runaway recursion
     uint32_t            function_depth;    // how many FUNCTION calls deep the evaluator is, to catch runaway recursion
 } baron;
 
-void baron_init(baron *b);
-void baron_deinit(baron *b);
+// Build a baron on `a`'s three arenas (borrowing them - they stay the caller's to free). Seeds the scope
+// root and the default overlay, so it is ready to assemble into. There is no baron_deinit: the arenas own
+// everything, and baron_arenas_deinit frees them.
+//
+// This is an in-place `_init(baron *b, ...)`, NOT a by-value `baron baron_make(...)` (unlike baron_arenas,
+// which is a plain bag of arenas and returns fine). A baron cannot be returned or copied by value: seeding
+// the scope root makes tries that point back into the scopes' OWN embedded pools (symbol_pool / child_pool),
+// so relocating the struct - which a `return b;` may do, C not guaranteeing copy elision - would leave every
+// trie's pool pointer dangling. So the caller owns the storage and we fill it where it will stay put.
+void baron_init(baron *b, baron_arenas *a);
 
 // Append a diagnostic to b's list. baron_error records a failing error (severity 0); baron_warning
 // records a harmless warning at a positive `severity` level. baron_has_errors reports whether any

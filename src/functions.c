@@ -4,33 +4,27 @@
 #include "richc/mstr.h"
 
 
-// Generous starting capacities so the shared arena rarely reallocates mid-pass.
+// Generous starting capacities so the per_pass arena rarely reallocates mid-pass. Floored at 8.
 enum {
-    functions_list_reserve       = 16,
-    function_signatures_reserve   = 2,
-    function_params_reserve       = 4,
+    functions_list_reserve      = 128,
+    function_signatures_reserve = 8,
+    function_params_reserve     = 8,
 };
 
-void functions_init(functions *f)
+void functions_init(functions *f, rc_arena *per_pass)
 {
-    RC_ASSERT(f != NULL);
-    f->arena           = rc_arena_make_default();
-    f->list            = rc_array_function_make(functions_list_reserve, &f->arena);
-    f->operand_tokens  = (rc_array_token) {0};   // functions_reset seeds it from the base each pass
-}
-
-void functions_deinit(functions *f)
-{
-    RC_ASSERT(f != NULL);
-    rc_arena_deinit(&f->arena);   // frees the list, each function's sub-arrays AND operand_tokens
+    RC_ASSERT(f != NULL && per_pass != NULL);
+    f->arena          = per_pass;               // borrowed; baron owns it
+    f->list           = (rc_array_function) {0};   // functions_reset builds the store each pass
+    f->operand_tokens = (rc_array_token) {0};   // functions_reset seeds it from the base each pass
 }
 
 void functions_reset(functions *f, token_table base, uint32_t reserve_extra)
 {
     RC_ASSERT(f != NULL);
-    rc_arena_reset(&f->arena);   // reclaim everything - the list, the signatures, the promoted param views
-    f->list           = rc_array_function_make(functions_list_reserve, &f->arena);
-    f->operand_tokens = rc_array_token_make_copy(base, base.num + reserve_extra, &f->arena);
+    // The caller resets the shared per_pass arena once before this; we only re-make the containers.
+    f->list           = rc_array_function_make(functions_list_reserve, f->arena);
+    f->operand_tokens = rc_array_token_make_copy(base, base.num + reserve_extra, f->arena);
 }
 
 token_table functions_operand_tokens(const functions *f)
@@ -41,8 +35,8 @@ token_table functions_operand_tokens(const functions *f)
 
 static uint32_t functions_add(functions *f)
 {
-    function entry = { .signatures = rc_array_function_signature_make(function_signatures_reserve, &f->arena) };
-    return rc_array_function_push(&f->list, entry, &f->arena);
+    function entry = { .signatures = rc_array_function_signature_make(function_signatures_reserve, f->arena) };
+    return rc_array_function_push(&f->list, entry, f->arena);
 }
 
 uint32_t functions_index_for_name(functions *f, rc_str name)
@@ -51,9 +45,9 @@ uint32_t functions_index_for_name(functions *f, rc_str name)
 
     // The operand token spells `name(` (the '(' baked in, like every builtin). Intern it so a call `name(`
     // matches regardless of any whitespace at the definition.
-    rc_mstr spelling = rc_mstr_make(name.len + 2, &f->arena);
-    rc_mstr_append(&spelling, name, &f->arena);
-    rc_mstr_append_char(&spelling, '(', &f->arena);
+    rc_mstr spelling = rc_mstr_make(name.len + 2, f->arena);
+    rc_mstr_append(&spelling, name, f->arena);
+    rc_mstr_append_char(&spelling, '(', f->arena);
 
     uint32_t t = token_table_find(f->operand_tokens.view, spelling.view);
     if (t != RC_INDEX_NONE) {
@@ -67,7 +61,7 @@ uint32_t functions_index_for_name(functions *f, rc_str name)
     rc_array_token_push(
         &f->operand_tokens,
         (token) {.name = spelling.view, .lexeme = {.type = lexeme_type_user_function, .user_function = {.index = index}}},
-        &f->arena);
+        f->arena);
     return index;
 }
 
@@ -104,7 +98,7 @@ function_add_status functions_add_signature(functions *f, uint32_t index, rc_vie
     rc_array_function_signature_push(
         &e->signatures,
         (function_signature) {.params = params, .body = body, .def_scope = def_scope, .defined = defined},
-        &f->arena);
+        f->arena);
     return function_add_inserted;
 }
 
@@ -134,8 +128,9 @@ static rc_view_rc_str t_params(const rc_str *names, uint32_t n)
 
 RC_TEST(functions, index_for_name_reuses)
 {
+    rc_arena arena = rc_arena_make_default();
     functions f;
-    functions_init(&f);
+    functions_init(&f, &arena);
     functions_reset(&f, (token_table) {0}, 8);   // an empty base is fine for the store-only checks
 
     uint32_t a  = functions_index_for_name(&f, RC_STR("sqr"));
@@ -145,7 +140,7 @@ RC_TEST(functions, index_for_name_reuses)
     RC_CHECK_TRUE(a != b);
     RC_CHECK(f.list.num, ==, 2u);
 
-    functions_deinit(&f);
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST(functions, add_signature_reconciles_by_arity)
@@ -153,8 +148,9 @@ RC_TEST(functions, add_signature_reconciles_by_arity)
     rc_str one[]  = {RC_STR("x")};
     rc_str two[]  = {RC_STR("a"), RC_STR("b")};
 
+    rc_arena arena = rc_arena_make_default();
     functions f;
-    functions_init(&f);
+    functions_init(&f, &arena);
     functions_reset(&f, (token_table) {0}, 8);
     uint32_t g = functions_index_for_name(&f, RC_STR("g"));
 
@@ -169,7 +165,7 @@ RC_TEST(functions, add_signature_reconciles_by_arity)
     RC_CHECK_TRUE(functions_add_signature(&f, h, t_params(one, 1), (cursor){0, 40}, 0, true)  == function_add_filled);
     RC_CHECK_TRUE(functions_add_signature(&f, h, t_params(one, 1), (cursor){0, 80}, 0, true)  == function_add_duplicate);
 
-    functions_deinit(&f);
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST(functions, match_picks_by_arity)
@@ -177,8 +173,9 @@ RC_TEST(functions, match_picks_by_arity)
     rc_str one[] = {RC_STR("w")};
     rc_str two[] = {RC_STR("w"), RC_STR("h")};
 
+    rc_arena arena = rc_arena_make_default();
     functions f;
-    functions_init(&f);
+    functions_init(&f, &arena);
     functions_reset(&f, (token_table) {0}, 8);
     uint32_t area = functions_index_for_name(&f, RC_STR("area"));
     functions_add_signature(&f, area, t_params(one, 1), (cursor){0, 10}, 0, true);
@@ -188,13 +185,14 @@ RC_TEST(functions, match_picks_by_arity)
     RC_CHECK(functions_match(&f, area, 2)->body.pos, ==, 20u);
     RC_CHECK_TRUE(functions_match(&f, area, 3) == NULL);
 
-    functions_deinit(&f);
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST(functions, reset_empties)
 {
+    rc_arena arena = rc_arena_make_default();
     functions f;
-    functions_init(&f);
+    functions_init(&f, &arena);
     functions_reset(&f, (token_table) {0}, 8);
     functions_index_for_name(&f, RC_STR("a"));
     functions_index_for_name(&f, RC_STR("b"));
@@ -202,7 +200,7 @@ RC_TEST(functions, reset_empties)
     functions_reset(&f, (token_table) {0}, 8);
     RC_CHECK(f.list.num, ==, 0u);
     RC_CHECK(functions_index_for_name(&f, RC_STR("c")), ==, 0u);   // usable again
-    functions_deinit(&f);
+    rc_arena_deinit(&arena);
 }
 
 #endif // BARON_TESTS

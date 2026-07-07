@@ -67,16 +67,17 @@ typedef struct macro {
 // entry per macro name, rebuilt from source order every pass. The lexer reads it to recognise a name as a
 // call; a name defined earlier this pass is in it, one defined later is not (definition order matters).
 typedef struct macros {
-    rc_arena       arena;
+    rc_arena      *arena;              // BORROWED: baron's per_pass arena (list, sub-arrays, tokens all live here)
     rc_array_macro list;               // one per distinct name; a lexeme_type_macro's index addresses it
     rc_array_token statement_tokens;   // the live dispatch table (static base + a token per macro name)
 } macros;
 
-void macros_init(macros *m);
-void macros_deinit(macros *m);
+void macros_init(macros *m, rc_arena *per_pass);
 
-// Empty the store and reclaim the arena, for a fresh pass, then reseed statement_tokens from `base` (the
-// static statement-token table) with room for `reserve_extra` macro-name tokens reserved up front.
+// Rebuild the store for a fresh pass and reseed statement_tokens from `base` (the static statement-token
+// table) with room for `reserve_extra` macro-name tokens. The caller resets the shared per_pass arena
+// once BEFORE this (which reclaims the previous pass's list, sub-arrays and tokens); this only re-makes
+// the containers into the fresh arena.
 void macros_reset(macros *m, token_table base, uint32_t reserve_extra);
 
 // The live statement-token table the lexer dispatches from (the base plus a token per macro seen so far).

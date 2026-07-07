@@ -48,16 +48,16 @@ typedef struct function {
 // operand table (expression.c) plus one lexeme_type_user_function entry per function name, rebuilt in source
 // order every pass, threaded to the evaluator through expr_env.
 typedef struct functions {
-    rc_arena          arena;
+    rc_arena         *arena;           // BORROWED: baron's per_pass arena (list, sub-arrays, tokens all live here)
     rc_array_function list;            // one per distinct name; a lexeme_type_user_function's index addresses it
     rc_array_token    operand_tokens;  // the live operand table (static base + a token per function name)
 } functions;
 
-void functions_init(functions *f);
-void functions_deinit(functions *f);
+void functions_init(functions *f, rc_arena *per_pass);
 
-// Empty the store and reclaim the arena, for a fresh pass, then reseed operand_tokens from `base` (the static
-// operand table) with room for `reserve_extra` function-name tokens reserved up front.
+// Rebuild the store for a fresh pass and reseed operand_tokens from `base` (the static operand table) with
+// room for `reserve_extra` function-name tokens. The caller resets the shared per_pass arena once BEFORE
+// this (reclaiming the previous pass's list, sub-arrays and tokens); this only re-makes the containers.
 void functions_reset(functions *f, token_table base, uint32_t reserve_extra);
 
 // The live operand-token table the expression parser lexes calls from (the base plus a token per function).

@@ -3,6 +3,7 @@
 
 #include "value.h"
 #include "cursor.h"
+#include "symbols.h"   // symbol_entry, rc_array_symbol_entry (scopes_flatten's output)
 #include "richc/hash.h"
 
 
@@ -65,26 +66,23 @@ typedef struct scope_node {
 #include "richc/template/array.h"
 
 
-// The scope tree and symbol table rolled together. It owns every growable thing:
-// the scope_node array and the two trie node pools, each parked on its own arena
-// so it can grow in place as the sole tenant. All scopes share the one symbol_pool
-// and the one child_pool (a single pool happily backs many tries). Keep it put
-// once it holds scopes - the per-node tries squirrel away pointers back into
-// symbol_pool / child_pool.
+// The scope tree and symbol table rolled together. It holds the scope_node array, the two shared trie
+// node pools, and (in `arena`) the deep-cloned symbol values and owned name keys. All growables share
+// the ONE borrowed permanent arena: that is safe because inter-node trie links are block INDICES and a
+// trie stores only a pointer to its pool STRUCT (an embedded member here, stable), never into arena
+// memory - so a growth that relocates a backing array to the arena top invalidates nothing (every
+// reference is an index or a pointer to this struct). `scopes` itself must stay put once it holds
+// scopes, since the tries point at symbol_pool / child_pool inside it.
 typedef struct scopes {
-    rc_arena node_arena;     // backs `nodes`
-    rc_arena symbol_arena;   // backs `symbol_pool`
-    rc_arena child_arena;    // backs `child_pool` alone, so the pool is its sole tenant and grows in place
-    rc_arena value_arena;    // backs deep-cloned symbol values and owned scope-name keys
+    rc_arena *arena;                  // BORROWED: baron's permanent arena, backs everything below
     rc_array_scope_node nodes;        // scope index 0 is the root
     rc_trie_symbol_pool symbol_pool;  // shared by every node's `symbols` trie
     rc_trie_child_pool  child_pool;   // shared by every node's `children` trie
 } scopes;
 
-// Set-up and tear-down. In-place, because once the container holds scopes it must
-// not budge.
-void scopes_init(scopes *s);
-void scopes_deinit(scopes *s);
+// Set-up. `permanent` is baron's permanent arena (not owned here). In-place, because once the container
+// holds scopes it must not budge (the tries point back into its pools).
+void scopes_init(scopes *s, rc_arena *permanent);
 
 // Empty the tree back to a bare root (index 0), reclaiming everything. Used to discard the
 // half-built symbol table when an assemble fails, so no stale bindings are read afterwards.
@@ -141,6 +139,16 @@ value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
 // by value, so an ORG between two local labels cannot reorder them. Hands back the winner's value, or an
 // unknown-symbol error value when none qualifies (so an unresolved @- / @+ defers like any forward reference).
 value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t source, uint32_t use_pos, bool forward);
+
+// Flatten every spellable resolved binding into a fresh array (backed by `arena`) and hand back its view,
+// each entry keyed by its full dotted path from the top level ("routine.core"). Unspellable internals are
+// skipped: any scope or symbol whose name begins with '@' - anonymous `{ }` blocks (a synthetic "@source:pos"
+// key), FOR-iteration and macro/function call frames, and local labels - none of which a source path can
+// spell or scopes_get_symbol can reach. A top-level symbol's path reuses its owned key rc_str directly (no
+// copy); a nested symbol's path is built in `arena`. `scratch` backs the per-scope prefix while it is
+// assembled. The result is a read-only, position-independent snapshot (paths and values all live in `arena`),
+// so it outlives the scope tree.
+rc_view_symbol_entry scopes_flatten(const scopes *s, rc_arena *arena, rc_arena scratch);
 
 
 #endif // ifndef BARON_SCOPES_H_

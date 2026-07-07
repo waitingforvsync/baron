@@ -1939,13 +1939,12 @@ RC_TEST_GROUP_DATA(expression) {
 RC_TEST_GROUP_INIT(expression, fix)
 {
     fix->arena = rc_arena_make_default();
-    scopes_init(&fix->scopes);
+    scopes_init(&fix->scopes, &fix->arena);
     scopes_make_root(&fix->scopes);
 }
 
 RC_TEST_GROUP_DEINIT(expression, fix)
 {
-    scopes_deinit(&fix->scopes);
     rc_arena_deinit(&fix->arena);
 }
 

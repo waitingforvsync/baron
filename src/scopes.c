@@ -11,34 +11,34 @@ static bool is_leaf_name(rc_str name)
 }
 
 
-void scopes_init(scopes *s)
-{
-    RC_ASSERT(s != NULL);
-    s->node_arena   = rc_arena_make_default();
-    s->symbol_arena = rc_arena_make_default();
-    s->child_arena  = rc_arena_make_default();
-    s->value_arena  = rc_arena_make_default();
-    s->nodes        = rc_array_scope_node_make(0, &s->node_arena);
-    s->symbol_pool  = rc_trie_symbol_pool_make(0, &s->symbol_arena);
-    s->child_pool   = rc_trie_child_pool_make(0, &s->child_arena);
-}
+// Up-front reserves, sized for a big 6502 project. Named scopes are few; the count is dominated by
+// scopes with unspellable names - one per FOR iteration and per function / macro call frame - and every
+// scope allocates one symbol block AND one child block on creation, so all three track scope count.
+// Growth past these is safe (indices), just a copy.
+enum {
+    scopes_nodes_reserve         = 4096,
+    scopes_symbol_blocks_reserve = 4096,
+    scopes_child_blocks_reserve  = 4096,
+};
 
-void scopes_deinit(scopes *s)
+void scopes_init(scopes *s, rc_arena *permanent)
 {
-    RC_ASSERT(s != NULL);
-    rc_arena_deinit(&s->node_arena);
-    rc_arena_deinit(&s->symbol_arena);
-    rc_arena_deinit(&s->child_arena);
-    rc_arena_deinit(&s->value_arena);
+    RC_ASSERT(s != NULL && permanent != NULL);
+    s->arena       = permanent;   // borrowed; baron owns it
+    s->nodes       = rc_array_scope_node_make(scopes_nodes_reserve, s->arena);
+    s->symbol_pool = rc_trie_symbol_pool_make(scopes_symbol_blocks_reserve, s->arena);
+    s->child_pool  = rc_trie_child_pool_make(scopes_child_blocks_reserve, s->arena);
 }
 
 void scopes_reset(scopes *s)
 {
     RC_ASSERT(s != NULL);
-    // The tries squirrel pointers back into the pools, so we cannot cheaply truncate: tear the whole
-    // thing down and stand a fresh, empty tree back up (a bare root at index 0). Only runs on failure.
-    scopes_deinit(s);
-    scopes_init(s);
+    // Discard the half-built tree by standing up fresh, empty containers in the permanent arena (a bare
+    // root at index 0). The old nodes / pool blocks / values become holes - acceptable on this
+    // failure-only path. We do NOT reset the arena: it is shared (source text, diagnostics live there too).
+    s->nodes       = rc_array_scope_node_make(scopes_nodes_reserve, s->arena);
+    s->symbol_pool = rc_trie_symbol_pool_make(scopes_symbol_blocks_reserve, s->arena);
+    s->child_pool  = rc_trie_child_pool_make(scopes_child_blocks_reserve, s->arena);
     scopes_make_root(s);
 }
 
@@ -52,10 +52,10 @@ uint32_t scopes_make_root(scopes *s)
         (scope_node) {
             .name     = (rc_str) {0},
             .parent   = RC_INDEX_NONE,
-            .symbols  = rc_trie_symbol_make(&s->symbol_pool, &s->symbol_arena),
-            .children = rc_trie_child_make(&s->child_pool, &s->child_arena),
+            .symbols  = rc_trie_symbol_make(&s->symbol_pool, s->arena),
+            .children = rc_trie_child_make(&s->child_pool, s->arena),
         },
-        &s->node_arena);
+        s->arena);
 }
 
 uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
@@ -69,10 +69,10 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
         (scope_node) {
             .name     = name,
             .parent   = parent_index,
-            .symbols  = rc_trie_symbol_make(&s->symbol_pool, &s->symbol_arena),
-            .children = rc_trie_child_make(&s->child_pool, &s->child_arena),
+            .symbols  = rc_trie_symbol_make(&s->symbol_pool, s->arena),
+            .children = rc_trie_child_make(&s->child_pool, s->arena),
         },
-        &s->node_arena);
+        s->arena);
 
     // Reach the parent fresh after the push: it may have shuffled the nodes array
     // along. An anonymous child is reachable only by index, so we leave it off the
@@ -82,7 +82,7 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
             &RC_AT(s->nodes, parent_index).children,
             name,
             child_index,
-            &s->child_arena);
+            s->arena);
     }
     return child_index;
 }
@@ -98,9 +98,8 @@ uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
         return rc_trie_child_value_get(kids, found);
     }
 
-    // First sighting: own the key so the caller may hand us a scratch buffer. It goes in value_arena
-    // (not child_arena) to leave the child_pool the sole tenant of its arena, free to grow in place.
-    rc_str owned = rc_mstr_from_str(name, name.len, &s->value_arena).view;
+    // First sighting: own the key in the permanent arena so the caller may hand us a scratch buffer.
+    rc_str owned = rc_mstr_from_str(name, name.len, s->arena).view;
     return scopes_make_child(s, parent_index, owned);
 }
 
@@ -124,14 +123,14 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, va
         if (value_is_equal(existing.v, v)) {
             return symbol_status_unchanged;
         }
-        rc_trie_symbol_value_set(syms, found, (symbol){ value_make_copy(v, &s->value_arena), def });
+        rc_trie_symbol_value_set(syms, found, (symbol){ value_make_copy(v, s->arena), def });
         return symbol_status_changed;
     }
-    // First binding: own the key in value_arena too, so the caller may hand us a scratch view - a local
-    // label's synthetic '@source:pos' key has no backing in the source text. Only the add path copies (a
-    // later pass finds the key by content and reuses it), so this is one copy per symbol, not per pass.
-    rc_str owned = rc_mstr_from_str(name, name.len, &s->value_arena).view;
-    rc_trie_symbol_add(syms, owned, (symbol){ value_make_copy(v, &s->value_arena), def }, &s->symbol_arena);
+    // First binding: own the key in the permanent arena too, so the caller may hand us a scratch view - a
+    // local label's synthetic '@source:pos' key has no backing in the source text. Only the add path copies
+    // (a later pass finds the key by content and reuses it), so this is one copy per symbol, not per pass.
+    rc_str owned = rc_mstr_from_str(name, name.len, s->arena).view;
+    rc_trie_symbol_add(syms, owned, (symbol){ value_make_copy(v, s->arena), def }, s->arena);
     return symbol_status_unchanged;   // brand new, so there was nothing to converge from
 }
 
@@ -263,25 +262,114 @@ value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t so
 }
 
 
+// Scope `i`'s dotted prefix (root-to-leaf, each name followed by '.'), plus whether it can be spelled at all.
+// `spellable` is false if any scope on the path (i itself or an ancestor) is unspellable - its name begins
+// '@' (an anonymous block / call frame / iteration scope) - meaning its symbols cannot be reached by a source
+// path and the whole scope should be skipped. The root (empty name) contributes nothing, so a top-level scope
+// gets an empty prefix.
+typedef struct scope_prefix {
+    rc_str prefix;
+    bool   spellable;
+} scope_prefix;
+
+// Build that prefix by value, recursing to the parent first so the segments land in reading order. The
+// intermediate strings pile up in `scratch`.
+static scope_prefix build_scope_prefix(const scopes *s, uint32_t i, rc_arena *scratch)
+{
+    if (i == RC_INDEX_NONE) {
+        return (scope_prefix) {.prefix = RC_STR(""), .spellable = true};   // walked off the top of the root
+    }
+    scope_node   node   = rc_view_scope_node_get(s->nodes.view, i);
+    scope_prefix parent = build_scope_prefix(s, node.parent, scratch);
+    if (!parent.spellable) {
+        return parent;   // already doomed by an ancestor
+    }
+    if (node.name.len == 0) {
+        return parent;   // the root: no segment of its own
+    }
+    if (rc_str_starts_with(node.name, RC_STR("@"))) {
+        return (scope_prefix) {.prefix = RC_STR(""), .spellable = false};
+    }
+    rc_mstr m = rc_mstr_make(parent.prefix.len + node.name.len + 1, scratch);
+    rc_mstr_append(&m, parent.prefix, scratch);
+    rc_mstr_append(&m, node.name, scratch);
+    rc_mstr_append_char(&m, '.', scratch);
+    return (scope_prefix) {.prefix = m.view, .spellable = true};
+}
+
+// The accumulator for one scope's flatten pass: where entries go, the arena their paths grow in, and this
+// scope's already-built prefix ("" at the top level, "routine." one level in).
+typedef struct symbol_flatten {
+    rc_array_symbol_entry *out;
+    rc_arena              *arena;
+    rc_str                 prefix;
+} symbol_flatten;
+
+// One symbol of the current scope: skip the unspellable '@' local labels, otherwise record it under its full
+// path. A top-level name (empty prefix) is stored by reference to its owned key - no copy; a nested name is
+// prefixed into `arena` (the prefix already carries its trailing '.').
+static void flatten_symbol(symbol_flatten *c, rc_trie_symbol *t, uint32_t i)
+{
+    rc_str name = rc_trie_symbol_key_get(t, i);
+    if (rc_str_starts_with(name, RC_STR("@"))) {
+        return;   // a local label bound under an unspellable key
+    }
+    rc_str path = name;
+    if (c->prefix.len != 0) {
+        rc_mstr full = rc_mstr_make(c->prefix.len + name.len, c->arena);
+        rc_mstr_append(&full, c->prefix, c->arena);
+        rc_mstr_append(&full, name, c->arena);
+        path = full.view;
+    }
+    rc_array_symbol_entry_push(c->out,
+        (symbol_entry) {.path = path, .v = rc_trie_symbol_value_get(t, i).v}, c->arena);
+}
+
+#define RC_TRIE_FOREACH_TYPE          symbol
+#define RC_TRIE_FOREACH_CTX           symbol_flatten
+#define RC_TRIE_FOREACH_FUNC(c, t, i) flatten_symbol(c, t, i)
+#define RC_TRIE_FOREACH_NAME          rc_trie_foreach_symbol_flatten   // the local-label one already owns the default name
+#include "richc/template/algorithm/hash_trie_foreach.h"
+
+rc_view_symbol_entry scopes_flatten(const scopes *s, rc_arena *arena, rc_arena scratch)
+{
+    RC_ASSERT(s != NULL && arena != NULL);
+
+    rc_array_symbol_entry out = rc_array_symbol_entry_make(64, arena);
+    symbol_flatten        ctx = { .out = &out, .arena = arena };
+    for (uint32_t i = 0; i < s->nodes.num; i++) {
+        scope_prefix sp = build_scope_prefix(s, i, &scratch);
+        if (!sp.spellable) {
+            continue;   // an unspellable scope: none of its symbols are reachable by path
+        }
+        ctx.prefix = sp.prefix;
+        rc_trie_foreach_symbol_flatten(&RC_AT(s->nodes, i).symbols, &ctx);
+    }
+    return out.view;
+}
+
+
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
 
 // Each test gets a fresh scope tree with its root already made.
 RC_TEST_GROUP_DATA(scopes) {
+    rc_arena arena;
     scopes   scopes;
     uint32_t root;
 };
 
 RC_TEST_GROUP_INIT(scopes, fix)
 {
-    scopes_init(&fix->scopes);
+    fix->arena = rc_arena_make_default();
+    scopes_init(&fix->scopes, &fix->arena);
     fix->root = scopes_make_root(&fix->scopes);
 }
 
 RC_TEST_GROUP_DEINIT(scopes, fix)
 {
-    scopes_deinit(&fix->scopes);
+    rc_arena_deinit(&fix->arena);
 }
 
 RC_TEST_STEP(scopes, set_get_overwrite, fix)
@@ -427,6 +515,43 @@ RC_TEST_STEP(scopes, get_or_make_child_is_idempotent, fix)
     scopes_set_symbol(&fix->scopes, a, RC_STR("inner"), value_make_numeric(7), (cursor){0, 90});
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("blk.inner")),
                                  value_make_numeric(7)));
+}
+
+// The value the flattened table holds for `path`, or none if it is absent (a plain scan of the snapshot).
+static value flattened_lookup(rc_view_symbol_entry entries, rc_str path)
+{
+    for (uint32_t i = 0; i < entries.num; i++) {
+        symbol_entry e = rc_view_symbol_entry_get(entries, i);
+        if (rc_str_is_equal(e.path, path)) {
+            return e.v;
+        }
+    }
+    return value_make_none();
+}
+
+RC_TEST_STEP(scopes, flatten_snapshots_spellable_symbols, fix)
+{
+    // A top-level symbol, a symbol in a named child (reachable as "routine.core"), a symbol in a nameless
+    // anonymous scope (synthetic '@' key), and a local label ('@' symbol) at the top level.
+    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
+    uint32_t anon    = scopes_make_child(&fix->scopes, fix->root, RC_STR("@0:12"));
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),   value_make_numeric(1.0),  (cursor){0, 1});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"),  value_make_numeric(2.0),  (cursor){0, 2});
+    scopes_set_symbol(&fix->scopes, anon,      RC_STR("hidden"),value_make_numeric(3.0),  (cursor){0, 3});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("@0:20"), value_make_numeric(4.0),  (cursor){0, 4});   // a local label
+
+    rc_arena scratch = rc_arena_make_default();
+    rc_view_symbol_entry out = scopes_flatten(&fix->scopes, &fix->arena, scratch);
+
+    // Spellable bindings appear, by their full path...
+    RC_CHECK_TRUE(value_is_equal(flattened_lookup(out, RC_STR("top")),          value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(flattened_lookup(out, RC_STR("routine.core")), value_make_numeric(2.0)));
+    // ...and the unspellable ones (anonymous-scope symbol, top-level local label) do not.
+    RC_CHECK_TRUE(value_is_none(flattened_lookup(out, RC_STR("hidden"))));
+    RC_CHECK_TRUE(value_is_none(flattened_lookup(out, RC_STR("@0:20"))));
+    RC_CHECK(out.num, ==, 2u);   // exactly the two spellable symbols
+
+    rc_arena_deinit(&scratch);
 }
 
 #endif // BARON_TESTS

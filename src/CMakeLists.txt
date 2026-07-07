@@ -2,6 +2,7 @@ add_executable(baron
     main.c
     value.c
     value.h
+    symbols.h
     error.c
     error.h
     lexeme.h
