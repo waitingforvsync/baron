@@ -3,7 +3,7 @@
 
 #include "value.h"
 #include "cursor.h"
-#include "symbols.h"   // symbol_entry, rc_array_symbol_entry (scopes_flatten's output)
+#include "symbols.h"   // symbol_entry, rc_array_symbol_entry (scopes_view_flatten's output)
 #include "richc/hash.h"
 
 
@@ -80,6 +80,20 @@ typedef struct scopes {
     rc_trie_child_pool  child_pool;   // shared by every node's `children` trie
 } scopes;
 
+// A read-only projection of a finished `scopes`: the scope-node array as a view, plus the two shared trie
+// pools BY VALUE. Now that a trie is a position-independent value (it holds no pointer into its pool - the
+// pool is passed to every op), these three read-only handles are all a lookup or a flatten needs, so a
+// scopes_view is a cheap, trivially-copyable snapshot. Its backing lives in the permanent arena, so the
+// view outlives the `scopes` STRUCT it was projected from (and the internal `baron` that owned it) - it is
+// valid as long as that arena is. The pools are held by value, not as an rc_view, because richc pools have
+// no view type and a pool is itself just a trivially-copyable read-only handle over arena memory (exactly
+// the property the value-trie redesign gave us); the read-only trie ops already take a `const POOL *`.
+typedef struct scopes_view {
+    rc_view_scope_node  nodes;        // scope index 0 is the root
+    rc_trie_symbol_pool symbol_pool;  // read-only: backs every node's `symbols` trie
+    rc_trie_child_pool  child_pool;   // read-only: backs every node's `children` trie
+} scopes_view;
+
 // Set-up. `permanent` is baron's permanent arena (not owned here). In-place, because once the container
 // holds scopes it must not budge (the tries point back into its pools).
 void scopes_init(scopes *s, rc_arena *permanent);
@@ -140,15 +154,25 @@ value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
 // unknown-symbol error value when none qualifies (so an unresolved @- / @+ defers like any forward reference).
 value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t source, uint32_t use_pos, bool forward);
 
+// Project a finished `scopes` into a read-only view (see scopes_view above). Cheap - it copies the nodes
+// view and the two pool handles; the arena-backed backing is shared, not duplicated.
+scopes_view scopes_view_make(const scopes *s);
+
+// Look a full dotted path up in the view, from the top level (root). A bare name ("top") is found in the
+// root scope; a dotted path ("routine.core") descends the child maps and reads the leaf scope's symbol map.
+// Hands back value_make_none() if nothing matches. (This is the result-facing lookup; the internal
+// scopes_get_symbol adds a starting scope + parent walk for use during assembly.)
+value scopes_view_get_symbol(scopes_view v, rc_str full_path);
+
 // Flatten every spellable resolved binding into a fresh array (backed by `arena`) and hand back its view,
 // each entry keyed by its full dotted path from the top level ("routine.core"). Unspellable internals are
 // skipped: any scope or symbol whose name begins with '@' - anonymous `{ }` blocks (a synthetic "@source:pos"
 // key), FOR-iteration and macro/function call frames, and local labels - none of which a source path can
-// spell or scopes_get_symbol can reach. A top-level symbol's path reuses its owned key rc_str directly (no
+// spell or scopes_view_get_symbol can reach. A top-level symbol's path reuses its owned key rc_str directly (no
 // copy); a nested symbol's path is built in `arena`. `scratch` backs the per-scope prefix while it is
 // assembled. The result is a read-only, position-independent snapshot (paths and values all live in `arena`),
-// so it outlives the scope tree.
-rc_view_symbol_entry scopes_flatten(const scopes *s, rc_arena *arena, rc_arena scratch);
+// so it outlives the view.
+rc_view_symbol_entry scopes_view_flatten(scopes_view v, rc_arena *arena, rc_arena scratch);
 
 
 #endif // ifndef BARON_SCOPES_H_

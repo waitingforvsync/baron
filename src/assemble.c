@@ -1621,29 +1621,33 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
     return assemble_failed(b);
 }
 
-// Turn a finished baron into the read-only snapshot the caller keeps. The object code lives in the per_pass
-// arena (the final pass's overlay), diagnostics in permanent; the symbol table is flattened out of the live
-// scope tree into permanent HERE, while that tree is still standing (it dies with `b` the moment we return).
-static baron_result baron_result_make(baron *b, baron_arenas *a, uint32_t passes)
+// Turn a finished baron into the read-only snapshot the caller keeps. The overlay list (each overlay's pc +
+// object code) lives in the per_pass arena from the final pass; diagnostics in permanent. The scope tree's
+// backing (nodes + trie pools) is in permanent too. Both are handed back as cheap views/projections that
+// outlive `b` (which dies the moment we return) - nothing is flattened up front; the caller queries on demand.
+static baron_result baron_result_make(baron *b, uint32_t passes)
 {
     return (baron_result) {
         .passes      = passes,
-        .code        = overlays_code(&b->overlays, overlays_default),
+        .overlays    = overlays_all(&b->overlays),
         .diagnostics = b->diagnostics.view,
-        .symbols     = scopes_flatten(&b->scopes, &a->permanent, a->scratch),
+        .scopes      = scopes_view_make(&b->scopes),
     };
+}
+
+rc_view_bytes baron_result_code(const baron_result *r)
+{
+    RC_ASSERT(r != NULL);
+    if (r->overlays.num == 0) {
+        return (rc_view_bytes) {0};
+    }
+    return rc_view_overlay_get(r->overlays, overlays_default).code.view;
 }
 
 value baron_result_symbol(const baron_result *r, rc_str path)
 {
     RC_ASSERT(r != NULL);
-    for (uint32_t i = 0; i < r->symbols.num; i++) {
-        symbol_entry e = rc_view_symbol_entry_get(r->symbols, i);
-        if (rc_str_is_equal(e.path, path)) {
-            return e.v;
-        }
-    }
-    return value_make_none();
+    return scopes_view_get_symbol(r->scopes, path);
 }
 
 baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
@@ -1652,7 +1656,7 @@ baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
     baron b;
     baron_init(&b, arenas);   // a fresh machine borrowing the caller's arenas
     uint32_t source = source_files_add_string(&b.source_files, name, text);
-    return baron_result_make(&b, arenas, run_passes(&b, source, arenas->scratch));
+    return baron_result_make(&b, run_passes(&b, source, arenas->scratch));
 }
 
 baron_result assemble_file(baron_arenas *arenas, rc_str path)
@@ -1663,9 +1667,9 @@ baron_result assemble_file(baron_arenas *arenas, rc_str path)
     uint32_t source = source_files_add_file(&b.source_files, path);
     if (source == RC_INDEX_NONE) {
         baron_error(&b, error_type_source_load, (cursor) {0});
-        return baron_result_make(&b, arenas, assemble_failed(&b));   // assemble_failed clears outputs and returns 0
+        return baron_result_make(&b, assemble_failed(&b));   // assemble_failed clears outputs and returns 0
     }
-    return baron_result_make(&b, arenas, run_passes(&b, source, arenas->scratch));
+    return baron_result_make(&b, run_passes(&b, source, arenas->scratch));
 }
 
 
@@ -1700,11 +1704,12 @@ RC_TEST_GROUP_DEINIT(assemble, fix)
 // call can wrap ASM directly - code_is(&fix->r, ASM(src), exp, n) - reading the freshly stashed result.
 static bool code_is(const baron_result *r, uint32_t passes, const uint8_t *exp, uint32_t n)
 {
-    if (passes == 0 || r->code.num != n) {
+    rc_view_bytes code = baron_result_code(r);
+    if (passes == 0 || code.num != n) {
         return false;
     }
     for (uint32_t i = 0; i < n; i++) {
-        if (rc_view_bytes_get(r->code, i) != exp[i]) {
+        if (rc_view_bytes_get(code, i) != exp[i]) {
             return false;
         }
     }
@@ -1781,7 +1786,7 @@ RC_TEST_STEP(assemble, branch_to_shadowed_forward_label, fix)
     // time the layout settles the near inner label is bound and the branch is in range (offset 0).
     uint32_t passes = ASM(".label { SKIP 256 : BEQ label : .label }");
     RC_CHECK_TRUE(passes != 0);
-    rc_view_bytes code = fix->r.code;
+    rc_view_bytes code = baron_result_code(&fix->r);
     RC_CHECK(code.num, ==, 258u);                                  // 256 skipped + BEQ (2 bytes)
     RC_CHECK((uint32_t)rc_view_bytes_get(code, 256), ==, 0xF0u);   // BEQ opcode
     RC_CHECK((uint32_t)rc_view_bytes_get(code, 257), ==, 0x00u);   // resolves near: branch to the next byte
@@ -1913,6 +1918,47 @@ RC_TEST_STEP(assemble, named_scope_dotted_access, fix)
                                  value_make_numeric(0x2000)));
 }
 
+RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
+{
+    // A result carries a read-only scopes_view; scopes_view_flatten harvests the whole spellable table on
+    // demand, keyed by full dotted path (into a caller arena). The `.routine` label binds a top-level
+    // `routine` AND names the child scope, so the spellable table is exactly x, routine, routine.core (all
+    // at &2000); the anonymous machinery stays hidden.
+    RC_CHECK_TRUE(ASM("ORG &2000 : .routine { .core LDA #0 } : x = routine.core") != 0);
+
+    rc_arena out_arena = rc_arena_make_default();
+    rc_arena scratch   = rc_arena_make_default();
+    rc_view_symbol_entry syms = scopes_view_flatten(fix->r.scopes, &out_arena, scratch);
+
+    RC_CHECK(syms.num, ==, 3u);   // exactly x, routine, routine.core
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < syms.num; i++) {
+        symbol_entry e = rc_view_symbol_entry_get(syms, i);
+        bool known = rc_str_is_equal(e.path, RC_STR("x"))
+                  || rc_str_is_equal(e.path, RC_STR("routine"))
+                  || rc_str_is_equal(e.path, RC_STR("routine.core"));
+        RC_CHECK_TRUE(known);                                             // no stray / unspellable paths
+        RC_CHECK_TRUE(value_is_equal(e.v, value_make_numeric(0x2000)));   // every one resolves to &2000
+        seen++;
+    }
+    RC_CHECK(seen, ==, 3u);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&out_arena);
+}
+
+RC_TEST_STEP(assemble, result_exposes_overlays, fix)
+{
+    // The result carries the whole overlay list, not just the default's bytes. Today that is exactly one
+    // overlay (index 0): its code matches baron_result_code and its pc advanced past the emitted bytes.
+    RC_CHECK_TRUE(ASM("ORG &2000 : LDA #&12 : LDX #&34") != 0);   // 4 bytes at &2000
+    RC_CHECK(fix->r.overlays.num, ==, 1u);
+    overlay o = rc_view_overlay_get(fix->r.overlays, 0);
+    RC_CHECK(o.code.view.num, ==, 4u);
+    RC_CHECK(o.pc, ==, 0x2004u);                                  // &2000 + 4 emitted bytes
+    RC_CHECK(baron_result_code(&fix->r).num, ==, o.code.view.num);   // the convenience matches overlay 0
+}
+
 RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)
 {
     // The naming brace may sit on the next line (or after a ':').
@@ -1987,10 +2033,10 @@ RC_TEST_STEP(assemble, if_does_not_introduce_scope, fix)
 RC_TEST_STEP(assemble, if_wraps_scope_and_nests, fix)
 {
     RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 1 : { LDA #5 } : ENDIF"), (uint8_t[]){0xA9, 0x05}, 2));
-    RC_CHECK(((void)ASM("IF 0 : { LDA #5 } : ENDIF"), fix->r.code.num), ==, 0u);
+    RC_CHECK(((void)ASM("IF 0 : { LDA #5 } : ENDIF"), baron_result_code(&fix->r).num), ==, 0u);
     RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 1 : IF 1 : LDA #7 : ENDIF : ENDIF"), (uint8_t[]){0xA9, 0x07}, 2));
-    RC_CHECK(((void)ASM("IF 1 : IF 0 : LDA #7 : ENDIF : ENDIF"), fix->r.code.num), ==, 0u);
-    RC_CHECK(((void)ASM("IF 0 : IF 1 : LDA #7 : ENDIF : ENDIF"), fix->r.code.num), ==, 0u);   // outer dead -> inner dead
+    RC_CHECK(((void)ASM("IF 1 : IF 0 : LDA #7 : ENDIF : ENDIF"), baron_result_code(&fix->r).num), ==, 0u);
+    RC_CHECK(((void)ASM("IF 0 : IF 1 : LDA #7 : ENDIF : ENDIF"), baron_result_code(&fix->r).num), ==, 0u);   // outer dead -> inner dead
 }
 
 RC_TEST_STEP(assemble, if_dead_branch_suppresses_value_errors_but_not_syntax, fix)
@@ -2298,7 +2344,7 @@ RC_TEST_STEP(assemble, failure_clears_outputs, fix)
 {
     // A failed assemble hands back no object code and no symbols - only the diagnostics remain.
     RC_CHECK_TRUE(ASM("ORG &2000 : .lbl LDA #0 : TAX #5") == 0);   // TAX #5 has no encoding
-    RC_CHECK(fix->r.code.num, ==, 0u);
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 0u);
     RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("lbl"))));
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_bad_addressing_mode));
 }
@@ -2357,14 +2403,14 @@ RC_TEST_STEP(assemble, random, fix)
     // The definitive reset test: the same source assembles to the same bytes twice. Without the per-pass
     // reseed the second run's stream would continue from where the first left off and diverge.
     uint32_t p1 = ASM("EQUB RND(full(3, 200))");
-    rc_view_bytes first = fix->r.code;
+    rc_view_bytes first = baron_result_code(&fix->r);
     RC_CHECK_TRUE(p1 != 0 && first.num == 3);
     uint8_t saved[3];
     for (uint32_t i = 0; i < 3; i++) {
         saved[i] = rc_view_bytes_get(first, i);
     }
     uint32_t p2 = ASM("EQUB RND(full(3, 200))");
-    rc_view_bytes second = fix->r.code;
+    rc_view_bytes second = baron_result_code(&fix->r);
     RC_CHECK_TRUE(p2 != 0 && second.num == 3);
     for (uint32_t i = 0; i < 3; i++) {
         RC_CHECK(rc_view_bytes_get(second, i), ==, saved[i]);
@@ -2372,7 +2418,7 @@ RC_TEST_STEP(assemble, random, fix)
 
     // A larger draw list converges and stays in-range; RND(0) has no range and is a domain error.
     uint32_t p8 = ASM("EQUB RND(full(8, 256))");
-    RC_CHECK_TRUE(p8 != 0 && fix->r.code.num == 8);
+    RC_CHECK_TRUE(p8 != 0 && baron_result_code(&fix->r).num == 8);
     RC_CHECK_TRUE(((void)ASM("EQUB RND(0)"), has_diag(&fix->r, error_type_domain)));
 }
 
@@ -2747,7 +2793,7 @@ RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
 
     uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("stress"), src.view)).passes;
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK(fix->r.code.num, ==, 2000u);   // 2000 bytes from the loop; the labels emit nothing
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 2000u);   // 2000 bytes from the loop; the labels emit nothing
     // A symbol bound last, after every relocation, is still correct...
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("last")), value_make_numeric(0xBEEF)));
     // ...as is a label from the middle of the run (they all resolve to the post-loop pc).

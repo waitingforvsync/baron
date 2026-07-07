@@ -10,7 +10,6 @@ static bool is_leaf_name(rc_str name)
     return rc_str_find_first(name, RC_STR(".")) == RC_INDEX_NONE;
 }
 
-
 // Up-front reserves, sized for a big 6502 project. Named scopes are few; the count is dominated by
 // scopes with unspellable names - one per FOR iteration and per function / macro call frame - and every
 // scope allocates one symbol block AND one child block on creation, so all three track scope count.
@@ -47,13 +46,13 @@ uint32_t scopes_make_root(scopes *s)
     RC_ASSERT(s != NULL);
     RC_ASSERT(rc_array_scope_node_is_empty(&s->nodes));   // the root is the first node
 
+    // A node's tries start empty (zero-init: root == 0 means "no root block yet"); the first symbol / child
+    // added to a scope lazily allocates its root block in the shared pool. No construction ceremony needed.
     return rc_array_scope_node_push(
         &s->nodes,
         (scope_node) {
-            .name     = (rc_str) {0},
-            .parent   = RC_INDEX_NONE,
-            .symbols  = rc_trie_symbol_make(&s->symbol_pool, s->arena),
-            .children = rc_trie_child_make(&s->child_pool, s->arena),
+            .name   = (rc_str) {0},
+            .parent = RC_INDEX_NONE,
         },
         s->arena);
 }
@@ -67,10 +66,8 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
     uint32_t child_index = rc_array_scope_node_push(
         &s->nodes,
         (scope_node) {
-            .name     = name,
-            .parent   = parent_index,
-            .symbols  = rc_trie_symbol_make(&s->symbol_pool, s->arena),
-            .children = rc_trie_child_make(&s->child_pool, s->arena),
+            .name   = name,
+            .parent = parent_index,
         },
         s->arena);
 
@@ -80,6 +77,7 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
     if (name.len > 0) {
         rc_trie_child_add(
             &RC_AT(s->nodes, parent_index).children,
+            &s->child_pool,
             name,
             child_index,
             s->arena);
@@ -92,10 +90,10 @@ uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
     RC_ASSERT(s != NULL);
     RC_ASSERT(name.len > 0);
 
-    rc_trie_child *kids  = &RC_AT(s->nodes, parent_index).children;
-    uint32_t       found = rc_trie_child_find(kids, name);   // probe with the caller's (maybe scratch) view
+    rc_trie_child kids  = RC_AT(s->nodes, parent_index).children;
+    uint32_t      found = rc_trie_child_find(kids, &s->child_pool, name);   // probe with the caller's (maybe scratch) view
     if (found != RC_INDEX_NONE) {
-        return rc_trie_child_value_get(kids, found);
+        return rc_trie_child_value_get(&s->child_pool, found);
     }
 
     // First sighting: own the key in the permanent arena so the caller may hand us a scratch buffer.
@@ -109,9 +107,9 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, va
     RC_ASSERT(is_leaf_name(name));
 
     rc_trie_symbol *syms  = &RC_AT(s->nodes, scope_index).symbols;
-    uint32_t        found = rc_trie_symbol_find(syms, name);
+    uint32_t        found = rc_trie_symbol_find(*syms, &s->symbol_pool, name);
     if (found != RC_INDEX_NONE) {
-        symbol existing = rc_trie_symbol_value_get(syms, found);
+        symbol existing = rc_trie_symbol_value_get(&s->symbol_pool, found);
         // A different definition reaching the same name in the same scope is a duplicate -
         // immutable source means a name is bound exactly once. Leave the binding untouched.
         if (!cursor_is_equal(existing.def, def)) {
@@ -123,14 +121,14 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, va
         if (value_is_equal(existing.v, v)) {
             return symbol_status_unchanged;
         }
-        rc_trie_symbol_value_set(syms, found, (symbol){ value_make_copy(v, s->arena), def });
+        rc_trie_symbol_value_set(&s->symbol_pool, found, (symbol){ value_make_copy(v, s->arena), def });
         return symbol_status_changed;
     }
     // First binding: own the key in the permanent arena too, so the caller may hand us a scratch view - a
     // local label's synthetic '@source:pos' key has no backing in the source text. Only the add path copies
     // (a later pass finds the key by content and reuses it), so this is one copy per symbol, not per pass.
     rc_str owned = rc_mstr_from_str(name, name.len, s->arena).view;
-    rc_trie_symbol_add(syms, owned, (symbol){ value_make_copy(v, s->arena), def }, s->arena);
+    rc_trie_symbol_add(syms, &s->symbol_pool, owned, (symbol){ value_make_copy(v, s->arena), def }, s->arena);
     return symbol_status_unchanged;   // brand new, so there was nothing to converge from
 }
 
@@ -138,34 +136,46 @@ bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name)
 {
     RC_ASSERT(s != NULL);
     RC_ASSERT(is_leaf_name(name));
-    return rc_trie_symbol_delete(&RC_AT(s->nodes, scope_index).symbols, name);
+    return rc_trie_symbol_delete(RC_AT(s->nodes, scope_index).symbols, &s->symbol_pool, name);
 }
 
 cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
 {
     RC_ASSERT(s != NULL && is_leaf_name(name));
 
-    rc_trie_symbol *syms  = &RC_AT(s->nodes, scope_index).symbols;
-    uint32_t        found = rc_trie_symbol_find(syms, name);
+    rc_trie_symbol syms  = RC_AT(s->nodes, scope_index).symbols;
+    uint32_t       found = rc_trie_symbol_find(syms, &s->symbol_pool, name);
     return found == RC_INDEX_NONE
                ? cursor_none()
-               : rc_trie_symbol_value_get(syms, found).def;
+               : rc_trie_symbol_value_get(&s->symbol_pool, found).def;
 }
 
-value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
+scopes_view scopes_view_make(const scopes *s)
 {
     RC_ASSERT(s != NULL);
+    return (scopes_view) {
+        .nodes       = s->nodes.view,
+        .symbol_pool = s->symbol_pool,
+        .child_pool  = s->child_pool,
+    };
+}
 
+// The shared lookup core, over a read-only view. From scope_index: a bare name walks up the parent chain
+// (nearest enclosing definition wins); a dotted path finds its head the same way, then descends the rest
+// strictly through the child maps and reads the final name in the leaf scope alone. value_make_none() if
+// nothing matches.
+static value view_get_from(scopes_view v, uint32_t scope_index, rc_str full_path)
+{
     rc_str      dot   = RC_STR(".");
     rc_str_pair split = rc_str_first_split(full_path, dot);
 
     // Bare name: walk up the parent chain, and the nearest enclosing definition wins.
     if (!rc_str_is_valid(split.second)) {
-        for (uint32_t i = scope_index; i != RC_INDEX_NONE; i = RC_AT(s->nodes, i).parent) {
-            rc_trie_symbol *syms  = &RC_AT(s->nodes, i).symbols;
-            uint32_t        found = rc_trie_symbol_find(syms, full_path);
+        for (uint32_t i = scope_index; i != RC_INDEX_NONE; i = rc_view_scope_node_get(v.nodes, i).parent) {
+            rc_trie_symbol syms  = rc_view_scope_node_get(v.nodes, i).symbols;
+            uint32_t       found = rc_trie_symbol_find(syms, &v.symbol_pool, full_path);
             if (found != RC_INDEX_NONE) {
-                return rc_trie_symbol_value_get(syms, found).v;
+                return rc_trie_symbol_value_get(&v.symbol_pool, found).v;
             }
         }
         return value_make_none();
@@ -175,11 +185,11 @@ value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
     // the rest strictly through the child maps.
     uint32_t cur  = RC_INDEX_NONE;
     rc_str   head = split.first;
-    for (uint32_t i = scope_index; i != RC_INDEX_NONE; i = RC_AT(s->nodes, i).parent) {
-        rc_trie_child *kids  = &RC_AT(s->nodes, i).children;
-        uint32_t       found = rc_trie_child_find(kids, head);
+    for (uint32_t i = scope_index; i != RC_INDEX_NONE; i = rc_view_scope_node_get(v.nodes, i).parent) {
+        rc_trie_child kids  = rc_view_scope_node_get(v.nodes, i).children;
+        uint32_t      found = rc_trie_child_find(kids, &v.child_pool, head);
         if (found != RC_INDEX_NONE) {
-            cur = rc_trie_child_value_get(kids, found);
+            cur = rc_trie_child_value_get(&v.child_pool, found);
             break;
         }
     }
@@ -192,19 +202,32 @@ value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
         split = rc_str_first_split(rest, dot);
         if (!rc_str_is_valid(split.second)) {
             // Last component: the symbol name, looked up in the leaf scope alone.
-            rc_trie_symbol *syms  = &RC_AT(s->nodes, cur).symbols;
-            uint32_t        found = rc_trie_symbol_find(syms, rest);
-            return found == RC_INDEX_NONE ? value_make_none() : rc_trie_symbol_value_get(syms, found).v;
+            rc_trie_symbol syms  = rc_view_scope_node_get(v.nodes, cur).symbols;
+            uint32_t       found = rc_trie_symbol_find(syms, &v.symbol_pool, rest);
+            return found == RC_INDEX_NONE ? value_make_none() : rc_trie_symbol_value_get(&v.symbol_pool, found).v;
         }
         // Intermediate component: step down into the named child scope.
-        rc_trie_child *kids  = &RC_AT(s->nodes, cur).children;
-        uint32_t       found = rc_trie_child_find(kids, split.first);
+        rc_trie_child kids  = rc_view_scope_node_get(v.nodes, cur).children;
+        uint32_t      found = rc_trie_child_find(kids, &v.child_pool, split.first);
         if (found == RC_INDEX_NONE) {
             return value_make_none();
         }
-        cur  = rc_trie_child_value_get(kids, found);
+        cur  = rc_trie_child_value_get(&v.child_pool, found);
         rest = split.second;
     }
+}
+
+// Look a symbol up during assembly, starting from scope_index (with parent-walk shadowing).
+value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
+{
+    RC_ASSERT(s != NULL);
+    return view_get_from(scopes_view_make(s), scope_index, full_path);
+}
+
+// Result-facing lookup: a full dotted path from the top level (root == scope index 0).
+value scopes_view_get_symbol(scopes_view v, rc_str full_path)
+{
+    return view_get_from(v, 0, full_path);
 }
 
 
@@ -221,13 +244,13 @@ typedef struct local_label_search {
 // One trie entry: keep it only if it is a local label ('@'-prefixed key) defined in the same source, then
 // let it displace the current best when it is nearer to the reference on the correct side. We compare by the
 // DEFINITION position (sym.def.pos), never by the value, so an ORG between two labels cannot reorder them.
-static void local_label_visit(local_label_search *search, rc_trie_symbol *t, uint32_t index)
+static void local_label_visit(local_label_search *search, const rc_trie_symbol_pool *pool, uint32_t index)
 {
-    rc_str key = rc_trie_symbol_key_get(t, index);
+    rc_str key = rc_trie_symbol_key_get(pool, index);
     if (!rc_str_starts_with(key, RC_STR("@"))) {
         return;   // an ordinary named symbol, not a local label
     }
-    symbol sym = rc_trie_symbol_value_get(t, index);
+    symbol sym = rc_trie_symbol_value_get(pool, index);
     if (sym.def.source != search->source) {
         return;   // defined in a different source: positions are not comparable
     }
@@ -242,10 +265,11 @@ static void local_label_visit(local_label_search *search, rc_trie_symbol *t, uin
     }
 }
 
-#define RC_TRIE_FOREACH_TYPE          symbol
+#define RC_TRIE_FOREACH_TRIE          rc_trie_symbol
 #define RC_TRIE_FOREACH_CTX           local_label_search
-#define RC_TRIE_FOREACH_FUNC(c, t, i) local_label_visit(c, t, i)
-#include "richc/template/algorithm/hash_trie_foreach.h"   // rc_trie_foreach_symbol
+#define RC_TRIE_FOREACH_CONST                              // read-only scan (const scopes)
+#define RC_TRIE_FOREACH_FUNC(c, p, i) local_label_visit(c, p, i)
+#include "richc/template/algorithm/hash_trie_foreach.h"   // rc_trie_symbol_foreach
 
 value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t source, uint32_t use_pos, bool forward)
 {
@@ -255,7 +279,7 @@ value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t so
         .use_pos = use_pos,
         .forward = forward,
     };
-    rc_trie_foreach_symbol(&RC_AT(s->nodes, scope_index).symbols, &search);
+    rc_trie_symbol_foreach(RC_AT(s->nodes, scope_index).symbols, &s->symbol_pool, &search);
     // No candidate: report it as an unknown symbol, so an unresolved @- / @+ defers like any forward
     // reference (and becomes undefined_symbol on the final pass if it never binds).
     return search.found ? search.result : value_make_error(error_type_unknown_symbol);
@@ -274,13 +298,13 @@ typedef struct scope_prefix {
 
 // Build that prefix by value, recursing to the parent first so the segments land in reading order. The
 // intermediate strings pile up in `scratch`.
-static scope_prefix build_scope_prefix(const scopes *s, uint32_t i, rc_arena *scratch)
+static scope_prefix build_scope_prefix(rc_view_scope_node nodes, uint32_t i, rc_arena *scratch)
 {
     if (i == RC_INDEX_NONE) {
         return (scope_prefix) {.prefix = RC_STR(""), .spellable = true};   // walked off the top of the root
     }
-    scope_node   node   = rc_view_scope_node_get(s->nodes.view, i);
-    scope_prefix parent = build_scope_prefix(s, node.parent, scratch);
+    scope_node   node   = rc_view_scope_node_get(nodes, i);
+    scope_prefix parent = build_scope_prefix(nodes, node.parent, scratch);
     if (!parent.spellable) {
         return parent;   // already doomed by an ancestor
     }
@@ -308,9 +332,9 @@ typedef struct symbol_flatten {
 // One symbol of the current scope: skip the unspellable '@' local labels, otherwise record it under its full
 // path. A top-level name (empty prefix) is stored by reference to its owned key - no copy; a nested name is
 // prefixed into `arena` (the prefix already carries its trailing '.').
-static void flatten_symbol(symbol_flatten *c, rc_trie_symbol *t, uint32_t i)
+static void flatten_symbol(symbol_flatten *c, const rc_trie_symbol_pool *pool, uint32_t i)
 {
-    rc_str name = rc_trie_symbol_key_get(t, i);
+    rc_str name = rc_trie_symbol_key_get(pool, i);
     if (rc_str_starts_with(name, RC_STR("@"))) {
         return;   // a local label bound under an unspellable key
     }
@@ -322,28 +346,29 @@ static void flatten_symbol(symbol_flatten *c, rc_trie_symbol *t, uint32_t i)
         path = full.view;
     }
     rc_array_symbol_entry_push(c->out,
-        (symbol_entry) {.path = path, .v = rc_trie_symbol_value_get(t, i).v}, c->arena);
+        (symbol_entry) {.path = path, .v = rc_trie_symbol_value_get(pool, i).v}, c->arena);
 }
 
-#define RC_TRIE_FOREACH_TYPE          symbol
+#define RC_TRIE_FOREACH_TRIE          rc_trie_symbol
 #define RC_TRIE_FOREACH_CTX           symbol_flatten
-#define RC_TRIE_FOREACH_FUNC(c, t, i) flatten_symbol(c, t, i)
-#define RC_TRIE_FOREACH_NAME          rc_trie_foreach_symbol_flatten   // the local-label one already owns the default name
+#define RC_TRIE_FOREACH_CONST                              // read-only scan (const pool)
+#define RC_TRIE_FOREACH_FUNC(c, p, i) flatten_symbol(c, p, i)
+#define RC_TRIE_FOREACH_NAME          rc_trie_symbol_foreach_flatten   // the local-label one already owns the default name
 #include "richc/template/algorithm/hash_trie_foreach.h"
 
-rc_view_symbol_entry scopes_flatten(const scopes *s, rc_arena *arena, rc_arena scratch)
+rc_view_symbol_entry scopes_view_flatten(scopes_view v, rc_arena *arena, rc_arena scratch)
 {
-    RC_ASSERT(s != NULL && arena != NULL);
+    RC_ASSERT(arena != NULL);
 
     rc_array_symbol_entry out = rc_array_symbol_entry_make(64, arena);
     symbol_flatten        ctx = { .out = &out, .arena = arena };
-    for (uint32_t i = 0; i < s->nodes.num; i++) {
-        scope_prefix sp = build_scope_prefix(s, i, &scratch);
+    for (uint32_t i = 0; i < v.nodes.num; i++) {
+        scope_prefix sp = build_scope_prefix(v.nodes, i, &scratch);
         if (!sp.spellable) {
             continue;   // an unspellable scope: none of its symbols are reachable by path
         }
         ctx.prefix = sp.prefix;
-        rc_trie_foreach_symbol_flatten(&RC_AT(s->nodes, i).symbols, &ctx);
+        rc_trie_symbol_foreach_flatten(rc_view_scope_node_get(v.nodes, i).symbols, &v.symbol_pool, &ctx);
     }
     return out.view;
 }
@@ -499,6 +524,23 @@ RC_TEST_STEP(scopes, set_symbol_clones_into_permanent, fix)
     rc_arena_deinit(&scratch);
 }
 
+RC_TEST_STEP(scopes, copy_by_value_still_resolves, fix)
+{
+    // The payoff of the value-trie redesign: no node holds a pointer into the scopes struct any more (a trie
+    // is now just an index into a shared pool), so a fully-built scopes copied BY VALUE resolves symbols
+    // identically to the original - the copy's tries index the same pool blocks. This is what makes a
+    // scopes (hence baron) safe to hand around / return by value once it is done being built.
+    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),  value_make_numeric(11.0), (cursor){0, 1});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"), value_make_numeric(22.0), (cursor){0, 2});
+
+    scopes copy = fix->scopes;   // a bitwise copy: just the nodes array header + two pool headers, all indices
+
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&copy, fix->root, RC_STR("top")),          value_make_numeric(11.0)));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&copy, fix->root, RC_STR("routine.core")), value_make_numeric(22.0)));
+    RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&copy, fix->root, RC_STR("ghost"))));
+}
+
 RC_TEST_STEP(scopes, get_or_make_child_is_idempotent, fix)
 {
     // Re-walking the same source lands on the same scope, for a real name and for a synthetic
@@ -541,7 +583,7 @@ RC_TEST_STEP(scopes, flatten_snapshots_spellable_symbols, fix)
     scopes_set_symbol(&fix->scopes, fix->root, RC_STR("@0:20"), value_make_numeric(4.0),  (cursor){0, 4});   // a local label
 
     rc_arena scratch = rc_arena_make_default();
-    rc_view_symbol_entry out = scopes_flatten(&fix->scopes, &fix->arena, scratch);
+    rc_view_symbol_entry out = scopes_view_flatten(scopes_view_make(&fix->scopes), &fix->arena, scratch);
 
     // Spellable bindings appear, by their full path...
     RC_CHECK_TRUE(value_is_equal(flattened_lookup(out, RC_STR("top")),          value_make_numeric(1.0)));
@@ -552,6 +594,22 @@ RC_TEST_STEP(scopes, flatten_snapshots_spellable_symbols, fix)
     RC_CHECK(out.num, ==, 2u);   // exactly the two spellable symbols
 
     rc_arena_deinit(&scratch);
+}
+
+RC_TEST_STEP(scopes, view_get_symbol_from_root, fix)
+{
+    // scopes_view_get_symbol resolves a full path from the top level (root), off a projected read-only view:
+    // a bare top-level name, a dotted path into a named child, and a miss all behave like scopes_get_symbol
+    // from the root - proving the view carries everything a lookup needs (nodes + both pools).
+    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),  value_make_numeric(10.0), (cursor){0, 1});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"), value_make_numeric(20.0), (cursor){0, 2});
+
+    scopes_view v = scopes_view_make(&fix->scopes);
+    RC_CHECK_TRUE(value_is_equal(scopes_view_get_symbol(v, RC_STR("top")),          value_make_numeric(10.0)));
+    RC_CHECK_TRUE(value_is_equal(scopes_view_get_symbol(v, RC_STR("routine.core")), value_make_numeric(20.0)));
+    RC_CHECK_TRUE(value_is_none(scopes_view_get_symbol(v, RC_STR("routine.missing"))));
+    RC_CHECK_TRUE(value_is_none(scopes_view_get_symbol(v, RC_STR("nope"))));
 }
 
 #endif // BARON_TESTS

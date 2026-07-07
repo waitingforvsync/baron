@@ -3,7 +3,9 @@
 
 #include "richc/bytes.h"   // rc_view_bytes, rc_str
 #include "richc/arena.h"   // rc_arena
-#include "symbols.h"       // symbol_entry, rc_view_symbol_entry (brings value.h)
+#include "symbols.h"       // symbol_entry, rc_view_symbol_entry (the harvest's output; brings value.h)
+#include "scopes.h"        // scopes_view: the read-only scope tree a result carries
+#include "overlays.h"      // overlay, rc_view_overlay: the object-code overlays a result carries
 #include "cursor.h"        // cursor: where a diagnostic points
 #include "error.h"         // error_type (the diagnostic code)
 
@@ -56,20 +58,29 @@ typedef struct baron_arenas {
 baron_arenas baron_arenas_make(void);        // permanent + scratch default reserves; per_pass 64 MB
 void         baron_arenas_deinit(baron_arenas *a);
 
-// What an assemble produced: a read-only, position-independent snapshot. Every view borrows from the arenas
+// What an assemble produced: a read-only, position-independent snapshot. Every field borrows from the arenas
 // that were passed in, so the result is valid until the next assemble on those same arenas (or until
-// baron_arenas_deinit). passes == 0 means failure - `code` and `symbols` are then empty and `diagnostics`
-// carries the errors. The symbol table is flattened to full dotted paths (see baron_result_symbol); it is a
-// snapshot, NOT the live scope tree (which cannot outlive the assemble), so it can be read and copied freely.
+// baron_arenas_deinit). passes == 0 means failure - `overlays` then holds only an empty default overlay,
+// `scopes` is an empty tree, and `diagnostics` carries the errors. `overlays` is the whole object-code
+// list (index 0 is the default overlay; each carries its pc + code) - iterate it directly, or use
+// baron_result_code for the default overlay's bytes alone. `scopes` is a read-only view of the resolved
+// scope tree (its backing outlives the internal machine): look a single symbol up by full dotted path with
+// baron_result_symbol / scopes_view_get_symbol, or harvest the whole spellable table on demand with
+// scopes_view_flatten (which needs an arena to build the paths into).
 typedef struct baron_result {
-    uint32_t             passes;        // number of passes taken; 0 == failure
-    rc_view_bytes        code;          // the default overlay's object code (empty on failure)
-    rc_view_diagnostic   diagnostics;   // every error + warning, in order
-    rc_view_symbol_entry symbols;       // resolved top-level + named-nested symbols, keyed by full path
+    uint32_t           passes;        // number of passes taken; 0 == failure
+    rc_view_overlay    overlays;      // every object-code overlay (pc + code); index 0 is the default
+    rc_view_diagnostic diagnostics;   // every error + warning, in order
+    scopes_view        scopes;        // the resolved scope tree, read-only (query via the functions below)
 } baron_result;
 
-// Look a symbol up in the result by its full dotted path (e.g. "routine.core"). Hands back value_make_none()
-// if nothing is bound there. A linear scan of `symbols` - ample for interactive / test use.
+// The default overlay's object code (index 0) - the common single-overlay case, empty on failure. For
+// multiple overlays, iterate `r->overlays` directly.
+rc_view_bytes baron_result_code(const baron_result *r);
+
+// Look a symbol up in the result by its full dotted path (e.g. "routine.core"), from the top level. Hands
+// back value_make_none() if nothing is bound there. A convenience wrapper over scopes_view_get_symbol; for
+// the whole table at once, flatten `r->scopes` with scopes_view_flatten.
 value baron_result_symbol(const baron_result *r, rc_str path);
 
 // Assemble a source (a string cached under `name`, or a file loaded from `path`) into the default overlay,

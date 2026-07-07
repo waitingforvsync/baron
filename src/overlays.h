@@ -36,6 +36,10 @@ void overlays_init(overlays *ovl, rc_arena *per_pass);
 uint32_t      overlays_pc(const overlays *ovl, uint32_t id);
 rc_view_bytes overlays_code(const overlays *ovl, uint32_t id);
 
+// The whole overlay list as a read-only view (index 0 is the default). This is what a baron_result hands
+// back so a caller can see every overlay's pc + code, not just the default one's bytes.
+rc_view_overlay overlays_all(const overlays *ovl);
+
 // Per-overlay mutation (manager + index, as per scopes).
 void overlays_org(overlays *ovl, uint32_t id, uint32_t addr);     // set pc; does not move code
 void overlays_emit_u8(overlays *ovl, uint32_t id, uint8_t b);     // append a byte, pc += 1

@@ -37,6 +37,12 @@ rc_view_bytes overlays_code(const overlays *ovl, uint32_t id)
     return RC_AT(ovl->nodes, id).code.view;
 }
 
+rc_view_overlay overlays_all(const overlays *ovl)
+{
+    RC_ASSERT(ovl != NULL);
+    return ovl->nodes.view;
+}
+
 void overlays_org(overlays *ovl, uint32_t id, uint32_t addr)
 {
     RC_ASSERT(ovl != NULL);

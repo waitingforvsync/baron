@@ -6,9 +6,9 @@
 
 // One resolved symbol, as it appears in an assemble's flattened symbol table: its full dotted path from
 // the top level ("routine.core") and its value. Both are position-independent - the path bytes and the
-// value's backing live in the permanent arena - so an array of these is a plain read-only snapshot,
-// safe to hand back by view once the scope tree it came from is gone. scopes_flatten builds it; a
-// baron_result carries it.
+// value's backing live in the arena the harvest wrote into - so an array of these is a plain read-only
+// snapshot, safe to hold once the scope tree it came from is gone. scopes_view_flatten builds it on demand
+// from a baron_result's `scopes` view.
 typedef struct symbol_entry {
     rc_str path;
     value  v;
