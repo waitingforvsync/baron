@@ -22,6 +22,8 @@ add_executable(baron
     source_files.h
     macros.c
     macros.h
+    functions.c
+    functions.h
     file_utils.c
     file_utils.h
     assemble.c

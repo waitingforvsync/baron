@@ -47,6 +47,7 @@ typedef enum lexeme_type {
     lexeme_type_keyword,                // a statement directive with a baked-in handler (ORG, '.')
     lexeme_type_macro,                  // a macro name at statement start (carries the macro index)
     lexeme_type_macro_literal,          // a signature literal, in a macro's own matching table (carries a literal id)
+    lexeme_type_user_function,          // a user-defined FUNCTION call in operand position (carries the function index)
     lexeme_type_hash,                   // '#', the immediate-operand marker
     lexeme_type_assign,                 // '=', symbol definition
     lexeme_type_register,               // A / X / Y, in opcode-operand context
@@ -136,6 +137,13 @@ typedef struct lexeme_macro_literal {
     uint32_t id;
 } lexeme_macro_literal;
 
+// A user-defined FUNCTION call, met in operand position (its `name(` spelling is a token in the dynamic
+// operand table). `index` addresses the function in the manager's list, from which the evaluator reads the
+// overload signatures (params + body cursor) to interpret the call.
+typedef struct lexeme_user_function {
+    uint32_t index;
+} lexeme_user_function;
+
 
 // A statement-block closer: '}', an IF-chain keyword (ELIF/ELSE/ENDIF) or FOR's NEXT. `id` is a
 // `closer_kind` saying which one (so handle_if / handle_for / parse_scope can dispatch); `unexpected`
@@ -192,6 +200,7 @@ typedef struct lexeme {
         lexeme_opcode opcode;
         lexeme_macro macro;
         lexeme_macro_literal macro_literal;
+        lexeme_user_function user_function;
         lexeme_register reg;
         lexeme_keyword keyword;
         lexeme_closer closer;

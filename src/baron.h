@@ -5,6 +5,7 @@
 #include "overlays.h"
 #include "source_files.h"
 #include "macros.h"      // the macro store, and rc_array_token (the dynamic statement table)
+#include "functions.h"   // the user-FUNCTION store (and its dynamic operand-token table)
 #include "assemble.h"   // error_type, diagnostic, rc_array_diagnostic
 
 
@@ -20,11 +21,13 @@ typedef struct baron {
     overlays            overlays;
     source_files        source_files;
     macros              macros;            // the macro store (and its dynamic statement-token table), rebuilt each pass
+    functions           functions;         // the user-FUNCTION store (and its dynamic operand-token table), rebuilt each pass
     rc_arena            diag_arena;    // backs the diagnostics array (reset per assemble)
     rc_array_diagnostic diagnostics;   // errors from the last assemble; empty means it succeeded
     uint32_t            current_overlay;   // the overlay statements emit into now
     uint32_t            include_depth;     // how many INCLUDEs deep the parser is now, to catch runaway recursion
     uint32_t            macro_depth;       // how many macro expansions deep, to catch runaway recursion
+    uint32_t            function_depth;    // how many FUNCTION calls deep the evaluator is, to catch runaway recursion
 } baron;
 
 void baron_init(baron *b);

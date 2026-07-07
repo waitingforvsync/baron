@@ -1,9 +1,12 @@
 #include "expression.h"
 
-#include "scopes.h"   // scopes_get_symbol (expression.h only forward-declares scopes)
+#include "scopes.h"   // scopes_get_symbol / _set_symbol / _get_or_make_child (a FUNCTION body binds locals)
+#include "functions.h"   // the FUNCTION registry: functions_match, function_signature
+#include "source_files.h"   // source_files_text: a body's source may differ from the call's
 #include "lexer.h"
 #include "richc/random.h"   // the RND stream
 #include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
+#include "richc/mstr.h"   // rc_mstr, to build a call's child-scope key
 #include "richc/macros.h"
 #include <math.h>
 
@@ -441,6 +444,9 @@ typedef struct parser {
     rc_str          text;
     const expr_env *env;
     rc_arena       *arena;
+    bool            live;   // false during a FUNCTION-body definition scan OR inside a dead body branch:
+                            //   a user-FUNCTION call short-circuits (no body run) rather than executing. A
+                            //   dead branch is still PARSED, to find where it ends, so its calls must not run.
 } parser;
 
 // Expand a bounded range into its rank-1 list of numeric values; an unbounded range has
@@ -1261,6 +1267,27 @@ static const token odd_entries[] = {
 static const token_table even_tokens = RC_VIEW(even_entries);
 static const token_table odd_tokens  = RC_VIEW(odd_entries);
 
+token_table expression_operand_base(void) { return even_tokens; }
+
+// The operand table to lex from: the dynamic one the env carries (base + user-FUNCTION names) when present,
+// else the static base. A bare env (expression.c's own tests) leaves operand_tokens {0} and gets the base.
+static token_table operand_table(const parser *p) {
+    return p->env->operand_tokens.num ? p->env->operand_tokens : even_tokens;
+}
+
+// The FUNCTION-body statement keywords - the minimum a body needs. Its own tiny table, so a body can lex only
+// these (plus intrinsic identifiers/terminators): an opcode or EQUB name is just an identifier here, an
+// assignment target, never code. The '=' return marker reuses lexeme_type_assign (statement-start position).
+typedef enum body_keyword { body_if, body_elif, body_else, body_endif } body_keyword;
+static const token function_body_entries[] = {
+    {RC_STR("if"),    {.type = lexeme_type_closer, .closer = {body_if,    error_type_none}}},
+    {RC_STR("elif"),  {.type = lexeme_type_closer, .closer = {body_elif,  error_type_none}}},
+    {RC_STR("else"),  {.type = lexeme_type_closer, .closer = {body_else,  error_type_none}}},
+    {RC_STR("endif"), {.type = lexeme_type_closer, .closer = {body_endif, error_type_none}}},
+    {RC_STR("="),     {.type = lexeme_type_assign}},
+};
+static const token_table function_body_tokens = RC_VIEW(function_body_entries);
+
 
 // Require a ')' at pos (lexed from operator position). On success returns v with
 // the pos past the ')'; otherwise an expected_close_paren error.
@@ -1301,9 +1328,9 @@ static expr_result parse_list(const parser *p, uint32_t pos)
 
     while (true) {
         // Value-or-'}' position.
-        pos = accept_newline(p, pos, even_tokens);
+        pos = accept_newline(p, pos, operand_table(p));
 
-        lexer_result lr = lexer_next(p->text, pos, even_tokens);
+        lexer_result lr = lexer_next(p->text, pos, operand_table(p));
         if (lr.token.type == lexeme_type_close_brace) {
             return ok(value_make_list(elems.view), lr.next);   // possibly empty
         }
@@ -1333,29 +1360,27 @@ static expr_result parse_list(const parser *p, uint32_t pos)
     }
 }
 
-// Parse a function call's arguments from just after the '(' (which was part of the token):
-// comma-separated expressions up to the ')', then hand the raw arguments to the function's
-// handler, which validates the count and types and decides how to treat errors (most
-// propagate, defined() inspects). An empty list is allowed; a missing ')' is committed.
-static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t pos)
+// Collect a call's arguments from just after the '(' (which was part of the token): comma-separated
+// expressions up to the ')', pushed into *args (the parser's scratch arena). On success returns .next just
+// past the ')' (its .value is unused); a soft expected_expression (e.g. "f(1,)") or a missing ')' is a real
+// error. Shared by builtin functions and user-defined FUNCTION calls.
+static expr_result collect_args(const parser *p, uint32_t pos, rc_array_value *args)
 {
-    RC_ASSERT(pos > 0 && p->text.data[pos - 1] == '(');   // the '(' is part of the function token
-
-    rc_array_value args = {0};
+    RC_ASSERT(pos > 0 && p->text.data[pos - 1] == '(');   // the '(' is part of the call token
 
     // An immediate ')' is an empty argument list.
     lexer_result lr = lexer_next(p->text, pos, odd_tokens);
     if (lr.token.type == lexeme_type_close_paren) {
-        return ok(fn.apply(args.view, p->arena), lr.next);
+        return ok(value_make_none(), lr.next);
     }
 
     while (true) {
         expr_result a = parse_precedence(p, pos, 0);
         if (a.error != expr_error_none) {
-            return a;   // a soft expected_expression here (e.g. "f(1,)") is a real error
+            return a;
         }
 
-        rc_array_value_push(&args, a.value, p->arena);
+        rc_array_value_push(args, a.value, p->arena);
         pos = a.next;
 
         lr = lexer_next(p->text, pos, odd_tokens);
@@ -1365,11 +1390,297 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
         }
 
         if (lr.token.type == lexeme_type_close_paren) {
-            return ok(fn.apply(args.view, p->arena), lr.next);
+            return ok(value_make_none(), lr.next);
         }
 
         return fail(expr_error_expected_close_paren, pos);
     }
+}
+
+// A builtin (variadic / structural) function call: collect args, then hand the raw list to its handler,
+// which validates count/types and decides how to treat error operands (most propagate, defined() inspects).
+static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t pos)
+{
+    rc_array_value args = {0};
+    expr_result r = collect_args(p, pos, &args);
+    if (r.error != expr_error_none) {
+        return r;
+    }
+    return ok(fn.apply(args.view, p->arena), r.next);
+}
+
+// ---- user-defined FUNCTION calls: interpreted here, in the evaluator, with no callback into the assembler ----
+
+#define FUNCTION_MAX_DEPTH 64u   // a runaway backstop; a bounded recursion unwinds well before it
+
+// Where a body statement-run stopped.
+typedef enum body_stop {
+    body_stop_return,   // a top-level '=' return
+    body_stop_elif,     // an ELIF closer (left AT the keyword for the caller)
+    body_stop_else,     // an ELSE closer
+    body_stop_endif,    // an ENDIF closer
+    body_stop_eof,      // end of the body source
+} body_stop;
+
+typedef struct body_result {
+    body_stop  stop;
+    uint32_t   next;         // past the return expression, or AT the elif/else/endif keyword, or at EOF
+    value      value;        // the return value (stop == body_stop_return); value_make_none() = empty return
+    bool       saw_statement;// did any assignment / IF run before the stop (to tell a forward decl from a body)
+    error_type error;        // error_type_none, or a structural body error
+    uint32_t   error_at;
+} body_result;
+
+static body_result interpret_statements(const parser *p, uint32_t pos, bool active);
+
+static body_result body_fail(error_type code, uint32_t at)
+{
+    return (body_result) {.next = at, .error = code, .error_at = at};
+}
+
+// A single-token '=' table, to read the assignment operator after a body statement's target name.
+static const token assign_only_entries[] = { {RC_STR("="), {.type = lexeme_type_assign}} };
+static const token_table assign_only_tokens = RC_VIEW(assign_only_entries);
+
+// A sub-parser for a body expression (a condition, an assignment RHS, the return). It inherits everything
+// but forces user-FUNCTION calls dead in an inactive branch: a dead branch is still PARSED (to find where
+// it ends), so any call it contains must short-circuit rather than run - otherwise a dead branch's recursion
+// would fire on every step, running to the depth cap and exhausting the scratch arena.
+static parser body_sub(const parser *p, bool active)
+{
+    parser sp = *p;
+    sp.live = p->live && active;
+    return sp;
+}
+
+// A body assignment `name = expr`, from just after `name` (whose start is `name_at`). A single immutable
+// binding into the current (child) scope when active; when inactive, clear only the binding this statement
+// owns (the dead-branch rule). Returns the cursor after the RHS.
+static body_result interpret_assignment(const parser *p, rc_str name, uint32_t pos, bool active, uint32_t name_at)
+{
+    lexer_result eq = lexer_next(p->text, pos, assign_only_tokens);
+    if (eq.token.type != lexeme_type_assign) {
+        return body_fail(error_type_expected_assign, pos);
+    }
+
+    parser sp = body_sub(p, active);
+    expr_result rhs = parse_precedence(&sp, eq.next, 0);
+    if (rhs.error != expr_error_none) {
+        return body_fail(error_type_expression, rhs.error_at);
+    }
+
+    cursor at = {p->env->source, name_at};
+    if (active) {
+        scopes_set_symbol(p->env->scopes, p->env->scope_index, name, rhs.value, at);
+    }
+    else if (cursor_is_equal(scopes_symbol_def(p->env->scopes, p->env->scope_index, name), at)) {
+        scopes_remove_symbol(p->env->scopes, p->env->scope_index, name);
+    }
+
+    return (body_result) {.next = rhs.next, .saw_statement = true};
+}
+
+// An IF ... [ELIF ...] [ELSE ...] ENDIF, from just after the `if`/`elif` keyword. Runs the selected branch
+// live and scans the rest; nested IFs recurse. Returns the cursor past ENDIF. Return (`=`) is top-level only,
+// so a return met inside a branch is an error.
+static body_result interpret_if(const parser *p, uint32_t pos, bool active)
+{
+    parser sp = body_sub(p, active);
+    expr_result cond = parse_precedence(&sp, pos, 0);
+    if (cond.error != expr_error_none) {
+        return body_fail(error_type_expression, cond.error_at);
+    }
+
+    // A live IF with a KNOWN numeric condition picks a branch; an unknown / non-numeric condition is
+    // undecidable, so no branch runs and the eventual return defers (resolves on a later pass).
+    bool decided     = active && value_is_numeric(cond.value);
+    bool run_if      = decided && cond.value.numeric != 0.0;
+    bool else_active = decided && !run_if;
+
+    body_result br = interpret_statements(p, cond.next, run_if);
+    if (br.error != error_type_none) {
+        return br;
+    }
+    if (br.stop == body_stop_return) {
+        return body_fail(error_type_unclosed_function, br.next);   // a return inside a branch: top-level only
+    }
+    if (br.stop == body_stop_eof) {
+        return body_fail(error_type_unclosed_function, br.next);   // IF with no ENDIF
+    }
+
+    // Consume the closer keyword the branch stopped at.
+    lexer_result closer = lexer_next(p->text, br.next, function_body_tokens);
+    if (br.stop == body_stop_elif) {
+        return interpret_if(p, closer.next, else_active);   // the ELIF is a fresh IF over the else path
+    }
+    if (br.stop == body_stop_else) {
+        body_result eb = interpret_statements(p, closer.next, else_active);
+        if (eb.error != error_type_none) {
+            return eb;
+        }
+        if (eb.stop != body_stop_endif) {
+            return body_fail(error_type_unclosed_function, eb.next);   // ELSE must end at ENDIF
+        }
+        lexer_result end = lexer_next(p->text, eb.next, function_body_tokens);
+        return (body_result) {.next = end.next, .saw_statement = true};
+    }
+    // body_stop_endif
+    return (body_result) {.next = closer.next, .saw_statement = true};
+}
+
+// Run body statements (assignments, IFs) until the top-level '=' return, a branch closer (elif/else/endif),
+// or EOF. `active` gates whether assignments bind and IF branches execute (an inactive run just walks the
+// structure, for the definition scan and dead branches).
+static body_result interpret_statements(const parser *p, uint32_t pos, bool active)
+{
+    bool saw = false;
+    while (true) {
+        lexer_result lr = lexer_next(p->text, pos, function_body_tokens);
+
+        if (lr.token.type == lexeme_type_assign) {           // '=' return
+            parser sp = body_sub(p, active);
+            expr_result rhs = parse_precedence(&sp, lr.next, 0);
+            if (rhs.error == expr_error_expected_expression) {
+                return (body_result) {.stop = body_stop_return, .next = lr.next,
+                                      .value = value_make_none(), .saw_statement = saw};   // empty (forward)
+            }
+            if (rhs.error != expr_error_none) {
+                return body_fail(error_type_expression, rhs.error_at);
+            }
+            return (body_result) {.stop = body_stop_return, .next = rhs.next,
+                                  .value = rhs.value, .saw_statement = saw};
+        }
+
+        if (lr.token.type == lexeme_type_closer) {
+            switch (lr.token.closer.id) {
+                case body_if: {
+                    body_result ifr = interpret_if(p, lr.next, active);
+                    if (ifr.error != error_type_none) {
+                        return ifr;
+                    }
+                    pos = ifr.next;
+                    saw = true;
+                    continue;
+                }
+                case body_elif: return (body_result) {.stop = body_stop_elif,  .next = pos, .saw_statement = saw};
+                case body_else: return (body_result) {.stop = body_stop_else,  .next = pos, .saw_statement = saw};
+                default:        return (body_result) {.stop = body_stop_endif, .next = pos, .saw_statement = saw};
+            }
+        }
+
+        if (lr.token.type == lexeme_type_identifier) {
+            body_result a = interpret_assignment(p, lr.token.identifier.name, lr.next, active, pos);
+            if (a.error != error_type_none) {
+                return a;
+            }
+            pos = a.next;
+            saw = true;
+            continue;
+        }
+
+        if (lr.token.type == lexeme_type_terminator) {
+            if (lexer_at_end(p->text, lr.next)) {
+                return (body_result) {.stop = body_stop_eof, .next = lr.next, .saw_statement = saw};
+            }
+            pos = lr.next;   // a blank statement
+            continue;
+        }
+
+        return body_fail(error_type_unexpected_token, pos);   // nothing else is a legal body statement
+    }
+}
+
+// A user-defined FUNCTION call in operand position. `call_pos` is the token's start in the CALLER source
+// (for the child-scope key), `pos` is just past the '('. Collects arguments in the caller scope, matches an
+// overload by arity, then interprets the body in a fresh child scope parented on the definition scope.
+static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call_pos, uint32_t pos, bool active)
+{
+    rc_array_value args = {0};
+    expr_result r = collect_args(p, pos, &args);
+    if (r.error != expr_error_none) {
+        return r;
+    }
+    uint32_t after = r.next;   // past ')'
+
+    const function_signature *sig = functions_match(p->env->functions, index, args.view.num);
+    if (sig == NULL) {
+        return ok(value_make_error(error_type_no_matching_arity), after);
+    }
+    if (!sig->defined) {
+        return ok(value_make_error(error_type_function_not_defined), after);   // only forward-declared
+    }
+
+    // Inactive (the definition scan, or a dead enclosing branch): arguments consumed, body NOT run - which is
+    // what stops the inactive scan from recursing into a self-call. Yield a deferrable placeholder.
+    if (!active) {
+        return ok(value_make_error(error_type_unknown_symbol), after);
+    }
+
+    if (p->env->call_depth && *p->env->call_depth >= FUNCTION_MAX_DEPTH) {
+        return ok(value_make_error(error_type_function_too_deep), after);
+    }
+
+    // A per-call child scope, parented on the DEFINITION scope so lookup is LEXICAL: a body sees its own
+    // params and whatever was in scope where it was defined (the globals at root, normally), never the
+    // caller's locals. But the frame is KEYED on its caller's scope index (plus the call site): that is what
+    // keeps two independent call chains from aliasing one shared frame. Keying on the call site AND depth
+    // alone - under one flat def-scope parent - collided distinct chains that reached the same site+depth,
+    // and corrupted deep or repeated recursion. The caller's scope index is unique per frame in the tree, so
+    // it names the chain; call_pos separates several call sites that share one caller frame (qsort calls lt,
+    // ge and qsort from one body). It is stable pass-to-pass (scopes are created in a deterministic order).
+    char storage[80];
+    rc_mstr key = {.data = storage, .len = 0, .cap = sizeof storage};
+    rc_mstr_append_char(&key, '@', NULL);
+    rc_mstr_append_u32(&key, p->env->scope_index, NULL);   // the caller frame - names this call chain
+    rc_mstr_append_char(&key, ':', NULL);
+    rc_mstr_append_u32(&key, call_pos, NULL);
+    uint32_t child = scopes_get_or_make_child(p->env->scopes, sig->def_scope, key.view);
+
+    cursor call_at = {p->env->source, call_pos};
+    for (uint32_t i = 0; i < sig->params.num; i++) {
+        scopes_set_symbol(p->env->scopes, child, rc_view_rc_str_get(sig->params, i),
+                          rc_view_value_get(args.view, i), call_at);
+    }
+
+    // Interpret the body in the child scope, in ITS source (a body may live in a different file than the call).
+    expr_env body_env = *p->env;
+    body_env.scope_index = child;
+    body_env.source      = sig->body.source;
+    body_env.offset      = sig->body.pos;
+    parser body_p = {.text = source_files_text(p->env->sources, sig->body.source), .env = &body_env,
+                     .arena = p->arena, .live = true};
+
+    if (p->env->call_depth) { (*p->env->call_depth)++; }
+    body_result br = interpret_statements(&body_p, sig->body.pos, true);
+    if (p->env->call_depth) { (*p->env->call_depth)--; }
+
+    if (br.error != error_type_none) {
+        return ok(value_make_error(br.error), after);   // a malformed body (should have failed the scan) -> a value
+    }
+    if (br.stop != body_stop_return) {
+        return ok(value_make_error(error_type_unclosed_function), after);
+    }
+    return ok(br.value, after);
+}
+
+function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena)
+{
+    parser p = {.text = text, .env = env, .arena = arena, .live = false};   // scan: nested calls do not execute
+    body_result br = interpret_statements(&p, pos, false);   // inactive: just walk to the top-level '='
+
+    if (br.error != error_type_none) {
+        return (function_body_scan) {.next = br.error_at, .error = br.error, .error_at = br.error_at};
+    }
+    if (br.stop != body_stop_return) {
+        return (function_body_scan) {.next = br.next, .error = error_type_unclosed_function, .error_at = br.next};
+    }
+
+    bool empty_return = value_is_none(br.value);
+    if (br.saw_statement && empty_return) {
+        return (function_body_scan) {.next = br.next, .error = error_type_unclosed_function, .error_at = br.next};
+    }
+    // A forward declaration is an empty body AND an empty return; anything with a real return is defined.
+    return (function_body_scan) {.next = br.next, .defined = !empty_return};
 }
 
 // Parse one operand: a literal, a symbol, a parenthesised group, a prefixed unary
@@ -1377,7 +1688,7 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
 // operand is a soft expected_expression failure, leaving the caller to decide.
 static expr_result parse_operand(const parser *p, uint32_t pos)
 {
-    lexer_result lr = lexer_next(p->text, pos, even_tokens);
+    lexer_result lr = lexer_next(p->text, pos, operand_table(p));
     lexeme lex = lr.token;
 
     switch (lex.type) {
@@ -1443,6 +1754,11 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
         case lexeme_type_function:
             // The '(' is part of the token name, so we are already inside the call.
             return parse_call_args(p, lex.function, lr.next);
+
+        case lexeme_type_user_function:
+            // A user-defined FUNCTION: `pos` is the token start (the call site), `lr.next` is past its '('.
+            // `p->live` is false only inside a definition scan, where a call must not actually execute.
+            return interpret_call(p, lex.user_function.index, pos, lr.next, p->live);
 
         case lexeme_type_range: {
             // A '..' where an operand is expected opens an unbounded-start range. Parse a
@@ -1600,7 +1916,8 @@ expr_result expression_parse(rc_str text, uint32_t pos, const expr_env *env, rc_
     parser p = {
         .text = text,
         .env = env,
-        .arena = arena
+        .arena = arena,
+        .live = true
     };
 
     return parse_precedence(&p, pos, 0);

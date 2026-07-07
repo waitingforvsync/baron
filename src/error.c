@@ -32,6 +32,10 @@ rc_str error_type_name(error_type e)
         case error_type_unquoted_macro_token:    return RC_STR("A literal token in a macro signature must be quoted");
         case error_type_unclosed_macro:          return RC_STR("Unclosed MACRO: expected ENDMACRO");
         case error_type_unexpected_endmacro:     return RC_STR("ENDMACRO without a matching MACRO");
+        case error_type_expected_function_name:  return RC_STR("Expected a name after FUNCTION");
+        case error_type_function_name_reserved:  return RC_STR("A function cannot be named after a mnemonic, keyword or constant");
+        case error_type_expected_function_params:return RC_STR("Expected a parenthesised parameter list");
+        case error_type_unclosed_function:       return RC_STR("Unclosed FUNCTION: expected an '=' return");
         case error_type_bad_addressing_mode:     return RC_STR("This instruction has no such addressing mode");
         case error_type_operand_not_numeric:     return RC_STR("Operand is not a number");
         case error_type_value_out_of_range:      return RC_STR("Value out of range");
@@ -50,6 +54,10 @@ rc_str error_type_name(error_type e)
         case error_type_macro_not_defined:       return RC_STR("Macro is only forward-declared: its body is not defined here");
         case error_type_macro_too_deep:          return RC_STR("Macro expansion nested too deeply (a missing recursion base case?)");
         case error_type_expanded_from:           return RC_STR("Expanded from here");
+        case error_type_no_matching_arity:       return RC_STR("No function overload takes this number of arguments");
+        case error_type_duplicate_function:      return RC_STR("This function arity is already defined");
+        case error_type_function_not_defined:    return RC_STR("Function is only forward-declared: its body is not defined here");
+        case error_type_function_too_deep:       return RC_STR("Function recursion nested too deeply (a missing recursion base case?)");
         case error_type_divide_by_zero:          return RC_STR("Division by zero");
         case error_type_domain:                  return RC_STR("Argument outside the valid range for this operation");
         case error_type_unknown_symbol:          return RC_STR("Unknown symbol");

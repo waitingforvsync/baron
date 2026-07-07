@@ -31,6 +31,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
 static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t macro_index, rc_arena scratch);
+static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -194,6 +195,7 @@ static const token statement_token_entries[] = {
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
     {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
+    {RC_STR("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
     // The pure expression constants are reserved at statement start too, so `pi = 5` is rejected rather than
     // quietly binding a shadowed symbol. Three near-identical rows, but it is only three tokens.
     {RC_STR("true"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
@@ -247,11 +249,15 @@ expr_result eval(baron *b, cursor at, uint32_t scope, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     expr_env env = {
-        .scopes      = &b->scopes,
-        .scope_index = scope,
-        .pc          = overlays_pc(&b->overlays, b->current_overlay),
-        .source      = at.source,
-        .offset      = at.pos,
+        .scopes         = &b->scopes,
+        .scope_index    = scope,
+        .pc             = overlays_pc(&b->overlays, b->current_overlay),
+        .source         = at.source,
+        .offset         = at.pos,
+        .operand_tokens = functions_operand_tokens(&b->functions),   // base + a token per FUNCTION name
+        .functions      = &b->functions,
+        .sources        = &b->source_files,
+        .call_depth     = &b->function_depth,
     };
     return expression_parse(src, at.pos, &env, &scratch);
 }
@@ -558,7 +564,9 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
         }
         r.changed = (st == symbol_status_changed);
     }
-    else {
+    else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), at)) {
+        // Dead branch: clear only the binding THIS label owns (its def is our cursor), so a live sibling
+        // branch's - or an outer statement's - like-named binding survives.
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
     }
 
@@ -629,8 +637,10 @@ static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, pars
             at);
         r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
     }
-    else {
-        r.changed = scopes_remove_symbol(&b->scopes, scope, key.view);   // dead branch: clear a prior binding
+    else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, key.view), at)) {
+        // Dead branch: clear only the binding this local label owns. Its @source:pos key is unique per
+        // position, so the guard is a no-op here, but we keep it uniform with the named-label / assignment cases.
+        r.changed = scopes_remove_symbol(&b->scopes, scope, key.view);
     }
     return r;
 }
@@ -822,7 +832,9 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse
             r.changed = (st == symbol_status_changed);
         }
     }
-    else {
+    else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), at)) {
+        // Dead branch: clear only the binding THIS assignment owns (def is our cursor), so a live sibling
+        // branch - IF TRUE:x=2:ELSE:x=3:ENDIF - or an outer binding of the same name is not clobbered.
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
     }
 
@@ -1092,6 +1104,107 @@ static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flag
     return require_separator(b, cursor_at(at, end.next));
 }
 
+// The header parens - not statement tokens, so a small dedicated table (identifiers / commas are intrinsic).
+static const token func_paren_entries[] = {
+    {RC_STR("("), {.type = lexeme_type_open_paren}},
+    {RC_STR(")"), {.type = lexeme_type_close_paren}},
+};
+static const token_table func_paren_tokens = RC_VIEW(func_paren_entries);
+
+// FUNCTION name(params) [ : body ] = return-expr, evaluated each pass. The name/token is registered BEFORE
+// the body is scanned, so the body may call the function itself (self-recursion). The definition is a
+// STATEMENT (it emits nothing); the body's value semantics live in the evaluator (expression.c), which we
+// call here only to locate the top-level '=' return and learn whether this is a real body or a forward
+// declaration (an empty body plus an empty return expression).
+static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    // The name, from the STATIC base table (so an already-defined function name reads as a plain identifier
+    // here, not a call - which is what lets an overload or a fill-in reuse the one name entry).
+    lexer_result nm = lexer_next(src, at.pos, base_statement_tokens);
+    if (nm.token.type != lexeme_type_identifier) {
+        error_type code = (nm.token.type == lexeme_type_terminator)
+                              ? error_type_expected_function_name
+                              : error_type_function_name_reserved;
+        return syntax_error(b, code, cursor_at(at, at.pos));
+    }
+    rc_str name = nm.token.identifier.name;
+    if (is_dotted(name)) {
+        return syntax_error(b, error_type_function_name_reserved, cursor_at(at, at.pos));
+    }
+    // A builtin operand call (abs(, lo(, shape() bakes its '(' into its token, so lexing the name here -
+    // where the header's '(' follows it - matches such a builtin and rejects the collision. Use the STATIC
+    // base operand table, not the dynamic one: reusing a prior USER function's name is fine (overload /
+    // forward-decl fill-in), only a builtin clash is reserved.
+    lexer_result op = lexer_next(src, at.pos, expression_operand_base());
+    if (op.token.type == lexeme_type_unary_op || op.token.type == lexeme_type_function) {
+        return syntax_error(b, error_type_function_name_reserved, cursor_at(at, at.pos));
+    }
+
+    // Register the name now (idempotent), before the body is scanned, so a self-call inside lexes as a call.
+    uint32_t index = functions_index_for_name(&b->functions, name);
+
+    // The parameter list: '(' identifiers (comma-separated) ')'. Empty is allowed (a niladic function).
+    lexer_result lp = lexer_next(src, nm.next, func_paren_tokens);
+    if (lp.token.type != lexeme_type_open_paren) {
+        return syntax_error(b, error_type_expected_function_params, cursor_at(at, nm.next));
+    }
+    rc_array_rc_str params = rc_array_rc_str_make(4, &b->functions.arena);
+    uint32_t pos = lp.next;
+    lexer_result t = lexer_next(src, pos, func_paren_tokens);
+    if (t.token.type != lexeme_type_close_paren) {
+        while (true) {
+            if (t.token.type != lexeme_type_identifier) {
+                return syntax_error(b, error_type_expected_function_params, cursor_at(at, pos));
+            }
+            rc_array_rc_str_push(&params, t.token.identifier.name, &b->functions.arena);
+            pos = t.next;
+            t = lexer_next(src, pos, func_paren_tokens);
+            if (t.token.type == lexeme_type_close_paren) {
+                break;
+            }
+            if (t.token.type != lexeme_type_comma) {
+                return syntax_error(b, error_type_expected_function_params, cursor_at(at, pos));
+            }
+            pos = t.next;
+            t = lexer_next(src, pos, func_paren_tokens);
+        }
+    }
+    cursor body = cursor_at(at, t.next);   // just past ')'
+
+    // Scan the body (in the evaluator) to find the top-level '=' return and its extent. The scan is inactive
+    // and side-effect-free (nested calls do not execute), and self-calls find no signature yet, so it always
+    // terminates. It also reports whether this is a real body or a forward declaration (empty body + return).
+    expr_env env = {
+        .scopes         = &b->scopes,
+        .scope_index    = scope,
+        .pc             = overlays_pc(&b->overlays, b->current_overlay),
+        .source         = at.source,
+        .offset         = body.pos,
+        .operand_tokens = functions_operand_tokens(&b->functions),
+        .functions      = &b->functions,
+        .sources        = &b->source_files,
+        .call_depth     = &b->function_depth,
+    };
+    function_body_scan fs = expression_scan_function_body(src, body.pos, &env, &scratch);
+    if (fs.error != error_type_none) {
+        return syntax_error(b, fs.error, cursor_at(at, fs.error_at));   // a structurally broken body aborts
+    }
+
+    // Register the signature, but only when the definition is actually reached: a dead-branch definition, or
+    // one met while inactively scanning another body, registers nothing. Reconcile against overloads by arity.
+    if (flags.active) {
+        function_add_status st = functions_add_signature(&b->functions, index, params.view, body, scope, fs.defined);
+        if (st == function_add_duplicate) {
+            semantic_error(b, flags, error_type_duplicate_function, cursor_at(at, at.pos));
+        }
+    }
+
+    // The return expression insists on a following separator, like any statement.
+    return require_separator(b, cursor_at(at, fs.next));
+}
+
 // Try to match one overload against the call text at `at`. Returns true (and sets *end, the cursor at the
 // trailing separator) when every slot matches and the statement then ends. Literal slots are recognised via
 // the macro's OWN literal table; parameter slots consume one expression in `scope` - its value is ignored
@@ -1358,11 +1471,13 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
+    b->function_depth  = 0;                  // ditto for FUNCTION recursion (balanced by the evaluator)
     expression_reset_random();               // replay the same RND stream every pass, so RND can converge
 
-    // The macro store and its statement-token table are a fresh projection of the source each pass: reset the
-    // store, which reseeds the table from the static base (reserving room for macro-name tokens up front).
+    // The macro / function stores and their dynamic token tables are a fresh projection of the source each
+    // pass: reset each store, reseeding its table from the static base (with room for per-name tokens).
     macros_reset(&b->macros, base_statement_tokens, 64);
+    functions_reset(&b->functions, expression_operand_base(), 64);
 
     const uint32_t scope = 0;
     return parse_file(
@@ -1796,6 +1911,17 @@ RC_TEST_STEP(assemble, if_branch_flip_clears_label, fix)
     // inactive rule leaves it undefined; a stale binding would linger.
     RC_CHECK_TRUE(ASM("IF gate : .x : ENDIF\ngate = 1 - defined(other)\n.other") != 0);
     RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("x"))));
+}
+
+RC_TEST_STEP(assemble, dead_branch_does_not_clobber_live_binding, fix)
+{
+    // The inactive ELSE assigns `blah` too; it must NOT delete the live IF branch's binding (each dead-branch
+    // assignment clears only what it owns). Likewise a dead branch must leave an OUTER binding of the name intact.
+    RC_CHECK_TRUE(ASM("IF 1 : blah = 2 : ELSE : blah = 3 : ENDIF") != 0);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("blah")), value_make_numeric(2)));
+
+    RC_CHECK_TRUE(ASM("x = 1\nIF 0 : x = 2 : ENDIF") != 0);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("x")), value_make_numeric(1)));
 }
 
 RC_TEST_STEP(assemble, if_framing_errors, fix)
@@ -2278,6 +2404,126 @@ RC_TEST_STEP(assemble, macro_framing_and_call_errors, fix)
     RC_CHECK_TRUE(ERR("MACRO A n ENDMACRO") == error_type_expected_separator);
     // A macro cannot be named after a mnemonic.
     RC_CHECK_TRUE(ERR("MACRO NOP : ENDMACRO") == error_type_macro_name_reserved);
+}
+
+RC_TEST_STEP(assemble, function_single_line, fix)
+{
+    // A one-line value function, called in an operand position.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("FUNCTION sqr(x) = x*x\nEQUB sqr(5)"), (uint8_t[]) {25}, 1));
+    // The parameter woven through a bigger expression (`and` is baron's bitwise AND; `lo` is a builtin, so `low`).
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("FUNCTION low(w) = w and &FF\nEQUB low(&1234)"), (uint8_t[]) {0x34}, 1));
+    // Lexical scope: a body sees a global defined where the function was written.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("k = 10\nFUNCTION addk(x) = x + k\nEQUB addk(5)"), (uint8_t[]) {15}, 1));
+}
+
+RC_TEST_STEP(assemble, function_multiline_if, fix)
+{
+    // A body with an IF choosing the top-level return, plus a function-local assignment.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("FUNCTION clamp(x) : IF x > 9 : r = 9 : ELSE : r = x : ENDIF : = r\nEQUB clamp(20)\nEQUB clamp(3)"),
+        (uint8_t[]) {9, 3}, 2));
+}
+
+RC_TEST_STEP(assemble, function_recursive_gcd, fix)
+{
+    // Euclid's algorithm, recursive, with a function-local and a top-level return.
+    uint32_t passes = ASM("FUNCTION gcd(a, b) : IF b = 0 : r = a : ELSE : r = gcd(b, a mod b) : ENDIF : = r\n"
+                          "EQUB gcd(48, 36)\nEQUB gcd(1071, 462)");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {12, 21}, 2));
+    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);   // no runaway-recursion trip
+}
+
+RC_TEST_STEP(assemble, function_overload_by_arity, fix)
+{
+    // area(w) and area(w,h): the call picks the overload by argument count.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("FUNCTION area(w) = w*w\nFUNCTION area(w, h) = w*h\nEQUB area(3)\nEQUB area(3, 4)"),
+        (uint8_t[]) {9, 12}, 2));
+}
+
+RC_TEST_STEP(assemble, function_mutual_recursion_via_forward_declaration, fix)
+{
+    // Parity by mutual recursion - a genuinely useful pair - needs a forward declaration so is_even can name
+    // is_odd before is_odd is defined. The fill-in of the same arity is not a duplicate.
+    uint32_t passes = ASM("FUNCTION is_odd(n) =\n"
+                          "FUNCTION is_even(n) : IF n = 0 : r = 1 : ELSE : r = is_odd(n - 1)  : ENDIF : = r\n"
+                          "FUNCTION is_odd(n)  : IF n = 0 : r = 0 : ELSE : r = is_even(n - 1) : ENDIF : = r\n"
+                          "EQUB is_even(10)\nEQUB is_odd(7)\nEQUB is_even(3)");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {1, 1, 0}, 3));
+    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, function_recursive_list, fix)
+{
+    // A recursive fold over a list to a scalar.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("FUNCTION rsum(xs) : IF len(xs) = 0 : r = 0 : ELSE : r = xs[0] + rsum(xs[1..]) : ENDIF : = r\n"
+            "EQUB rsum({1, 2, 3, 4})"),
+        (uint8_t[]) {10}, 1));
+
+    // A recursive build of a NEW list (reverse), emitted as bytes.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("FUNCTION rrev(xs) : IF len(xs) = 0 : r = xs : ELSE : r = concat(rrev(xs[1..]), {xs[0]}) : ENDIF : = r\n"
+            "EQUB rrev({1, 2, 3})"),
+        (uint8_t[]) {3, 2, 1}, 3));
+}
+
+RC_TEST_STEP(assemble, function_recursive_quicksort, fix)
+{
+    // Quicksort, in functions: two recursive partition helpers (nested IF) and a recursive sort that sorts
+    // both partitions, using variadic concat, unbounded-range tails xs[1..], and empty / singleton list literals.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("FUNCTION lt(xs, p) : IF len(xs) = 0 : r = {} : ELSE : IF xs[0] < p : r = concat({xs[0]}, lt(xs[1..], p)) : ELSE : r = lt(xs[1..], p) : ENDIF : ENDIF : = r\n"
+            "FUNCTION ge(xs, p) : IF len(xs) = 0 : r = {} : ELSE : IF xs[0] < p : r = ge(xs[1..], p) : ELSE : r = concat({xs[0]}, ge(xs[1..], p)) : ENDIF : ENDIF : = r\n"
+            "FUNCTION qsort(xs) : IF len(xs) <= 1 : r = xs : ELSE : r = concat(qsort(lt(xs[1..], xs[0])), {xs[0]}, qsort(ge(xs[1..], xs[0]))) : ENDIF : = r\n"
+            "EQUB qsort({3, 1, 4, 1, 5, 9, 2, 6})"),
+        (uint8_t[]) {1, 1, 2, 3, 4, 5, 6, 9}, 8));
+}
+
+RC_TEST_STEP(assemble, function_forward_referenced_argument, fix)
+{
+    // An argument that is a forward reference resolves over passes, like any operand.
+    uint32_t passes = ASM("FUNCTION sqr(x) = x*x\nEQUB sqr(later)\nlater = 5");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {25}, 1));
+    RC_CHECK(passes, >=, 2u);
+}
+
+RC_TEST_STEP(assemble, function_scope_is_per_invocation, fix)
+{
+    // A body local, and two calls: each invocation gets its own child scope, so the local does not collide.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("FUNCTION dbl(x) : y = x + x : = y\nEQUB dbl(3)\nEQUB dbl(4)"),
+        (uint8_t[]) {6, 8}, 2));
+    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);   // no duplicate_symbol across the two calls
+}
+
+RC_TEST_STEP(assemble, function_scoping_is_lexical, fix)
+{
+    // A body sees the scope where it was DEFINED (a global at root), not the caller's locals. `usesg` reads
+    // the global g = 7; `caller` binds its OWN param g = 99 and calls usesg. Lexical scoping means usesg
+    // resolves g to the root global (7), NOT the caller's g (99) - so caller(99) is 0 + 7 = 7. Dynamic
+    // scoping would leak the caller's 99. This is the load-bearing check that scoping is lexical.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("g = 7\nFUNCTION usesg(x) = x + g\nFUNCTION caller(g) = usesg(0)\nEQUB caller(99)"),
+        (uint8_t[]) {7}, 1));
+    RC_CHECK_TRUE(first_error(&fix->b) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, function_call_and_definition_errors, fix)
+{
+    // A call before the definition: the name is not an operand token yet, so it misparses.
+    RC_CHECK(ASM("EQUB sqr(5)\nFUNCTION sqr(x) = x*x"), ==, 0u);
+    // No overload takes this argument count.
+    RC_CHECK_TRUE(ERR("FUNCTION area(w) = w*w\nEQUB area(1, 2)") == error_type_no_matching_arity);
+    // A forward declaration that is invoked before it is filled in.
+    RC_CHECK_TRUE(ERR("FUNCTION f(n) =\nEQUB f(3)") == error_type_function_not_defined);
+    // Two real bodies for one arity.
+    RC_CHECK_TRUE(ERR("FUNCTION g(x) = 1\nFUNCTION g(x) = 2") == error_type_duplicate_function);
+    // Unbounded recursion (no base case) trips the depth cap.
+    RC_CHECK_TRUE(ERR("FUNCTION loop(n) = loop(n) + 1\nEQUB loop(1)") == error_type_function_too_deep);
+    // A function cannot be named after a mnemonic, nor after a builtin operand function.
+    RC_CHECK_TRUE(ERR("FUNCTION nop(x) = 1") == error_type_function_name_reserved);
+    RC_CHECK_TRUE(ERR("FUNCTION lo(x) = x") == error_type_function_name_reserved);
 }
 
 #endif // BARON_TESTS
