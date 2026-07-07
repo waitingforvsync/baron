@@ -27,6 +27,11 @@ rc_str error_type_name(error_type e)
         case error_type_unclosed_for:            return RC_STR("Unclosed FOR: expected NEXT");
         case error_type_unexpected_next:         return RC_STR("NEXT without a matching FOR");
         case error_type_reserved_constant:       return RC_STR("TRUE, FALSE and PI are built-in constants and cannot be redefined");
+        case error_type_expected_macro_name:     return RC_STR("Expected a name after MACRO");
+        case error_type_macro_name_reserved:     return RC_STR("A macro cannot be named after a mnemonic, keyword or constant");
+        case error_type_unquoted_macro_token:    return RC_STR("A literal token in a macro signature must be quoted");
+        case error_type_unclosed_macro:          return RC_STR("Unclosed MACRO: expected ENDMACRO");
+        case error_type_unexpected_endmacro:     return RC_STR("ENDMACRO without a matching MACRO");
         case error_type_bad_addressing_mode:     return RC_STR("This instruction has no such addressing mode");
         case error_type_operand_not_numeric:     return RC_STR("Operand is not a number");
         case error_type_value_out_of_range:      return RC_STR("Value out of range");
@@ -40,6 +45,11 @@ rc_str error_type_name(error_type e)
         case error_type_expected_filename:       return RC_STR("INCLUDE expects a filename string");
         case error_type_include_too_deep:        return RC_STR("INCLUDE nested too deeply (a cyclic include?)");
         case error_type_included_from:           return RC_STR("Included from here");
+        case error_type_duplicate_signature:     return RC_STR("This macro signature is already defined");
+        case error_type_no_matching_signature:   return RC_STR("No macro overload matches this invocation");
+        case error_type_macro_not_defined:       return RC_STR("Macro is only forward-declared: its body is not defined here");
+        case error_type_macro_too_deep:          return RC_STR("Macro expansion nested too deeply (a missing recursion base case?)");
+        case error_type_expanded_from:           return RC_STR("Expanded from here");
         case error_type_divide_by_zero:          return RC_STR("Division by zero");
         case error_type_domain:                  return RC_STR("Argument outside the valid range for this operation");
         case error_type_unknown_symbol:          return RC_STR("Unknown symbol");

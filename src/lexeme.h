@@ -45,6 +45,8 @@ typedef enum lexeme_type {
     lexeme_type_range,                  // '..' / '..<', the range operator
     lexeme_type_opcode,                 // a 6502 mnemonic (carries the mnemonic id)
     lexeme_type_keyword,                // a statement directive with a baked-in handler (ORG, '.')
+    lexeme_type_macro,                  // a macro name at statement start (carries the macro index)
+    lexeme_type_macro_literal,          // a signature literal, in a macro's own matching table (carries a literal id)
     lexeme_type_hash,                   // '#', the immediate-operand marker
     lexeme_type_assign,                 // '=', symbol definition
     lexeme_type_register,               // A / X / Y, in opcode-operand context
@@ -121,6 +123,19 @@ typedef struct lexeme_opcode {
     uint16_t id;
 } lexeme_opcode;
 
+// A macro name met at statement start. `index` addresses the macro in the manager's list, from which
+// the invocation reads the overload signatures and body. The name-tokens live in a dynamic statement
+// table built as definitions are parsed (see assemble.c), never in a static one.
+typedef struct lexeme_macro {
+    uint32_t index;
+} lexeme_macro;
+
+// A signature literal, recognised during overload matching. It only appears in a macro's OWN token
+// table (one per name), where `id` identifies which of that macro's distinct literals matched.
+typedef struct lexeme_macro_literal {
+    uint32_t id;
+} lexeme_macro_literal;
+
 
 // A statement-block closer: '}', an IF-chain keyword (ELIF/ELSE/ENDIF) or FOR's NEXT. `id` is a
 // `closer_kind` saying which one (so handle_if / handle_for / parse_scope can dispatch); `unexpected`
@@ -175,6 +190,8 @@ typedef struct lexeme {
         lexeme_function function;
         lexeme_range range;
         lexeme_opcode opcode;
+        lexeme_macro macro;
+        lexeme_macro_literal macro_literal;
         lexeme_register reg;
         lexeme_keyword keyword;
         lexeme_closer closer;

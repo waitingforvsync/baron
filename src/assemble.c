@@ -10,6 +10,7 @@
 
 #define ASSEMBLE_MAX_PASSES 100u
 #define ASSEMBLE_MAX_INCLUDE_DEPTH 64u   // a runaway / cyclic INCLUDE is caught here before the C stack gives out
+#define ASSEMBLE_MAX_MACRO_DEPTH 64u     // a runaway macro expansion (a missing recursion base case) is caught here
 
 
 // Mutual recursion: a label or a scope reopens the statement loop, and the loop reaches the
@@ -28,6 +29,8 @@ static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse
 static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t macro_index, rc_arena scratch);
 static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -102,6 +105,7 @@ typedef enum closer_kind {
     closer_else,
     closer_endif,
     closer_next,
+    closer_endmacro,
 } closer_kind;
 
 // Pre-combined: every mnemonic (its own lexeme type, carrying the id) plus the statement
@@ -189,6 +193,7 @@ static const token statement_token_entries[] = {
     {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
+    {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
     // The pure expression constants are reserved at statement start too, so `pi = 5` is rejected rather than
     // quietly binding a shadowed symbol. Three near-identical rows, but it is only three tokens.
     {RC_STR("true"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
@@ -197,17 +202,31 @@ static const token statement_token_entries[] = {
     {RC_STR("elif"),   {.type = lexeme_type_closer, .closer = {closer_elif,  error_type_unexpected_elif}}},
     {RC_STR("else"),   {.type = lexeme_type_closer, .closer = {closer_else,  error_type_unexpected_else}}},
     {RC_STR("endif"),  {.type = lexeme_type_closer, .closer = {closer_endif, error_type_unexpected_endif}}},
-    {RC_STR("next"),   {.type = lexeme_type_closer, .closer = {closer_next,  error_type_unexpected_next}}},
-    {RC_STR("}"),      {.type = lexeme_type_closer, .closer = {closer_brace, error_type_unexpected_close_brace}}},
+    {RC_STR("next"),    {.type = lexeme_type_closer, .closer = {closer_next,     error_type_unexpected_next}}},
+    {RC_STR("endmacro"),{.type = lexeme_type_closer, .closer = {closer_endmacro, error_type_unexpected_endmacro}}},
+    {RC_STR("}"),       {.type = lexeme_type_closer, .closer = {closer_brace,    error_type_unexpected_close_brace}}},
 };
-static const token_table statement_tokens = RC_VIEW(statement_token_entries);
+
+// The STATIC base: mnemonics, directives and closers. Macro-name tokens are appended to a per-pass COPY of
+// this (macros.statement_tokens), so a name defined earlier this pass is recognised as a call; statement_tokens(b)
+// returns that live table. handle_macro lexes the macro NAME from the base instead, so an already-defined name
+// still reads as a plain identifier there (and overloads reuse one name entry).
+static const token_table base_statement_tokens = RC_VIEW(statement_token_entries);
+
+// The statement table THIS pass - the base plus one token per macro name seen so far. Every statement-start
+// lex goes through it, so a label / for-var / symbol spelled like a macro reads as a call (and errors), the
+// same acceptable collision a mnemonic-named label already has.
+static token_table statement_tokens(const baron *b)
+{
+    return macros_statement_tokens(&b->macros);
+}
 
 // require_separator is shared with opcodes.c (declared in assemble.h); it reads the statement
 // table to recognise the '}' that implicitly closes a one-liner, so it lives here with it.
 parse_result require_separator(baron *b, cursor at)
 {
     rc_str source = source_files_text(&b->source_files, at.source);
-    lexer_result r = lexer_next(source, at.pos, statement_tokens);
+    lexer_result r = lexer_next(source, at.pos, statement_tokens(b));
 
     if (r.token.type == lexeme_type_terminator) {
         return (parse_result) { .next = r.next };
@@ -483,7 +502,7 @@ static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags
         }
         unresolved |= em.unresolved;
 
-        lexer_result lr = lexer_next(src, e.next, statement_tokens);
+        lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
         if (lr.token.type == lexeme_type_comma) {
             pos = lr.next;
             continue;   // another value follows
@@ -502,7 +521,7 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
     // The label name. A name spelled exactly like a mnemonic would lex as that opcode (the same
     // limitation an assignment target has at statement start) - acceptable, and not worth a
     // private name table.
-    lexer_result nm = lexer_next(src, at.pos, statement_tokens);
+    lexer_result nm = lexer_next(src, at.pos, statement_tokens(b));
     if (nm.token.type != lexeme_type_identifier) {
         return syntax_error(b, error_type_expected_label_name, cursor_at(at, at.pos));   // no name token: malformed
     }
@@ -547,10 +566,10 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
     // on the next line - makes the label name a scope. Anything else is not the label's to parse: we
     // drop back to the parent loop, which takes the next token as its own statement (or, on a '}',
     // closes the block). The label never owns the statement that follows it.
-    lexer_result nb = lexer_next(src, r.next, statement_tokens);
+    lexer_result nb = lexer_next(src, r.next, statement_tokens(b));
     
     if (nb.token.type == lexeme_type_terminator) {
-        lexer_result after = lexer_next(src, nb.next, statement_tokens);
+        lexer_result after = lexer_next(src, nb.next, statement_tokens(b));
         if (!is_open_brace(after.token)) {
             return r;                          // stand-alone label - leave the terminator for the loop
         }
@@ -686,7 +705,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
         return acc;
     }
 
-    lexer_result t = lexer_next(src, acc.next, statement_tokens);
+    lexer_result t = lexer_next(src, acc.next, statement_tokens(b));
 
     // If the IF block is closed with an ELIF, recurse here
     if (t.token.type == lexeme_type_closer && t.token.closer.id == closer_elif) {
@@ -727,7 +746,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
         }
 
         // Now read the token after the ELSE block, which must be ENDIF. The ELSE body is always the last
-        t = lexer_next(src, acc.next, statement_tokens);
+        t = lexer_next(src, acc.next, statement_tokens(b));
     }
 
     // If it was ENDIF, close the IF block here
@@ -825,7 +844,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
 
     // The loop variable: a bare identifier (a dotted path cannot be a binding target). A malformed
     // header (no name, no '=') is fatal - we cannot reliably find the matching NEXT.
-    lexer_result var = lexer_next(src, at.pos, statement_tokens);
+    lexer_result var = lexer_next(src, at.pos, statement_tokens(b));
     if (var.token.type != lexeme_type_identifier || is_dotted(var.token.identifier.name)) {
         return syntax_error(b, error_type_expected_label_name, cursor_at(at, at.pos));
     }
@@ -899,7 +918,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
     }
 
     // Close with NEXT, which insists on a separator after it (like ENDIF).
-    lexer_result t = lexer_next(src, acc.next, statement_tokens);
+    lexer_result t = lexer_next(src, acc.next, statement_tokens(b));
     if (t.token.type == lexeme_type_closer && t.token.closer.id == closer_next) {
         acc.next = t.next;
         return fold(acc, require_separator(b, cursor_at(at, acc.next)));
@@ -979,6 +998,246 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_fl
 }
 
 
+// ---- MACRO ----
+
+// MACRO name [signature] : ...body... : ENDMACRO, evaluated each pass. The name/token is registered BEFORE
+// the body is scanned, so the body may call the macro itself (self-recursion); mutual recursion needs a
+// forward declaration - an empty body - so the partner's name is a token in time. The body is captured as a
+// cursor and only ever PARSED at invocation; here we scan it inactively (the trick FOR uses to locate NEXT),
+// which finds ENDMACRO through the real parser - handling multi-line list literals and nested IF/FOR/{} -
+// without expanding anything. The definition emits nothing itself.
+static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    // The name, from the STATIC base table (so an already-defined macro name reads as a plain identifier
+    // here, not a call - which is what lets an overload or a fill-in reuse the one name entry).
+    lexer_result nm = lexer_next(src, at.pos, base_statement_tokens);
+    if (nm.token.type != lexeme_type_identifier) {
+        error_type code = (nm.token.type == lexeme_type_terminator)
+                              ? error_type_expected_macro_name    // MACRO with nothing after it
+                              : error_type_macro_name_reserved;    // a mnemonic / keyword / constant / closer
+        return syntax_error(b, code, cursor_at(at, at.pos));
+    }
+    rc_str name = nm.token.identifier.name;
+    if (is_dotted(name)) {
+        return syntax_error(b, error_type_macro_name_reserved, cursor_at(at, at.pos));   // a dotted name is not a macro name
+    }
+
+    // Register the name now (idempotent), before the body is scanned, so a self-call inside lexes as a macro.
+    uint32_t index = macros_index_for_name(&b->macros, name);
+
+    // The signature: slots up to the terminator MACRO insists on. Built in the manager arena, stored as a view.
+    rc_array_macro_slot slots = rc_array_macro_slot_make(4, &b->macros.arena);
+    uint32_t pos = nm.next;
+    while (true) {
+        lexer_result s = lexer_next(src, pos, base_statement_tokens);
+        if (s.token.type == lexeme_type_terminator) {
+            pos = s.next;   // the required separator; the body starts here
+            break;
+        }
+        if (s.token.type == lexeme_type_identifier) {
+            rc_array_macro_slot_push(&slots,
+                (macro_slot) {.type = macro_slot_param, .name = s.token.identifier.name}, &b->macros.arena);
+        }
+        else if (s.token.type == lexeme_type_string_literal || s.token.type == lexeme_type_escaped_string_literal) {
+            uint32_t id = macros_intern_literal(&b->macros, index, s.token.string_literal.ref);
+            rc_array_macro_slot_push(&slots,
+                (macro_slot) {.type = macro_slot_literal, .literal_id = id}, &b->macros.arena);
+        }
+        else if (s.token.type == lexeme_type_comma) {
+            // The comma is its own slot: the lexer yields lexeme_type_comma intrinsically (never via a token
+            // table), so a comma can never be matched through the literal table - it is handled directly.
+            rc_array_macro_slot_push(&slots,
+                (macro_slot) {.type = macro_slot_comma}, &b->macros.arena);
+        }
+        else if (s.token.type == lexeme_type_closer) {
+            return syntax_error(b, error_type_expected_separator, cursor_at(at, pos));   // ENDMACRO / '}' before a separator
+        }
+        else {
+            return syntax_error(b, error_type_unquoted_macro_token, cursor_at(at, pos));   // bare punctuation must be quoted
+        }
+        pos = s.next;
+    }
+    cursor body = cursor_at(at, pos);
+
+    // Empty body == a forward declaration: true iff the first meaningful token is ENDMACRO.
+    lexer_result peek = lexer_next(src, body.pos, statement_tokens(b));
+    while (peek.token.type == lexeme_type_terminator && !lexer_at_end(src, peek.next)) {
+        peek = lexer_next(src, peek.next, statement_tokens(b));
+    }
+    bool defined = !(peek.token.type == lexeme_type_closer && peek.token.closer.id == closer_endmacro);
+
+    // Scan the body inactively to find its ENDMACRO. Nested calls consume their arguments but do not expand
+    // (see handle_macro_invocation), so the scan never recurses and always stops at this macro's ENDMACRO.
+    parse_result scan = parse_block(b, body, scope, (parse_flags) {flags.final, false}, scratch);
+    if (scan.fatal) {
+        return scan;   // a structurally broken body aborts, reported at the definition
+    }
+    lexer_result end = lexer_next(src, scan.next, statement_tokens(b));
+    if (!(end.token.type == lexeme_type_closer && end.token.closer.id == closer_endmacro)) {
+        return syntax_error(b, error_type_unclosed_macro, cursor_at(at, scan.next));   // a foreign closer / EOF first
+    }
+
+    // Register the signature, but only when the definition is actually reached: a dead-branch definition, or
+    // one met while inactively scanning another macro's body, registers nothing. Reconcile against overloads.
+    if (flags.active) {
+        macro_add_status st = macros_add_signature(&b->macros, index, slots.view, body, defined);
+        if (st == macro_add_duplicate) {
+            semantic_error(b, flags, error_type_duplicate_signature, cursor_at(at, at.pos));
+        }
+    }
+
+    // ENDMACRO insists on a separator after it, like NEXT / ENDIF.
+    return require_separator(b, cursor_at(at, end.next));
+}
+
+// Try to match one overload against the call text at `at`. Returns true (and sets *end, the cursor at the
+// trailing separator) when every slot matches and the statement then ends. Literal slots are recognised via
+// the macro's OWN literal table; parameter slots consume one expression in `scope` - its value is ignored
+// here, so matching is purely structural and a forward-referenced argument matches like any other (the choice
+// of overload is thus identical every pass). A parse failure (no operand where one is needed) fails the fit.
+static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_signature sig,
+                            uint32_t scope, uint32_t *end, rc_arena scratch)
+{
+    uint32_t pos = at.pos;
+    for (uint32_t k = 0; k < sig.slots.num; k++) {
+        macro_slot slot = rc_view_macro_slot_get(sig.slots, k);
+        if (slot.type == macro_slot_literal) {
+            lexer_result lr = lexer_next(src, pos, m->literal_table.view);
+            if (lr.token.type != lexeme_type_macro_literal || lr.token.macro_literal.id != slot.literal_id) {
+                return false;
+            }
+            pos = lr.next;
+        }
+        else if (slot.type == macro_slot_comma) {
+            lexer_result lr = lexer_next(src, pos, m->literal_table.view);
+            if (lr.token.type != lexeme_type_comma) {
+                return false;
+            }
+            pos = lr.next;
+        }
+        else {
+            expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+            if (e.error != expr_error_none) {
+                return false;   // no operand here (or a broken one): this overload does not fit
+            }
+            pos = e.next;
+        }
+    }
+    lexer_result term = lexer_next(src, pos, statement_tokens(b));
+    if (term.token.type == lexeme_type_terminator
+        || (term.token.type == lexeme_type_closer && term.token.closer.id == closer_brace)) {
+        *end = pos;
+        return true;
+    }
+    return false;
+}
+
+// name arg1, arg2 - a macro call. Match an overload, then (when live) stamp its body out into a fresh child
+// scope with the arguments bound as symbols. Mirrors handle_for's body re-walk and handle_include's error
+// breadcrumb. An inactive call consumes its arguments but expands nothing - which is what makes a recursive
+// call terminate once its base-case branch goes inactive.
+static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t macro_index, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+    macro *m = macros_at(&b->macros, macro_index);
+
+    // Match an overload: sorted so tokens beat expressions, first full match wins. Matching runs whether or
+    // not we are active - it validates the arguments and, above all, advances the cursor past the call.
+    uint32_t chosen = RC_INDEX_NONE;
+    uint32_t args_end = at.pos;
+    for (uint32_t si = 0; si < m->signatures.num; si++) {
+        uint32_t end;
+        if (macro_try_match(b, src, at, m, rc_array_macro_signature_get(&m->signatures, si), scope, &end, scratch)) {
+            chosen = si;
+            args_end = end;
+            break;
+        }
+    }
+
+    if (chosen == RC_INDEX_NONE) {
+        semantic_error(b, flags, error_type_no_matching_signature, cursor_at(at, at.pos));
+        uint32_t p = at.pos;   // resync: skip to the end of the statement so parsing carries on
+        while (true) {
+            lexer_result lr = lexer_next(src, p, statement_tokens(b));
+            if (lr.token.type == lexeme_type_terminator) {
+                return (parse_result) {.next = lr.next};
+            }
+            if (lr.token.type == lexeme_type_closer) {
+                return (parse_result) {.next = p};   // leave the closer for the caller
+            }
+            // A stray token the lexer cannot advance past (an unexpected char like a bare '#') returns
+            // next == p; step over it by hand so the resync always makes progress to the terminator.
+            p = lr.next > p ? lr.next : p + 1;
+        }
+    }
+
+    // Copy out what the expansion needs BEFORE any body parse (which may register a macro and move the list).
+    macro_signature sig = rc_array_macro_signature_get(&m->signatures, chosen);
+    rc_view_macro_slot slots = sig.slots;
+    cursor body = sig.body;
+    bool defined = sig.defined;
+
+    // Inactive (a dead branch, or a recursive call whose base case is met): arguments consumed, nothing more.
+    if (!flags.active) {
+        return require_separator(b, cursor_at(at, args_end));
+    }
+
+    // The depth guard is a runaway backstop; a bounded recursion unwinds well before it.
+    if (b->macro_depth >= ASSEMBLE_MAX_MACRO_DEPTH) {
+        semantic_error(b, flags, error_type_macro_too_deep, cursor_at(at, at.pos));
+        return require_separator(b, cursor_at(at, args_end));   // expand nothing
+    }
+
+    // A fresh per-invocation child scope, keyed on the call site; the parent chain disambiguates recursion.
+    char storage[64];
+    rc_mstr key = anon_scope_key(storage, sizeof storage, at);
+    uint32_t child = scopes_get_or_make_child(&b->scopes, scope, key.view);
+
+    // Bind the parameters: re-evaluate each argument in the CALLER scope and set it as a symbol in the child.
+    uint32_t pos = at.pos;
+    for (uint32_t k = 0; k < slots.num; k++) {
+        macro_slot slot = rc_view_macro_slot_get(slots, k);
+        if (slot.type == macro_slot_literal || slot.type == macro_slot_comma) {
+            pos = lexer_next(src, pos, m->literal_table.view).next;   // already matched; just step over it
+        }
+        else {
+            expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+            scopes_set_symbol(&b->scopes, child, slot.name, e.value, at);
+            pos = e.next;
+        }
+    }
+
+    // Expand the body in the child scope. Its errors point at the definition (parsed in place); if it raised
+    // any, drop an "expanded from here" breadcrumb at the call site - the handle_include idiom.
+    uint32_t errors_before = baron_error_count(b);
+    b->macro_depth++;
+    parse_result bodyr = parse_block(b, body, child, flags, scratch);
+    b->macro_depth--;
+
+    if (bodyr.fatal) {
+        return bodyr;   // a broken body aborts the whole assemble
+    }
+
+    rc_str bsrc = source_files_text(&b->source_files, body.source);
+    lexer_result be = lexer_next(bsrc, bodyr.next, statement_tokens(b));
+    if (!(be.token.type == lexeme_type_closer && be.token.closer.id == closer_endmacro)) {
+        return fold(bodyr, syntax_error(b, error_type_unclosed_macro, cursor_at(body, bodyr.next)));
+    }
+
+    if (baron_error_count(b) > errors_before) {
+        semantic_error(b, flags, error_type_expanded_from, cursor_at(at, at.pos));
+    }
+    if (!defined) {
+        semantic_error(b, flags, error_type_macro_not_defined, cursor_at(at, at.pos));   // invoked while only forward-declared
+    }
+
+    // Resume in the caller at the separator after the arguments; carry the body's convergence flags up.
+    return fold(bodyr, require_separator(b, cursor_at(at, args_end)));
+}
+
+
 // TRUE / FALSE / PI are expression constants, reserved so that a name always resolves to the constant.
 // Meeting one at statement start is someone assigning to it (pi = 5) or otherwise misusing it as a name -
 // a fatal error, the same way a name that clashes with a mnemonic is rejected.
@@ -996,13 +1255,15 @@ static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
-    lexer_result lr = lexer_next(src, at.pos, statement_tokens);
+    lexer_result lr = lexer_next(src, at.pos, statement_tokens(b));
 
     switch (lr.token.type) {
         case lexeme_type_opcode:
             return opcode_parse(b, (mnemonic)lr.token.opcode.id, cursor_at(at, lr.next), scope, flags, scratch);
         case lexeme_type_keyword:
             return lr.token.keyword.handle(b, cursor_at(at, lr.next), scope, flags, scratch);
+        case lexeme_type_macro:
+            return handle_macro_invocation(b, cursor_at(at, lr.next), scope, flags, lr.token.macro.index, scratch);
         case lexeme_type_identifier:
             return handle_assignment(b, cursor_at(at, lr.next), scope, flags, lr.token.identifier.name, scratch);
         default:
@@ -1019,7 +1280,7 @@ static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags
 
     parse_result acc = {.next = at.pos};
     while (!acc.fatal) {
-        lexer_result lr = lexer_next(src, acc.next, statement_tokens);
+        lexer_result lr = lexer_next(src, acc.next, statement_tokens(b));
 
         if (is_block_terminator(lr.token)) {
             return acc;                    // stop at the closer, leaving it for the caller
@@ -1050,7 +1311,7 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags
     }
 
     rc_str src = source_files_text(&b->source_files, at.source);
-    lexer_result lr = lexer_next(src, r.next, statement_tokens);
+    lexer_result lr = lexer_next(src, r.next, statement_tokens(b));
 
     if (lr.token.type == lexeme_type_closer) {
         if (lr.token.closer.id == closer_brace) {   // the '}' we were waiting for
@@ -1078,7 +1339,7 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags 
     }
 
     rc_str src = source_files_text(&b->source_files, at.source);
-    lexer_result lr = lexer_next(src, r.next, statement_tokens);
+    lexer_result lr = lexer_next(src, r.next, statement_tokens(b));
 
     if (lr.token.type == lexeme_type_closer) {   // any closer at file scope has nothing to close
         return fold(r, syntax_error(b, (error_type) lr.token.closer.unexpected, cursor_at(at, lr.next)));
@@ -1096,7 +1357,12 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     overlays_reset_all(&b->overlays);
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
+    b->macro_depth     = 0;                  // ditto for macro expansion
     expression_reset_random();               // replay the same RND stream every pass, so RND can converge
+
+    // The macro store and its statement-token table are a fresh projection of the source each pass: reset the
+    // store, which reseeds the table from the static base (reserving room for macro-name tokens up front).
+    macros_reset(&b->macros, base_statement_tokens, 64);
 
     const uint32_t scope = 0;
     return parse_file(
@@ -1906,6 +2172,112 @@ RC_TEST_STEP(assemble, include_cycle_is_caught, fix)
     uint32_t passes = assemble_file(&fix->b, RC_STR("inc_cycle.6502"), fix->scratch);
     RC_CHECK(passes, ==, 0u);
     RC_CHECK_TRUE(has_diag(&fix->b, error_type_include_too_deep));
+}
+
+RC_TEST_STEP(assemble, macro_expands_body, fix)
+{
+    // A directive body with a value parameter.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("MACRO PAD n : SKIP n : ENDMACRO\nPAD 3"),
+                          (uint8_t[]) {0x00, 0x00, 0x00}, 3));
+    // Instructions with the parameter woven through the operands.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("MACRO ST16 a : LDA #0 : STA a : STA a+1 : ENDMACRO\nST16 &70"),
+                          (uint8_t[]) {0xA9, 0x00, 0x85, 0x70, 0x85, 0x71}, 6));
+}
+
+RC_TEST_STEP(assemble, macro_overload_by_arity, fix)
+{
+    // TWO a, b and TWO a are distinct overloads; the call picks by the number of arguments.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("MACRO TWO a, b : EQUB a : EQUB b : ENDMACRO\n"
+            "MACRO TWO a : EQUB a : EQUB a : ENDMACRO\n"
+            "TWO 5, 6\nTWO 9"),
+        (uint8_t[]) {0x05, 0x06, 0x09, 0x09}, 4));
+}
+
+RC_TEST_STEP(assemble, macro_overload_by_literal_token, fix)
+{
+    // The immediate form carries a "#" literal; ADD 1, #2 picks it, ADD 1, 2 the two-argument form.
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("MACRO ADD a, \"#\" b : EQUB a : EQUB b : ENDMACRO\n"
+            "MACRO ADD a, b : EQUB a : EQUB &FF : ENDMACRO\n"
+            "ADD 1, #2\nADD 1, 2"),
+        (uint8_t[]) {0x01, 0x02, 0x01, 0xFF}, 4));
+}
+
+RC_TEST_STEP(assemble, macro_matches_tokens_before_expressions, fix)
+{
+    // LAX "(" addr ")" outranks LAX addr, so a parenthesised call takes the token form even though the
+    // bare form's greedy expression would also swallow (5).
+    RC_CHECK_TRUE(code_is(&fix->b,
+        ASM("MACRO LAX \"(\" addr \")\" : EQUB addr : EQUB &EE : ENDMACRO\n"
+            "MACRO LAX addr : EQUB addr : ENDMACRO\n"
+            "LAX (5)\nLAX 7"),
+        (uint8_t[]) {0x05, 0xEE, 0x07}, 3));
+}
+
+RC_TEST_STEP(assemble, macro_forward_referenced_argument, fix)
+{
+    // The argument is a symbol defined AFTER the call: it defers, then resolves on a later pass.
+    uint32_t passes = ASM("MACRO W a : EQUB a : ENDMACRO\nW later\nlater = 5");
+    RC_CHECK_TRUE(passes >= 2);
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0x05}, 1));
+}
+
+RC_TEST_STEP(assemble, macro_body_labels_are_per_invocation, fix)
+{
+    // A body that defines a label, invoked twice: each expansion has its own scope, so no duplicate.
+    uint32_t passes = ASM("MACRO M : .here : NOP : ENDMACRO\nM\nM");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0xEA, 0xEA}, 2));
+    RC_CHECK_FALSE(has_diag(&fix->b, error_type_duplicate_symbol));
+}
+
+RC_TEST_STEP(assemble, macro_bounded_self_recursion, fix)
+{
+    // FILL n recurses with an IF base case; the recursive call goes inactive at n == 0 and stops.
+    uint32_t passes = ASM("MACRO FILL n : IF n > 0 : EQUB n : FILL n-1 : ENDIF : ENDMACRO\nFILL 3");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0x03, 0x02, 0x01}, 3));
+    RC_CHECK_FALSE(has_diag(&fix->b, error_type_macro_too_deep));
+}
+
+RC_TEST_STEP(assemble, macro_mutual_recursion_via_forward_declaration, fix)
+{
+    // PING is forward-declared (empty body) so PONG can call it; the real PING fills that in, not a
+    // duplicate. PING 3 then ping-pongs down to zero.
+    uint32_t passes = ASM("MACRO PING n : ENDMACRO\n"
+                          "MACRO PONG n : IF n > 0 : EQUB n : PING n-1 : ENDIF : ENDMACRO\n"
+                          "MACRO PING n : IF n > 0 : EQUB n : PONG n-1 : ENDIF : ENDMACRO\n"
+                          "PING 3");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]) {0x03, 0x02, 0x01}, 3));
+    RC_CHECK_FALSE(has_diag(&fix->b, error_type_duplicate_signature));
+}
+
+RC_TEST_STEP(assemble, macro_error_breadcrumb, fix)
+{
+    // A body whose EQUB overflows raises value_out_of_range at the definition, then an expanded_from
+    // frame at the call site.
+    ASM("MACRO BIG x : EQUB x : ENDMACRO\nBIG 300");
+    RC_CHECK_TRUE(has_diag(&fix->b, error_type_value_out_of_range));
+    RC_CHECK_TRUE(has_diag(&fix->b, error_type_expanded_from));
+}
+
+RC_TEST_STEP(assemble, macro_framing_and_call_errors, fix)
+{
+    // A call before the definition: the name is not a token yet, so it misparses as an assignment.
+    RC_CHECK(ASM("PAD 3\nMACRO PAD n : SKIP n : ENDMACRO"), ==, 0u);
+    // No overload fits the arguments.
+    RC_CHECK_TRUE(ERR("MACRO AD a, b : EQUB a : ENDMACRO\nAD 1, 2, 3") == error_type_no_matching_signature);
+    // Unbounded recursion (no base case) trips the depth cap.
+    RC_CHECK_TRUE(ERR("MACRO LOOP n : EQUB n : LOOP n : ENDMACRO\nLOOP 1") == error_type_macro_too_deep);
+    // A macro invoked while only forward-declared has no body to expand here.
+    RC_CHECK_TRUE(ERR("MACRO F n : ENDMACRO\nF 5") == error_type_macro_not_defined);
+    // Missing ENDMACRO.
+    RC_CHECK_TRUE(ERR("MACRO G n : EQUB n") == error_type_unclosed_macro);
+    // Two real bodies for one signature.
+    RC_CHECK_TRUE(ERR("MACRO H n : EQUB 1 : ENDMACRO\nMACRO H n : EQUB 2 : ENDMACRO") == error_type_duplicate_signature);
+    // A header with no separator before ENDMACRO.
+    RC_CHECK_TRUE(ERR("MACRO A n ENDMACRO") == error_type_expected_separator);
+    // A macro cannot be named after a mnemonic.
+    RC_CHECK_TRUE(ERR("MACRO NOP : ENDMACRO") == error_type_macro_name_reserved);
 }
 
 #endif // BARON_TESTS

@@ -36,6 +36,11 @@ typedef enum error_type {
     error_type_unclosed_for,          // FOR reached '}' or end of input before NEXT
     error_type_unexpected_next,       // NEXT with no FOR to match
     error_type_reserved_constant,     // a built-in constant (TRUE/FALSE/PI) used as a statement / assignment target
+    error_type_expected_macro_name,   // MACRO with no name after it
+    error_type_macro_name_reserved,   // a macro named like a mnemonic / keyword / constant, or a dotted name
+    error_type_unquoted_macro_token,  // a bare (non-comma) literal token in a signature - it must be quoted
+    error_type_unclosed_macro,        // MACRO reached a foreign closer or end of input before ENDMACRO
+    error_type_unexpected_endmacro,   // ENDMACRO with no MACRO to match
 
     // Semantic: the statement parses, but its meaning is wrong.
     error_type_bad_addressing_mode,   // the mnemonic has no encoding for that operand shape
@@ -51,6 +56,11 @@ typedef enum error_type {
     error_type_expected_filename,     // INCLUDE's operand did not evaluate to a string
     error_type_include_too_deep,      // INCLUDE recursion hit the depth cap - a cyclic include, most likely
     error_type_included_from,         // the companion frame: points at the INCLUDE that pulled in a failing file
+    error_type_duplicate_signature,   // a second body defined for a macro signature already given one
+    error_type_no_matching_signature, // a macro call whose arguments fit none of its overloads
+    error_type_macro_not_defined,     // a macro invoked while only forward-declared (its body never supplied here)
+    error_type_macro_too_deep,        // macro expansion hit the depth cap - a missing/wrong recursion base case
+    error_type_expanded_from,         // the companion frame: points at the macro invocation an error expanded from
 
     // Value-evaluation errors: produced by the expression evaluator, carried inside a value.
     error_type_divide_by_zero,

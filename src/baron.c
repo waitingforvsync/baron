@@ -11,7 +11,9 @@ void baron_init(baron *b)
     overlays_init(&b->overlays);
     b->current_overlay = overlays_make_default(&b->overlays);   // emit into the default overlay (index 0)
     source_files_init(&b->source_files);
+    macros_init(&b->macros);   // owns the dynamic statement-token table; run_pass seeds it from the base each pass
     b->include_depth = 0;
+    b->macro_depth   = 0;
     b->diag_arena  = rc_arena_make_default();
     b->diagnostics = rc_array_diagnostic_make(0, &b->diag_arena);
 }
@@ -22,6 +24,7 @@ void baron_deinit(baron *b)
     scopes_deinit(&b->scopes);
     overlays_deinit(&b->overlays);
     source_files_deinit(&b->source_files);
+    macros_deinit(&b->macros);   // also frees the statement-token table, which lives in the macros arena
     rc_arena_deinit(&b->diag_arena);
 }
 
