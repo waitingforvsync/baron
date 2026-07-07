@@ -3,7 +3,8 @@
 #include "opcodes.h"
 #include "lexer.h"
 #include "expression.h"
-#include "file_utils.h"          // INCLUDE's path resolution
+#include "file_utils.h"          // INCLUDE / INCBIN path resolution
+#include "richc/file.h"          // INCBIN: rc_file_size / rc_file_load_binary
 #include "baron.h"               // the owner type the tests assemble into
 #include "richc/macros.h"
 
@@ -23,12 +24,15 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
 static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t macro_index, rc_arena scratch);
 static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -191,9 +195,12 @@ static const token statement_token_entries[] = {
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
     {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
+    {RC_STR("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
+    {RC_STR("equd"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equd}}},   // 32-bit words
     {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
+    {RC_STR("incbin"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incbin}}},
     {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
     {RC_STR("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
     // The pure expression constants are reserved at statement start too, so `pi = 5` is rejected rather than
@@ -439,12 +446,21 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
     return r;
 }
 
-// Emit one value's bytes into the current overlay, for EQUB / EQUS. A string goes character by
-// character; a range is enumerated; a list is descended (so nested lists and ranges flatten out);
-// anything else is a single byte via int_argument_make, where a forward reference emits a 0 placeholder
-// and asks for another pass. Returns .error/.error_at on failure and .unresolved when a value defers
-// (its .next is unused). A dead branch emits nothing and raises nothing - mirroring inactive statements.
-static parse_result emit_data(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
+// Emit `bits` as `width` little-endian bytes into the current overlay.
+static void emit_le(baron *b, uint64_t bits, uint32_t width)
+{
+    for (uint32_t i = 0; i < width; i++) {
+        overlays_emit_u8(&b->overlays, b->current_overlay, (uint8_t) (bits >> (8 * i)));
+    }
+}
+
+// Emit one value into the current overlay as `width`-byte little-endian units, for EQUB/EQUW/EQUD (width
+// 1/2/4). A string goes character by character (each char widened to `width` bytes); a range is enumerated;
+// a list is descended (so nested lists and ranges flatten out); anything else is one `width`-byte unit via
+// int_argument_make, where a forward reference emits a zero placeholder of the right size and asks for
+// another pass. Returns .error/.error_at on failure and .unresolved when a value defers (its .next is
+// unused). A dead branch emits nothing and raises nothing - mirroring inactive statements.
+static parse_result emit_data(baron *b, value v, parse_flags flags, cursor at, uint32_t width, rc_arena scratch)
 {
     if (!flags.active) {
         return (parse_result) {0};
@@ -452,45 +468,46 @@ static parse_result emit_data(baron *b, value v, parse_flags flags, cursor at, r
 
     if (value_is_string(v)) {
         for (uint32_t i = 0; i < v.string.len; i++) {
-            overlays_emit_u8(&b->overlays, b->current_overlay, (uint8_t) v.string.data[i]);
+            emit_le(b, (uint8_t) v.string.data[i], width);
         }
         return (parse_result) {0};
     }
 
     if (value_is_range(v)) {
-        return emit_data(b, range_to_list(v.range, &scratch), flags, at, scratch);   // enumerated to a list (or an error leaf)
+        return emit_data(b, range_to_list(v.range, &scratch), flags, at, width, scratch);   // enumerated to a list (or an error leaf)
     }
 
     if (value_is_list(v)) {
         parse_result acc = {0};
         for (uint32_t i = 0; i < v.list.num; i++) {
-            acc = fold(acc, emit_data(b, rc_view_value_get(v.list, i), flags, at, scratch));
+            acc = fold(acc, emit_data(b, rc_view_value_get(v.list, i), flags, at, width, scratch));
         }
         return acc;
     }
 
-    // A numeric, a forward reference, or some other error value - one byte either way.
+    // A numeric, a forward reference, or some other error value - one `width`-byte unit either way.
     int_argument arg = int_argument_make(v, flags.final, at.pos);
     if (arg.type == int_argument_type_error) {
         semantic_error(b, flags, arg.error, at);
-        overlays_emit_u8(&b->overlays, b->current_overlay, 0);   // best-effort placeholder; keeps the size stable
+        emit_le(b, 0, width);   // best-effort placeholder; keeps the size stable
         return (parse_result) {0};
     }
     if (arg.type == int_argument_type_unresolved) {
-        overlays_emit_u8(&b->overlays, b->current_overlay, 0);   // placeholder; its size is assumed one byte
+        emit_le(b, 0, width);   // placeholder of the right width; forces another pass
         return (parse_result) {.unresolved = true};
     }
-    // We allow signed bytes, so the byte-sized window is -255..255; recorded only once everything settles.
-    if (arg.value < -255 || arg.value > 255) {
+    // We allow signed values, so the window is -(2^(8*width)-1) .. (2^(8*width)-1); recorded once settled.
+    int64_t limit = (int64_t) ((1ull << (8 * width)) - 1);
+    if (arg.value < -limit || arg.value > limit) {
         semantic_error(b, flags, error_type_value_out_of_range, at);
     }
-    overlays_emit_u8(&b->overlays, b->current_overlay, (uint8_t) (arg.value & 0xFF));
+    emit_le(b, (uint64_t) arg.value, width);
     return (parse_result) {0};
 }
 
-// EQUB / EQUS: a comma-separated list of values, each emitted as bytes (see emit_data). The two
-// spellings are aliases - both take numbers, strings, ranges and lists alike.
-static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+// EQUB / EQUS (width 1) / EQUW (2) / EQUD (4): a comma-separated list of values, each emitted as `width`-byte
+// little-endian units (see emit_data). All take numbers, strings, ranges and lists alike; EQUS is an EQUB alias.
+static parse_result handle_equ(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t width, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
@@ -502,7 +519,7 @@ static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        parse_result em = emit_data(b, e.value, flags, cursor_at(at, pos), scratch);
+        parse_result em = emit_data(b, e.value, flags, cursor_at(at, pos), width, scratch);
         if (em.fatal) {
             return em;
         }
@@ -518,6 +535,20 @@ static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags
         r.unresolved = unresolved;
         return r;   // end of the list: a terminator or '}'
     }
+}
+
+// The width-specialised entry points named in the statement table. EQUS is an alias of EQUB.
+static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    return handle_equ(b, at, scope, flags, 1, scratch);
+}
+static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    return handle_equ(b, at, scope, flags, 2, scratch);
+}
+static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    return handle_equ(b, at, scope, flags, 4, scratch);
 }
 
 static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
@@ -1006,6 +1037,61 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_fl
 
     // Carry the pull-in's unresolved/changed up so the driver runs another pass if it must, and carry on in
     // THIS file at the separator just past the filename.
+    return fold(pulled, require_separator(b, cursor_at(at, e.next)));
+}
+
+// INCBIN "file" - splice a binary file's bytes into the current overlay. Its size never changes across passes,
+// so on the settling passes we do NOT read the file at all: rc_file_size tells us how many bytes it will be and
+// we just advance pc by that much (overlays_skip pads with zeroes). Only on the FINAL pass do we actually load
+// it and emit the real bytes (via emit_data, reusing EQUB's per-byte path over a string of the contents). The
+// filename is a string operand resolved relative to the includer, exactly like INCLUDE; a forward-referenced
+// name defers like a forward address. A missing / unreadable file is FATAL (there is no sensible recovery - the
+// output would be the wrong size), so it unwinds the whole assemble rather than accumulating.
+static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    expr_result e = eval(b, at, scope, scratch);
+    if (e.error != expr_error_none) {
+        return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+    }
+
+    parse_result pulled = {0};
+    if (flags.active) {
+        if (value_is_string(e.value)) {
+            rc_str base = source_files_name(&b->source_files, at.source);
+            rc_str path = file_path_resolve(base, e.value.string, &scratch);
+            if (flags.final) {
+                // Final pass: load the file and emit its bytes for real (one byte at a time, via emit_data).
+                rc_file_load_binary_result f = rc_file_load_binary(path, 0, &scratch);
+                if (f.error != RC_FILE_OK) {
+                    return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
+                }
+                rc_str bytes = {.data = (const char *) f.contents.view.data, .len = f.contents.view.num};
+                pulled = emit_data(b, value_make_string(bytes), flags, cursor_at(at, at.pos), 1, scratch);
+            }
+            else {
+                // Settling passes: reserve the file's size without reading it, so pc / later labels are right.
+                rc_file_size_result sz = rc_file_size(path);
+                if (sz.error != RC_FILE_OK) {
+                    return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
+                }
+                overlays_skip(&b->overlays, b->current_overlay, sz.size);
+            }
+        }
+        else if (value_is_error(e.value) && e.value.error == error_type_unknown_symbol) {
+            // A forward-referenced filename: defer, like INCLUDE. Still unknown on the final pass means it never
+            // binds (a name defined only where it cannot be seen in time), so we call it out then.
+            if (flags.final) {
+                semantic_error(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos));
+            }
+            else {
+                pulled.unresolved = true;
+            }
+        }
+        else {
+            semantic_error(b, flags, error_type_expected_filename, cursor_at(at, at.pos));
+        }
+    }
+
     return fold(pulled, require_separator(b, cursor_at(at, e.next)));
 }
 
@@ -2104,6 +2190,46 @@ RC_TEST_STEP(assemble, equb_dead_branch_emits_nothing, fix)
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
 }
 
+RC_TEST_STEP(assemble, equw_emits_little_endian_words, fix)
+{
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW &1234"),   (uint8_t[]){0x34, 0x12}, 2));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 1, 2"),    (uint8_t[]){0x01, 0x00, 0x02, 0x00}, 4));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 258"),     (uint8_t[]){0x02, 0x01}, 2));
+    // Ranges and lists flatten, each element a 16-bit word.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 0..2"),        (uint8_t[]){0x00, 0x00, 0x01, 0x00, 0x02, 0x00}, 6));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW {1, {2, 3}}"), (uint8_t[]){0x01, 0x00, 0x02, 0x00, 0x03, 0x00}, 6));
+}
+
+RC_TEST_STEP(assemble, equw_signed_range_and_pc, fix)
+{
+    // Signed window is -65535..65535; we emit the low word.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW -1"),     (uint8_t[]){0xFF, 0xFF}, 2));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUW 65535"),  (uint8_t[]){0xFF, 0xFF}, 2));
+    RC_CHECK_TRUE(ERR("EQUW 65536")  == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("EQUW -65536") == error_type_value_out_of_range);
+    // Each word advances pc by 2; a label after two words sees +4.
+    RC_CHECK_TRUE(ASM("ORG &2000 : EQUW 1, 2 : .here") != 0);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2004)));
+    // A forward reference is a 2-byte placeholder, so end - start = 2.
+    uint32_t passes = ASM(".start EQUW end - start : .end");
+    RC_CHECK_TRUE(code_is(&fix->b, passes, (uint8_t[]){0x02, 0x00}, 2));
+    RC_CHECK_TRUE(passes >= 2u);
+}
+
+RC_TEST_STEP(assemble, equd_emits_little_endian_dwords, fix)
+{
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD &12345678"), (uint8_t[]){0x78, 0x56, 0x34, 0x12}, 4));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD 1, 2"),
+                          (uint8_t[]){0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 8));
+    // Signed window is -(2^32-1)..(2^32-1); we emit the low dword.
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD -1"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
+    RC_CHECK_TRUE(code_is(&fix->b, ASM("EQUD 4294967295"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
+    RC_CHECK_TRUE(ERR("EQUD 4294967296") == error_type_value_out_of_range);
+    // Each dword advances pc by 4.
+    RC_CHECK_TRUE(ASM("ORG &2000 : EQUD 1 : .here") != 0);
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("here")), value_make_numeric(0x2004)));
+}
+
 RC_TEST_STEP(assemble, value_errors_promote_to_specific_codes, fix)
 {
     // A value error in an operand keeps its specific cause rather than collapsing to operand_not_numeric,
@@ -2298,6 +2424,30 @@ RC_TEST_STEP(assemble, include_cycle_is_caught, fix)
     uint32_t passes = assemble_file(&fix->b, RC_STR("inc_cycle.6502"), fix->scratch);
     RC_CHECK(passes, ==, 0u);
     RC_CHECK_TRUE(has_diag(&fix->b, error_type_include_too_deep));
+}
+
+RC_TEST_STEP(assemble, incbin_splices_file_bytes, fix)
+{
+    // Write a small binary, splice it, and check the exact bytes land in the overlay and pc advances by its
+    // size (a label after INCBIN sees +size). One assemble - INC dedupes sources by name, so we cannot reuse it.
+    uint8_t blob[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42};
+    RC_CHECK_TRUE(rc_file_save_binary(RC_STR("blob.bin"),
+                  (rc_view_bytes) {.data = blob, .num = (uint32_t) sizeof blob}) == RC_FILE_OK);
+
+    uint32_t passes = assemble_string(&fix->b, RC_STR("t"),
+                          RC_STR("ORG &2000 : incbin \"blob.bin\" : .after"), fix->scratch);
+    RC_CHECK_TRUE(code_is(&fix->b, passes, blob, (uint32_t) sizeof blob));
+    RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->b.scopes, 0, RC_STR("after")),
+                                 value_make_numeric(0x2000 + sizeof blob)));
+
+    rc_file_delete(RC_STR("blob.bin"));
+}
+
+RC_TEST_STEP(assemble, incbin_missing_file_is_fatal, fix)
+{
+    // A missing file cannot be recovered from (the output would be the wrong size), so it is fatal.
+    RC_CHECK(INC("incbin \"no_such_blob.bin\""), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->b) == error_type_source_load);
 }
 
 RC_TEST_STEP(assemble, macro_expands_body, fix)
