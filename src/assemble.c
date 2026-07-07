@@ -2470,13 +2470,39 @@ RC_TEST_STEP(assemble, function_recursive_list, fix)
 
 RC_TEST_STEP(assemble, function_recursive_quicksort, fix)
 {
-    // Quicksort, in functions: two recursive partition helpers (nested IF) and a recursive sort that sorts
+    // Quicksort, in functions: two recursive partition helpers and a recursive sort that sorts
     // both partitions, using variadic concat, unbounded-range tails xs[1..], and empty / singleton list literals.
     RC_CHECK_TRUE(code_is(&fix->b,
-        ASM("FUNCTION lt(xs, p) : IF len(xs) = 0 : r = {} : ELSE : IF xs[0] < p : r = concat({xs[0]}, lt(xs[1..], p)) : ELSE : r = lt(xs[1..], p) : ENDIF : ENDIF : = r\n"
-            "FUNCTION ge(xs, p) : IF len(xs) = 0 : r = {} : ELSE : IF xs[0] < p : r = ge(xs[1..], p) : ELSE : r = concat({xs[0]}, ge(xs[1..], p)) : ENDIF : ENDIF : = r\n"
-            "FUNCTION qsort(xs) : IF len(xs) <= 1 : r = xs : ELSE : r = concat(qsort(lt(xs[1..], xs[0])), {xs[0]}, qsort(ge(xs[1..], xs[0]))) : ENDIF : = r\n"
-            "EQUB qsort({3, 1, 4, 1, 5, 9, 2, 6})"),
+        ASM("FUNCTION lt(xs, p)                          \n\
+                 IF len(xs) = 0                          \n\
+                     r = {}                              \n\
+                 ELIF xs[0] < p                          \n\
+                     r = concat({xs[0]}, lt(xs[1..], p)) \n\
+                 ELSE                                    \n\
+                     r = lt(xs[1..], p)                  \n\
+                 ENDIF                                   \n\
+             = r                                         \n\
+                                                         \n\
+             FUNCTION ge(xs, p)                          \n\
+                 IF len(xs) = 0                          \n\
+                     r = {}                              \n\
+                 ELIF xs[0] < p                          \n\
+                     r = ge(xs[1..], p)                  \n\
+                 ELSE                                    \n\
+                     r = concat({xs[0]}, ge(xs[1..], p)) \n\
+                 ENDIF                                   \n\
+             = r                                         \n\
+                                                         \n\
+             FUNCTION qsort(xs)                          \n\
+                 IF len(xs) <= 1                         \n\
+                     r = xs                              \n\
+                 ELSE                                    \n\
+                     r = concat(qsort(lt(xs[1..], xs[0])), {xs[0]}, qsort(ge(xs[1..], xs[0]))) \n\
+                 ENDIF                                   \n\
+             = r                                         \n\
+                                                         \n\
+            EQUB qsort({3, 1, 4, 1, 5, 9, 2, 6})"
+        ),
         (uint8_t[]) {1, 1, 2, 3, 4, 5, 6, 9}, 8));
 }
 
