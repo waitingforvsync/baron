@@ -1624,7 +1624,7 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
 // Turn a finished baron into the read-only snapshot the caller keeps. The object code lives in the per_pass
 // arena (the final pass's overlay), diagnostics in permanent; the symbol table is flattened out of the live
 // scope tree into permanent HERE, while that tree is still standing (it dies with `b` the moment we return).
-static baron_result harvest(baron *b, baron_arenas *a, uint32_t passes)
+static baron_result baron_result_make(baron *b, baron_arenas *a, uint32_t passes)
 {
     return (baron_result) {
         .passes      = passes,
@@ -1652,7 +1652,7 @@ baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
     baron b;
     baron_init(&b, arenas);   // a fresh machine borrowing the caller's arenas
     uint32_t source = source_files_add_string(&b.source_files, name, text);
-    return harvest(&b, arenas, run_passes(&b, source, arenas->scratch));
+    return baron_result_make(&b, arenas, run_passes(&b, source, arenas->scratch));
 }
 
 baron_result assemble_file(baron_arenas *arenas, rc_str path)
@@ -1663,9 +1663,9 @@ baron_result assemble_file(baron_arenas *arenas, rc_str path)
     uint32_t source = source_files_add_file(&b.source_files, path);
     if (source == RC_INDEX_NONE) {
         baron_error(&b, error_type_source_load, (cursor) {0});
-        return harvest(&b, arenas, assemble_failed(&b));   // assemble_failed clears outputs and returns 0
+        return baron_result_make(&b, arenas, assemble_failed(&b));   // assemble_failed clears outputs and returns 0
     }
-    return harvest(&b, arenas, run_passes(&b, source, arenas->scratch));
+    return baron_result_make(&b, arenas, run_passes(&b, source, arenas->scratch));
 }
 
 
