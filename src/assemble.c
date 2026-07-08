@@ -24,6 +24,7 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
 static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_reserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -195,6 +196,7 @@ static const token statement_token_entries[] = {
     {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
     {RC_STR("overlay"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_overlay}}},
+    {RC_STR("reserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_reserve}}},
     {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
@@ -469,6 +471,80 @@ static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_fl
         b->current_overlay = overlays_get_or_make(&b->overlays, nm.token.identifier.name);
     }
     return require_separator(b, cursor_at(at, nm.next));
+}
+
+// Add one RESERVE value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
+// enumerated, a list is flattened, and a scalar is one byte - but it must land in the zero page ($00-$FF).
+// A forward reference defers (marks unresolved, reserves nothing this pass); a non-numeric or out-of-page
+// value is a semantic error. A dead branch reserves nothing.
+static parse_result reserve_add(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
+{
+    if (!flags.active) {
+        return (parse_result) {0};
+    }
+
+    if (value_is_range(v)) {
+        return reserve_add(b, range_to_list(v.range, &scratch), flags, at, scratch);
+    }
+
+    if (value_is_list(v)) {
+        parse_result acc = {0};
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            acc = fold(acc, reserve_add(b, rc_view_value_get(v.list, i), flags, at, scratch));
+        }
+        return acc;
+    }
+
+    // A numeric, a forward reference, or an error (a string / list leaf lands here as operand_not_numeric).
+    int_argument arg = int_argument_make(v, flags.final, at.pos);
+    if (arg.type == int_argument_type_error) {
+        semantic_error(b, flags, arg.error, at);
+        return (parse_result) {0};
+    }
+    if (arg.type == int_argument_type_unresolved) {
+        return (parse_result) {.unresolved = true};   // a forward-referenced address settles on a later pass
+    }
+    if (arg.value < 0 || arg.value >= zeropage_size) {
+        semantic_error(b, flags, error_type_reserve_not_zeropage, at);
+        return (parse_result) {0};
+    }
+    zeropage_reserve(&b->zeropage, (uint32_t) arg.value);
+    return (parse_result) {0};
+}
+
+// RESERVE <list> - declare the zero-page bytes the VAR1/VAR2 allocator may draw from, and (by its mere
+// presence) ENABLE the whole feature. A comma-separated list of values, each a zero-page address or a range
+// of them (the same operand shape as EQUB); every value must fall within $00-$FF. The set is global and
+// rebuilt each pass. A dead branch parses the operand but reserves nothing and does not enable.
+static parse_result handle_reserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+    bool unresolved = false;
+
+    if (flags.active) {
+        zeropage_enable(&b->zeropage);   // RESERVE turns the feature on even if the list is empty
+    }
+
+    while (true) {
+        expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+        if (e.error != expr_error_none) {
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+        }
+
+        parse_result ra = reserve_add(b, e.value, flags, cursor_at(at, pos), scratch);
+        unresolved |= ra.unresolved;
+
+        lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;   // another value follows
+        }
+
+        parse_result r = require_separator(b, cursor_at(at, e.next));
+        r.unresolved = unresolved;
+        return r;   // end of the list: a terminator or '}'
+    }
 }
 
 // Emit `bits` as `width` little-endian bytes into the current overlay.
@@ -1583,6 +1659,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     // token tables are reseeded from their static bases, with room for per-name tokens).
     rc_arena_reset(b->per_pass);
     overlays_reset(&b->overlays);
+    zeropage_reset(&b->zeropage);            // RESERVE re-runs this pass and refills the (permanent) set
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
@@ -1890,6 +1967,31 @@ RC_TEST_STEP(assemble, overlay_name_errors, fix)
 {
     RC_CHECK_TRUE(ERR("OVERLAY")   == error_type_expected_overlay_name);   // nothing after the keyword
     RC_CHECK_TRUE(ERR("OVERLAY 5") == error_type_expected_overlay_name);   // a number is not a name
+}
+
+RC_TEST_STEP(assemble, reserve_directive, fix)
+{
+    // A plain range, a comma-list of ranges and a bare byte all parse and assemble cleanly (no code).
+    RC_CHECK_TRUE(ASM("RESERVE &70..&8F") != 0);
+    RC_CHECK_TRUE(ASM("RESERVE &70..&7F, &A0..&A7") != 0);
+    RC_CHECK_TRUE(ASM("RESERVE &70") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // An empty exclusive range is a legal empty list: it enables the feature but reserves nothing.
+    RC_CHECK_TRUE(ASM("RESERVE 5..<5") != 0);
+
+    // The address may be forward-referenced; it defers and settles on a later pass (still converges).
+    RC_CHECK_TRUE(ASM("RESERVE base..base+3 : base = &70") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, reserve_errors, fix)
+{
+    // Out of the zero page (high, and via a range that overshoots) - a recoverable semantic error.
+    RC_CHECK_TRUE(ERR("RESERVE &100")      == error_type_reserve_not_zeropage);
+    RC_CHECK_TRUE(ERR("RESERVE &FE..&102") == error_type_reserve_not_zeropage);
+    // A non-numeric operand is not an address.
+    RC_CHECK_TRUE(ERR("RESERVE \"hi\"")    == error_type_operand_not_numeric);
 }
 
 RC_TEST_STEP(assemble, org_and_labels, fix)

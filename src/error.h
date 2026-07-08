@@ -54,6 +54,7 @@ typedef enum error_type {
     error_type_branch_out_of_range,
     error_type_skip_backwards,        // SKIP / SKIPTO would move the pointer backwards
     error_type_bad_alignment,         // ALIGN n with n < 1
+    error_type_reserve_not_zeropage,  // a RESERVE address falls outside the zero page ($00-$FF)
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

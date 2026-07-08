@@ -43,6 +43,7 @@ rc_str error_type_name(error_type e)
         case error_type_branch_out_of_range:     return RC_STR("Branch target is out of range");
         case error_type_skip_backwards:          return RC_STR("Cannot move the program counter backwards");
         case error_type_bad_alignment:           return RC_STR("Alignment must be at least 1");
+        case error_type_reserve_not_zeropage:    return RC_STR("RESERVE address must be within the zero page ($00-$FF)");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol");
         case error_type_duplicate_symbol:        return RC_STR("Symbol is already defined in this scope");
         case error_type_original_definition:     return RC_STR("Originally defined here");

@@ -3,6 +3,7 @@
 
 #include "scopes.h"
 #include "overlays.h"
+#include "zeropage.h"    // the zero-page RESERVE set (and, later, the VAR allocator)
 #include "source_files.h"
 #include "macros.h"      // the macro store, and rc_array_token (the dynamic statement table)
 #include "functions.h"   // the user-FUNCTION store (and its dynamic operand-token table)
@@ -28,6 +29,7 @@ typedef struct baron {
     rc_arena           *per_pass;    // BORROWED from baron_arenas: overlays, macros, functions (reset each pass)
     scopes              scopes;
     overlays            overlays;
+    zeropage            zeropage;          // the global RESERVE set; dormant until a RESERVE directive runs
     source_files        source_files;
     macros              macros;            // the macro store (and its dynamic statement-token table), rebuilt each pass
     functions           functions;         // the user-FUNCTION store (and its dynamic operand-token table), rebuilt each pass
