@@ -71,7 +71,7 @@ typedef struct parse_result parse_result;
 typedef struct parse_flags parse_flags;
 typedef struct cursor cursor;
 parse_result opcode_parse(baron *b, mnemonic m, cursor at,
-                          uint32_t scope, parse_flags flags, rc_arena scratch);
+                          uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 
 
 #endif // ifndef BARON_OPCODES_H_

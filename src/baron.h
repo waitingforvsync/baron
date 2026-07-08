@@ -13,9 +13,9 @@
 // Baron's global state, threaded through the parser as a single `baron *` first argument. It holds
 // the scope tree (root already made at scope index 0), the section manager (default section made
 // at index 0), the source-file cache, the accumulated diagnostics, and the current section index.
-// current_section names the innermost open SECTION (the default at index 0 when none is open); handle_section
-// mutates it on SECTION and restores it on ENDSECTION, threading the parent through its own recursion, so it
-// lives here (read by every emit / pc query) rather than being passed around. Output and options
+// The current section index is NOT stored here: it is threaded through the parser as a parameter (like the
+// scope index), since sections are strictly nested (SECTION / ENDSECTION). The default section is index 0.
+// Output and options
 // pile in later. It is built by value with `baron_make`: now that a trie is a position-independent value
 // (it holds no pointer into its pool), every member is trivially movable, so the whole struct copies
 // cleanly. The parser still threads a `baron *` - to mutate one shared instance, not out of any move
@@ -35,7 +35,6 @@ typedef struct baron {
     macros              macros;            // the macro store (and its dynamic statement-token table), rebuilt each pass
     functions           functions;         // the user-FUNCTION store (and its dynamic operand-token table), rebuilt each pass
     rc_array_diagnostic diagnostics;   // errors from the last assemble (in permanent); empty means it succeeded
-    uint32_t            current_section;   // the section statements emit into now
     uint32_t            include_depth;     // how many INCLUDEs deep the parser is now, to catch runaway recursion
     uint32_t            macro_depth;       // how many macro expansions deep, to catch runaway recursion
     uint32_t            function_depth;    // how many FUNCTION calls deep the evaluator is, to catch runaway recursion

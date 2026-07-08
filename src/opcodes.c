@@ -524,7 +524,7 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
 // liveness passes: its address + size, control-flow class + resolved target (branch/jump/call to a plain
 // abs/rel address; an indirect/computed target stays RC_INDEX_NONE), and its variable touch (if any).
-static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, addr_mode mode,
+static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, addr_mode mode,
                         uint16_t cell, int_argument arg, uint32_t operand_base, uint32_t pc)
 {
     if (!flags.final || !flags.active || !zeropage_is_enabled(&b->zeropage)) {
@@ -542,7 +542,6 @@ static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, 
 
     // The operand byte lands right after the opcode byte we are about to emit: the section's current code
     // length is the opcode's offset, so the operand is at +1. Recorded so the allocation patch can find it.
-    uint32_t section        = b->current_section;
     uint32_t operand_offset = sections_code(&b->sections, section).num + 1;
 
     zeropage_add_insn(&b->zeropage, (zp_insn) {
@@ -562,10 +561,9 @@ static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, 
 }
 
 struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
-                                 uint32_t scope, parse_flags flags, rc_arena scratch)
+                                 uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     uint32_t source = at.source;
-    uint32_t section = b->current_section;   // the section we emit into now (assembler-wide state)
     rc_str src = source_files_text(&b->source_files, source);
     uint32_t start = at.pos;              // just past the mnemonic
     uint32_t insn_pc = sections_pc(&b->sections, section);   // this instruction's address (before it emits)
@@ -592,7 +590,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         after = start;                     // leave the terminator for require_separator
     }
     else if (peek.token.type == lexeme_type_hash) {
-        expr_result e = eval(b, cursor_at(at, peek.next), scope, scratch);
+        expr_result e = eval(b, cursor_at(at, peek.next), scope, section, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -602,7 +600,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     }
     else if (peek.token.type == lexeme_type_open_paren) {
         operand_base = peek.next;   // the pointer expression inside the parentheses
-        expr_result e = eval(b, cursor_at(at, peek.next), scope, scratch);
+        expr_result e = eval(b, cursor_at(at, peek.next), scope, section, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -662,7 +660,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         }
         if (!handled) {
             operand_base = start;   // the zero-page / absolute operand expression
-            expr_result e = eval(b, cursor_at(at, start), scope, scratch);
+            expr_result e = eval(b, cursor_at(at, start), scope, section, scratch);
             if (e.error != expr_error_none) {
                 return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
             }
@@ -705,7 +703,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     }
 
     // Record this instruction into the ZP IR (final active pass, feature on) for the CFG + liveness passes.
-    record_insn(b, at, scope, flags, mode, cell, arg, operand_base, insn_pc);
+    record_insn(b, at, scope, section, flags, mode, cell, arg, operand_base, insn_pc);
 
     sections_emit_u8(&b->sections, section, (uint8_t)(cell & 0xFF));
 

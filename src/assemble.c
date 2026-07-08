@@ -23,34 +23,34 @@
 // All the parse functions take the same head: the baron (its scopes / sections / source files, and
 // the current section), then the cursor `at` (source file index plus offset), the scope index, and
 // the parse flags, then scratch by value. Each fetches its source rc_str from b->source_files at the top.
-static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t macro_index, rc_arena scratch);
-static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_skip(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_align(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_equb(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_equw(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_equd(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_for(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_include(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_macro(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch);
+static parse_result handle_function(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result parse_block(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 
 
 // int_argument_make is shared with opcodes.c (both declared in assemble.h); it needs no token
@@ -277,13 +277,13 @@ parse_result require_separator(baron *b, cursor at)
 // section, and the reference's own position (`at`) for the impure @- / @+ locals. Every directive / operand
 // evaluates through here, so no call site rebuilds the environment and the expression parser never sees
 // baron. The cursor's source+pos double as the parse start and the use site. Shared with opcodes.c.
-expr_result eval(baron *b, cursor at, uint32_t scope, rc_arena scratch)
+expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     expr_env env = {
         .scopes         = &b->scopes,
         .scope_index    = scope,
-        .pc             = sections_pc(&b->sections, b->current_section),
+        .pc             = sections_pc(&b->sections, section),
         .source         = at.source,
         .offset         = at.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),   // base + a token per FUNCTION name
@@ -329,10 +329,10 @@ static parse_result fold(parse_result r, parse_result sub)
 
 // SKIP n - pad the object code with n zero bytes (advancing pc by n). A negative count would
 // rewind the pointer, which we cannot do; the layout-dependent check is deferred to the final pass.
-static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_skip(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
-    expr_result e = eval(b, at, scope, scratch);
+    expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -346,7 +346,7 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
                     semantic_error(b, flags, error_type_skip_backwards, cursor_at(at, at.pos));   // skip nothing
                 }
                 else {
-                    sections_skip(&b->sections, b->current_section, (uint32_t) arg.value);
+                    sections_skip(&b->sections, section, (uint32_t) arg.value);
                 }
                 break;
             case int_argument_type_unresolved:
@@ -365,10 +365,10 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
 
 // SKIPTO addr - pad with zeroes until pc reaches addr. Being already past addr is an error,
 // deferred to the final pass since pc only settles once preceding forward references resolve.
-static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
-    expr_result e = eval(b, at, scope, scratch);
+    expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -378,12 +378,12 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_fla
         int_argument arg = int_argument_make(e.value, flags.final, at.pos);
         switch (arg.type) {
             case int_argument_type_known: {
-                uint32_t pc = sections_pc(&b->sections, b->current_section);
+                uint32_t pc = sections_pc(&b->sections, section);
                 if (arg.value < pc) {
                     semantic_error(b, flags, error_type_skip_backwards, cursor_at(at, at.pos));   // skip nothing
                 }
                 else {
-                    sections_skip(&b->sections, b->current_section, (uint32_t) (arg.value - pc));
+                    sections_skip(&b->sections, section, (uint32_t) (arg.value - pc));
                 }
                 break;
             }
@@ -403,10 +403,10 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_fla
 
 // ALIGN n - pad with zeroes until pc is a multiple of n. n < 1 is meaningless (and would divide
 // by zero), so it is an error; the modulo is only evaluated once we know n is sound.
-static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_align(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
-    expr_result e = eval(b, at, scope, scratch);
+    expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -421,9 +421,9 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
                 }
                 else {
                     uint32_t n = (uint32_t) arg.value;
-                    uint32_t rem = sections_pc(&b->sections, b->current_section) % n;
+                    uint32_t rem = sections_pc(&b->sections, section) % n;
                     if (rem != 0) {
-                        sections_skip(&b->sections, b->current_section, n - rem);
+                        sections_skip(&b->sections, section, n - rem);
                     }
                 }
                 break;
@@ -450,7 +450,7 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
 // resumes where the child left off. A SECTION does NOT open a naming scope - labels inside bind in the
 // enclosing scope, exactly as an IF body does. A dead branch parses the whole block for its extent but
 // creates nothing and emits nothing.
-static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -461,11 +461,11 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_fl
         return syntax_error(b, error_type_expected_section_name, cursor_at(at, at.pos));
     }
 
-    // Create the section and switch into it (only when live). parent_section is restored on ENDSECTION; the
-    // cursor flows: the child starts where the parent's pc sits (unless an `org` attribute jumps it), and on
-    // close the parent resumes from the child's end.
-    uint32_t parent_section = b->current_section;
-    uint32_t child          = RC_INDEX_NONE;
+    // Create the section (only when live). The parent section arrives as the threaded `section` parameter;
+    // the child is passed on to the body's parse_block rather than stashed in a field. The cursor flows: the
+    // child starts where the parent's pc sits (unless an `org` attribute jumps it), and on close the parent
+    // resumes from the child's end.
+    uint32_t child = RC_INDEX_NONE;
     if (flags.active) {
         child = sections_make(&b->sections, nm.token.identifier.name);
         if (child == RC_INDEX_NONE) {
@@ -473,15 +473,14 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_fl
         }
         // Inherit the parent's attributes (bar `org`, which is positional), then default the cursor to
         // continue from the parent; an explicit `org` attribute below overrides it.
-        rc_view_attribute inherited = sections_attributes(&b->sections, parent_section);
+        rc_view_attribute inherited = sections_attributes(&b->sections, section);
         for (uint32_t i = 0; i < inherited.num; i++) {
             attribute a = rc_view_attribute_get(inherited, i);
             if (!rc_str_is_equal_insensitive(a.key, RC_STR("org"))) {
                 sections_add_attribute(&b->sections, child, a.key, a.v, a.at);
             }
         }
-        sections_org(&b->sections, child, sections_pc(&b->sections, parent_section));
-        b->current_section = child;
+        sections_org(&b->sections, child, sections_pc(&b->sections, section));
     }
 
     // The attribute list: `, key = expr` pairs to the end of the SECTION line. Parsed structurally even in a
@@ -495,17 +494,14 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_fl
         }
         lexer_result key = lexer_next(src, comma.next, statement_tokens(b));
         if (key.token.type != lexeme_type_identifier) {
-            b->current_section = parent_section;
             return syntax_error(b, error_type_unexpected_token, cursor_at(at, comma.next));   // want an attribute name
         }
         lexer_result eq = lexer_next(src, key.next, assign_tokens);
         if (eq.token.type != lexeme_type_assign) {
-            b->current_section = parent_section;
             return syntax_error(b, error_type_expected_assign, cursor_at(at, key.next));
         }
-        expr_result e = eval(b, cursor_at(at, eq.next), scope, scratch);
+        expr_result e = eval(b, cursor_at(at, eq.next), scope, section, scratch);
         if (e.error != expr_error_none) {
-            b->current_section = parent_section;
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
@@ -529,20 +525,22 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_fl
         pos = e.next;
     }
 
-    // Close the SECTION line, parse the body up to ENDSECTION, then restore the parent (threading the cursor).
+    // Close the SECTION line, parse the body up to ENDSECTION (in the child section), then thread the cursor
+    // back so the parent resumes where the child left off.
     parse_result sep = require_separator(b, cursor_at(at, pos));
     if (sep.fatal) {
-        b->current_section = parent_section;
         return sep;
     }
 
-    parse_result body = parse_block(b, cursor_at(at, sep.next), scope, flags, scratch);
+    // A dead branch has no child section: the body parses (for its extent) in the parent section, emitting
+    // nothing.
+    uint32_t body_section = (child != RC_INDEX_NONE) ? child : section;
+    parse_result body = parse_block(b, cursor_at(at, sep.next), scope, body_section, flags, scratch);
     body.unresolved |= unresolved;
 
     if (child != RC_INDEX_NONE) {
-        sections_org(&b->sections, parent_section, sections_pc(&b->sections, child));   // parent resumes from the child's end
+        sections_org(&b->sections, section, sections_pc(&b->sections, child));   // parent resumes from the child's end
     }
-    b->current_section = parent_section;
 
     if (body.fatal) {
         return body;
@@ -599,7 +597,7 @@ static parse_result zpreserve_add(baron *b, value v, parse_flags flags, cursor a
 // presence) ENABLE the whole feature. A comma-separated list of values, each a zero-page address or a range
 // of them (the same operand shape as EQUB); every value must fall within $00-$FF. The set is global and
 // rebuilt each pass. A dead branch parses the operand but reserves nothing and does not enable.
-static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
@@ -610,7 +608,7 @@ static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_
     }
 
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -637,8 +635,9 @@ static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_
 // the single final pass (the settling passes need just the placeholder binding for layout to converge). ZPAUTO
 // is meaningless without a ZPRESERVE first: we flag that, but still bind the names so references do not cascade
 // into undefined-symbol errors. A dead branch removes only the binding it owns, like a dead label.
-static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, parse_flags flags, uint8_t width, rc_arena scratch)
+static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint8_t width, rc_arena scratch)
 {
+    (void) section;   // ZPAUTO binds a symbol; the section it sits in is recorded later, at the instruction site
     (void) scratch;
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
@@ -698,13 +697,13 @@ static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, parse_fla
     }
 }
 
-static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_zpauto(b, at, scope, flags, 1, scratch);
+    return handle_zpauto(b, at, scope, section, flags, 1, scratch);
 }
-static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_zpauto(b, at, scope, flags, 2, scratch);
+    return handle_zpauto(b, at, scope, section, flags, 2, scratch);
 }
 
 // UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch, that control cannot fall
@@ -713,13 +712,13 @@ static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_fl
 // pc lets zeropage_finalize prune that one edge. It is TRUSTED - a wrong UNREACHABLE (a fall-through that
 // really can happen) is one of the few ways to defeat the certainty contract, but it is the programmer's
 // explicit promise. Only meaningful on the final pass, and only with the feature enabled.
-static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scope;
     (void) scratch;
     if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
         zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-            .site   = sections_pc(&b->sections, b->current_section),
+            .site   = sections_pc(&b->sections, section),
             .target = RC_INDEX_NONE,
             .kind   = zp_cflow_unreachable,
             .at     = cursor_at(at, at.pos),
@@ -733,7 +732,7 @@ static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, pars
 // only when that instruction's flow is `expect_flow`, so a stray CANCALL after a JMP (or vice versa) binds to
 // nothing rather than mis-annotating. Only the final pass records instructions, so only then is there a site;
 // the settling passes still parse the list so the statement stays well-formed. A forward target defers.
-static parse_result handle_can_targets(baron *b, cursor at, uint32_t scope, parse_flags flags,
+static parse_result handle_can_targets(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
                                        zp_flow expect_flow, zp_cflow_kind kind, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -752,7 +751,7 @@ static parse_result handle_can_targets(baron *b, cursor at, uint32_t scope, pars
     }
 
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -792,25 +791,25 @@ static parse_result handle_can_targets(baron *b, cursor at, uint32_t scope, pars
 // self-modified operand, or a dispatch the analysis cannot follow). Without it, such a call has an unknown
 // footprint and a value held live across it is refused (error_type_zpauto_across_call); with it, the callee
 // footprint is bounded by the union of the named routines. TRUSTED, like UNREACHABLE.
-static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, at, scope, flags, zp_flow_call, zp_cflow_cancall, scratch);
+    return handle_can_targets(b, at, scope, section, flags, zp_flow_call, zp_cflow_cancall, scratch);
 }
 
 // CANJUMP <targets> - the programmer declares the possible destinations of the computed / indirect JMP
 // immediately preceding it (a jump table). Without it, the jump reaches code the CFG cannot follow and, with
 // variables live, is refused (error_type_zpauto_computed_flow); with it, the CFG wires every named target as a
 // real successor edge, so liveness follows control to each one. TRUSTED, like UNREACHABLE.
-static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, at, scope, flags, zp_flow_jump, zp_cflow_canjump, scratch);
+    return handle_can_targets(b, at, scope, section, flags, zp_flow_jump, zp_cflow_canjump, scratch);
 }
 
 // Emit `bits` as `width` little-endian bytes into the current section.
-static void emit_le(baron *b, uint64_t bits, uint32_t width)
+static void emit_le(baron *b, uint32_t section, uint64_t bits, uint32_t width)
 {
     for (uint32_t i = 0; i < width; i++) {
-        sections_emit_u8(&b->sections, b->current_section, (uint8_t) (bits >> (8 * i)));
+        sections_emit_u8(&b->sections, section, (uint8_t) (bits >> (8 * i)));
     }
 }
 
@@ -820,7 +819,7 @@ static void emit_le(baron *b, uint64_t bits, uint32_t width)
 // int_argument_make, where a forward reference emits a zero placeholder of the right size and asks for
 // another pass. Returns .error/.error_at on failure and .unresolved when a value defers (its .next is
 // unused). A dead branch emits nothing and raises nothing - mirroring inactive statements.
-static parse_result emit_data(baron *b, value v, parse_flags flags, cursor at, uint32_t width, rc_arena scratch)
+static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags flags, cursor at, uint32_t width, rc_arena scratch)
 {
     if (!flags.active) {
         return (parse_result) {0};
@@ -828,19 +827,19 @@ static parse_result emit_data(baron *b, value v, parse_flags flags, cursor at, u
 
     if (value_is_string(v)) {
         for (uint32_t i = 0; i < v.string.len; i++) {
-            emit_le(b, (uint8_t) v.string.data[i], width);
+            emit_le(b, section, (uint8_t) v.string.data[i], width);
         }
         return (parse_result) {0};
     }
 
     if (value_is_range(v)) {
-        return emit_data(b, range_to_list(v.range, &scratch), flags, at, width, scratch);   // enumerated to a list (or an error leaf)
+        return emit_data(b, section, range_to_list(v.range, &scratch), flags, at, width, scratch);   // enumerated to a list (or an error leaf)
     }
 
     if (value_is_list(v)) {
         parse_result acc = {0};
         for (uint32_t i = 0; i < v.list.num; i++) {
-            acc = fold(acc, emit_data(b, rc_view_value_get(v.list, i), flags, at, width, scratch));
+            acc = fold(acc, emit_data(b, section, rc_view_value_get(v.list, i), flags, at, width, scratch));
         }
         return acc;
     }
@@ -849,11 +848,11 @@ static parse_result emit_data(baron *b, value v, parse_flags flags, cursor at, u
     int_argument arg = int_argument_make(v, flags.final, at.pos);
     if (arg.type == int_argument_type_error) {
         semantic_error(b, flags, arg.error, at);
-        emit_le(b, 0, width);   // best-effort placeholder; keeps the size stable
+        emit_le(b, section, 0, width);   // best-effort placeholder; keeps the size stable
         return (parse_result) {0};
     }
     if (arg.type == int_argument_type_unresolved) {
-        emit_le(b, 0, width);   // placeholder of the right width; forces another pass
+        emit_le(b, section, 0, width);   // placeholder of the right width; forces another pass
         return (parse_result) {.unresolved = true};
     }
     // We allow signed values, so the window is -(2^(8*width)-1) .. (2^(8*width)-1); recorded once settled.
@@ -861,25 +860,25 @@ static parse_result emit_data(baron *b, value v, parse_flags flags, cursor at, u
     if (arg.value < -limit || arg.value > limit) {
         semantic_error(b, flags, error_type_value_out_of_range, at);
     }
-    emit_le(b, (uint64_t) arg.value, width);
+    emit_le(b, section, (uint64_t) arg.value, width);
     return (parse_result) {0};
 }
 
 // EQUB / EQUS (width 1) / EQUW (2) / EQUD (4): a comma-separated list of values, each emitted as `width`-byte
 // little-endian units (see emit_data). All take numbers, strings, ranges and lists alike; EQUS is an EQUB alias.
-static parse_result handle_equ(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t width, rc_arena scratch)
+static parse_result handle_equ(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t width, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
     bool unresolved = false;
 
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        parse_result em = emit_data(b, e.value, flags, cursor_at(at, pos), width, scratch);
+        parse_result em = emit_data(b, section, e.value, flags, cursor_at(at, pos), width, scratch);
         if (em.fatal) {
             return em;
         }
@@ -898,20 +897,20 @@ static parse_result handle_equ(baron *b, cursor at, uint32_t scope, parse_flags 
 }
 
 // The width-specialised entry points named in the statement table. EQUS is an alias of EQUB.
-static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_equb(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_equ(b, at, scope, flags, 1, scratch);
+    return handle_equ(b, at, scope, section, flags, 1, scratch);
 }
-static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_equw(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_equ(b, at, scope, flags, 2, scratch);
+    return handle_equ(b, at, scope, section, flags, 2, scratch);
 }
-static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_equd(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_equ(b, at, scope, flags, 4, scratch);
+    return handle_equ(b, at, scope, section, flags, 4, scratch);
 }
 
-static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -942,7 +941,7 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
             &b->scopes,
             scope,
             name,
-            value_make_numeric((double)sections_pc(&b->sections, b->current_section)),
+            value_make_numeric((double)sections_pc(&b->sections, section)),
             at
         );
 
@@ -977,7 +976,7 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
 
     if (is_open_brace(nb.token)) {
         uint32_t child = scopes_get_or_make_child(&b->scopes, scope, name);
-        return fold(r, parse_scope(b, cursor_at(at, nb.next), child, flags, scratch));
+        return fold(r, parse_scope(b, cursor_at(at, nb.next), child, section, flags, scratch));
     }
 
     return r;   // not a scope - leave the rest of the line to the parent parser
@@ -1012,7 +1011,7 @@ static rc_mstr anon_for_scope_key(char *storage, uint32_t cap, cursor at, uint32
 // branch, and defers a forward @+ exactly as a named label would. Its cursor is unique per '.@', so it can
 // never be a duplicate. A '.@' is a whole statement with nothing following it, so we consume just the token
 // and leave the rest of the line to the statement loop.
-static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scratch;
     char storage[64];
@@ -1024,7 +1023,7 @@ static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, pars
             &b->scopes,
             scope,
             key.view,
-            value_make_numeric((double) sections_pc(&b->sections, b->current_section)),
+            value_make_numeric((double) sections_pc(&b->sections, section)),
             at);
         r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
     }
@@ -1036,14 +1035,14 @@ static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, pars
     return r;
 }
 
-static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     // The just-passed pos gives the anonymous scope a stable per-pass identity, so re-walking it
     // on a later pass keeps the same bindings.
     char storage[64];
     rc_mstr key = anon_scope_key(storage, sizeof storage, at);
     uint32_t child = scopes_get_or_make_child(&b->scopes, scope, key.view);
-    return parse_scope(b, at, child, flags, scratch);
+    return parse_scope(b, at, child, section, flags, scratch);
 }
 
 // IF cond ... ELIF cond ... ELSE ... ENDIF, evaluated each pass. IF does not open a scope: labels in
@@ -1054,11 +1053,11 @@ static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, parse
 // known FALSE. At most one is live - and neither when the condition cannot yet be evaluated, which
 // owes another pass (a hard error on the final pass). Entered just past the IF - or, via the
 // recursion, the ELIF - at the condition.
-static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, at, scope, scratch);
+    expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));   // a syntax error always aborts
     }
@@ -1097,6 +1096,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
             b,
             cursor_at(at, acc.next),
             scope,
+            section,
             (parse_flags) {flags.final, flags.active && if_cond},
             scratch
         )
@@ -1116,6 +1116,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
                 b,
                 cursor_at(at, t.next),
                 scope,
+                section,
                 (parse_flags) {flags.final, flags.active && else_cond},
                 scratch
             )
@@ -1137,6 +1138,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
                 b,
                 cursor_at(at, sep.next),
                 scope,
+                section,
                 (parse_flags) {flags.final, flags.active && else_cond},
                 scratch
             )
@@ -1171,7 +1173,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
 
 // `name` is the identifier and `pos` sits just past it; an assignment defines a symbol and
 // emits nothing.
-static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_str name, rc_arena scratch)
+static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_str name, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1180,7 +1182,7 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse
         return syntax_error(b, error_type_expected_assign, cursor_at(at, at.pos));   // not an assignment: malformed
     }
 
-    expr_result e = eval(b, cursor_at(at, eq.next), scope, scratch);
+    expr_result e = eval(b, cursor_at(at, eq.next), scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -1235,7 +1237,7 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, parse
 // A sequence whose count is not yet known (a forward reference) does the same and forces another pass;
 // on the final pass that is a hard undefined_symbol. Like IF, FOR opens no scope of its own for the loop
 // control (only the per-iteration body scopes) and must close (NEXT) inside the scope it began in.
-static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_for(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1252,7 +1254,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
         return syntax_error(b, error_type_expected_assign, cursor_at(at, var.next));
     }
 
-    expr_result e = eval(b, cursor_at(at, eq.next), scope, scratch);
+    expr_result e = eval(b, cursor_at(at, eq.next), scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -1307,7 +1309,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
         if (iterate) {
             scopes_set_symbol(&b->scopes, child, name, rc_view_value_get(items, i), at);
         }
-        acc = fold(acc, parse_block(b, cursor_at(at, body_start), child,
+        acc = fold(acc, parse_block(b, cursor_at(at, body_start), child, section,
                                     (parse_flags) {flags.final, active_body}, scratch));
     }
     if (acc.fatal) {
@@ -1330,12 +1332,12 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
 // section at the current pc and its symbols bind into the current scope (no scope of its own). We re-parse
 // the included file every pass, exactly like the rest of the statement stream, so forward references cross
 // the boundary freely. The filename is resolved relative to THIS file's directory (see file_path_resolve).
-static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_include(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
     // The filename is a string operand, evaluated on the spot - we load the file this very pass, so a
     // forward-referenced name is no use to us (it stays an error value, and we grumble about it below).
-    expr_result e = eval(b, at, scope, scratch);
+    expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -1358,7 +1360,7 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_fl
                 else {
                     uint32_t errors_before = baron_error_count(b);
                     b->include_depth++;
-                    pulled = parse_file(b, (cursor) {.source = inc_source, .pos = 0}, scope, flags, scratch);
+                    pulled = parse_file(b, (cursor) {.source = inc_source, .pos = 0}, scope, section, flags, scratch);
                     b->include_depth--;
                     if (pulled.fatal) {
                         return pulled;   // a broken statement stream in the included file aborts the whole assemble
@@ -1401,9 +1403,9 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_fl
 // filename is a string operand resolved relative to the includer, exactly like INCLUDE; a forward-referenced
 // name defers like a forward address. A missing / unreadable file is FATAL (there is no sensible recovery - the
 // output would be the wrong size), so it unwinds the whole assemble rather than accumulating.
-static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    expr_result e = eval(b, at, scope, scratch);
+    expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -1420,7 +1422,7 @@ static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_fla
                     return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
                 }
                 rc_str bytes = {.data = (const char *) f.contents.view.data, .len = f.contents.view.num};
-                pulled = emit_data(b, value_make_string(bytes), flags, cursor_at(at, at.pos), 1, scratch);
+                pulled = emit_data(b, section, value_make_string(bytes), flags, cursor_at(at, at.pos), 1, scratch);
             }
             else {
                 // Settling passes: reserve the file's size without reading it, so pc / later labels are right.
@@ -1428,7 +1430,7 @@ static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_fla
                 if (sz.error != RC_FILE_OK) {
                     return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
                 }
-                sections_skip(&b->sections, b->current_section, sz.size);
+                sections_skip(&b->sections, section, sz.size);
             }
         }
         else if (value_is_error(e.value) && e.value.error == error_type_unknown_symbol) {
@@ -1458,7 +1460,7 @@ static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_fla
 // cursor and only ever PARSED at invocation; here we scan it inactively (the trick FOR uses to locate NEXT),
 // which finds ENDMACRO through the real parser - handling multi-line list literals and nested IF/FOR/{} -
 // without expanding anything. The definition emits nothing itself.
-static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_macro(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1522,7 +1524,7 @@ static parse_result handle_macro(baron *b, cursor at, uint32_t scope, parse_flag
 
     // Scan the body inactively to find its ENDMACRO. Nested calls consume their arguments but do not expand
     // (see handle_macro_invocation), so the scan never recurses and always stops at this macro's ENDMACRO.
-    parse_result scan = parse_block(b, body, scope, (parse_flags) {flags.final, false}, scratch);
+    parse_result scan = parse_block(b, body, scope, section, (parse_flags) {flags.final, false}, scratch);
     if (scan.fatal) {
         return scan;   // a structurally broken body aborts, reported at the definition
     }
@@ -1556,7 +1558,7 @@ static const token_table func_paren_tokens = RC_VIEW(func_paren_entries);
 // STATEMENT (it emits nothing); the body's value semantics live in the evaluator (expression.c), which we
 // call here only to locate the top-level '=' return and learn whether this is a real body or a forward
 // declaration (an empty body plus an empty return expression).
-static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_function(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1619,7 +1621,7 @@ static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_f
     expr_env env = {
         .scopes         = &b->scopes,
         .scope_index    = scope,
-        .pc             = sections_pc(&b->sections, b->current_section),
+        .pc             = sections_pc(&b->sections, section),
         .source         = at.source,
         .offset         = body.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),
@@ -1651,7 +1653,7 @@ static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_f
 // here, so matching is purely structural and a forward-referenced argument matches like any other (the choice
 // of overload is thus identical every pass). A parse failure (no operand where one is needed) fails the fit.
 static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_signature sig,
-                            uint32_t scope, uint32_t *end, rc_arena scratch)
+                            uint32_t scope, uint32_t section, uint32_t *end, rc_arena scratch)
 {
     uint32_t pos = at.pos;
     for (uint32_t k = 0; k < sig.slots.num; k++) {
@@ -1671,7 +1673,7 @@ static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_sig
             pos = lr.next;
         }
         else {
-            expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+            expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
             if (e.error != expr_error_none) {
                 return false;   // no operand here (or a broken one): this overload does not fit
             }
@@ -1691,7 +1693,7 @@ static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_sig
 // scope with the arguments bound as symbols. Mirrors handle_for's body re-walk and handle_include's error
 // breadcrumb. An inactive call consumes its arguments but expands nothing - which is what makes a recursive
 // call terminate once its base-case branch goes inactive.
-static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, parse_flags flags, uint32_t macro_index, rc_arena scratch)
+static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     macro *m = macros_at(&b->macros, macro_index);
@@ -1702,7 +1704,7 @@ static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope,
     uint32_t args_end = at.pos;
     for (uint32_t si = 0; si < m->signatures.num; si++) {
         uint32_t end;
-        if (macro_try_match(b, src, at, m, rc_array_macro_signature_get(&m->signatures, si), scope, &end, scratch)) {
+        if (macro_try_match(b, src, at, m, rc_array_macro_signature_get(&m->signatures, si), scope, section, &end, scratch)) {
             chosen = si;
             args_end = end;
             break;
@@ -1756,7 +1758,7 @@ static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope,
             pos = lexer_next(src, pos, m->literal_table.view).next;   // already matched; just step over it
         }
         else {
-            expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+            expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
             scopes_set_symbol(&b->scopes, child, slot.name, e.value, at);
             pos = e.next;
         }
@@ -1766,7 +1768,7 @@ static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope,
     // any, drop an "expanded from here" breadcrumb at the call site - the handle_include idiom.
     uint32_t errors_before = baron_error_count(b);
     b->macro_depth++;
-    parse_result bodyr = parse_block(b, body, child, flags, scratch);
+    parse_result bodyr = parse_block(b, body, child, section, flags, scratch);
     b->macro_depth--;
 
     if (bodyr.fatal) {
@@ -1794,9 +1796,10 @@ static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope,
 // TRUE / FALSE / PI are expression constants, reserved so that a name always resolves to the constant.
 // Meeting one at statement start is someone assigning to it (pi = 5) or otherwise misusing it as a name -
 // a fatal error, the same way a name that clashes with a mnemonic is rejected.
-static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scope;
+    (void) section;
     (void) flags;
     (void) scratch;
     return syntax_error(b, error_type_reserved_constant, cursor_at(at, at.pos));
@@ -1805,20 +1808,20 @@ static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope
 
 // ---- the statement loop ----
 
-static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lr = lexer_next(src, at.pos, statement_tokens(b));
 
     switch (lr.token.type) {
         case lexeme_type_opcode:
-            return opcode_parse(b, (mnemonic)lr.token.opcode.id, cursor_at(at, lr.next), scope, flags, scratch);
+            return opcode_parse(b, (mnemonic)lr.token.opcode.id, cursor_at(at, lr.next), scope, section, flags, scratch);
         case lexeme_type_keyword:
-            return lr.token.keyword.handle(b, cursor_at(at, lr.next), scope, flags, scratch);
+            return lr.token.keyword.handle(b, cursor_at(at, lr.next), scope, section, flags, scratch);
         case lexeme_type_macro:
-            return handle_macro_invocation(b, cursor_at(at, lr.next), scope, flags, lr.token.macro.index, scratch);
+            return handle_macro_invocation(b, cursor_at(at, lr.next), scope, section, flags, lr.token.macro.index, scratch);
         case lexeme_type_identifier:
-            return handle_assignment(b, cursor_at(at, lr.next), scope, flags, lr.token.identifier.name, scratch);
+            return handle_assignment(b, cursor_at(at, lr.next), scope, section, flags, lr.token.identifier.name, scratch);
         default:
             return syntax_error(b, error_type_unexpected_token, at);
     }
@@ -1827,7 +1830,7 @@ static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, par
 // Parse statements until the block's closer: a '}' or end of input. It stops AT the closer -
 // leaving a '}' unconsumed - and treats neither as an error, because which closer is required
 // depends on the caller: parse_scope wants the '}', run_pass wants end of input.
-static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result parse_block(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1848,16 +1851,16 @@ static parse_result parse_block(baron *b, cursor at, uint32_t scope, parse_flags
             continue;
         }
 
-        acc = fold(acc, parse_one_statement(b, cursor_at(at, acc.next), scope, flags, scratch));
+        acc = fold(acc, parse_one_statement(b, cursor_at(at, acc.next), scope, section, flags, scratch));
     }
     return acc;
 }
 
 // A braced block: parse its statements (entered just past the '{') and require the closing '}';
 // reaching end of input first is an unclosed scope.
-static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    parse_result r = parse_block(b, at, scope, flags, scratch);
+    parse_result r = parse_block(b, at, scope, section, flags, scratch);
 
     if (r.fatal) {
         return r;
@@ -1883,9 +1886,9 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, parse_flags
 // closer here has nothing to close: a stray '}', an IF-chain keyword with no IF, or a NEXT with no
 // FOR. With those ruled out, end of input is the only thing left (asserted). (parse_scope is a braced
 // block within a file; parse_block is the shared statement loop both rest on.)
-static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    parse_result r = parse_block(b, at, scope, flags, scratch);
+    parse_result r = parse_block(b, at, scope, section, flags, scratch);
 
     if (r.fatal) {
         return r;
@@ -1913,7 +1916,6 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     rc_arena_reset(b->per_pass);
     sections_reset(&b->sections);
     zeropage_reset(&b->zeropage);            // ZPRESERVE re-runs this pass and refills the (permanent) set
-    b->current_section = sections_default;   // each pass re-derives the current section from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
     b->function_depth  = 0;                  // ditto for FUNCTION recursion (balanced by the evaluator)
@@ -1922,11 +1924,13 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     macros_reset(&b->macros, base_statement_tokens, 128);
     functions_reset(&b->functions, expression_operand_base(), 128);
 
-    const uint32_t scope = 0;
+    const uint32_t scope   = 0;
+    const uint32_t section = sections_default;   // each pass starts in the default section (index 0)
     return parse_file(
         b,
         (cursor) {.source = source, .pos = 0},
         scope,
+        section,
         flags,
         scratch
     );
