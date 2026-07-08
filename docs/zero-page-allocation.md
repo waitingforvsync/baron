@@ -21,6 +21,7 @@ This is opt-in and costs nothing until you ask for it. No `ZPRESERVE`, no alloca
 - [Scopes, blocks and control flow](#scopes-blocks-and-control-flow)
 - [Across subroutine calls](#across-subroutine-calls)
 - [Annotations](#annotations)
+- [Overlays and ORG](#overlays-and-org)
 - [Limitations](#limitations)
 - [What doesn't work (yet)](#what-doesnt-work-yet)
 - [Getting the most out of it](#getting-the-most-out-of-it)
@@ -257,6 +258,48 @@ counterpart of `CANCALL`: without it a computed jump reaches code the analysis c
 variables live it is refused (see `computed jump` below). As with `CANCALL`, list every destination - a missing
 one is the way to get it wrong.
 
+## Overlays and ORG ##
+
+You can use `ORG` and `OVERLAY` freely alongside auto-variables. There is exactly one rule, and it falls
+straight out of how the analysis works: **no two instructions may share an address.** The flow analysis pins
+each instruction to its address, so if two of them claim the same one it cannot tell them apart - and that is
+the only way to make it reason wrongly. Everything else is fine.
+
+So all of this is allowed:
+
+- **Any number of `ORG`s that move forwards.** Lay routines out wherever you like; gaps are no problem.
+- **Multiple overlays, at different addresses.** Each overlay is assembled into its own image; as long as their
+  code sits at different addresses, the analysis keeps them straight.
+- **Cross-overlay calls.** A `JSR` into another overlay resolves by address like any other, so the callee's
+  footprint is accounted for - a variable held live across it is protected exactly as it would be for a
+  same-overlay call.
+
+And there is a nice bonus: two overlays at different addresses that never interact will happily *share* reserved
+bytes, because the analysis sees no flow between them and no interference - you get per-overlay reuse for free
+whenever the addresses don't collide.
+
+What is refused is precisely a collision:
+
+```
+    ORG &2000
+    STA v
+    ORG &2000       ; rewind onto code we already emitted - now two instructions live at &2000
+    LDA v
+```
+> An ORG that rewinds or overlaps the program counter ...
+
+```
+    STA v
+    OVERLAY loader  ; a second overlay loaded into the SAME slot (both start at the same address)...
+    LDA v           ; ...so this &2000 and that &2000 are indistinguishable
+```
+> Two overlays place code at the same address ...
+
+The swap-in-place pattern - several overlays all loaded to, say, `&1100` and paged in and out - is the one that
+trips the second case. Baron cannot yet tell those apart (per-overlay allocation at a shared address is a
+planned refinement). Until then, for the overlays that share a slot, reach for hand-placed zero-page symbols
+rather than auto-variables, or keep the auto-variables to a single one of them.
+
 ## Limitations ##
 
 The analysis is sound, which means it is conservative: when it cannot be certain, it refuses rather than
@@ -279,6 +322,13 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
   RTS-dispatch still has no annotation; keep those clear.)
 - **No recursion.** A value held live across a recursive call cannot live in one static byte - each level would
   need its own. Baron detects the cycle and refuses.
+- **No two instructions at the same address.** The flow analysis identifies a block purely by its address, so
+  the single rule is that your code must not put two instructions at one address. `ORG` and `OVERLAY` are
+  otherwise free: use as many as you like. What that rules out is an `ORG` that *rewinds* onto code already
+  emitted, and two overlays loaded into the *same* address slot (the classic swap-in-place pattern) - both make
+  two instructions share an address, and both are refused. Overlays at *different* addresses are completely
+  fine, and a cross-overlay `JSR` is followed correctly, because it resolves by address. See
+  [Overlays and ORG](#overlays-and-org) for the details.
 - **You cannot name a variable `a`.** It collides with accumulator addressing: `ASL a` would read as `ASL A`
   and quietly lose the variable. Names `x` and `y` are fine - they only mean registers after a comma, which a
   plain operand never is - so `STA x` resolves to your variable, not the X register.
@@ -289,7 +339,7 @@ you code that assembles cleanly and runs wrong.
 
 ## What doesn't work (yet) ##
 
-Some concrete shapes, and what Baron does with each. All five it catches and refuses. Two related shapes it
+Some concrete shapes, and what Baron does with each. All six it catches and refuses. Two related shapes it
 *cannot* see - a self-modified operand, and a pointer aimed into the reserved block - remain preconditions on
 you: there is nothing in the instruction stream to give them away.
 
@@ -348,6 +398,22 @@ The same goes for `var,Y` and the indexed-indirect `(var,X)`. What Baron *cannot
 operand or a pointer that happens to hold an address inside the reserved block - neither shows up in the
 instruction stream - so keep those on a hand-placed zero-page symbol, not an auto-variable.
 
+**An address collision is refused.** The analysis pins a block to its address, so two instructions at one
+address - an `ORG` rewound onto emitted code, or two overlays loaded into the same slot - would let a target
+resolve to the wrong one:
+
+```
+    ZPAUTO1 v
+    ORG &2000
+    STA v
+    ORG &2000           ; back onto the STA - now two instructions claim &2000
+    LDA v
+```
+> An ORG that rewinds or overlaps the program counter ...
+
+This is the *only* layout hazard: `ORG` and `OVERLAY` are otherwise free (see
+[Overlays and ORG](#overlays-and-org)). Forward `ORG`s and overlays at different addresses are all sound.
+
 ## Getting the most out of it ##
 
 Reuse is driven by lifetimes, so the way to pack tightly is to keep lifetimes short:
@@ -378,6 +444,8 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
 | A ZPAUTO variable must be reached by direct addressing only | An indexed / indexed-indirect access (`var,X`, `(var,X)`). Use a hand-placed symbol there. |
+| Two overlays place code at the same address ... | Two overlays share an address slot. Load them at different addresses (overlays elsewhere are fine), or place those by hand. |
+| An ORG that rewinds or overlaps the program counter ... | An `ORG` moved back onto emitted code. Keep the pc moving forwards, or place those bytes by hand. |
 
 Every one of these is a refusal, not a warning - Baron will not emit code it cannot vouch for. Fix it, annotate
 it, or fall back to a hand-placed address, and you are on solid ground again.

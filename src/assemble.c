@@ -1881,7 +1881,6 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 // fully analysable, colourable program has its operands + symbols rewritten to real addresses.
 static void zeropage_finalize(baron *b, rc_arena scratch)
 {
-    (void) scratch;
     if (!zeropage_is_enabled(&b->zeropage)) {
         return;
     }
@@ -1889,19 +1888,34 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
     rc_view_zp_insn insns = zeropage_insns(&b->zeropage);
     uint32_t nv = zeropage_var_count(&b->zeropage);
 
-    // Own working arenas: cfg + liveness results in `work`, their by-value scratch in `wscratch` (never the
-    // same arena - see the scratch-aliasing lesson).
-    rc_arena work     = rc_arena_make_default();
-    rc_arena wscratch = rc_arena_make_default();
-
-    rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
-
-    // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
-    // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
-    cfg g       = cfg_build(insns, cflows, &work, wscratch);
-    liveness lv = liveness_analyze(g, insns, nv, 0, &work, wscratch);
-
     bool refused = false;
+
+    // Guard L (layout soundness): the CFG identifies a block purely by its address (block_at_pc), so two
+    // instructions sharing a START address are indistinguishable - a branch/jump target could resolve to the
+    // wrong one, a real edge be missed, and a live range wrongly shortened (a silently unsound allocation). An
+    // address collision is the ONE layout hazard, and it is the only thing refused here. Everything with
+    // distinct addresses is sound: several forward ORGs, and multiple OVERLAYs at DIFFERENT addresses - even a
+    // cross-overlay JSR resolves by address and is analysed correctly; a spurious cross-overlay edge only
+    // lengthens a live range, never shortens it. A collision arises from an ORG that rewinds onto emitted code
+    // (same overlay) or two overlays loaded into the same address slot (different overlay); we name which.
+    // (Gated on nv > 0: with no variable there is nothing to allocate, so no hazard.)
+    if (nv > 0) {
+        uint32_t *pc_owner = rc_arena_alloc_zero_type(&scratch, uint32_t, 0x10000);   // 0 = free; else overlay+1
+        for (uint32_t i = 0; i < insns.num; i++) {
+            zp_insn n = rc_view_zp_insn_get(insns, i);
+            if (n.pc >= 0x10000) {
+                continue;   // a degenerate out-of-range pc; the CFG ignores it too (16-bit address space)
+            }
+            if (pc_owner[n.pc] != 0) {
+                error_type e = (pc_owner[n.pc] - 1 == n.overlay) ? error_type_zpauto_org_rewind
+                                                                 : error_type_zpauto_multi_overlay;
+                baron_error(b, e, n.at);
+                refused = true;
+                break;
+            }
+            pc_owner[n.pc] = n.overlay + 1;
+        }
+    }
 
     // Guard 0 (the direct-addressing envelope): a variable reached by an indexed / indexed-indirect mode
     // (var,X, var,Y, (var,X)) touches var+index, a byte the allocator cannot see and may have given to another
@@ -1915,6 +1929,24 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
             refused = true;
         }
     }
+
+    // A broken layout or an out-of-envelope access is decided from the instruction stream alone - and building
+    // a CFG over a stream we have just judged unanalysable would be meaningless. Bail before we do.
+    if (refused) {
+        return;
+    }
+
+    // Own working arenas: cfg + liveness results in `work`, their by-value scratch in `wscratch` (never the
+    // same arena - see the scratch-aliasing lesson).
+    rc_arena work     = rc_arena_make_default();
+    rc_arena wscratch = rc_arena_make_default();
+
+    rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
+
+    // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
+    // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
+    cfg g       = cfg_build(insns, cflows, &work, wscratch);
+    liveness lv = liveness_analyze(g, insns, nv, 0, &work, wscratch);
 
     // Guard 1: a computed / indirect jump (unknown_succ) leaves for code we cannot model. With any variable in
     // play we cannot prove it is not clobbered there, so refuse and ask for an annotation.
@@ -2527,6 +2559,36 @@ RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, zpauto_layout_must_not_collide, fix)
+{
+    // The flow analysis identifies a block by its address, so the ONLY rule is that no two instructions share
+    // an address. ORG and OVERLAY are otherwise free.
+
+    // A forward ORG is fine - the pc only moves onwards.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : ORG &2000 : STA v : LDA v : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+
+    // Two overlays at DIFFERENT addresses are fine, and their variables reuse the same reserved byte (they are
+    // never resident together, and no flow connects them, so they do not interfere).
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+                      "ORG &2000 : STA v : LDA v : RTS\n"
+                      "OVERLAY second : ORG &3000 : STA w : LDA w : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);   // OVERLAY selects output, not a scope: w is top-level
+
+    // But an ORG that rewinds the pc puts two instructions at one address - refused rather than risk a wrong
+    // edge (same overlay, so it is named as an ORG rewind).
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : ORG &2000 : STA v : ORG &2000 : LDA v : RTS")
+                  == error_type_zpauto_org_rewind);
+
+    // And two overlays loaded into the SAME address slot collide (both default to pc 0 here) - refused, and
+    // named as an overlay clash.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : OVERLAY second : LDA v : RTS")
+                  == error_type_zpauto_multi_overlay);
 }
 
 RC_TEST_STEP(assemble, zpauto_unreachable_prunes_dead_edge, fix)
