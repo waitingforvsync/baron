@@ -97,13 +97,10 @@ uint32_t zeropage_find_var_by_def(const zeropage *zp, cursor def)
     return RC_INDEX_NONE;
 }
 
-uint32_t zeropage_add_insn(zeropage *zp, uint32_t vreg, uint8_t rw, cursor at)
+uint32_t zeropage_add_insn(zeropage *zp, zp_insn insn)
 {
     RC_ASSERT(zp != NULL);
-    return rc_array_zp_insn_push(
-        &zp->insns,
-        (zp_insn) {.vreg = vreg, .rw = rw, .at = at},
-        zp->arena);
+    return rc_array_zp_insn_push(&zp->insns, insn, zp->arena);
 }
 
 uint32_t zeropage_insn_count(const zeropage *zp)
@@ -116,6 +113,12 @@ zp_insn zeropage_insn_get(const zeropage *zp, uint32_t index)
 {
     RC_ASSERT(zp != NULL);
     return rc_array_zp_insn_get(&zp->insns, index);
+}
+
+rc_view_zp_insn zeropage_insns(const zeropage *zp)
+{
+    RC_ASSERT(zp != NULL);
+    return zp->insns.view;
 }
 
 
@@ -213,12 +216,17 @@ RC_TEST(zeropage, insn_list)
     zeropage_init(&zp, &arena);
 
     RC_CHECK(zeropage_insn_count(&zp), ==, 0u);
-    zeropage_add_insn(&zp, 0, vref_write, (cursor) {.source = 0, .pos = 4});
-    zeropage_add_insn(&zp, 0, vref_read | vref_write, (cursor) {.source = 0, .pos = 8});
+    zeropage_add_insn(&zp, (zp_insn) {.pc = 0x2000, .size = 2, .flow = zp_flow_normal,
+                                      .vreg = 0, .rw = vref_write, .target = RC_INDEX_NONE,
+                                      .at = (cursor) {.source = 0, .pos = 4}});
+    zeropage_add_insn(&zp, (zp_insn) {.pc = 0x2002, .size = 2, .flow = zp_flow_normal,
+                                      .vreg = 0, .rw = vref_read | vref_write, .target = RC_INDEX_NONE,
+                                      .at = (cursor) {.source = 0, .pos = 8}});
     RC_CHECK(zeropage_insn_count(&zp), ==, 2u);
     RC_CHECK((int) zeropage_insn_get(&zp, 0).rw, ==, (int) vref_write);
     RC_CHECK((int) zeropage_insn_get(&zp, 1).rw, ==, (int) (vref_read | vref_write));
     RC_CHECK(zeropage_insn_get(&zp, 1).at.pos, ==, 8u);
+    RC_CHECK(zeropage_insn_get(&zp, 1).pc, ==, 0x2002u);
 
     rc_arena_deinit(&arena);
 }
@@ -232,7 +240,7 @@ RC_TEST(zeropage, reset_clears_for_next_pass)
     zeropage_reserve(&zp, 0x70);
     zeropage_reserve(&zp, 0x71);
     zeropage_add_var(&zp, RC_STR("foo"), 0, 1, (cursor) {0});
-    zeropage_add_insn(&zp, 0, vref_read, (cursor) {0});
+    zeropage_add_insn(&zp, (zp_insn) {.vreg = 0, .rw = vref_read, .target = RC_INDEX_NONE});
     RC_CHECK(zeropage_reserved_count(&zp), ==, 2u);
     RC_CHECK(zeropage_var_count(&zp), ==, 1u);
     RC_CHECK(zeropage_insn_count(&zp), ==, 1u);

@@ -447,33 +447,73 @@ static bool is_indirect_mode(addr_mode mode)
     return mode == addr_mode_indx || mode == addr_mode_indy || mode == addr_mode_ind;
 }
 
-// Record a ZPAUTO-touching instruction into the zero-page IR, for the allocator's future liveness analysis.
-// Only on the final pass of an active branch with the feature enabled, and only when the operand's leading
-// identifier resolves (with shadowing) to a declared ZPAUTO variable. The rw class comes from the cell for a
-// DIRECT access (the variable IS the operand); an INDIRECT access reads the variable as a pointer. `operand_pos`
-// is where the operand expression begins, or RC_INDEX_NONE for a no-operand / immediate instruction.
-static void observe_var_operand(baron *b, cursor at, uint32_t scope, parse_flags flags,
-                                addr_mode mode, uint16_t cell, uint32_t operand_pos)
+// The instruction's control-flow class, from its cell's control flags (exclusive: at most one is set).
+static zp_flow flow_from_cell(uint16_t cell)
 {
-    if (operand_pos == RC_INDEX_NONE || !flags.final || !flags.active || !zeropage_is_enabled(&b->zeropage)) {
-        return;
+    if (cell & op_branch) return zp_flow_branch;
+    if (cell & op_jump)   return zp_flow_jump;
+    if (cell & op_call)   return zp_flow_call;
+    if (cell & op_return) return zp_flow_return;
+    return zp_flow_normal;
+}
+
+// If the operand's leading identifier resolves (with shadowing) to a declared ZPAUTO variable, return its
+// vreg and how this instruction touches it; otherwise vreg = RC_INDEX_NONE. The rw class comes from the cell
+// for a DIRECT access (the variable IS the operand); an INDIRECT access reads the variable as a pointer to
+// dereference, whatever the instruction does to the pointed-to data. `operand_pos` is where the operand
+// expression begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable access).
+static uint32_t attribute_var(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
+                              uint32_t operand_pos, uint8_t *out_rw)
+{
+    *out_rw = vref_none;
+    if (operand_pos == RC_INDEX_NONE) {
+        return RC_INDEX_NONE;
     }
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lx = lexer_next(src, operand_pos, operand_tokens);
     if (lx.token.type != lexeme_type_identifier) {
-        return;   // a literal address or a register - not a variable reference
+        return RC_INDEX_NONE;   // a literal address or a register
     }
     cursor def = scopes_resolve_symbol_def(&b->scopes, scope, lx.token.identifier.name);
     uint32_t vreg = cursor_is_none(def) ? RC_INDEX_NONE : zeropage_find_var_by_def(&b->zeropage, def);
     if (vreg == RC_INDEX_NONE) {
-        return;   // resolves to nothing, or to an ordinary symbol - not a ZPAUTO variable
+        return RC_INDEX_NONE;   // resolves to nothing, or to an ordinary symbol
     }
-    uint8_t rw = is_indirect_mode(mode)
-                     ? (uint8_t) vref_read
-                     : (uint8_t) (((cell & op_read) ? vref_read : 0) | ((cell & op_write) ? vref_write : 0));
-    if (rw != vref_none) {
-        zeropage_add_insn(&b->zeropage, vreg, rw, cursor_at(at, operand_pos));
+    *out_rw = is_indirect_mode(mode)
+                  ? (uint8_t) vref_read
+                  : (uint8_t) (((cell & op_read) ? vref_read : 0) | ((cell & op_write) ? vref_write : 0));
+    return vreg;
+}
+
+// Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
+// liveness passes: its address + size, control-flow class + resolved target (branch/jump/call to a plain
+// abs/rel address; an indirect/computed target stays RC_INDEX_NONE), and its variable touch (if any).
+static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, addr_mode mode,
+                        uint16_t cell, int_argument arg, uint32_t operand_base, uint32_t pc)
+{
+    if (!flags.final || !flags.active || !zeropage_is_enabled(&b->zeropage)) {
+        return;
     }
+    zp_flow  flow   = flow_from_cell(cell);
+    uint32_t target = RC_INDEX_NONE;
+    if ((flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call)
+        && arg.type == int_argument_type_known
+        && (mode == addr_mode_rel || mode == addr_mode_abs)) {
+        target = (uint32_t) (arg.value & 0xFFFF);
+    }
+
+    uint8_t  rw   = vref_none;
+    uint32_t vreg = attribute_var(b, at, scope, mode, cell, operand_base, &rw);
+
+    zeropage_add_insn(&b->zeropage, (zp_insn) {
+        .pc     = pc,
+        .size   = (uint16_t) (1 + mode_operand_bytes(mode)),
+        .flow   = (uint8_t) flow,
+        .rw     = rw,
+        .vreg   = vreg,
+        .target = target,
+        .at     = at,
+    });
 }
 
 struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
@@ -483,6 +523,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     uint32_t overlay = b->current_overlay;   // the overlay we emit into now (assembler-wide state)
     rc_str src = source_files_text(&b->source_files, source);
     uint32_t start = at.pos;              // just past the mnemonic
+    uint32_t insn_pc = overlays_pc(&b->overlays, overlay);   // this instruction's address (before it emits)
     addr_mode mode;
     int_argument arg = {.type = int_argument_type_known};
     uint32_t operand_base = RC_INDEX_NONE;   // where a memory operand's expression begins (for VAR observation)
@@ -611,8 +652,8 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         return require_separator(b, cursor_at(at, after));
     }
 
-    // Record this instruction into the ZP IR if its operand names a ZPAUTO variable (final pass, feature on).
-    observe_var_operand(b, at, scope, flags, mode, cell, operand_base);
+    // Record this instruction into the ZP IR (final active pass, feature on) for the CFG + liveness passes.
+    record_insn(b, at, scope, flags, mode, cell, arg, operand_base, insn_pc);
 
     overlays_emit_u8(&b->overlays, overlay, (uint8_t)(cell & 0xFF));
 

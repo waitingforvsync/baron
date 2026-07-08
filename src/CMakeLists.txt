@@ -21,6 +21,8 @@ add_executable(baron
     overlays.h
     zeropage.c
     zeropage.h
+    cfg.c
+    cfg.h
     source_files.c
     source_files.h
     macros.c

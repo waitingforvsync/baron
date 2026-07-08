@@ -2176,13 +2176,17 @@ RC_TEST(assemble, zpauto_rw_observation)
         }
     }
 
-    // An ordinary symbol or a literal address in operand position records nothing.
+    // Every instruction is recorded (the CFG needs the whole stream), but an ordinary symbol or a literal
+    // address in operand position attributes to NO vreg - only ZPAUTO operands do.
     {
         baron b = baron_make(&arenas);
         uint32_t s = source_files_add_string(&b.source_files, RC_STR("t3"),
             RC_STR("ZPRESERVE &70..&7F : label = &50 : LDA label : LDA &2000 : LDA #7"));
         run_passes(&b, s, arenas.scratch);
-        RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 0u);
+        RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 3u);   // all three LDAs are recorded...
+        for (uint32_t i = 0; i < 3; i++) {
+            RC_CHECK(zeropage_insn_get(&b.zeropage, i).vreg, ==, RC_INDEX_NONE);   // ...but touch no vreg
+        }
     }
 
     baron_arenas_deinit(&arenas);
