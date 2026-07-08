@@ -86,11 +86,24 @@ zp_var zeropage_var_get(const zeropage *zp, uint32_t index)
     return rc_array_zp_var_get(&zp->vars, index);
 }
 
-uint32_t zeropage_find_var_by_def(const zeropage *zp, cursor def)
+rc_view_zp_var zeropage_vars(const zeropage *zp)
+{
+    RC_ASSERT(zp != NULL);
+    return zp->vars.view;
+}
+
+const rc_bitset *zeropage_reserved(const zeropage *zp)
+{
+    RC_ASSERT(zp != NULL);
+    return &zp->reserved;
+}
+
+uint32_t zeropage_find_var(const zeropage *zp, uint32_t scope, cursor def)
 {
     RC_ASSERT(zp != NULL);
     for (uint32_t i = 0; i < zp->vars.num; i++) {
-        if (cursor_is_equal(rc_array_zp_var_get(&zp->vars, i).def, def)) {
+        zp_var v = rc_array_zp_var_get(&zp->vars, i);
+        if (v.scope == scope && cursor_is_equal(v.def, def)) {
             return i;
         }
     }
@@ -101,6 +114,16 @@ uint32_t zeropage_add_insn(zeropage *zp, zp_insn insn)
 {
     RC_ASSERT(zp != NULL);
     return rc_array_zp_insn_push(&zp->insns, insn, zp->arena);
+}
+
+void zeropage_resolve_vregs(zeropage *zp)
+{
+    RC_ASSERT(zp != NULL);
+    for (uint32_t i = 0; i < zp->insns.num; i++) {
+        zp_insn *n = rc_array_zp_insn_at(&zp->insns, i);
+        n->vreg = cursor_is_none(n->var_def) ? RC_INDEX_NONE
+                                             : zeropage_find_var(zp, n->var_scope, n->var_def);
+    }
 }
 
 uint32_t zeropage_insn_count(const zeropage *zp)
@@ -201,10 +224,12 @@ RC_TEST(zeropage, var_registry)
     zp_var v1 = zeropage_var_get(&zp, 1);
     RC_CHECK(v1.width, ==, (uint8_t) 2);
 
-    // find_var_by_def maps a binding's identity cursor back to its vreg index (or NONE).
-    RC_CHECK(zeropage_find_var_by_def(&zp, (cursor) {.source = 0, .pos = 20}), ==, 1u);
-    RC_CHECK(zeropage_find_var_by_def(&zp, (cursor) {.source = 0, .pos = 10}), ==, 0u);
-    RC_CHECK(zeropage_find_var_by_def(&zp, (cursor) {.source = 0, .pos = 99}), ==, RC_INDEX_NONE);
+    // find_var maps a binding's identity - the (scope, def) PAIR - back to its vreg index (or NONE).
+    RC_CHECK(zeropage_find_var(&zp, 3, (cursor) {.source = 0, .pos = 20}), ==, 1u);
+    RC_CHECK(zeropage_find_var(&zp, 3, (cursor) {.source = 0, .pos = 10}), ==, 0u);
+    RC_CHECK(zeropage_find_var(&zp, 3, (cursor) {.source = 0, .pos = 99}), ==, RC_INDEX_NONE);
+    // Same def cursor, different scope -> a different variable (this is what lets macro instances differ).
+    RC_CHECK(zeropage_find_var(&zp, 5, (cursor) {.source = 0, .pos = 20}), ==, RC_INDEX_NONE);
 
     rc_arena_deinit(&arena);
 }

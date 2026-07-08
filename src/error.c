@@ -46,6 +46,9 @@ rc_str error_type_name(error_type e)
         case error_type_bad_alignment:           return RC_STR("Alignment must be at least 1");
         case error_type_reserve_not_zeropage:    return RC_STR("ZPRESERVE address must be within the zero page ($00-$FF)");
         case error_type_var_without_reserve:     return RC_STR("ZPAUTO needs a ZPRESERVE block before it");
+        case error_type_zeropage_full:           return RC_STR("No free zero-page byte left to allocate this ZPAUTO variable");
+        case error_type_zpauto_across_call:      return RC_STR("A ZPAUTO variable is live across a JSR; interprocedural allocation is not yet supported - split the value or hold it elsewhere");
+        case error_type_zpauto_computed_flow:    return RC_STR("A computed or indirect jump reaches unknown code while ZPAUTO is active; its targets cannot be proven, so annotate them (CANJUMP/CANCALL) or avoid ZPAUTO here");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol");
         case error_type_duplicate_symbol:        return RC_STR("Symbol is already defined in this scope");
         case error_type_original_definition:     return RC_STR("Originally defined here");

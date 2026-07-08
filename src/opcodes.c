@@ -457,32 +457,41 @@ static zp_flow flow_from_cell(uint16_t cell)
     return zp_flow_normal;
 }
 
-// If the operand's leading identifier resolves (with shadowing) to a declared ZPAUTO variable, return its
-// vreg and how this instruction touches it; otherwise vreg = RC_INDEX_NONE. The rw class comes from the cell
-// for a DIRECT access (the variable IS the operand); an INDIRECT access reads the variable as a pointer to
-// dereference, whatever the instruction does to the pointed-to data. `operand_pos` is where the operand
-// expression begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable access).
-static uint32_t attribute_var(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
-                              uint32_t operand_pos, uint8_t *out_rw)
+// The attribution of one operand to a ZPAUTO variable: the referenced binding's identity (def cursor + the
+// scope it was declared in) and how this instruction touches it. All-none / vref_none when the operand names
+// no bound symbol.
+typedef struct operand_ref {
+    cursor   def;
+    uint32_t scope;
+    uint8_t  rw;
+} operand_ref;
+
+// If the operand's leading identifier resolves (with shadowing) to a bound symbol, return its identity and rw
+// class; otherwise an all-none ref. The identity is mapped to a concrete vreg LATER (zeropage_resolve_vregs),
+// once the whole ZPAUTO registry is populated, so a use before the declaration still attributes. The rw class
+// comes from the cell for a DIRECT access (the variable IS the operand); an INDIRECT access reads the variable
+// as a pointer to dereference, whatever the instruction does to the pointed-to data. `operand_pos` is where
+// the operand expression begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable).
+static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
+                                     uint32_t operand_pos)
 {
-    *out_rw = vref_none;
+    operand_ref none = {.def = cursor_none(), .scope = RC_INDEX_NONE, .rw = vref_none};
     if (operand_pos == RC_INDEX_NONE) {
-        return RC_INDEX_NONE;
+        return none;
     }
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lx = lexer_next(src, operand_pos, operand_tokens);
     if (lx.token.type != lexeme_type_identifier) {
-        return RC_INDEX_NONE;   // a literal address or a register
+        return none;   // a literal address or a register
     }
-    cursor def = scopes_resolve_symbol_def(&b->scopes, scope, lx.token.identifier.name);
-    uint32_t vreg = cursor_is_none(def) ? RC_INDEX_NONE : zeropage_find_var_by_def(&b->zeropage, def);
-    if (vreg == RC_INDEX_NONE) {
-        return RC_INDEX_NONE;   // resolves to nothing, or to an ordinary symbol
+    symbol_ref ref = scopes_resolve_symbol_def(&b->scopes, scope, lx.token.identifier.name);
+    if (cursor_is_none(ref.def)) {
+        return none;   // resolves to nothing (undefined / not a bare symbol)
     }
-    *out_rw = is_indirect_mode(mode)
-                  ? (uint8_t) vref_read
-                  : (uint8_t) (((cell & op_read) ? vref_read : 0) | ((cell & op_write) ? vref_write : 0));
-    return vreg;
+    uint8_t rw = is_indirect_mode(mode)
+                     ? (uint8_t) vref_read
+                     : (uint8_t) (((cell & op_read) ? vref_read : 0) | ((cell & op_write) ? vref_write : 0));
+    return (operand_ref) {.def = ref.def, .scope = ref.scope, .rw = rw};
 }
 
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
@@ -502,17 +511,25 @@ static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, 
         target = (uint32_t) (arg.value & 0xFFFF);
     }
 
-    uint8_t  rw   = vref_none;
-    uint32_t vreg = attribute_var(b, at, scope, mode, cell, operand_base, &rw);
+    operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
+
+    // The operand byte lands right after the opcode byte we are about to emit: the overlay's current code
+    // length is the opcode's offset, so the operand is at +1. Recorded so the allocation patch can find it.
+    uint32_t overlay        = b->current_overlay;
+    uint32_t operand_offset = overlays_code(&b->overlays, overlay).num + 1;
 
     zeropage_add_insn(&b->zeropage, (zp_insn) {
-        .pc     = pc,
-        .size   = (uint16_t) (1 + mode_operand_bytes(mode)),
-        .flow   = (uint8_t) flow,
-        .rw     = rw,
-        .vreg   = vreg,
-        .target = target,
-        .at     = at,
+        .pc             = pc,
+        .size           = (uint16_t) (1 + mode_operand_bytes(mode)),
+        .flow           = (uint8_t) flow,
+        .rw             = op.rw,
+        .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
+        .var_scope      = op.scope,
+        .var_def        = op.def,
+        .target         = target,
+        .overlay        = overlay,
+        .operand_offset = operand_offset,
+        .at             = at,
     });
 }
 

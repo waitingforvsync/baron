@@ -91,6 +91,14 @@ void overlays_skip(overlays *ovl, uint32_t id, uint32_t count)
     o->pc += count;
 }
 
+void overlays_patch_add_u8(overlays *ovl, uint32_t id, uint32_t offset, uint8_t delta)
+{
+    RC_ASSERT(ovl != NULL);
+    overlay *o = &RC_AT(ovl->nodes, id);
+    uint8_t *byte = &RC_AT(o->code, offset);
+    *byte = (uint8_t) (*byte + delta);
+}
+
 #ifdef BARON_TESTS
 
 #include "richc/test.h"

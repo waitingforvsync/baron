@@ -25,6 +25,8 @@ add_executable(baron
     cfg.h
     liveness.c
     liveness.h
+    zpalloc.c
+    zpalloc.h
     source_files.c
     source_files.h
     macros.c

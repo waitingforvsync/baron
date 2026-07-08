@@ -50,6 +50,11 @@ void overlays_emit_u8(overlays *ovl, uint32_t id, uint8_t b);     // append a by
 void overlays_emit_u16(overlays *ovl, uint32_t id, uint16_t w);   // little-endian word, pc += 2
 void overlays_skip(overlays *ovl, uint32_t id, uint32_t count);   // append `count` zero bytes, pc += count
 
+// Post-hoc patch: add `delta` (mod 256) to the byte already emitted at `offset` in overlay `id`. Used by the
+// zero-page allocator to fold a variable's assigned base address into an operand that was emitted with the
+// placeholder base (so the emitted byte held just the intra-variable offset). Does NOT touch pc.
+void overlays_patch_add_u8(overlays *ovl, uint32_t id, uint32_t offset, uint8_t delta);
+
 // Select the overlay named `name`, making it (with its own pc 0 + empty code buffer) on first sighting;
 // hands back its stable index. Overlay names live in their OWN namespace, keyed by content. `name` must be
 // non-empty (the nameless default is index 0, unreachable this way). The index is stable across passes

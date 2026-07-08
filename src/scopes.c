@@ -150,21 +150,22 @@ cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
                : rc_trie_symbol_value_get(&s->symbol_pool, found).def;
 }
 
-cursor scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
+symbol_ref scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
 {
     RC_ASSERT(s != NULL);
     if (!is_leaf_name(name)) {
-        return cursor_none();   // a dotted operand is not attributed to a single variable (yet)
+        return (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};   // a dotted operand is not a single variable (yet)
     }
-    // Same parent-walk as a bare-name value lookup, but we return the binding's def (its identity).
+    // Same parent-walk as a bare-name value lookup, but we return the binding's def (its identity) plus the
+    // scope it was found in - the two together are what uniquely identify a variable across instantiations.
     for (uint32_t i = scope_index; i != RC_INDEX_NONE; i = RC_AT(s->nodes, i).parent) {
         rc_trie_symbol syms  = RC_AT(s->nodes, i).symbols;
         uint32_t       found = rc_trie_symbol_find(syms, &s->symbol_pool, name);
         if (found != RC_INDEX_NONE) {
-            return rc_trie_symbol_value_get(&s->symbol_pool, found).def;
+            return (symbol_ref) {.def = rc_trie_symbol_value_get(&s->symbol_pool, found).def, .scope = i};
         }
     }
-    return cursor_none();
+    return (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};
 }
 
 scopes_view scopes_view_make(const scopes *s)

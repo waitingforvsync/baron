@@ -3,6 +3,9 @@
 #include "opcodes.h"
 #include "lexer.h"
 #include "expression.h"
+#include "cfg.h"                 // post-convergence zero-page allocation: recover the CFG...
+#include "liveness.h"            // ...run liveness over it...
+#include "zpalloc.h"             // ...and colour the interference graph into the reserved bytes
 #include "file_utils.h"          // INCLUDE / INCBIN path resolution
 #include "richc/file.h"          // INCBIN: rc_file_size / rc_file_load_binary
 #include "baron.h"               // the owner type the tests assemble into
@@ -593,7 +596,10 @@ static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, parse_fla
                 }
             }
             else if (flags.final) {
-                zeropage_add_var(&b->zeropage, name, scope, width, def);   // record the vreg once, on the final pass
+                // Record the vreg. Its identity is the (scope, def) pair: a macro / FOR body shares one def
+                // across every instantiation, but each runs in its own child scope, so each instance becomes a
+                // distinct variable here - exactly as two sibling blocks declaring the same name would.
+                zeropage_add_var(&b->zeropage, name, scope, width, def);
             }
         }
         else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
@@ -1750,6 +1756,105 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     );
 }
 
+// Post-convergence zero-page allocation. Layout has settled with every ZPAUTO reference sized as a
+// placeholder zero-page access, so assigning a real byte and patching the operand cannot perturb size. The
+// governing rule is CERTAINTY: this only patches a program it can prove correct, and turns anything it cannot
+// into a clear diagnostic pointing the user at a fix or an annotation. Three refusals:
+//   - a computed / indirect jump reaches code the CFG cannot follow (unknown_succ) -> error_type_zpauto_computed_flow;
+//   - a variable is live across a JSR, whose callee footprint needs interprocedural analysis we do not yet do
+//     -> error_type_zpauto_across_call;
+//   - more simultaneously-live variables than reserved bytes -> error_type_zeropage_full (a spill).
+// On any refusal it records the error(s) and patches nothing; run_passes then fails the assemble. Only a
+// fully analysable, colourable program has its operands + symbols rewritten to real addresses.
+static void zeropage_finalize(baron *b, rc_arena scratch)
+{
+    (void) scratch;
+    if (!zeropage_is_enabled(&b->zeropage)) {
+        return;
+    }
+    zeropage_resolve_vregs(&b->zeropage);   // map each operand's def cursor to its vreg (registry now complete)
+    rc_view_zp_insn insns = zeropage_insns(&b->zeropage);
+    uint32_t nv = zeropage_var_count(&b->zeropage);
+
+    // Own working arenas: cfg + liveness results in `work`, their by-value scratch in `wscratch` (never the
+    // same arena - see the scratch-aliasing lesson).
+    rc_arena work     = rc_arena_make_default();
+    rc_arena wscratch = rc_arena_make_default();
+
+    cfg g       = cfg_build(insns, &work, wscratch);
+    liveness lv = liveness_analyze(g, insns, nv, 0, &work, wscratch);
+
+    bool refused = false;
+
+    // Guard 1: a computed / indirect jump (unknown_succ) leaves for code we cannot model. With any variable in
+    // play we cannot prove it is not clobbered there, so refuse and ask for an annotation.
+    for (uint32_t bi = 0; bi < g.blocks.num && nv > 0; bi++) {
+        basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+        if (blk.unknown_succ) {
+            zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
+            baron_error(b, error_type_zpauto_computed_flow, last.at);
+            refused = true;
+        }
+    }
+
+    // Guard 2: a variable live ACROSS a JSR would be clobbered by the callee's zero-page footprint, which we
+    // cannot yet see. Sweep each block backward; at a call, the current live set is exactly what is live across
+    // it (a JSR touches no variable of its own, so live-out at the call equals live-across).
+    rc_bitset live = {0};
+    rc_bitset_resize(&live, nv, &wscratch);
+    for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
+        basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+        rc_bitset_reset(&live);
+        for (uint32_t v = 0; v < nv; v++) {
+            if (liveness_is_live_out(&lv, bi, v)) {
+                rc_bitset_set(&live, v);
+            }
+        }
+        for (uint32_t k = blk.num_insns; k-- > 0; ) {
+            zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + k);
+            if (n.flow == zp_flow_call && rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
+                baron_error(b, error_type_zpauto_across_call, n.at);
+                refused = true;
+            }
+            if (n.vreg != RC_INDEX_NONE) {
+                if (n.rw & vref_write) { rc_bitset_clear(&live, n.vreg); }
+                if (n.rw & vref_read)  { rc_bitset_set(&live, n.vreg); }
+            }
+        }
+    }
+
+    if (!refused) {
+        zp_coloring col = zp_color(&lv, zeropage_vars(&b->zeropage), zeropage_reserved(&b->zeropage),
+                                   &work, wscratch);
+        if (col.any_spilled) {
+            for (uint32_t v = 0; v < nv; v++) {
+                if (col.base[v] == RC_INDEX_NONE) {
+                    baron_error(b, error_type_zeropage_full, zeropage_var_get(&b->zeropage, v).def);
+                }
+            }
+        }
+        else {
+            // Patch each recorded operand: it was emitted with the placeholder base 0, so the byte held only
+            // the intra-variable offset (0 for `var`, 1 for `var+1`); fold in the assigned base.
+            for (uint32_t i = 0; i < insns.num; i++) {
+                zp_insn n = rc_view_zp_insn_get(insns, i);
+                if (n.vreg != RC_INDEX_NONE) {
+                    overlays_patch_add_u8(&b->overlays, n.overlay, n.operand_offset, (uint8_t) col.base[n.vreg]);
+                }
+            }
+            // Rewrite each variable's symbol from the placeholder to its real zero-page address.
+            for (uint32_t v = 0; v < nv; v++) {
+                zp_var var = zeropage_var_get(&b->zeropage, v);
+                scopes_set_symbol(&b->scopes, var.scope, var.name,
+                                  value_make_numeric((double) col.base[v]), var.def);
+            }
+        }
+    }
+
+    rc_arena_deinit(&wscratch);
+    rc_arena_deinit(&work);
+}
+
 // Discard the half-built outputs - object code and symbols - so a failed assemble hands back nothing
 // to consume; only the diagnostics remain. Returns 0, the failure signal the entry points hand back.
 static uint32_t assemble_failed(baron *b)
@@ -1779,6 +1884,13 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             parse_result fin = run_pass(b, source, (parse_flags) {.final = true, .active = true}, scratch);
 
             if (fin.fatal || baron_has_errors(b)) {
+                return assemble_failed(b);
+            }
+            // Layout has settled: now assign real zero-page bytes to the ZPAUTO variables and patch the
+            // placeholder operands. This refuses (records errors, patches nothing) on anything it cannot prove
+            // correct, so a fresh error here fails the assemble just like a pass error would.
+            zeropage_finalize(b, scratch);
+            if (baron_has_errors(b)) {
                 return assemble_failed(b);
             }
             return pass + 1;
@@ -1850,8 +1962,6 @@ baron_result assemble_file(baron_arenas *arenas, rc_str path)
 
 #include "richc/test.h"
 #include "richc/mstr.h"   // the stress test builds a big source with rc_mstr
-#include "cfg.h"          // the end-to-end zeropage tests flow the recorded IR through the CFG...
-#include "liveness.h"     // ...and liveness, to prove the real parse -> IR -> analysis chain
 
 RC_TEST_GROUP_DATA(assemble) {
     baron_arenas arenas;
@@ -2082,14 +2192,14 @@ RC_TEST_STEP(assemble, zpreserve_errors, fix)
 
 RC_TEST_STEP(assemble, zpauto_declares_scoped_var, fix)
 {
-    // ZPAUTO1/ZPAUTO2 bind scoped symbols to the placeholder ZP address (the real byte is assigned later).
+    // ZPAUTO1/ZPAUTO2 bind scoped symbols; after convergence the allocator gives each a real zero-page byte.
+    // Neither variable is ever referenced, so there is no liveness to prove sharing safe - each keeps its own
+    // byte. FFD places the 2-byte `ptr` first (&70-&71), then the 1-byte `foo` at the next free byte, &72.
     uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : ZPAUTO2 ptr");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("foo")),
-                                 value_make_numeric((double) zeropage_var_placeholder)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("ptr")),
-                                 value_make_numeric((double) zeropage_var_placeholder)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("ptr")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("foo")), value_make_numeric(0x72)));
 
     // A comma-list declares several at once.
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 a, b, c") != 0);
@@ -2114,29 +2224,106 @@ RC_TEST_STEP(assemble, zpauto_errors, fix)
 
 RC_TEST_STEP(assemble, zpauto_operand_is_zeropage, fix)
 {
-    // A ZPAUTO variable in operand position assembles as a 2-byte zero-page access, at the placeholder
-    // address (0 for now; the real byte is assigned later, at the allocation phase). This is the layout-
-    // independence property: a variable reference is always zero-page-sized, so allocation never perturbs
-    // code size. These operand bytes will become the allocated addresses once colouring + patching land.
-    const uint8_t ph = (uint8_t) zeropage_var_placeholder;
+    // A ZPAUTO variable in operand position assembles as a 2-byte zero-page access. Post-convergence the
+    // allocator assigns the real byte and patches the operand in place - it never changes size (the layout-
+    // independence property), so patching is sound. With one variable and a free block from &70, it lands on
+    // the first reserved byte, &70; a 2-byte pointer's hi half is &71 (its low byte + 1).
+    const uint8_t b0 = 0x70;   // the first reserved byte the single variable is allocated to
 
-    // Declared then used: LDA zp / STA zp (read and write).
+    // Declared then used: LDA zp / STA zp (read and write), operand patched to the allocated address.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : LDA foo"),
-                          (uint8_t[]){0xA5, ph}, 2));
+                          (uint8_t[]){0xA5, b0}, 2));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : STA foo"),
-                          (uint8_t[]){0x85, ph}, 2));
+                          (uint8_t[]){0x85, b0}, 2));
 
-    // Used BEFORE declared: still 2 bytes. It sizes as zero-page every pass (a VAR is always ZP), so the
-    // layout converges no matter the eventual address - the binding from one pass resolves the next.
+    // Used BEFORE declared: still 2 bytes, still patched. It sizes as zero-page every pass (a VAR is always
+    // ZP), so the layout converges no matter the eventual address - the binding from one pass resolves the next.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : LDA foo : ZPAUTO1 foo"),
-                          (uint8_t[]){0xA5, ph}, 2));
+                          (uint8_t[]){0xA5, b0}, 2));
 
-    // A 2-byte pointer: lo is `ptr`, hi is `ptr+1` (arithmetic on the placeholder), both zero-page; and the
-    // pointer drives indirect-indexed addressing (its intended use).
+    // A 2-byte pointer: lo is `ptr` (&70), hi is `ptr+1` (&71 - the base plus the intra-variable offset that
+    // the operand carried); and the pointer drives indirect-indexed addressing (its intended use).
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : LDA ptr : LDA ptr+1"),
-                          (uint8_t[]){0xA5, ph, 0xA5, (uint8_t)(ph + 1)}, 4));
+                          (uint8_t[]){0xA5, b0, 0xA5, (uint8_t)(b0 + 1)}, 4));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : LDA (ptr),Y"),
-                          (uint8_t[]){0xB1, ph}, 2));
+                          (uint8_t[]){0xB1, b0}, 2));
+}
+
+// A ZPAUTO symbol's allocated zero-page address, or -1 if it is not a plain number (unbound / failed).
+static int64_t zp_addr(const baron_result *r, const char *name)
+{
+    value v = baron_result_symbol(r, rc_str_from_cstr(name));
+    return value_is_numeric(v) ? (int64_t) v.numeric : -1;
+}
+
+RC_TEST_STEP(assemble, zpauto_allocates_and_reuses, fix)
+{
+    // D1 - two locals with disjoint live ranges share one byte. v1 dies (last read) before v2 is written, so
+    // the colourer packs both onto &70.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v1, v2 : STA v1 : LDA v1 : STA v2 : LDA v2 : RTS") != 0);
+    RC_CHECK(zp_addr(&fix->r, "v1"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "v2"), ==, 0x70);
+
+    // D2 - the spec's mul shape: in1 is read first (input), tmp is written-then-read (temp), out1 is written
+    // last (output). in1 and tmp overlap so tmp takes &71; out1 is born only after both die, so it REUSES
+    // in1's &70. Six accesses collapse onto two bytes.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 in1, tmp, out1\n"
+                      "LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS") != 0);
+    RC_CHECK(zp_addr(&fix->r, "in1"),  ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "tmp"),  ==, 0x71);
+    RC_CHECK(zp_addr(&fix->r, "out1"), ==, 0x70);   // reuses in1's byte
+
+    // D3 - a 2-byte pointer packs beside a 1-byte temp when they interfere. `a` is live across the pointer's
+    // setup, so it cannot overlap ptr's two bytes (&70-&71) and lands at &72.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 a\n"
+                      "STA a : STA ptr : STA ptr+1 : LDA a : LDA (ptr),Y : RTS") != 0);
+    RC_CHECK(zp_addr(&fix->r, "ptr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "a"),   ==, 0x72);
+}
+
+RC_TEST_STEP(assemble, zpauto_call_without_live_var_is_allowed, fix)
+{
+    // A JSR is fine as long as no ZPAUTO variable is live across it: `t` is written and read BEFORE the call,
+    // dead by the time control leaves, so the callee cannot clobber it. Allocation proceeds normally.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 t : STA t : LDA t : JSR sub : RTS : .sub { RTS }");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "t"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
+{
+    // The certainty contract: rather than emit code it cannot prove correct, the allocator errors and points
+    // at the fix. Each of these MUST fail the assemble.
+
+    // A variable live ACROSS a JSR - the callee's zero-page footprint is not yet analysed, so we refuse.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 keep : STA keep : JSR sub : LDA keep : RTS : .sub { RTS }")
+                  == error_type_zpauto_across_call);
+
+    // A computed / indirect jump reaches code the CFG cannot follow while a variable is in play - refuse and
+    // ask for an annotation.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : JMP (&2000)")
+                  == error_type_zpauto_computed_flow);
+
+    // More simultaneously-live variables than reserved bytes is a spill: a and b overlap but only &70 is free.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 a, b : STA a : STA b : LDA a : LDA b : RTS")
+                  == error_type_zeropage_full);
+}
+
+RC_TEST_STEP(assemble, zpauto_macro_local_is_per_invocation, fix)
+{
+    // A macro can declare its own ZPAUTO temp without caring where it lands. Each invocation runs in its own
+    // child scope, so each `loc` is a DISTINCT variable (identity = scope + def), exactly like two sibling
+    // blocks declaring the same name. Invoked twice, the two disjoint locals both settle on &70.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : MACRO USE : ZPAUTO1 loc : STA loc : LDA loc : ENDMACRO\n"
+                          "USE\nUSE");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x85, 0x70, 0xA5, 0x70, 0x85, 0x70, 0xA5, 0x70}, 8));
+
+    // Likewise inside a FOR body that iterates more than once: each iteration's temp is its own variable.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : FOR i = 0..1 : ZPAUTO1 loc : STA loc : LDA loc : NEXT") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 RC_TEST(assemble, zpauto_rw_observation)

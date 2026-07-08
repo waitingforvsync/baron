@@ -63,12 +63,16 @@ typedef enum zp_flow {
 // through a pointer the pointer is always READ, whatever the instruction does to the pointed-to data).
 // `vreg` is RC_INDEX_NONE for an instruction that touches no variable. Recorded on the final pass only.
 typedef struct zp_insn {
-    uint32_t pc;       // this instruction's address
-    uint16_t size;     // its length in bytes (1 + operand bytes)
-    uint8_t  flow;     // zp_flow
-    uint8_t  rw;       // vref_rw, if it touches `vreg`
-    uint32_t vreg;     // the ZPAUTO it touches, or RC_INDEX_NONE
-    uint32_t target;   // branch/jump/call target address, or RC_INDEX_NONE
+    uint32_t pc;              // this instruction's address
+    uint16_t size;           // its length in bytes (1 + operand bytes)
+    uint8_t  flow;           // zp_flow
+    uint8_t  rw;             // vref_rw, if it touches `vreg`
+    uint32_t vreg;           // the ZPAUTO it touches, or RC_INDEX_NONE - RESOLVED from (var_scope, var_def)
+    uint32_t var_scope;      // scope the operand's base name was declared in (with var_def, the vreg identity)
+    cursor   var_def;        // def cursor of the operand's base name, or cursor_none; with var_scope resolves vreg
+    uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE
+    uint32_t overlay;        // which overlay the operand byte lives in (for the allocation patch)
+    uint32_t operand_offset; // byte offset of the operand within that overlay's code buffer
     cursor   at;
 } zp_insn;
 
@@ -114,15 +118,24 @@ uint32_t zeropage_reserved_count(const zeropage *zp);
 // final pass; the settling passes only need the placeholder symbol binding, not the registry.
 uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint8_t width, cursor def);
 
-uint32_t zeropage_var_count(const zeropage *zp);
-zp_var   zeropage_var_get(const zeropage *zp, uint32_t index);
+uint32_t         zeropage_var_count(const zeropage *zp);
+zp_var           zeropage_var_get(const zeropage *zp, uint32_t index);
+rc_view_zp_var   zeropage_vars(const zeropage *zp);          // the whole var list, for the allocator
+const rc_bitset *zeropage_reserved(const zeropage *zp);      // the free-byte set the allocator draws from
 
-// The index of the variable defined at `def` (its identity cursor), or RC_INDEX_NONE if `def` is not a
-// ZPAUTO declaration. A linear scan - variables are few. Used to map an operand's resolved binding to a vreg.
-uint32_t zeropage_find_var_by_def(const zeropage *zp, cursor def);
+// The index of the variable declared in `scope` at `def`, or RC_INDEX_NONE if that pair is not a ZPAUTO
+// declaration. A linear scan - variables are few. The (scope, def) PAIR is the identity: the def cursor alone
+// collides across a macro / FOR body's instantiations (all share one def), but each instantiation runs in its
+// own child scope, so the scope tells them apart.
+uint32_t zeropage_find_var(const zeropage *zp, uint32_t scope, cursor def);
 
 // Record one instruction into the IR (final pass only). Returns its index.
 uint32_t zeropage_add_insn(zeropage *zp, zp_insn insn);
+
+// Resolve every recorded insn's vreg from its var_def, now that the whole var registry is populated. Done
+// once post-pass (not at record time) so a variable USED before its ZPAUTO declaration still attributes -
+// the def cursor is stable across passes, but the registry fills in source order during the final pass.
+void zeropage_resolve_vregs(zeropage *zp);
 
 uint32_t         zeropage_insn_count(const zeropage *zp);
 zp_insn          zeropage_insn_get(const zeropage *zp, uint32_t index);
