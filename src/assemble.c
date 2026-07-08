@@ -1653,8 +1653,7 @@ value baron_result_symbol(const baron_result *r, rc_str path)
 baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
 {
     RC_ASSERT(arenas != NULL);
-    baron b;
-    baron_init(&b, arenas);   // a fresh machine borrowing the caller's arenas
+    baron b = baron_make(arenas);   // a fresh machine borrowing the caller's arenas
     uint32_t source = source_files_add_string(&b.source_files, name, text);
     return baron_result_make(&b, run_passes(&b, source, arenas->scratch));
 }
@@ -1662,8 +1661,7 @@ baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
 baron_result assemble_file(baron_arenas *arenas, rc_str path)
 {
     RC_ASSERT(arenas != NULL);
-    baron b;
-    baron_init(&b, arenas);
+    baron b = baron_make(arenas);
     uint32_t source = source_files_add_file(&b.source_files, path);
     if (source == RC_INDEX_NONE) {
         baron_error(&b, error_type_source_load, (cursor) {0});

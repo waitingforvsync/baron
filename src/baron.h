@@ -14,9 +14,10 @@
 // at index 0), the source-file cache, the accumulated diagnostics, and the current overlay index.
 // The current overlay is flat, assembler-wide state - a directive selects it and it stays selected,
 // never scoped by braces or files - so it lives here rather than being threaded. Output and options
-// pile in later. Set it up in place and leave it put - its `scopes` holds tries that point back into
-// its own pools (which is also why an assemble takes a `baron *`: it cannot be returned by value).
-// `baron` is now an INTERNAL detail: it is built on the stack inside assemble_string / assemble_file,
+// pile in later. It is built by value with `baron_make`: now that a trie is a position-independent value
+// (it holds no pointer into its pool), every member is trivially movable, so the whole struct copies
+// cleanly. The parser still threads a `baron *` - to mutate one shared instance, not out of any move
+// hazard. `baron` is now an INTERNAL detail: it is built on the stack inside assemble_string / assemble_file,
 // BORROWING the caller's three arenas (a `baron_arenas`), run, and discarded - the caller sees only the
 // harvested `baron_result`, never this struct. The two borrowed pointers are all it needs: `permanent`
 // to push diagnostics into, `per_pass` to reset at the top of each pass. scratch is threaded by value
@@ -37,16 +38,15 @@ typedef struct baron {
     uint32_t            function_depth;    // how many FUNCTION calls deep the evaluator is, to catch runaway recursion
 } baron;
 
-// Build a baron on `a`'s three arenas (borrowing them - they stay the caller's to free). Seeds the scope
-// root and the default overlay, so it is ready to assemble into. There is no baron_deinit: the arenas own
-// everything, and baron_arenas_deinit frees them.
+// Build a fresh baron on `a`'s three arenas (borrowing them - they stay the caller's to free) and return it
+// by value. Seeds the scope root and the default overlay, so it is ready to assemble into. There is no
+// baron_deinit: the arenas own everything, and baron_arenas_deinit frees them.
 //
-// This is an in-place `_init(baron *b, ...)`, NOT a by-value `baron baron_make(...)` (unlike baron_arenas,
-// which is a plain bag of arenas and returns fine). A baron cannot be returned or copied by value: seeding
-// the scope root makes tries that point back into the scopes' OWN embedded pools (symbol_pool / child_pool),
-// so relocating the struct - which a `return b;` may do, C not guaranteeing copy elision - would leave every
-// trie's pool pointer dangling. So the caller owns the storage and we fill it where it will stay put.
-void baron_init(baron *b, baron_arenas *a);
+// Returning by value is safe because every member is position-independent: a trie is now a plain `{ root }`
+// value (it holds no pointer into its pool - the pool is passed to each op), the managers hold only borrowed
+// arena pointers (into `a`, never into the baron) plus arena-backed arrays, and all inter-container links are
+// indices. So the copy a `return b;` may make - C not guaranteeing copy elision - dangles nothing.
+baron baron_make(baron_arenas *a);
 
 // Append a diagnostic to b's list. baron_error records a failing error (severity 0); baron_warning
 // records a harmless warning at a positive `severity` level. baron_has_errors reports whether any

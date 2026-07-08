@@ -94,8 +94,9 @@ typedef struct scopes_view {
     rc_trie_child_pool  child_pool;   // read-only: backs every node's `children` trie
 } scopes_view;
 
-// Set-up. `permanent` is baron's permanent arena (not owned here). In-place, because once the container
-// holds scopes it must not budge (the tries point back into its pools).
+// Set-up. `permanent` is baron's permanent arena (not owned here). An in-place initialiser that fills a
+// caller-owned struct; a fully-built scopes is freely movable now that its tries are position-independent
+// values (they hold no pointer into its pools), so this is just the init convention, not a constraint.
 void scopes_init(scopes *s, rc_arena *permanent);
 
 // Empty the tree back to a bare root (index 0), reclaiming everything. Used to discard the

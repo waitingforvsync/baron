@@ -22,24 +22,26 @@ void baron_arenas_deinit(baron_arenas *a)
     rc_arena_deinit(&a->scratch);
 }
 
-void baron_init(baron *b, baron_arenas *a)
+baron baron_make(baron_arenas *a)
 {
-    RC_ASSERT(b != NULL && a != NULL);
-    b->permanent = &a->permanent;   // borrowed: the arenas stay the caller's to free
-    b->per_pass  = &a->per_pass;
+    RC_ASSERT(a != NULL);
+    baron b;
+    b.permanent = &a->permanent;   // borrowed: the arenas stay the caller's to free
+    b.per_pass  = &a->per_pass;
 
-    scopes_init(&b->scopes, &a->permanent);
-    scopes_make_root(&b->scopes);              // the root is scope index 0
-    overlays_init(&b->overlays, &a->per_pass);   // the default overlay is (re)made per pass by overlays_reset
-    b->current_overlay = overlays_default;
-    source_files_init(&b->source_files, &a->permanent);
-    macros_init(&b->macros, &a->per_pass);         // run_pass reseeds its store + token table each pass
-    functions_init(&b->functions, &a->per_pass);   // ditto for the operand table
+    scopes_init(&b.scopes, &a->permanent);
+    scopes_make_root(&b.scopes);              // the root is scope index 0
+    overlays_init(&b.overlays, &a->per_pass);   // the default overlay is (re)made per pass by overlays_reset
+    b.current_overlay = overlays_default;
+    source_files_init(&b.source_files, &a->permanent);
+    macros_init(&b.macros, &a->per_pass);         // run_pass reseeds its store + token table each pass
+    functions_init(&b.functions, &a->per_pass);   // ditto for the operand table
 
-    b->include_depth  = 0;
-    b->macro_depth    = 0;
-    b->function_depth = 0;
-    b->diagnostics    = rc_array_diagnostic_make(256, &a->permanent);
+    b.include_depth  = 0;
+    b.macro_depth    = 0;
+    b.function_depth = 0;
+    b.diagnostics    = rc_array_diagnostic_make(256, &a->permanent);
+    return b;
 }
 
 void baron_error(baron *b, error_type code, cursor at)
@@ -81,10 +83,9 @@ bool baron_has_errors(const baron *b)
 RC_TEST(baron, init_set_get)
 {
     baron_arenas arenas = baron_arenas_make();
-    baron b;
-    baron_init(&b, &arenas);
+    baron b = baron_make(&arenas);
 
-    // baron_init already made the root at scope index 0.
+    // baron_make already made the root at scope index 0.
     RC_CHECK_TRUE(scopes_set_symbol(&b.scopes, 0, RC_STR("answer"), value_make_numeric(42.0), (cursor){0, 0}) == symbol_status_unchanged);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&b.scopes, 0, RC_STR("answer")), value_make_numeric(42.0)));
 
