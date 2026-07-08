@@ -9,10 +9,19 @@
 // and a single exit (its last). It indexes into the instruction list rather than owning insns. `succ` names
 // the successor blocks - fall-through and/or branch target - with RC_INDEX_NONE terminating the (<=2) list.
 typedef struct basic_block {
-    uint32_t pc;           // leader address (this block's entry)
-    uint32_t first_insn;   // index of the first instruction (into the insn list)
-    uint32_t num_insns;    // instruction count
-    uint32_t succ[2];      // successor block indices, RC_INDEX_NONE-terminated
+    uint32_t pc;             // leader address (this block's entry)
+    uint32_t first_insn;     // index of the first instruction (into the insn list)
+    uint32_t num_insns;      // instruction count
+    uint32_t succ[2];        // KNOWN successor block indices, RC_INDEX_NONE-terminated
+    bool     unknown_succ;   // control may also leave to an address we cannot model: an indirect / computed
+                             // JMP, or a jump/branch target outside the recorded stream. succ[] then lists
+                             // only the successors we CAN place, and a later liveness pass must treat live-out
+                             // conservatively (everything live) rather than trust succ[] as complete. This is
+                             // NOT a plain RTS/RTI return - a return has NO successor and is fully known.
+                             // (An RTS-dispatch masquerading as a return, and a self-modified JSR/JMP, cannot
+                             // be seen here at all; future CANCALL/CANJUMP annotations will supply their
+                             // targets. Until then those are unsound-if-unannotated preconditions, not taints
+                             // this builder can detect.)
 } basic_block;
 
 #define RC_ARRAY_TYPE basic_block

@@ -95,7 +95,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_arena *arena, rc_arena scratch)
             current = rc_array_basic_block_push(
                 &result.blocks,
                 (basic_block) {.pc = insn.pc, .first_insn = i, .num_insns = 0,
-                               .succ = {RC_INDEX_NONE, RC_INDEX_NONE}},
+                               .succ = {RC_INDEX_NONE, RC_INDEX_NONE}, .unknown_succ = false},
                 arena);
         }
         rc_array_basic_block_at(&result.blocks, current)->num_insns++;
@@ -111,17 +111,25 @@ cfg cfg_build(rc_view_zp_insn insns, rc_arena *arena, rc_arena scratch)
         uint32_t after = last.pc + last.size;
         switch (last.flow) {
             case zp_flow_branch:
-                block->succ[0] = block_at_pc(result.blocks.view, after);          // not taken
+                block->succ[0] = block_at_pc(result.blocks.view, after);          // not taken (in-stream)
                 block->succ[1] = block_at_pc(result.blocks.view, last.target);    // taken
+                if (block->succ[1] == RC_INDEX_NONE) {
+                    block->unknown_succ = true;   // taken target we cannot place -> conservative
+                }
                 break;
             case zp_flow_jump:
                 block->succ[0] = block_at_pc(result.blocks.view, last.target);
+                if (block->succ[0] == RC_INDEX_NONE) {
+                    block->unknown_succ = true;   // indirect/computed JMP, or a jump leaving the stream
+                }
                 break;
             case zp_flow_return:
-                break;   // no successor
+                break;   // a genuine return: no successor, fully known (an RTS-dispatch would need markup)
             case zp_flow_call:
             case zp_flow_normal:
             default:
+                // A call/normal terminator falls through in-stream; a fall-through with no block is the end of
+                // the program (or a routine falling off its end), which is a clean end, not an unknown target.
                 block->succ[0] = block_at_pc(result.blocks.view, after);
                 break;
         }
@@ -173,8 +181,35 @@ RC_TEST(cfg, straight_line_is_one_block)
     RC_CHECK(b.pc, ==, 0x2000u);
     RC_CHECK(b.first_insn, ==, 0u);
     RC_CHECK(b.num_insns, ==, 3u);
-    RC_CHECK(b.succ[0], ==, RC_INDEX_NONE);   // RTS has no successor
+    RC_CHECK(b.succ[0], ==, RC_INDEX_NONE);   // RTS has no successor...
     RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
+    RC_CHECK_FALSE(b.unknown_succ);            // ...and that is fully KNOWN (a return, not a computed exit)
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, indirect_jump_is_unknown_successor)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  LDA #..  (normal)
+    //   2002  JMP (ind) (jump with a computed target the assembler cannot see -> flow=jump, target=NONE)
+    // The block must NOT read as a clean dead-end (that would let liveness conclude nothing is live out and
+    // shrink a range the real target still needs); it is flagged unknown_succ so the analysis stays
+    // conservative. This is the "be conservative rather than silently emit broken code" guarantee.
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA #
+    pc = push_insn(&insns, pc, 3, zp_flow_jump, RC_INDEX_NONE, &arena);     // JMP (ind) - unknown target
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, &arena, arena);
+    RC_CHECK(g.blocks.num, ==, 1u);
+    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b.num_insns, ==, 2u);
+    RC_CHECK(b.succ[0], ==, RC_INDEX_NONE);   // no successor we can place...
+    RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
+    RC_CHECK_TRUE(b.unknown_succ);            // ...but control DOES leave, so stay conservative
 
     rc_arena_deinit(&arena);
 }
