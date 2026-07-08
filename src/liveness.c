@@ -241,7 +241,7 @@ static uint32_t touch(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, zp_fl
 {
     rc_array_zp_insn_push(insns,
         (zp_insn) {.pc = pc, .size = size, .flow = flow, .rw = rw, .vreg = vreg, .target = target,
-                   .at = (cursor) {0}},
+                   .target_scope = RC_INDEX_NONE, .target_def = cursor_none(), .at = (cursor) {0}},
         arena);
     return pc + size;
 }
@@ -269,7 +269,7 @@ RC_TEST(liveness, mul_interference)
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
     rc_array_zp_insn insns = build_mul(&arena);
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     liveness lv = liveness_analyze(g, insns.view, 3, 0, &arena, scratch);
 
     // in1 overlaps tmp (both live at n3..n4) -> they interfere. But in1 dies before out1 is born, and tmp
@@ -287,7 +287,7 @@ RC_TEST(liveness, mul_classification)
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
     rc_array_zp_insn insns = build_mul(&arena);
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     liveness lv = liveness_analyze(g, insns.view, 3, 0, &arena, scratch);
 
     RC_CHECK_TRUE(liveness_class_of(&lv, 0) == vreg_class_input);    // in1 read before written
@@ -316,7 +316,7 @@ RC_TEST(liveness, disjoint_locals_reuse_a_byte)
     pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     liveness lv = liveness_analyze(g, insns.view, 2, 0, &arena, scratch);
     RC_CHECK_FALSE(liveness_interferes(&lv, 0, 1));
 
@@ -343,7 +343,7 @@ RC_TEST(liveness, loop_carries_value_across_back_edge)
     pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     liveness lv = liveness_analyze(g, insns.view, 2, 0, &arena, scratch);
     RC_CHECK_TRUE(liveness_is_live_in(&lv, 0, 0));    // v0 live around the loop
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 0));   // and still live out (back-edge carries it)
@@ -367,7 +367,7 @@ RC_TEST(liveness, unknown_successor_keeps_everything_live)
     pc = touch(&insns, pc, 3, zp_flow_jump,   RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);   // JMP (ind)
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     liveness lv = liveness_analyze(g, insns.view, 2, 0, &arena, scratch);   // v1 exists in the id space, unused
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 0));   // v0 forced live out by the taint...
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 1));   // ...as is v1

@@ -441,15 +441,16 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, uint32_t s
     return r;
 }
 
-// SECTION name, key = expr, ... / ENDSECTION - a lexically scoped region of object code. The name is UNIQUE
-// (a repeat is error_type_duplicate_section: a name identifies one output blob, and there is no
-// concatenation). The attributes are `key = expr` pairs resolved here: the assembler acts on `org` (which
-// sets this section's start address - else the running emission cursor simply continues) and stores every
-// attribute on the section for the output utility to read out of the result. Sections nest: a child inherits
-// its parent's attributes (its own keys override) and, on ENDSECTION, hands the cursor back so the parent
-// resumes where the child left off. A SECTION does NOT open a naming scope - labels inside bind in the
-// enclosing scope, exactly as an IF body does. A dead branch parses the whole block for its extent but
-// creates nothing and emits nothing.
+// SECTION name, key = expr, ... / ENDSECTION - a lexically scoped region of object code, and its own address
+// space. The name is UNIQUE (a repeat is error_type_duplicate_section: a name identifies one output blob, and
+// there is no concatenation). The attributes are `key = expr` pairs resolved here: the assembler acts on `org`
+// (this section's start address) and stores every attribute on the section for the output utility to read out
+// of the result. `org` is an ordinary INHERITED attribute: a section with no `org` of its own starts at its
+// parent's org (the default section's org is 0), and a section's emission never moves its parent's cursor -
+// the two are separate spaces, so laying two sections at one address is fine (they never fall through into
+// each other; only a control transfer that names a label crosses between them). A SECTION does NOT open a
+// naming scope - labels inside bind in the enclosing scope, exactly as an IF body does. A dead branch parses
+// the whole block for its extent but creates nothing and emits nothing.
 static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -471,16 +472,20 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t
         if (child == RC_INDEX_NONE) {
             return syntax_error(b, error_type_duplicate_section, cursor_at(at, at.pos));   // names are unique
         }
-        // Inherit the parent's attributes (bar `org`, which is positional), then default the cursor to
-        // continue from the parent; an explicit `org` attribute below overrides it.
+        // Inherit the parent's whole attribute bag - `org` included. org is now just an inherited attribute:
+        // a child with no `org` of its own starts at the parent's org (its BASE address), not wherever the
+        // parent has emitted to. An explicit `org` below overrides. A section's emission never moves its
+        // parent's cursor - the two are separate address spaces.
+        uint32_t parent_org = 0;
         rc_view_attribute inherited = sections_attributes(&b->sections, section);
         for (uint32_t i = 0; i < inherited.num; i++) {
             attribute a = rc_view_attribute_get(inherited, i);
-            if (!rc_str_is_equal_insensitive(a.key, RC_STR("org"))) {
-                sections_add_attribute(&b->sections, child, a.key, a.v, a.at);
+            sections_add_attribute(&b->sections, child, a.key, a.v, a.at);
+            if (rc_str_is_equal_insensitive(a.key, RC_STR("org")) && value_is_numeric(a.v)) {
+                parent_org = (uint32_t) ((int64_t) a.v.numeric & 0xFFFF);
             }
         }
-        sections_org(&b->sections, child, sections_pc(&b->sections, section));
+        sections_org(&b->sections, child, parent_org);
     }
 
     // The attribute list: `, key = expr` pairs to the end of the SECTION line. Parsed structurally even in a
@@ -538,9 +543,8 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t
     parse_result body = parse_block(b, cursor_at(at, sep.next), scope, body_section, flags, scratch);
     body.unresolved |= unresolved;
 
-    if (child != RC_INDEX_NONE) {
-        sections_org(&b->sections, section, sections_pc(&b->sections, child));   // parent resumes from the child's end
-    }
+    // The parent's cursor is NOT touched by the child: sections are separate address spaces, so the parent
+    // resumes exactly where it was before the SECTION, and the child's bytes never displace it.
 
     if (body.fatal) {
         return body;
@@ -953,6 +957,13 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, uint32_t s
             }
         }
         r.changed = (st == symbol_status_changed);
+
+        // Record a marker tying this label's identity (scope, def=at - the pair a reference resolves to) to
+        // its placement, so a JSR/JMP/branch that names it finds the right block even where banks share the
+        // address. Final pass only, feature on - like the insn / annotation streams.
+        if (flags.final && zeropage_is_enabled(&b->zeropage)) {
+            zeropage_add_label(&b->zeropage, scope, at, section, sections_pc(&b->sections, section));
+        }
     }
     else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), at)) {
         // Dead branch: clear only the binding THIS label owns (its def is our cursor), so a live sibling
@@ -1946,7 +1957,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 //   - more simultaneously-live variables than reserved bytes -> error_type_zeropage_full (a spill).
 // On any refusal it records the error(s) and patches nothing; run_passes then fails the assemble. Only a
 // fully analysable, colourable program has its operands + symbols rewritten to real addresses.
-static void zeropage_finalize(baron *b, rc_arena scratch)
+static void zeropage_finalize(baron *b)
 {
     if (!zeropage_is_enabled(&b->zeropage)) {
         return;
@@ -1957,33 +1968,12 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
 
     bool refused = false;
 
-    // Guard L (layout soundness): the CFG identifies a block purely by its address (block_at_pc), so two
-    // instructions sharing a START address are indistinguishable - a branch/jump target could resolve to the
-    // wrong one, a real edge be missed, and a live range wrongly shortened (a silently unsound allocation). An
-    // address collision is the ONE layout hazard, and it is the only thing refused here. Everything with
-    // distinct addresses is sound: multiple sections at DIFFERENT addresses - even a cross-section JSR resolves
-    // by address and is analysed correctly; a spurious cross-section edge only lengthens a live range, never
-    // shortens it. A collision arises when a section's cursor was dragged backwards onto its own emitted code
-    // (a nested section with a low org threads back to it on close - named an org rewind) or two sections load
-    // into the same address slot (named a section clash); we name which.
-    // (Gated on nv > 0: with no variable there is nothing to allocate, so no hazard.)
-    if (nv > 0) {
-        uint32_t *pc_owner = rc_arena_alloc_zero_type(&scratch, uint32_t, 0x10000);   // 0 = free; else section+1
-        for (uint32_t i = 0; i < insns.num; i++) {
-            zp_insn n = rc_view_zp_insn_get(insns, i);
-            if (n.pc >= 0x10000) {
-                continue;   // a degenerate out-of-range pc; the CFG ignores it too (16-bit address space)
-            }
-            if (pc_owner[n.pc] != 0) {
-                error_type e = (pc_owner[n.pc] - 1 == n.section) ? error_type_zpauto_org_rewind
-                                                                 : error_type_zpauto_multi_section;
-                baron_error(b, e, n.at);
-                refused = true;
-                break;
-            }
-            pc_owner[n.pc] = n.section + 1;
-        }
-    }
+    // A note on layout soundness: the CFG identifies a block by (section, pc), so two sections sharing an
+    // address (paged banks) are distinct - fall-through and in-section branches stay within a section, and a
+    // control transfer that crosses one does so by naming a label, which picks the section. The one thing that
+    // would break WITHIN a section - two instructions at one address - cannot happen: a section's org is fixed
+    // at open and its cursor only advances (emission, or a forward SKIP/SKIPTO/ALIGN), so its pc is strictly
+    // monotonic. cfg_build asserts that invariant in debug builds; there is nothing to refuse here.
 
     // Guard 0 (the direct-addressing envelope): a variable reached by an indexed / indexed-indirect mode
     // (var,X, var,Y, (var,X)) touches var+index, a byte the allocator cannot see and may have given to another
@@ -2013,7 +2003,7 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
 
     // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
     // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
-    cfg g       = cfg_build(insns, cflows, &work, wscratch);
+    cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), &work, wscratch);
     liveness lv = liveness_analyze(g, insns, nv, 0, &work, wscratch);
 
     // Guard 1: a computed / indirect jump (unknown_succ) leaves for code we cannot model. With any variable in
@@ -2143,7 +2133,7 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             // Layout has settled: now assign real zero-page bytes to the ZPAUTO variables and patch the
             // placeholder operands. This refuses (records errors, patches nothing) on anything it cannot prove
             // correct, so a fresh error here fails the assemble just like a pass error would.
-            zeropage_finalize(b, scratch);
+            zeropage_finalize(b);
             if (baron_has_errors(b)) {
                 return assemble_failed(b);
             }
@@ -2433,13 +2423,23 @@ RC_TEST_STEP(assemble, section_org_attribute, fix)
     RC_CHECK(rc_view_section_get(fix->r.sections, 1).pc, ==, 0x3001u);   // &3000 + 1 emitted byte
 }
 
-RC_TEST_STEP(assemble, section_cursor_continues, fix)
+RC_TEST_STEP(assemble, section_cursor_is_independent, fix)
 {
-    // A section with no `org` continues the running cursor: the first section runs at &2000 and emits one
-    // byte, so the second (no org) begins at &2001. Labels confirm both.
+    // org is an INHERITED attribute, not a running cursor. A sibling section with no org of its own inherits
+    // the default section's org (0) - it does NOT continue from where the previous section ended. `a` runs at
+    // &2000 (x at &2000); `b` has no org, so it inherits 0 and y binds at 0, not &2001.
     RC_CHECK_TRUE(ASM("SECTION a, org=&2000 : .x EQUB 0 : ENDSECTION : SECTION b : .y EQUB 0 : ENDSECTION") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x2001)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x0000)));
+
+    // A NESTED section with no org starts at its PARENT's org (base address), not wherever the parent has
+    // emitted to - and the parent's cursor is untouched by the child. `outer` runs at &3000, emits a byte
+    // (o at &3000, cursor now &3001); nested `inner` inherits outer's org &3000, so p binds at &3000
+    // (overlapping outer - they are separate spaces); back in outer, q binds at &3001, not past inner.
+    RC_CHECK_TRUE(ASM("SECTION outer, org=&3000 : .o EQUB 0 : SECTION inner : .p EQUB 0,0 : ENDSECTION : .q EQUB 0 : ENDSECTION") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("o")), value_make_numeric(0x3000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("p")), value_make_numeric(0x3000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("q")), value_make_numeric(0x3001)));
 }
 
 RC_TEST_STEP(assemble, section_nesting_inherits_attributes, fix)
@@ -2667,8 +2667,8 @@ RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)
 
 RC_TEST_STEP(assemble, zpauto_layout_must_not_collide, fix)
 {
-    // The flow analysis identifies a block by its address, so the ONLY rule is that no two instructions share
-    // an address. Distinct sections at DIFFERENT addresses are free.
+    // The flow analysis identifies a block by (section, pc), so two sections sharing an address are distinct.
+    // The ONLY collision left is two instructions at one address WITHIN a section (an org rewind).
 
     // A section with an explicit org is fine - the var still allocates.
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : SECTION s, org=&2000 : STA v : LDA v : RTS : ENDSECTION") != 0);
@@ -2684,18 +2684,41 @@ RC_TEST_STEP(assemble, zpauto_layout_must_not_collide, fix)
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);
 
-    // But two sections loaded into the SAME address slot put two instructions at one address - refused rather
-    // than risk a wrong edge, and named as a section clash.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
-                      "SECTION a, org=&2000 : STA v : ENDSECTION\n"
-                      "SECTION b, org=&2000 : LDA v : RTS : ENDSECTION")
-                  == error_type_zpauto_multi_section);
+    // The paged-bank case: two sections loaded to the SAME address (coexisting banks) now coexist under ZPAUTO
+    // - the (section, pc) key tells the two banks apart, so this is no longer refused. Each bank's variable
+    // reuses the same reserved byte, since no flow connects the banks.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+                      "SECTION a, org=&8000 : STA v : LDA v : RTS : ENDSECTION\n"
+                      "SECTION b, org=&8000 : STA w : LDA w : RTS : ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);   // same byte: the two banks never interfere
 
-    // And a nested section whose low org threads the cursor BACK onto emitted code collides within one section
-    // (STA v at pc 0, then an empty org=0 section drags the default cursor back to 0, so LDA v lands on it) -
-    // named as an org rewind.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : SECTION a, org=0 : ENDSECTION : LDA v : RTS")
-                  == error_type_zpauto_org_rewind);
+    // (There is no way to place two instructions at one address WITHIN a section: a section's org is fixed at
+    // open and its cursor only advances - by emission or a forward SKIP/SKIPTO/ALIGN - so its pc is strictly
+    // monotonic. cfg_build asserts that invariant in debug builds; there is no same-section-collision error.)
+}
+
+RC_TEST_STEP(assemble, zpauto_var_live_across_cross_section_call, fix)
+{
+    // A variable held live across a JSR into ANOTHER section is fully supported. The call resolves by the
+    // target LABEL (`sub` lives in `bank`, so the edge crosses the section - a bare address never could), the
+    // callee's footprint is computed across the boundary, and the live-across variable is kept clear of it.
+    // `keep` is written, then read AFTER the call into `bank`; `bank`'s routine touches `tmp`. So keep is live
+    // across the call, must interfere with tmp, and takes a DIFFERENT byte rather than sharing one.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, tmp\n"
+                      "SECTION main, org=&1900 : STA keep : JSR sub : LDA keep : RTS : ENDSECTION\n"
+                      "SECTION bank, org=&8000 : .sub : STA tmp : LDA tmp : RTS : ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "tmp"));   // live across the call -> disjoint
+
+    // For contrast: with NOTHING live across the same cross-section call, keep and tmp DO share a byte - the
+    // interference only exists because a value spanned the call, not because the call crosses a section.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, tmp\n"
+                      "SECTION main, org=&1900 : STA keep : LDA keep : JSR sub : RTS : ENDSECTION\n"
+                      "SECTION bank, org=&8000 : .sub : STA tmp : LDA tmp : RTS : ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, zp_addr(&fix->r, "tmp"));   // nothing spans the call -> reuse
 }
 
 RC_TEST_STEP(assemble, zpauto_unreachable_prunes_dead_edge, fix)
@@ -2885,7 +2908,8 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
                ".mul { LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS }"));
     run_passes(&b, s, arenas.scratch);
 
-    cfg g = cfg_build(zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage), &arena, scratch);
+    cfg g = cfg_build(zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage), zeropage_labels(&b.zeropage),
+                      &arena, scratch);
     liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_var_count(&b.zeropage), 0,
                                    &arena, scratch);
 

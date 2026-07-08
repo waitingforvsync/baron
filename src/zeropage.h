@@ -73,7 +73,12 @@ typedef struct zp_insn {
     bool     var_indexed;    // the operand reaches its var by an indexed / indexed-indirect mode (var,X etc.) -
                              // outside the direct-addressing envelope, so the allocation would be unsound; a
                              // final-pass check refuses it (see zeropage_finalize)
-    uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE
+    uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE. Resolves WITHIN this
+                             // instruction's own section only (locals @+/@-, in-section expression branches);
+                             // it never crosses a section - only a named label (below) can do that.
+    uint32_t target_scope;   // scope of the target LABEL, when the operand named one, else RC_INDEX_NONE
+    cursor   target_def;     // def cursor of the target label, or cursor_none; with target_scope it identifies
+                             // the label - and so the exact block - even where banks share the address
     uint32_t section;        // which section the operand byte lives in (for the allocation patch)
     uint32_t operand_offset; // byte offset of the operand within that section's code buffer
     cursor   at;
@@ -110,12 +115,30 @@ typedef struct zp_cflow {
 #include "richc/template/array.h"
 
 
+// A label marker: where in the object a label sits. It ties the label's identity - its (scope, def), the same
+// pair scopes_resolve_symbol_def hands back for a reference - to its physical placement (section + address).
+// The CFG uses it to turn a control-transfer target that named a label into the exact block, which is what
+// lets two sections (paged banks) share an address yet resolve a `JSR bank5.entry` unambiguously - the label
+// picks the section, the raw address never could. Recorded by handle_label on the final pass, feature on.
+typedef struct zp_label {
+    uint32_t scope;    // scope the label was defined in (matches scopes_resolve_symbol_def's .scope)
+    cursor   def;      // the label's def cursor - its identity across passes
+    uint32_t section;  // the section the label sits in
+    uint32_t pc;       // the label's address
+} zp_label;
+
+#define RC_ARRAY_TYPE zp_label
+#define RC_ARRAY_NAME zp_label
+#include "richc/template/array.h"
+
+
 typedef struct zeropage {
     rc_arena        *arena;      // BORROWED permanent: backs the reserve bitset, var list and insn list
     rc_bitset        reserved;   // 256 bits: reserved[b] iff zero-page byte b may be auto-allocated
     rc_array_zp_var  vars;       // the declared ZPAUTO1/ZPAUTO2s, recorded on the final pass (see zeropage.c)
     rc_array_zp_insn insns;      // the VAR-touching instructions, recorded on the final pass
     rc_array_zp_cflow cflows;    // UNREACHABLE / CANCALL annotations, recorded on the final pass
+    rc_array_zp_label labels;    // label markers (identity -> section + pc), recorded on the final pass
     bool             enabled;    // a ZPRESERVE directive has run -> the ZPAUTO1/ZPAUTO2 feature is active
 } zeropage;
 
@@ -174,6 +197,10 @@ rc_view_zp_insn  zeropage_insns(const zeropage *zp);   // the whole insn list, f
 // Record one control-flow annotation (final pass only). Returns its index.
 uint32_t         zeropage_add_cflow(zeropage *zp, zp_cflow cf);
 rc_view_zp_cflow zeropage_cflows(const zeropage *zp);   // all annotations, for the CFG + footprint passes
+
+// Record one label marker (final pass only). Returns its index.
+uint32_t          zeropage_add_label(zeropage *zp, uint32_t scope, cursor def, uint32_t section, uint32_t pc);
+rc_view_zp_label  zeropage_labels(const zeropage *zp);   // all label markers, for the CFG's target resolution
 
 
 #endif // ifndef BARON_ZEROPAGE_H_

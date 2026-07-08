@@ -65,8 +65,6 @@ typedef enum error_type {
     error_type_zpauto_computed_flow,  // ZPAUTO active past a computed/indirect jump the analysis cannot follow
     error_type_zpauto_register_name,  // a ZPAUTO variable named 'A' - ambiguous with accumulator addressing
     error_type_zpauto_indexed_access, // a ZPAUTO reached by indexed / indexed-indirect addressing (var,X etc.)
-    error_type_zpauto_multi_section,  // two sections put code at the SAME address under ZPAUTO (ambiguous)
-    error_type_zpauto_org_rewind,     // an ORG rewinds/overlaps the pc under ZPAUTO (ambiguous addresses)
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

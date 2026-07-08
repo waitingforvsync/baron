@@ -54,8 +54,6 @@ rc_str error_type_name(error_type e)
         case error_type_zpauto_computed_flow:    return RC_STR("A computed or indirect jump reaches unknown code while ZPAUTO is active; its targets cannot be proven, so annotate them (CANJUMP/CANCALL) or avoid ZPAUTO here");
         case error_type_zpauto_register_name:    return RC_STR("A ZPAUTO variable cannot be named 'A': it is ambiguous with accumulator addressing (ASL A) and would silently drop the variable");
         case error_type_zpauto_indexed_access:   return RC_STR("A ZPAUTO variable must be reached by direct addressing only: indexed (var,X / var,Y) or indexed-indirect ((var,X)) access reads a byte the allocator may have placed another variable in. Use a hand-placed zero-page symbol here");
-        case error_type_zpauto_multi_section:    return RC_STR("Two sections place code at the same address while ZPAUTO is active: the allocator's flow analysis identifies code by address and cannot tell the two apart. Load them at different addresses (sections elsewhere are fine), or place those bytes by hand");
-        case error_type_zpauto_org_rewind:       return RC_STR("Two instructions in one section share an address while ZPAUTO is active: the flow analysis identifies code by address and cannot tell them apart. Keep the program counter moving forwards here");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol");
         case error_type_duplicate_symbol:        return RC_STR("Symbol is already defined in this scope");
         case error_type_original_definition:     return RC_STR("Originally defined here");

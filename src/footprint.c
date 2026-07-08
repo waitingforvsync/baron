@@ -28,14 +28,15 @@ static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
         zp_cflow cf = rc_view_zp_cflow_get(c->cflows, j);
         if (cf.kind == zp_cflow_cancall && cf.site == n.pc) {
             annotated = true;
-            uint32_t tb = cfg_block_at_pc(c->g, cf.target);
+            uint32_t tb = cfg_block_at(c->g, n.section, cf.target);   // CANCALL names a same-section address
             if (tb == RC_INDEX_NONE) { *c->unknown = true; }
             else { fp_visit(c, tb, scratch); }
         }
     }
     if (!annotated) {
-        uint32_t tb = (n.target == RC_INDEX_NONE) ? RC_INDEX_NONE : cfg_block_at_pc(c->g, n.target);
-        if (tb == RC_INDEX_NONE) { *c->unknown = true; }   // a computed / off-stream call target
+        // The callee, resolved by label - so a JSR into another section (a paged bank) finds the right block.
+        uint32_t tb = cfg_target_block(c->g, n);
+        if (tb == RC_INDEX_NONE) { *c->unknown = true; }   // a computed / off-stream / cross-bank-numeric call
         else { fp_visit(c, tb, scratch); }
     }
 }
@@ -133,7 +134,8 @@ static uint32_t fp_push(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, zp_
 {
     rc_array_zp_insn_push(insns,
         (zp_insn) {.pc = pc, .size = size, .flow = flow, .rw = vref_none, .vreg = vreg,
-                   .var_scope = 0, .var_def = (cursor) {0}, .target = target, .at = (cursor) {0}},
+                   .var_scope = 0, .var_def = (cursor) {0}, .target = target,
+                   .target_scope = RC_INDEX_NONE, .target_def = cursor_none(), .at = (cursor) {0}},
         arena);
     return pc + size;
 }
@@ -155,15 +157,15 @@ RC_TEST(footprint, transitive_touch_through_calls)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};   // no annotations in these tests
-    footprint main_fp = footprint_compute(g, insns.view, none, cfg_block_at_pc(g, 0x2000), 2, &arena, scratch);
+    footprint main_fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 2, &arena, scratch);
     RC_CHECK_FALSE(main_fp.unknown_call);
     RC_CHECK_FALSE(main_fp.recursive);
     RC_CHECK_TRUE(rc_bitset_is_set(&main_fp.touched, 0));   // v0 (own)
     RC_CHECK_TRUE(rc_bitset_is_set(&main_fp.touched, 1));   // v1 (callee's)
 
-    footprint sub_fp = footprint_compute(g, insns.view, none, cfg_block_at_pc(g, 0x2006), 2, &arena, scratch);
+    footprint sub_fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2006), 2, &arena, scratch);
     RC_CHECK_FALSE(rc_bitset_is_set(&sub_fp.touched, 0));   // main's v0 is NOT sub's footprint
     RC_CHECK_TRUE(rc_bitset_is_set(&sub_fp.touched, 1));
 
@@ -184,9 +186,9 @@ RC_TEST(footprint, recursion_is_flagged)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};
-    footprint fp = footprint_compute(g, insns.view, none, cfg_block_at_pc(g, 0x2000), 1, &arena, scratch);
+    footprint fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 1, &arena, scratch);
     RC_CHECK_TRUE(fp.recursive);
     RC_CHECK_TRUE(rc_bitset_is_set(&fp.touched, 0));   // still terminates and gathers v0
 
@@ -206,9 +208,9 @@ RC_TEST(footprint, unknown_call_target_is_flagged)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};
-    footprint fp = footprint_compute(g, insns.view, none, cfg_block_at_pc(g, 0x2000), 1, &arena, scratch);
+    footprint fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 1, &arena, scratch);
     RC_CHECK_TRUE(fp.unknown_call);
 
     rc_arena_deinit(&scratch);

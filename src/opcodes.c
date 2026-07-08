@@ -540,6 +540,13 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
 
     operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
 
+    // The same resolved operand identity plays one of two roles by control-flow class. For a branch/jump/call
+    // the operand names the TARGET label, so its (scope, def) is the target identity that lets the CFG cross a
+    // section by label; for everything else it may name a ZPAUTO VARIABLE. The two are mutually exclusive - a
+    // control-transfer instruction touches no data variable - so we file the identity into one pair or the
+    // other and leave the unused pair empty.
+    bool is_control = (flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call);
+
     // The operand byte lands right after the opcode byte we are about to emit: the section's current code
     // length is the opcode's offset, so the operand is at +1. Recorded so the allocation patch can find it.
     uint32_t operand_offset = sections_code(&b->sections, section).num + 1;
@@ -548,12 +555,14 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .pc             = pc,
         .size           = (uint16_t) (1 + mode_operand_bytes(mode)),
         .flow           = (uint8_t) flow,
-        .rw             = op.rw,
+        .rw             = is_control ? (uint8_t) vref_none : op.rw,
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
-        .var_scope      = op.scope,
-        .var_def        = op.def,
-        .var_indexed    = op.outside_envelope,
+        .var_scope      = is_control ? RC_INDEX_NONE : op.scope,
+        .var_def        = is_control ? cursor_none() : op.def,
+        .var_indexed    = is_control ? false : op.outside_envelope,
         .target         = target,
+        .target_scope   = is_control ? op.scope : RC_INDEX_NONE,
+        .target_def     = is_control ? op.def : cursor_none(),
         .section        = section,
         .operand_offset = operand_offset,
         .at             = at,

@@ -260,42 +260,30 @@ one is the way to get it wrong.
 
 ## Sections and addresses ##
 
-You can carve your program into `SECTION`s freely alongside auto-variables. There is exactly one rule, and it
-falls straight out of how the analysis works: **no two instructions may share an address.** The flow analysis
-pins each instruction to its `org` address, so if two of them claim the same one it cannot tell them apart -
-and that is the only way to make it reason wrongly. Everything else is fine.
+You can carve your program into `SECTION`s freely alongside auto-variables, and each section is its own
+address space. The flow analysis identifies code by `(section, address)`, not by address alone, so two
+sections may sit at the *same* address without confusing it - the classic paged-bank / swap-in-place layout.
+Within a section the address is unambiguous (it only ever moves forwards), and that is all the analysis needs.
 
 So all of this is allowed:
 
-- **Sections at any addresses, in any order.** A section sets its start with `org =`, or simply continues from
-  wherever the previous one left off. Lay things out however you like; gaps are no problem, and within a
-  section the address only ever moves forwards.
-- **Several sections at *different* addresses.** Each is assembled at its own `org`; as long as their code
-  sits at different addresses, the analysis keeps them straight.
-- **Cross-section calls.** A `JSR` into another section resolves by address like any other, so the callee's
-  footprint is accounted for - a variable held live across it is protected exactly as it would be for a
-  same-section call.
+- **Sections at any addresses, in any order.** A section sets its start with `org =`; with none, it inherits
+  its parent's `org` (a top-level section with no `org` starts at 0). Lay things out however you like; within
+  a section the address only ever moves forwards.
+- **Several sections at the same address (paged banks).** Two sideways-RAM banks both at `&8000`, or several
+  overlays swapped into `&1100`, coexist fine: the analysis keeps each bank's flow to itself. Fall-through and
+  in-section branches never leave a section, so one bank can never bleed into another.
+- **Cross-section calls.** A `JSR` into another section resolves by the target *label* - and a label names one
+  section, so the call finds the right bank even when banks share an address. The callee's footprint is
+  accounted for, and a variable held live across the call is protected exactly as for a same-section call.
 
-And there is a nice bonus: two sections at different addresses that never interact will happily *share*
-reserved bytes, because the analysis sees no flow between them and no interference - you get that reuse for
-free whenever the addresses don't collide.
+And there is a nice bonus: sections that never interact will happily *share* reserved bytes, because the
+analysis sees no flow between them and no interference. Two paged banks at one address reuse the same
+zero-page bytes for free - the reuse you most want, since they are never resident together.
 
-What is refused is precisely a collision - two sections loaded into the *same* address slot:
-
-```
-    SECTION main, org = &1100
-        STA v
-    ENDSECTION
-    SECTION loader, org = &1100   ; a second section in the SAME slot...
-        LDA v                     ; ...so this &1100 and that &1100 are indistinguishable
-    ENDSECTION
-```
-> Two sections place code at the same address ...
-
-The swap-in-place pattern - several sections all loaded to, say, `&1100` and paged in and out - is the one that
-trips this. Baron cannot yet tell those apart (per-section allocation at a shared address is a planned
-refinement). Until then, for the sections that share a slot, reach for hand-placed zero-page symbols rather
-than auto-variables, or keep the auto-variables to a single one of them.
+One thing to know: a cross-section transfer must go through a **label**, not a bare number. `JSR bank5_entry`
+resolves to that bank; `JSR &8003` cannot say *which* bank `&8003` it means, so it is treated as leaving for
+somewhere the analysis cannot follow (an external call). Name your cross-bank entry points and you are fine.
 
 ## Limitations ##
 
@@ -319,13 +307,12 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
   RTS-dispatch still has no annotation; keep those clear.)
 - **No recursion.** A value held live across a recursive call cannot live in one static byte - each level would
   need its own. Baron detects the cycle and refuses.
-- **No two instructions at the same address.** The flow analysis identifies a block purely by its address, so
-  the single rule is that your code must not put two instructions at one address. `SECTION`s are otherwise
-  free: use as many as you like, at whatever addresses. What that rules out is two sections loaded into the
-  *same* address slot (the classic swap-in-place pattern) - that makes two instructions share an address, and
-  it is refused. (A section's own address only moves forwards, so one section can never collide with itself.)
-  Sections at *different* addresses are completely fine, and a cross-section `JSR` is followed correctly,
-  because it resolves by address. See [Sections and addresses](#sections-and-addresses) for the details.
+- **Cross-section transfers go through labels.** The flow analysis identifies code by `(section, address)`, so
+  `SECTION`s are free - use as many as you like, at any addresses, *including two at the same address* (paged
+  banks). Fall-through and in-section branches stay within a section; only a `JSR`/`JMP`/branch that names a
+  **label** crosses between sections, and the label picks the section. A cross-section transfer to a bare
+  number (`JSR &8003`) cannot say which section it means, so it is treated as leaving for code the analysis
+  cannot follow - name the target instead. See [Sections and addresses](#sections-and-addresses) for details.
 - **You cannot name a variable `a`.** It collides with accumulator addressing: `ASL a` would read as `ASL A`
   and quietly lose the variable. Names `x` and `y` are fine - they only mean registers after a comma, which a
   plain operand never is - so `STA x` resolves to your variable, not the X register.
@@ -395,22 +382,23 @@ The same goes for `var,Y` and the indexed-indirect `(var,X)`. What Baron *cannot
 operand or a pointer that happens to hold an address inside the reserved block - neither shows up in the
 instruction stream - so keep those on a hand-placed zero-page symbol, not an auto-variable.
 
-**An address collision is refused.** The analysis pins a block to its address, so two instructions at one
-address - two sections loaded into the same slot - would let a target resolve to the wrong one:
+**Two sections may share an address.** The analysis identifies a block by `(section, address)`, so paged
+banks - two sections both at `&8000` - coexist, each keeping its own flow. Each variable is placed clear of
+whatever its own bank touches, and the two banks reuse the same reserved bytes since no flow connects them:
 
 ```
-    ZPAUTO1 v
-    SECTION main, org = &2000
-        STA v
+    ZPAUTO1 v, w
+    SECTION bank4, org = &8000
+        STA v : LDA v : RTS       ; bank 4's own flow, at &8000
     ENDSECTION
-    SECTION loader, org = &2000   ; the same slot - now two instructions claim &2000
-        LDA v
+    SECTION bank5, org = &8000    ; the same address - a different bank
+        STA w : LDA w : RTS       ; kept entirely separate; v and w may share a byte
     ENDSECTION
 ```
-> Two sections place code at the same address ...
 
-This is the *only* layout hazard: `SECTION`s are otherwise free (see
-[Sections and addresses](#sections-and-addresses)). Sections at different addresses are all sound.
+`SECTION`s are otherwise free (see [Sections and addresses](#sections-and-addresses)); the only thing to
+remember is that a control transfer *between* sections must name a label, so the analysis knows which section
+it lands in.
 
 ## Getting the most out of it ##
 
@@ -442,8 +430,6 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
 | A ZPAUTO variable must be reached by direct addressing only | An indexed / indexed-indirect access (`var,X`, `(var,X)`). Use a hand-placed symbol there. |
-| Two sections place code at the same address ... | Two sections share an address slot. Load them at different addresses (sections elsewhere are fine), or place those by hand. |
-| Two instructions in one section share an address ... | A nested section's low `org` dragged the cursor back onto emitted code. Keep the pc moving forwards, or place those bytes by hand. |
 
 Every one of these is a refusal, not a warning - Baron will not emit code it cannot vouch for. Fix it, annotate
 it, or fall back to a hand-placed address, and you are on solid ground again.
