@@ -23,6 +23,7 @@ typedef enum error_type {
     error_type_unclosed_scope,
     error_type_expected_separator,
     error_type_expected_label_name,
+    error_type_expected_overlay_name, // OVERLAY was not followed by a name
     error_type_invalid_assignment,    // a dotted path on the left of '='
     error_type_expected_assign,       // a bare identifier statement with no '='
     error_type_expected_close_paren,

@@ -14,6 +14,7 @@ rc_str error_type_name(error_type e)
         case error_type_unclosed_scope:          return RC_STR("Unclosed '{': expected a matching '}'");
         case error_type_expected_separator:      return RC_STR("Expected a newline or ':' after this statement");
         case error_type_expected_label_name:     return RC_STR("Expected a label name after '.'");
+        case error_type_expected_overlay_name:   return RC_STR("OVERLAY expects an overlay name");
         case error_type_invalid_assignment:      return RC_STR("Cannot assign to a dotted name");
         case error_type_expected_assign:         return RC_STR("Expected '=' in assignment");
         case error_type_expected_close_paren:    return RC_STR("Expected ')'");

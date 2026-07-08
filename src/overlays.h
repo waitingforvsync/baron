@@ -6,8 +6,12 @@
 
 // One overlay: a contiguous block of object code with its own instruction pointer. pc is the
 // effective address of the next byte - the value a label takes. The byte array fills from index 0
-// independent of pc, so ORG repositions later labels without moving where code lands.
+// independent of pc, so ORG repositions later labels without moving where code lands. `name` is the
+// overlay's own identity in a namespace SEPARATE from symbols and scopes (the default overlay at index 0
+// is nameless, {0}); OVERLAY <name> selects it. The name is a view into the source text (permanent), so
+// it outlives the per-pass overlay it labels.
 typedef struct overlay {
+    rc_str         name;
     uint32_t       pc;
     rc_array_bytes code;
 } overlay;
@@ -46,8 +50,14 @@ void overlays_emit_u8(overlays *ovl, uint32_t id, uint8_t b);     // append a by
 void overlays_emit_u16(overlays *ovl, uint32_t id, uint16_t w);   // little-endian word, pc += 2
 void overlays_skip(overlays *ovl, uint32_t id, uint32_t count);   // append `count` zero bytes, pc += count
 
-// Rebuild the list for a fresh pass: the default overlay at index 0 (pc 0, an empty code buffer). Call
-// it at the top of each pass, after the per_pass arena has been reset. It also makes the default the
+// Select the overlay named `name`, making it (with its own pc 0 + empty code buffer) on first sighting;
+// hands back its stable index. Overlay names live in their OWN namespace, keyed by content. `name` must be
+// non-empty (the nameless default is index 0, unreachable this way). The index is stable across passes
+// because overlays are created in first-sighting parse order, which is identical each pass.
+uint32_t overlays_get_or_make(overlays *ovl, rc_str name);
+
+// Rebuild the list for a fresh pass: the default overlay at index 0 (nameless, pc 0, an empty code buffer).
+// Call it at the top of each pass, after the per_pass arena has been reset. It also makes the default the
 // first time round (there is no separate overlays_make_default).
 void overlays_reset(overlays *ovl);
 

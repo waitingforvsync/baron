@@ -23,6 +23,7 @@ static parse_result handle_org(baron *b, cursor at, uint32_t scope, parse_flags 
 static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -193,6 +194,7 @@ static const token statement_token_entries[] = {
     {RC_STR("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
     {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
+    {RC_STR("overlay"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_overlay}}},
     {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
@@ -444,6 +446,29 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
     parse_result r = require_separator(b, cursor_at(at, e.next));
     r.unresolved = unresolved;
     return r;
+}
+
+// OVERLAY <name> - select the named overlay as the current one, creating it on first sighting. Overlay names
+// live in their OWN namespace (not symbols or scopes): the name is read as a bare identifier and looked up in
+// the overlay manager alone. For now selection is all it does; attributes come later. A dead branch reads the
+// name but selects nothing - the effect lives entirely under `active`.
+static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    (void) scope;
+    (void) scratch;
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    // The overlay name is a bare identifier (lexed like a label name; a mnemonic-spelled name would lex as
+    // that opcode, the same limitation labels have - acceptable, and not worth a private name table).
+    lexer_result nm = lexer_next(src, at.pos, statement_tokens(b));
+    if (nm.token.type != lexeme_type_identifier) {
+        return syntax_error(b, error_type_expected_overlay_name, cursor_at(at, at.pos));
+    }
+
+    if (flags.active) {
+        b->current_overlay = overlays_get_or_make(&b->overlays, nm.token.identifier.name);
+    }
+    return require_separator(b, cursor_at(at, nm.next));
 }
 
 // Emit `bits` as `width` little-endian bytes into the current overlay.
@@ -1653,7 +1678,7 @@ value baron_result_symbol(const baron_result *r, rc_str path)
 baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
 {
     RC_ASSERT(arenas != NULL);
-    baron b = baron_make(arenas);   // a fresh machine borrowing the caller's arenas
+    baron b = baron_make(arenas);
     uint32_t source = source_files_add_string(&b.source_files, name, text);
     return baron_result_make(&b, run_passes(&b, source, arenas->scratch));
 }
@@ -1815,6 +1840,56 @@ RC_TEST_STEP(assemble, skip_advances_pc, fix)
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("a")), value_make_numeric(0x2000)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("b")), value_make_numeric(0x2004)));
+}
+
+RC_TEST_STEP(assemble, overlay_selects_and_creates, fix)
+{
+    // OVERLAY <name> selects a named overlay (created on first sighting), so bytes after it land there, not
+    // in the default. The default (index 0) stays empty; "code" (index 1) carries the two instructions.
+    RC_CHECK_TRUE(ASM("OVERLAY code : LDA #&11 : LDX #&22") != 0);
+    RC_CHECK(fix->r.overlays.num, ==, 2u);   // default + "code"
+    overlay def  = rc_view_overlay_get(fix->r.overlays, 0);
+    overlay code = rc_view_overlay_get(fix->r.overlays, 1);
+    RC_CHECK(def.code.view.num, ==, 0u);     // nothing landed in the default
+    RC_CHECK(code.code.view.num, ==, 4u);    // LDA #, LDX # -> 4 bytes
+    RC_CHECK_TRUE(rc_str_is_equal(code.name, RC_STR("code")));
+}
+
+RC_TEST_STEP(assemble, overlay_reselect_accumulates, fix)
+{
+    // Re-selecting a name returns to the SAME overlay (stable index), so its code accumulates; a different
+    // name is a different overlay. a -> byte, b -> byte, back to a -> +byte, so a holds 2 and b holds 1.
+    RC_CHECK_TRUE(ASM("OVERLAY a : EQUB 1 : OVERLAY b : EQUB 2 : OVERLAY a : EQUB 3") != 0);
+    RC_CHECK(fix->r.overlays.num, ==, 3u);   // default + a + b
+    RC_CHECK(rc_view_overlay_get(fix->r.overlays, 1).code.view.num, ==, 2u);   // a got two bytes
+    RC_CHECK(rc_view_overlay_get(fix->r.overlays, 2).code.view.num, ==, 1u);   // b got one
+}
+
+RC_TEST_STEP(assemble, overlay_has_own_pc, fix)
+{
+    // Each overlay carries its own pc: ORG in a selected overlay sets that overlay's pc, and a label takes it.
+    RC_CHECK_TRUE(ASM("OVERLAY hi : ORG &3000 : .here EQUB 0") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x3000)));
+    RC_CHECK(rc_view_overlay_get(fix->r.overlays, 1).pc, ==, 0x3001u);   // &3000 + 1 emitted byte
+}
+
+RC_TEST_STEP(assemble, overlay_name_is_own_namespace, fix)
+{
+    // An overlay name lives in its own namespace, separate from symbols: `x` can be both a symbol (= 5) and
+    // an overlay name at once, and EQUB x still emits the SYMBOL's value into overlay "x".
+    RC_CHECK_TRUE(ASM("x = 5 : OVERLAY x : EQUB x") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(5)));
+    RC_CHECK(fix->r.overlays.num, ==, 2u);   // default + overlay "x"
+    overlay ox = rc_view_overlay_get(fix->r.overlays, 1);
+    RC_CHECK_TRUE(rc_str_is_equal(ox.name, RC_STR("x")));
+    RC_CHECK(ox.code.view.num, ==, 1u);
+    RC_CHECK((uint32_t)rc_view_bytes_get(ox.code.view, 0), ==, 5u);   // the symbol value 5, in overlay x
+}
+
+RC_TEST_STEP(assemble, overlay_name_errors, fix)
+{
+    RC_CHECK_TRUE(ERR("OVERLAY")   == error_type_expected_overlay_name);   // nothing after the keyword
+    RC_CHECK_TRUE(ERR("OVERLAY 5") == error_type_expected_overlay_name);   // a number is not a name
 }
 
 RC_TEST_STEP(assemble, org_and_labels, fix)

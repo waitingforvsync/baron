@@ -43,6 +43,24 @@ rc_view_overlay overlays_all(const overlays *ovl)
     return ovl->nodes.view;
 }
 
+uint32_t overlays_get_or_make(overlays *ovl, rc_str name)
+{
+    RC_ASSERT(ovl != NULL);
+    // Overlays are few (one per section), so a linear scan by name is ample. Skip nameless entries - the
+    // default at index 0 has a zero-initialised {0} name (NULL data, which rc_str_is_equal rejects), and it
+    // is never reachable by a name lookup regardless.
+    for (uint32_t i = 0; i < ovl->nodes.num; i++) {
+        rc_str n = RC_AT(ovl->nodes, i).name;
+        if (n.len != 0 && rc_str_is_equal(n, name)) {
+            return i;   // seen already this pass: reuse it, so its code + pc keep accumulating
+        }
+    }
+    return rc_array_overlay_push(
+        &ovl->nodes,
+        (overlay) { .name = name, .code = rc_array_bytes_make(overlay_code_reserve, ovl->arena) },
+        ovl->arena);
+}
+
 void overlays_org(overlays *ovl, uint32_t id, uint32_t addr)
 {
     RC_ASSERT(ovl != NULL);
