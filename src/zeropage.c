@@ -161,17 +161,6 @@ rc_view_zp_cflow zeropage_cflows(const zeropage *zp)
     return zp->cflows.view;
 }
 
-bool zeropage_is_unreachable(const zeropage *zp, uint32_t pc)
-{
-    RC_ASSERT(zp != NULL);
-    for (uint32_t i = 0; i < zp->cflows.num; i++) {
-        zp_cflow cf = rc_array_zp_cflow_get(&zp->cflows, i);
-        if (cf.kind == zp_cflow_unreachable && cf.site == pc) {
-            return true;
-        }
-    }
-    return false;
-}
 
 
 #ifdef BARON_TESTS

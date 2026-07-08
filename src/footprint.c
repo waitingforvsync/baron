@@ -74,9 +74,9 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
                 fp_visit_call(c, n, scratch);
             }
         }
-        for (uint32_t s = 0; s < 2; s++) {
-            uint32_t succ = blk.succ[s];
-            if (succ != RC_INDEX_NONE && !rc_bitset_is_set(&seen, succ)) {
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            uint32_t succ = cfg_succ(c->g, blk, s);
+            if (!rc_bitset_is_set(&seen, succ)) {
                 rc_bitset_set(&seen, succ);
                 stack[sp++] = succ;
             }
@@ -155,7 +155,7 @@ RC_TEST(footprint, transitive_touch_through_calls)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};   // no annotations in these tests
     footprint main_fp = footprint_compute(g, insns.view, none, cfg_block_at_pc(g, 0x2000), 2, &arena, scratch);
     RC_CHECK_FALSE(main_fp.unknown_call);
@@ -184,7 +184,7 @@ RC_TEST(footprint, recursion_is_flagged)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};
     footprint fp = footprint_compute(g, insns.view, none, cfg_block_at_pc(g, 0x2000), 1, &arena, scratch);
     RC_CHECK_TRUE(fp.recursive);
@@ -206,7 +206,7 @@ RC_TEST(footprint, unknown_call_target_is_flagged)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};
     footprint fp = footprint_compute(g, insns.view, none, cfg_block_at_pc(g, 0x2000), 1, &arena, scratch);
     RC_CHECK_TRUE(fp.unknown_call);

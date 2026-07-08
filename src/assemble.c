@@ -33,6 +33,7 @@ static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_fl
 static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -209,6 +210,7 @@ static const token statement_token_entries[] = {
     {RC_STR("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
     {RC_STR("unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_unreachable}}}, // dead fall-through
     {RC_STR("cancall"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_cancall}}},   // a JSR's real targets
+    {RC_STR("canjump"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_canjump}}},   // a computed JMP's targets
     {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
@@ -657,26 +659,24 @@ static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, pars
     return require_separator(b, at);
 }
 
-// CANCALL <targets> - the programmer declares the real destination(s) of the JSR immediately preceding it (a
-// self-modified operand, or a dispatch the analysis cannot follow). Without it, such a call has an unknown
-// footprint and a value held live across it is refused (error_type_zpauto_across_call). With it, the callee
-// footprint is bounded by the union of the named routines. The annotation attaches to the last recorded
-// instruction, which on the final pass is that JSR; if it is not a call the targets bind to nothing and are
-// harmless. A forward-referenced target defers like any address. TRUSTED, like UNREACHABLE.
-static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+// The shared body of CANCALL / CANJUMP: parse a comma-separated list of target addresses and record one cflow
+// of `kind` per target, sited on the last recorded instruction (the JSR / JMP this annotation qualifies) - but
+// only when that instruction's flow is `expect_flow`, so a stray CANCALL after a JMP (or vice versa) binds to
+// nothing rather than mis-annotating. Only the final pass records instructions, so only then is there a site;
+// the settling passes still parse the list so the statement stays well-formed. A forward target defers.
+static parse_result handle_can_targets(baron *b, cursor at, uint32_t scope, parse_flags flags,
+                                       zp_flow expect_flow, zp_cflow_kind kind, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
     bool unresolved = false;
 
-    // The site is the JSR this annotation qualifies. Only the final pass records instructions, so only then is
-    // there a site to attach to; the settling passes still parse the list so the statement stays well-formed.
     uint32_t site = RC_INDEX_NONE;
     if (flags.final) {
         uint32_t ni = zeropage_insn_count(&b->zeropage);
         if (ni > 0) {
             zp_insn last = zeropage_insn_get(&b->zeropage, ni - 1);
-            if (last.flow == zp_flow_call) {
+            if (last.flow == expect_flow) {
                 site = last.pc;
             }
         }
@@ -695,7 +695,7 @@ static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_fl
                     zeropage_add_cflow(&b->zeropage, (zp_cflow) {
                         .site   = site,
                         .target = (uint32_t) (arg.value & 0xFFFF),
-                        .kind   = zp_cflow_cancall,
+                        .kind   = (uint8_t) kind,
                         .at     = cursor_at(at, pos),
                     });
                     break;
@@ -717,6 +717,24 @@ static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_fl
         r.unresolved = unresolved;
         return r;
     }
+}
+
+// CANCALL <targets> - the programmer declares the real destination(s) of the JSR immediately preceding it (a
+// self-modified operand, or a dispatch the analysis cannot follow). Without it, such a call has an unknown
+// footprint and a value held live across it is refused (error_type_zpauto_across_call); with it, the callee
+// footprint is bounded by the union of the named routines. TRUSTED, like UNREACHABLE.
+static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    return handle_can_targets(b, at, scope, flags, zp_flow_call, zp_cflow_cancall, scratch);
+}
+
+// CANJUMP <targets> - the programmer declares the possible destinations of the computed / indirect JMP
+// immediately preceding it (a jump table). Without it, the jump reaches code the CFG cannot follow and, with
+// variables live, is refused (error_type_zpauto_computed_flow); with it, the CFG wires every named target as a
+// real successor edge, so liveness follows control to each one. TRUSTED, like UNREACHABLE.
+static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    return handle_can_targets(b, at, scope, flags, zp_flow_jump, zp_cflow_canjump, scratch);
 }
 
 // Emit `bits` as `width` little-endian bytes into the current overlay.
@@ -1878,27 +1896,9 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
 
     rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
 
-    cfg g = cfg_build(insns, &work, wscratch);
-
-    // Apply UNREACHABLE annotations before liveness: prune an always-taken branch's dead fall-through edge, so
-    // whatever lives down the never-taken path is not treated as live across the branch. Only a fall-through
-    // (branch / straight-line), never a jump's target edge, is a fall-through; succ[0] is the fall-through and
-    // succ[1] the taken target, so we only ever touch succ[0].
-    for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
-        basic_block *blk = rc_array_basic_block_at(&g.blocks, bi);
-        if (blk->num_insns == 0 || blk->succ[0] == RC_INDEX_NONE) {
-            continue;
-        }
-        zp_insn last = rc_view_zp_insn_get(insns, blk->first_insn + blk->num_insns - 1);
-        if (last.flow != zp_flow_branch && last.flow != zp_flow_normal) {
-            continue;
-        }
-        basic_block fall = rc_array_basic_block_get(&g.blocks, blk->succ[0]);
-        if (zeropage_is_unreachable(&b->zeropage, fall.pc)) {
-            blk->succ[0] = RC_INDEX_NONE;
-        }
-    }
-
+    // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
+    // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
+    cfg g       = cfg_build(insns, cflows, &work, wscratch);
     liveness lv = liveness_analyze(g, insns, nv, 0, &work, wscratch);
 
     bool refused = false;
@@ -2578,6 +2578,26 @@ RC_TEST_STEP(assemble, zpauto_cancall_bounds_dispatched_call, fix)
     RC_CHECK(zp_addr(&fix->r, "handlerB.hb"), !=, 0x70);   // now inside the call footprint
 }
 
+RC_TEST_STEP(assemble, zpauto_canjump_bounds_computed_jump, fix)
+{
+    // A computed / indirect JMP with a variable live across it is refused: the CFG cannot see where control
+    // goes, so it cannot prove `keep` survives.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 keep : vector = &2000\n"
+                      "STA keep : JMP (vector)\n"
+                      ".hA : LDA keep : RTS\n"
+                      ".hB : LDA keep : RTS") == error_type_zpauto_computed_flow);
+
+    // CANJUMP declares the jump table's targets, so the CFG wires each as a real successor edge: keep is live
+    // into both arms and allocates cleanly onto &70.
+    uint32_t p = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep : vector = &2000\n"
+                     "STA keep : JMP (vector) : CANJUMP hA, hB\n"
+                     ".hA : LDA keep : RTS\n"
+                     ".hB : LDA keep : RTS");
+    RC_CHECK_TRUE(p != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+}
+
 RC_TEST_STEP(assemble, zpauto_macro_local_is_per_invocation, fix)
 {
     // A macro can declare its own ZPAUTO temp without caring where it lands. Each invocation runs in its own
@@ -2665,7 +2685,7 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
                ".mul { LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS }"));
     run_passes(&b, s, arenas.scratch);
 
-    cfg g = cfg_build(zeropage_insns(&b.zeropage), &arena, scratch);
+    cfg g = cfg_build(zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage), &arena, scratch);
     liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_var_count(&b.zeropage), 0,
                                    &arena, scratch);
 

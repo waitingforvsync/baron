@@ -48,10 +48,38 @@ uint32_t cfg_block_at_pc(cfg g, uint32_t pc)
     return block_at_pc(g.blocks.view, pc);
 }
 
-cfg cfg_build(rc_view_zp_insn insns, rc_arena *arena, rc_arena scratch)
+uint32_t cfg_succ(cfg g, basic_block b, uint32_t i)
+{
+    RC_ASSERT(i < b.succ_count);
+    return rc_view_u32_get(g.succs.view, b.succ_first + i);
+}
+
+// Append `succ_block` to the shared pool as one more successor of `block`. The pool grows independently of the
+// blocks array, so a `block` pointer into the blocks array stays valid across this (only the pool relocates).
+// A block's successors are pushed contiguously, so succ_first (set before the first push) + succ_count spans
+// them.
+static void add_succ(cfg *g, basic_block *block, uint32_t succ_block, rc_arena *arena)
+{
+    rc_array_u32_push(&g->succs, succ_block, arena);
+    block->succ_count++;
+}
+
+// Does `cflows` carry an annotation of `kind` sited at `pc`? A linear scan - annotations are few.
+static bool cflow_at(rc_view_zp_cflow cflows, zp_cflow_kind kind, uint32_t pc)
+{
+    for (uint32_t i = 0; i < cflows.num; i++) {
+        zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
+        if (cf.kind == (uint8_t) kind && cf.site == pc) {
+            return true;
+        }
+    }
+    return false;
+}
+
+cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_arena *arena, rc_arena scratch)
 {
     RC_ASSERT(arena != NULL);
-    cfg result = {.blocks = rc_array_basic_block_make(16, arena)};
+    cfg result = {.blocks = rc_array_basic_block_make(16, arena), .succs = rc_array_u32_make(32, arena)};
     if (insns.num == 0) {
         return result;
     }
@@ -100,43 +128,79 @@ cfg cfg_build(rc_view_zp_insn insns, rc_arena *arena, rc_arena scratch)
             current = rc_array_basic_block_push(
                 &result.blocks,
                 (basic_block) {.pc = insn.pc, .first_insn = i, .num_insns = 0,
-                               .succ = {RC_INDEX_NONE, RC_INDEX_NONE}, .unknown_succ = false},
+                               .succ_first = 0, .succ_count = 0, .unknown_succ = false},
                 arena);
         }
         rc_array_basic_block_at(&result.blocks, current)->num_insns++;
     }
 
-    // Pass 3: wire successor edges from each block's LAST instruction's control-flow class. A branch has two
-    // (fall-through + target), a jump one (target), a return none, and a call / normal terminator falls
-    // through to the next block. A target that names no block (unresolved, or computed) yields NONE - a taint
-    // the liveness pass will read as "unknown successor" and treat conservatively.
+    // Pass 3: wire successor edges from each block's LAST instruction's control-flow class into the shared
+    // pool. A branch has two (fall-through + target), a jump one (target), a return none, and a call / normal
+    // terminator falls through to the next block. Annotations adjust this: an UNREACHABLE sited at a branch's
+    // fall-through prunes that edge; a CANJUMP sited at a computed JMP supplies its targets. A target that
+    // names no block and is not annotated yields the unknown_succ taint, which liveness treats conservatively.
     for (uint32_t bi = 0; bi < result.blocks.num; bi++) {
         basic_block *block = rc_array_basic_block_at(&result.blocks, bi);
         zp_insn last = rc_view_zp_insn_get(insns, block->first_insn + block->num_insns - 1);
         uint32_t after = last.pc + last.size;
+        block->succ_first = result.succs.num;
         switch (last.flow) {
-            case zp_flow_branch:
-                block->succ[0] = block_at_pc(result.blocks.view, after);          // not taken (in-stream)
-                block->succ[1] = block_at_pc(result.blocks.view, last.target);    // taken
-                if (block->succ[1] == RC_INDEX_NONE) {
+            case zp_flow_branch: {
+                // Not-taken (in-stream) fall-through, unless UNREACHABLE asserts control cannot reach it.
+                uint32_t ft = block_at_pc(result.blocks.view, after);
+                if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_unreachable, after)) {
+                    add_succ(&result, block, ft, arena);
+                }
+                uint32_t taken = block_at_pc(result.blocks.view, last.target);
+                if (taken != RC_INDEX_NONE) {
+                    add_succ(&result, block, taken, arena);
+                }
+                else {
                     block->unknown_succ = true;   // taken target we cannot place -> conservative
                 }
                 break;
-            case zp_flow_jump:
-                block->succ[0] = block_at_pc(result.blocks.view, last.target);
-                if (block->succ[0] == RC_INDEX_NONE) {
-                    block->unknown_succ = true;   // indirect/computed JMP, or a jump leaving the stream
+            }
+            case zp_flow_jump: {
+                uint32_t t = block_at_pc(result.blocks.view, last.target);
+                if (t != RC_INDEX_NONE) {
+                    add_succ(&result, block, t, arena);   // a plain, resolved JMP
+                }
+                else {
+                    // Computed / indirect JMP. If CANJUMP names its targets, wire each as a real edge; a
+                    // declared target we still cannot place keeps the taint. With no CANJUMP, the taint stands.
+                    bool annotated = false;
+                    for (uint32_t i = 0; i < cflows.num; i++) {
+                        zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
+                        if (cf.kind == zp_cflow_canjump && cf.site == last.pc) {
+                            annotated = true;
+                            uint32_t tb = block_at_pc(result.blocks.view, cf.target);
+                            if (tb != RC_INDEX_NONE) {
+                                add_succ(&result, block, tb, arena);
+                            }
+                            else {
+                                block->unknown_succ = true;
+                            }
+                        }
+                    }
+                    if (!annotated) {
+                        block->unknown_succ = true;   // indirect/computed JMP, or a jump leaving the stream
+                    }
                 }
                 break;
+            }
             case zp_flow_return:
                 break;   // a genuine return: no successor, fully known (an RTS-dispatch would need markup)
             case zp_flow_call:
             case zp_flow_normal:
-            default:
+            default: {
                 // A call/normal terminator falls through in-stream; a fall-through with no block is the end of
                 // the program (or a routine falling off its end), which is a clean end, not an unknown target.
-                block->succ[0] = block_at_pc(result.blocks.view, after);
+                uint32_t ft = block_at_pc(result.blocks.view, after);
+                if (ft != RC_INDEX_NONE) {
+                    add_succ(&result, block, ft, arena);
+                }
                 break;
+            }
         }
     }
 
@@ -164,7 +228,7 @@ RC_TEST(cfg, empty_stream_is_empty)
 {
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
-    cfg g = cfg_build((rc_view_zp_insn) {0}, &arena, scratch);
+    cfg g = cfg_build((rc_view_zp_insn) {0}, (rc_view_zp_cflow) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 0u);
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -183,14 +247,13 @@ RC_TEST(cfg, straight_line_is_one_block)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
     RC_CHECK(b.first_insn, ==, 0u);
     RC_CHECK(b.num_insns, ==, 3u);
-    RC_CHECK(b.succ[0], ==, RC_INDEX_NONE);   // RTS has no successor...
-    RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
+    RC_CHECK(b.succ_count, ==, 0u);            // RTS has no successor...
     RC_CHECK_FALSE(b.unknown_succ);            // ...and that is fully KNOWN (a return, not a computed exit)
 
     rc_arena_deinit(&scratch);
@@ -213,12 +276,11 @@ RC_TEST(cfg, indirect_jump_is_unknown_successor)
     pc = push_insn(&insns, pc, 3, zp_flow_jump, RC_INDEX_NONE, &arena);     // JMP (ind) - unknown target
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);
-    RC_CHECK(b.succ[0], ==, RC_INDEX_NONE);   // no successor we can place...
-    RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
+    RC_CHECK(b.succ_count, ==, 0u);           // no successor we can place...
     RC_CHECK_TRUE(b.unknown_succ);            // ...but control DOES leave, so stay conservative
 
     rc_arena_deinit(&scratch);
@@ -243,28 +305,29 @@ RC_TEST(cfg, branch_splits_into_blocks_with_edges)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 3u);
 
     // Block 0: LDX + BNE, leader 2000, two successors - fall-through (block 1) and target (block 2).
     basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b0.pc, ==, 0x2000u);
     RC_CHECK(b0.num_insns, ==, 2u);
-    RC_CHECK(b0.succ[0], ==, 1u);   // not taken -> the LDA block
-    RC_CHECK(b0.succ[1], ==, 2u);   // taken -> the RTS block
+    RC_CHECK(b0.succ_count, ==, 2u);
+    RC_CHECK(cfg_succ(g, b0, 0), ==, 1u);   // not taken -> the LDA block
+    RC_CHECK(cfg_succ(g, b0, 1), ==, 2u);   // taken -> the RTS block
 
     // Block 1: the fall-through LDA, leader 2004, falls through to block 2.
     basic_block b1 = rc_array_basic_block_get(&g.blocks, 1);
     RC_CHECK(b1.pc, ==, 0x2004u);
     RC_CHECK(b1.num_insns, ==, 1u);
-    RC_CHECK(b1.succ[0], ==, 2u);
-    RC_CHECK(b1.succ[1], ==, RC_INDEX_NONE);
+    RC_CHECK(b1.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, b1, 0), ==, 2u);
 
     // Block 2: the RTS target, leader 2006, no successor.
     basic_block b2 = rc_array_basic_block_get(&g.blocks, 2);
     RC_CHECK(b2.pc, ==, 0x2006u);
     RC_CHECK(b2.num_insns, ==, 1u);
-    RC_CHECK(b2.succ[0], ==, RC_INDEX_NONE);
+    RC_CHECK(b2.succ_count, ==, 0u);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -284,13 +347,13 @@ RC_TEST(cfg, jump_target_leads_backward_edge)
     pc = push_insn(&insns, pc, 3, zp_flow_jump, 0x2000, &arena);           // JMP 2000
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
     RC_CHECK(b.num_insns, ==, 2u);
-    RC_CHECK(b.succ[0], ==, 0u);   // jumps back to itself
-    RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
+    RC_CHECK(b.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, b, 0), ==, 0u);   // jumps back to itself
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -311,12 +374,52 @@ RC_TEST(cfg, call_is_in_block_not_an_edge)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);        // JSR and RTS in one block
-    RC_CHECK(b.succ[0], ==, RC_INDEX_NONE);   // ends in RTS - no intraprocedural successor
-    RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
+    RC_CHECK(b.succ_count, ==, 0u);           // ends in RTS - no intraprocedural successor
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, canjump_wires_declared_targets)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  LDA #   (normal)  <- target A block
+    //   2002  RTS
+    //   2003  LDA #   (normal)  <- target B block
+    //   2005  RTS
+    //   2006  JMP (ind) (jump, target unknown) <- the dispatcher
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2002
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2003
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2005
+    pc = push_insn(&insns, pc, 3, zp_flow_jump,   RC_INDEX_NONE, &arena);   // JMP (ind) @2006
+    (void) pc;
+
+    // CANJUMP @2006 -> {2000, 2003}: two real successor edges, and the taint cleared.
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(2, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2000, .kind = zp_cflow_canjump}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2003, .kind = zp_cflow_canjump}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, &arena, scratch);
+    basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at_pc(g, 0x2006));
+    RC_CHECK_FALSE(b.unknown_succ);            // CANJUMP resolved it - no taint
+    RC_CHECK(b.succ_count, ==, 2u);
+    RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at_pc(g, 0x2000));
+    RC_CHECK(cfg_succ(g, b, 1), ==, cfg_block_at_pc(g, 0x2003));
+
+    // Without the annotation the same JMP stays an unknown successor with no placeable edges.
+    cfg g2 = cfg_build(insns.view, (rc_view_zp_cflow) {0}, &arena, scratch);
+    basic_block b2 = rc_array_basic_block_get(&g2.blocks, cfg_block_at_pc(g2, 0x2006));
+    RC_CHECK_TRUE(b2.unknown_succ);
+    RC_CHECK(b2.succ_count, ==, 0u);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

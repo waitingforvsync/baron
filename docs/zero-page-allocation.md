@@ -242,9 +242,20 @@ List every routine the call can reach - an omission is the one way to get it wro
 
 ### CANJUMP ###
 
-Reserved for a future release. It will do for an indirect `JMP` (a jump table) what `CANCALL` does for a
-computed call. For now, a computed jump with variables in play is refused, not annotated - you will need to
-restructure or keep those bytes out of the reserved pool.
+Place `CANJUMP` immediately after a computed or indirect `JMP` - a jump table, a `JMP (vector)` - and list the
+labels it might land on:
+
+```
+    ; ... some code has stashed one of the mode handlers' addresses in `vector` ...
+    JMP (vector)            ; dispatch - the assembler cannot see where
+    CANJUMP mode_draw, mode_erase, mode_flip
+```
+
+Baron wires each named label as a real successor edge in the control-flow graph, so liveness follows control
+into every arm and a variable held live across the jump is protected in all of them. It is the jump-table
+counterpart of `CANCALL`: without it a computed jump reaches code the analysis cannot follow, and with
+variables live it is refused (see `computed jump` below). As with `CANCALL`, list every destination - a missing
+one is the way to get it wrong.
 
 ## Limitations ##
 
@@ -262,8 +273,9 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
   of that is a restriction - see [Scopes, blocks and control flow](#scopes-blocks-and-control-flow). It is only
   flow the assembler cannot *see* that is off-limits (next item).
 - **No unannotated computed flow.** An indirect `JMP`, a jump table or an RTS-dispatch whose target the analysis
-  cannot follow is refused while variables are live. Annotate it (`CANCALL`, and in time `CANJUMP`) or keep
-  clear. This - not the shape of your entries and exits - is the genuine boundary.
+  cannot follow is refused while variables are live. Annotate it (`CANJUMP` for a computed jump, `CANCALL` for a
+  computed call) or keep clear. This - not the shape of your entries and exits - is the genuine boundary. (An
+  RTS-dispatch still has no annotation; keep those clear.)
 - **No recursion.** A value held live across a recursive call cannot live in one static byte - each level would
   need its own. Baron detects the cycle and refuses.
 - **You cannot name a variable `a`.** It collides with accumulator addressing: `ASL a` would read as `ASL A`
@@ -293,13 +305,14 @@ soundness precondition it does not yet police, so it is on you.
 ```
 > A ZPAUTO variable is live across a recursive call ...
 
-**A computed jump is refused** while variables are in play, because Baron cannot see where it lands (this is
-what `CANJUMP` will one day annotate):
+**An *unannotated* computed jump is refused** while variables are in play, because Baron cannot see where it
+lands - add a `CANJUMP` naming its targets and it is fine again:
 
 ```
     ZPAUTO1 state
     STA state
-    JMP (vector)        ; an indirect jump - to where?
+    JMP (vector)        ; an indirect jump - to where? Baron cannot tell...
+    ; CANJUMP arm_a, arm_b   ; ...so tell it, and the refusal lifts
 ```
 > A computed or indirect jump reaches unknown code ...
 
@@ -359,7 +372,7 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | No free zero-page byte left ...             | A spill: more variables are live at once than you reserved bytes for.          |
 | ... live across a JSR whose callee footprint cannot be determined | A computed or off-stream call with a variable live across it. Annotate it with `CANCALL`. |
 | ... live across a recursive call            | A cycle in the call graph. One static byte cannot hold a per-recursion value.  |
-| A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Restructure, or keep clear until `CANJUMP` lands. |
+| A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
 
 Every one of these is a refusal, not a warning - Baron will not emit code it cannot vouch for. Fix it, annotate

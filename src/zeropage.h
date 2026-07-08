@@ -84,19 +84,20 @@ typedef struct zp_insn {
 // A control-flow annotation: the programmer's assertion where static analysis cannot see the truth on its
 // own. UNREACHABLE says control cannot fall through to its own pc (an always-taken branch's dead edge, which
 // the CFG then prunes); CANCALL names the real target(s) of a JSR the analysis cannot follow (a self-modified
-// or dispatched call), so the callee footprint can still be bounded. Both are TRUSTED overrides - a wrong one
-// is the single way to defeat the certainty contract - but they sit exactly where the analysis would
-// otherwise refuse, turning a "cannot prove it" into the programmer's explicit "I promise it is these".
-// Recorded on the final pass only, like insns. (CANJUMP - an indirect JMP's targets - waits on a variable-
-// length successor CFG: a jump table has more than the two successors a basic_block holds today.)
+// or dispatched call), so the callee footprint can still be bounded; CANJUMP names the possible targets of a
+// computed JMP (a jump table), which the CFG wires as real successor edges. All three are TRUSTED overrides -
+// a wrong one is the single way to defeat the certainty contract - but they sit exactly where the analysis
+// would otherwise refuse, turning a "cannot prove it" into the programmer's explicit "I promise it is these".
+// Recorded on the final pass only, like insns.
 typedef enum zp_cflow_kind {
     zp_cflow_unreachable = 0,   // control cannot fall through to `site`
     zp_cflow_cancall,           // the JSR at `site` may call `target` (overrides its literal target)
+    zp_cflow_canjump,           // the computed JMP at `site` may jump to `target` (a jump-table edge)
 } zp_cflow_kind;
 
 typedef struct zp_cflow {
-    uint32_t site;    // pc of the annotated instruction: UNREACHABLE its own pc; CANCALL the JSR's pc
-    uint32_t target;  // a call target address (CANCALL); RC_INDEX_NONE for UNREACHABLE
+    uint32_t site;    // pc of the annotated instruction: UNREACHABLE its own pc; CANCALL/CANJUMP the JSR/JMP pc
+    uint32_t target;  // a call/jump target address (CANCALL/CANJUMP); RC_INDEX_NONE for UNREACHABLE
     uint8_t  kind;    // zp_cflow_kind
     cursor   at;      // where the annotation sits, for diagnostics
 } zp_cflow;
@@ -170,10 +171,6 @@ rc_view_zp_insn  zeropage_insns(const zeropage *zp);   // the whole insn list, f
 // Record one control-flow annotation (final pass only). Returns its index.
 uint32_t         zeropage_add_cflow(zeropage *zp, zp_cflow cf);
 rc_view_zp_cflow zeropage_cflows(const zeropage *zp);   // all annotations, for the CFG + footprint passes
-
-// True if an UNREACHABLE annotation marks `pc` - control cannot fall through to it. A linear scan;
-// annotations are few.
-bool             zeropage_is_unreachable(const zeropage *zp, uint32_t pc);
 
 
 #endif // ifndef BARON_ZEROPAGE_H_
