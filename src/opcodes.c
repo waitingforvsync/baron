@@ -461,6 +461,17 @@ static bool is_indirect_mode(addr_mode mode)
     return mode == addr_mode_indx || mode == addr_mode_indy || mode == addr_mode_ind;
 }
 
+// Is `mode` within the auto-variable direct-addressing envelope? The allocator gives a variable a byte on the
+// assumption it is reached ONLY directly - the variable IS the operand (`var` / `var+k` -> zp), or the whole
+// pair is dereferenced as a pointer (`(var),Y` -> indy, `(var)` -> ind). Every other form that names the
+// variable base reaches `var + index`: `var,X` (zpx/zpy, or absx/absy when no zp form exists) and `(var,X)`
+// (indx) index INTO or THROUGH the reserved bytes, landing on a byte the allocator may have given to another
+// variable - which it cannot see. Those are outside the envelope and must be refused, not silently packed.
+static bool mode_in_var_envelope(addr_mode mode)
+{
+    return mode == addr_mode_zp || mode == addr_mode_indy || mode == addr_mode_ind;
+}
+
 // The instruction's control-flow class, from its cell's control flags (exclusive: at most one is set).
 static zp_flow flow_from_cell(uint16_t cell)
 {
@@ -478,6 +489,7 @@ typedef struct operand_ref {
     cursor   def;
     uint32_t scope;
     uint8_t  rw;
+    bool     outside_envelope;   // the variable is reached by an indexed / indexed-indirect mode (unsound)
 } operand_ref;
 
 // If the operand's leading identifier resolves (with shadowing) to a bound symbol, return its identity and rw
@@ -489,7 +501,7 @@ typedef struct operand_ref {
 static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
                                      uint32_t operand_pos)
 {
-    operand_ref none = {.def = cursor_none(), .scope = RC_INDEX_NONE, .rw = vref_none};
+    operand_ref none = {.def = cursor_none(), .scope = RC_INDEX_NONE, .rw = vref_none, .outside_envelope = false};
     if (operand_pos == RC_INDEX_NONE) {
         return none;
     }
@@ -505,7 +517,8 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
     uint8_t rw = is_indirect_mode(mode)
                      ? (uint8_t) vref_read
                      : (uint8_t) (((cell & op_read) ? vref_read : 0) | ((cell & op_write) ? vref_write : 0));
-    return (operand_ref) {.def = ref.def, .scope = ref.scope, .rw = rw};
+    return (operand_ref) {.def = ref.def, .scope = ref.scope, .rw = rw,
+                          .outside_envelope = !mode_in_var_envelope(mode)};
 }
 
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
@@ -540,6 +553,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, 
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
         .var_scope      = op.scope,
         .var_def        = op.def,
+        .var_indexed    = op.outside_envelope,
         .target         = target,
         .overlay        = overlay,
         .operand_offset = operand_offset,

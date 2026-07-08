@@ -1903,6 +1903,19 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
 
     bool refused = false;
 
+    // Guard 0 (the direct-addressing envelope): a variable reached by an indexed / indexed-indirect mode
+    // (var,X, var,Y, (var,X)) touches var+index, a byte the allocator cannot see and may have given to another
+    // variable. The whole packing is built on "a variable is reached only directly", so any such access is
+    // unsound - refuse it rather than emit code that quietly corrupts a neighbour. (Checked per recorded insn
+    // once vregs are resolved: a var_indexed insn that really names a ZPAUTO now has a vreg.)
+    for (uint32_t i = 0; i < insns.num; i++) {
+        zp_insn n = rc_view_zp_insn_get(insns, i);
+        if (n.vreg != RC_INDEX_NONE && n.var_indexed) {
+            baron_error(b, error_type_zpauto_indexed_access, n.at);
+            refused = true;
+        }
+    }
+
     // Guard 1: a computed / indirect jump (unknown_succ) leaves for code we cannot model. With any variable in
     // play we cannot prove it is not clobbered there, so refuse and ask for an annotation.
     for (uint32_t bi = 0; bi < g.blocks.num && nv > 0; bi++) {
@@ -2496,6 +2509,24 @@ RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
     // More simultaneously-live variables than reserved bytes is a spill: p and q overlap but only &70 is free.
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 p, q : STA p : STA q : LDA p : LDA q : RTS")
                   == error_type_zeropage_full);
+}
+
+RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)
+{
+    // The direct-addressing envelope: an auto-variable reached by an indexed mode touches var+index - a byte
+    // the allocator cannot account for and may have placed another variable in. It is refused rather than
+    // silently miscompiled. `v,X` (zero-page indexed), `v,Y` (widens to absolute indexed, no zp form), and
+    // `(p,X)` (indexed-indirect) are all outside the envelope.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA v,X") == error_type_zpauto_indexed_access);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA v,Y") == error_type_zpauto_indexed_access);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO2 p : LDA (p,X)") == error_type_zpauto_indexed_access);
+
+    // The envelope-safe forms stay legal: direct `var`, the `var+1` hi byte, and the whole-pointer `(var),Y`
+    // dereference (the intended ZPAUTO2 use - only the DATA is indexed by Y, the pointer itself is read direct).
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 RC_TEST_STEP(assemble, zpauto_unreachable_prunes_dead_edge, fix)

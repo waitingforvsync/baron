@@ -70,6 +70,9 @@ typedef struct zp_insn {
     uint32_t vreg;           // the ZPAUTO it touches, or RC_INDEX_NONE - RESOLVED from (var_scope, var_def)
     uint32_t var_scope;      // scope the operand's base name was declared in (with var_def, the vreg identity)
     cursor   var_def;        // def cursor of the operand's base name, or cursor_none; with var_scope resolves vreg
+    bool     var_indexed;    // the operand reaches its var by an indexed / indexed-indirect mode (var,X etc.) -
+                             // outside the direct-addressing envelope, so the allocation would be unsound; a
+                             // final-pass check refuses it (see zeropage_finalize)
     uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE
     uint32_t overlay;        // which overlay the operand byte lives in (for the allocation patch)
     uint32_t operand_offset; // byte offset of the operand within that overlay's code buffer

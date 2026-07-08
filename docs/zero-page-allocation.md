@@ -263,9 +263,10 @@ The analysis is sound, which means it is conservative: when it cannot be certain
 risking a miscompile. These are the shapes it needs, and the ones it will not accept without help.
 
 - **Direct addressing only.** A variable is reached as `var`, `var+1` (the high byte of a `ZPAUTO2`), or as a
-  pointer through `(var),Y`. Reaching one by a wandering index (`var,X` with an unbounded X), self-modifying its
-  operand, or pointing into it from elsewhere in zero page is outside the envelope - use a hand-placed symbol
-  for those.
+  pointer through `(var),Y`. Reaching one by an index (`var,X`, `var,Y`, `(var,X)`) is refused - it lands on
+  `var + index`, a byte the allocator cannot account for. Self-modifying its operand, or pointing into it from
+  elsewhere in zero page, is the same hazard but invisible in the instruction stream, so those Baron cannot
+  catch - use a hand-placed symbol for them.
 - **Statically recoverable flow is the only real requirement.** Every branch and jump target must be a label
   the assembler can resolve - a known address, not a computed one. Within that you have a free hand: a block may
   have several entry points (each its own `JSR` target), several `RTS` exits, early-outs, and branches or jumps
@@ -288,8 +289,9 @@ you code that assembles cleanly and runs wrong.
 
 ## What doesn't work (yet) ##
 
-Some concrete shapes, and what Baron does with each. The first four it catches and refuses; the last is a
-soundness precondition it does not yet police, so it is on you.
+Some concrete shapes, and what Baron does with each. All five it catches and refuses. Two related shapes it
+*cannot* see - a self-modified operand, and a pointer aimed into the reserved block - remain preconditions on
+you: there is nothing in the instruction stream to give them away.
 
 **Recursion is refused.** A value held across a call to yourself cannot live in one static byte:
 
@@ -332,18 +334,19 @@ ZPRESERVE &70                       ; one byte
 ```
 > No free zero-page byte left ...
 
-**Indexed access is NOT yet caught** - and this is the one to watch. `var,X` with a wandering X reads whatever
-byte is at `var + X`, which the allocator may well have handed to another variable:
+**Indexed access is refused** - it leaves the direct-addressing envelope. `var,X` with a wandering X reads
+whatever byte is at `var + X`, which the allocator may well have handed to another variable:
 
 ```
     ZPAUTO1 table
     LDX #4
     LDA table,X         ; reads table+4 - possibly somebody else's byte
 ```
+> A ZPAUTO variable must be reached by direct addressing only ...
 
-Baron will assemble this today without complaint, but it is outside the envelope: the allocator assumes a
-variable is reached only directly. Until the envelope is enforced, keep indexed reads, `(var,X)`-style access,
-and self-modified operands on hand-placed symbols rather than auto-variables.
+The same goes for `var,Y` and the indexed-indirect `(var,X)`. What Baron *cannot* catch is a self-modified
+operand or a pointer that happens to hold an address inside the reserved block - neither shows up in the
+instruction stream - so keep those on a hand-placed zero-page symbol, not an auto-variable.
 
 ## Getting the most out of it ##
 
@@ -374,6 +377,7 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | ... live across a recursive call            | A cycle in the call graph. One static byte cannot hold a per-recursion value.  |
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
+| A ZPAUTO variable must be reached by direct addressing only | An indexed / indexed-indirect access (`var,X`, `(var,X)`). Use a hand-placed symbol there. |
 
 Every one of these is a refusal, not a warning - Baron will not emit code it cannot vouch for. Fix it, annotate
 it, or fall back to a hand-placed address, and you are on solid ground again.
