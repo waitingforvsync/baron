@@ -2110,6 +2110,33 @@ RC_TEST_STEP(assemble, zpauto_errors, fix)
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 foo : ZPAUTO1 foo") == error_type_duplicate_symbol);
 }
 
+RC_TEST_STEP(assemble, zpauto_operand_is_zeropage, fix)
+{
+    // A ZPAUTO variable in operand position assembles as a 2-byte zero-page access, at the placeholder
+    // address (0 for now; the real byte is assigned later, at the allocation phase). This is the layout-
+    // independence property: a variable reference is always zero-page-sized, so allocation never perturbs
+    // code size. These operand bytes will become the allocated addresses once colouring + patching land.
+    const uint8_t ph = (uint8_t) zeropage_var_placeholder;
+
+    // Declared then used: LDA zp / STA zp (read and write).
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : LDA foo"),
+                          (uint8_t[]){0xA5, ph}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : STA foo"),
+                          (uint8_t[]){0x85, ph}, 2));
+
+    // Used BEFORE declared: still 2 bytes. It sizes as zero-page every pass (a VAR is always ZP), so the
+    // layout converges no matter the eventual address - the binding from one pass resolves the next.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : LDA foo : ZPAUTO1 foo"),
+                          (uint8_t[]){0xA5, ph}, 2));
+
+    // A 2-byte pointer: lo is `ptr`, hi is `ptr+1` (arithmetic on the placeholder), both zero-page; and the
+    // pointer drives indirect-indexed addressing (its intended use).
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : LDA ptr : LDA ptr+1"),
+                          (uint8_t[]){0xA5, ph, 0xA5, (uint8_t)(ph + 1)}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : LDA (ptr),Y"),
+                          (uint8_t[]){0xB1, ph}, 2));
+}
+
 RC_TEST_STEP(assemble, org_and_labels, fix)
 {
     // ORG sets the label's value but not where code lands (code still fills from index 0).
