@@ -4,8 +4,9 @@
 
 
 enum {
-    zeropage_vars_reserve  = 64,    // a very large routine's worth of locals; grows if exceeded
-    zeropage_insns_reserve = 256,   // a comfortable straight-line routine's worth of VAR touches
+    zeropage_vars_reserve   = 64,   // a very large routine's worth of locals; grows if exceeded
+    zeropage_insns_reserve  = 256,  // a comfortable straight-line routine's worth of VAR touches
+    zeropage_cflows_reserve = 16,   // annotations are rare; grows if exceeded
 };
 
 void zeropage_init(zeropage *zp, rc_arena *permanent)
@@ -16,6 +17,7 @@ void zeropage_init(zeropage *zp, rc_arena *permanent)
     rc_bitset_resize(&zp->reserved, zeropage_size, permanent);   // 256 addressable, all zero
     zp->vars     = rc_array_zp_var_make(zeropage_vars_reserve, permanent);
     zp->insns    = rc_array_zp_insn_make(zeropage_insns_reserve, permanent);
+    zp->cflows   = rc_array_zp_cflow_make(zeropage_cflows_reserve, permanent);
     zp->enabled  = false;
 }
 
@@ -25,6 +27,7 @@ void zeropage_reset(zeropage *zp)
     rc_bitset_reset(&zp->reserved);          // clears every bit, keeps num/cap
     rc_array_zp_var_resize(&zp->vars, 0, zp->arena);     // clears the lists, keeps the backing
     rc_array_zp_insn_resize(&zp->insns, 0, zp->arena);
+    rc_array_zp_cflow_resize(&zp->cflows, 0, zp->arena);
     zp->enabled = false;
 }
 
@@ -142,6 +145,32 @@ rc_view_zp_insn zeropage_insns(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->insns.view;
+}
+
+uint32_t zeropage_add_cflow(zeropage *zp, zp_cflow cf)
+{
+    RC_ASSERT(zp != NULL);
+    uint32_t index = zp->cflows.num;
+    rc_array_zp_cflow_push(&zp->cflows, cf, zp->arena);
+    return index;
+}
+
+rc_view_zp_cflow zeropage_cflows(const zeropage *zp)
+{
+    RC_ASSERT(zp != NULL);
+    return zp->cflows.view;
+}
+
+bool zeropage_is_unreachable(const zeropage *zp, uint32_t pc)
+{
+    RC_ASSERT(zp != NULL);
+    for (uint32_t i = 0; i < zp->cflows.num; i++) {
+        zp_cflow cf = rc_array_zp_cflow_get(&zp->cflows, i);
+        if (cf.kind == zp_cflow_unreachable && cf.site == pc) {
+            return true;
+        }
+    }
+    return false;
 }
 
 

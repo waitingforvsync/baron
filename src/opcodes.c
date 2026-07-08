@@ -341,16 +341,15 @@ uint16_t opcode_def(mnemonic m, addr_mode mode)
 
 // ---- operand + addressing-mode parsing ----
 
-// The opcode-operand token table: '#' (immediate), the parens (indirect), and the registers
-// A / X / Y. A bare register is recognised here rather than guessed from an identifier, and a
-// longer identifier still wins (so a symbol "xyz" is not the X register).
+// The DEFAULT opcode-operand token table: the structural punctuation only - '#' (immediate) and the parens
+// (indirect). No registers: in the BASE of an operand a bare A / X / Y is an ordinary symbol, never a
+// register, so `STA temp` still resolves to `temp` even when temp is literally named `x`. Registers are
+// recognised only where the grammar expects one (see operand_reg_tokens); everywhere else an identifier
+// wins, and a longer identifier always beats a keyword anyway (a symbol "xyz" is not the X register).
 static const token operand_token_entries[] = {
     {RC_STR("#"), {.type = lexeme_type_hash}},
     {RC_STR("("), {.type = lexeme_type_open_paren}},
     {RC_STR(")"), {.type = lexeme_type_close_paren}},
-    {RC_STR("A"), {.type = lexeme_type_register, .reg = {.which = reg_a}}},
-    {RC_STR("X"), {.type = lexeme_type_register, .reg = {.which = reg_x}}},
-    {RC_STR("Y"), {.type = lexeme_type_register, .reg = {.which = reg_y}}},
     // '}' closes a scope and so ends a statement: an implied/accumulator opcode may sit right before it
     // (`.routine { RTS }`). We must recognise it here rather than let it fall through as an unexpected char
     // that the no-operand peek would try to evaluate as an operand. It stays a `closer` in the statement
@@ -358,6 +357,21 @@ static const token operand_token_entries[] = {
     {RC_STR("}"), {.type = lexeme_type_close_brace}},
 };
 static const token_table operand_tokens = RC_VIEW(operand_token_entries);
+
+// The register-aware table: the same punctuation PLUS the registers A / X / Y. Used ONLY at the two operand
+// positions where a register is grammatical - the accumulator (`ASL A`), and an index following a comma
+// (`foo,X` / `(foo,X)` / `(foo),Y`). Kept separate from the default so a bare A/X/Y elsewhere stays a symbol;
+// `ASL A` still resolves as accumulator mode first because we consult this table at the accumulator slot.
+static const token operand_reg_token_entries[] = {
+    {RC_STR("#"), {.type = lexeme_type_hash}},
+    {RC_STR("("), {.type = lexeme_type_open_paren}},
+    {RC_STR(")"), {.type = lexeme_type_close_paren}},
+    {RC_STR("}"), {.type = lexeme_type_close_brace}},
+    {RC_STR("A"), {.type = lexeme_type_register, .reg = {.which = reg_a}}},
+    {RC_STR("X"), {.type = lexeme_type_register, .reg = {.which = reg_x}}},
+    {RC_STR("Y"), {.type = lexeme_type_register, .reg = {.which = reg_y}}},
+};
+static const token_table operand_reg_tokens = RC_VIEW(operand_reg_token_entries);
 
 static bool is_register(lexeme lx, reg_name which)
 {
@@ -423,7 +437,7 @@ static index_result consume_index(rc_str source, uint32_t cursor)
         return (index_result) {.reg = index_none, .next = cursor};
     }
 
-    lexer_result reg = lexer_next(source, a.next, operand_tokens);
+    lexer_result reg = lexer_next(source, a.next, operand_reg_tokens);   // after a comma: a register is expected
     if (is_register(reg.token, reg_x)) {
         return (index_result) {.reg = index_x, .next = reg.next};
     }
@@ -584,7 +598,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         // "(expr)" -> indirect (JMP's ind16, or a CMOS zero-page indirect).
         lexer_result a = lexer_next(src, e.next, operand_tokens);
         if (a.token.type == lexeme_type_comma) {
-            lexer_result reg = lexer_next(src, a.next, operand_tokens);
+            lexer_result reg = lexer_next(src, a.next, operand_reg_tokens);   // "(expr,X)": X expected
             if (!is_register(reg.token, reg_x)) {
                 return syntax_error(b, error_type_bad_index_register, cursor_at(at, a.next));
             }
@@ -598,7 +612,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         else if (a.token.type == lexeme_type_close_paren) {
             lexer_result tail = lexer_next(src, a.next, operand_tokens);
             if (tail.token.type == lexeme_type_comma) {
-                lexer_result reg = lexer_next(src, tail.next, operand_tokens);
+                lexer_result reg = lexer_next(src, tail.next, operand_reg_tokens);   // "(expr),Y": Y expected
                 if (!is_register(reg.token, reg_y)) {
                     return syntax_error(b, error_type_bad_index_register, cursor_at(at, tail.next));
                 }
@@ -615,14 +629,21 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         }
     }
     else {
-        // Plain operand. First, a bare accumulator 'A' on a shift / rmw mnemonic.
+        // Plain operand. First, a bare accumulator 'A' on a shift / rmw mnemonic - consulted with the
+        // register-aware table, so `ASL A` reads as accumulator mode even when a symbol `a` exists, yet a
+        // real symbol operand (`ASL data`) falls straight through to the expression parser below. It counts
+        // as the accumulator only when nothing but a statement terminator (or a scope-closing '}') follows.
         bool handled = false;
-        if (is_register(peek.token, reg_a) && opcode_def(m, addr_mode_acc) != 0) {
-            lexer_result after_a = lexer_next(src, peek.next, operand_tokens);
-            if (after_a.token.type == lexeme_type_terminator) {
-                mode = addr_mode_acc;
-                after = peek.next;
-                handled = true;
+        if (opcode_def(m, addr_mode_acc) != 0) {
+            lexer_result areg = lexer_next(src, start, operand_reg_tokens);
+            if (is_register(areg.token, reg_a)) {
+                lexer_result after_a = lexer_next(src, areg.next, operand_tokens);
+                if (after_a.token.type == lexeme_type_terminator
+                    || after_a.token.type == lexeme_type_close_brace) {
+                    mode = addr_mode_acc;
+                    after = areg.next;
+                    handled = true;
+                }
             }
         }
         if (!handled) {

@@ -81,11 +81,37 @@ typedef struct zp_insn {
 #include "richc/template/array.h"
 
 
+// A control-flow annotation: the programmer's assertion where static analysis cannot see the truth on its
+// own. UNREACHABLE says control cannot fall through to its own pc (an always-taken branch's dead edge, which
+// the CFG then prunes); CANCALL names the real target(s) of a JSR the analysis cannot follow (a self-modified
+// or dispatched call), so the callee footprint can still be bounded. Both are TRUSTED overrides - a wrong one
+// is the single way to defeat the certainty contract - but they sit exactly where the analysis would
+// otherwise refuse, turning a "cannot prove it" into the programmer's explicit "I promise it is these".
+// Recorded on the final pass only, like insns. (CANJUMP - an indirect JMP's targets - waits on a variable-
+// length successor CFG: a jump table has more than the two successors a basic_block holds today.)
+typedef enum zp_cflow_kind {
+    zp_cflow_unreachable = 0,   // control cannot fall through to `site`
+    zp_cflow_cancall,           // the JSR at `site` may call `target` (overrides its literal target)
+} zp_cflow_kind;
+
+typedef struct zp_cflow {
+    uint32_t site;    // pc of the annotated instruction: UNREACHABLE its own pc; CANCALL the JSR's pc
+    uint32_t target;  // a call target address (CANCALL); RC_INDEX_NONE for UNREACHABLE
+    uint8_t  kind;    // zp_cflow_kind
+    cursor   at;      // where the annotation sits, for diagnostics
+} zp_cflow;
+
+#define RC_ARRAY_TYPE zp_cflow
+#define RC_ARRAY_NAME zp_cflow
+#include "richc/template/array.h"
+
+
 typedef struct zeropage {
     rc_arena        *arena;      // BORROWED permanent: backs the reserve bitset, var list and insn list
     rc_bitset        reserved;   // 256 bits: reserved[b] iff zero-page byte b may be auto-allocated
     rc_array_zp_var  vars;       // the declared ZPAUTO1/ZPAUTO2s, recorded on the final pass (see zeropage.c)
     rc_array_zp_insn insns;      // the VAR-touching instructions, recorded on the final pass
+    rc_array_zp_cflow cflows;    // UNREACHABLE / CANCALL annotations, recorded on the final pass
     bool             enabled;    // a ZPRESERVE directive has run -> the ZPAUTO1/ZPAUTO2 feature is active
 } zeropage;
 
@@ -140,6 +166,14 @@ void zeropage_resolve_vregs(zeropage *zp);
 uint32_t         zeropage_insn_count(const zeropage *zp);
 zp_insn          zeropage_insn_get(const zeropage *zp, uint32_t index);
 rc_view_zp_insn  zeropage_insns(const zeropage *zp);   // the whole insn list, for the CFG builder
+
+// Record one control-flow annotation (final pass only). Returns its index.
+uint32_t         zeropage_add_cflow(zeropage *zp, zp_cflow cf);
+rc_view_zp_cflow zeropage_cflows(const zeropage *zp);   // all annotations, for the CFG + footprint passes
+
+// True if an UNREACHABLE annotation marks `pc` - control cannot fall through to it. A linear scan;
+// annotations are few.
+bool             zeropage_is_unreachable(const zeropage *zp, uint32_t pc);
 
 
 #endif // ifndef BARON_ZEROPAGE_H_

@@ -31,6 +31,8 @@ static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_fl
 static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -205,6 +207,8 @@ static const token statement_token_entries[] = {
     {RC_STR("zpreserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpreserve}}},
     {RC_STR("zpauto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto1}}},   // 1-byte ZP variable
     {RC_STR("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
+    {RC_STR("unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_unreachable}}}, // dead fall-through
+    {RC_STR("cancall"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_cancall}}},   // a JSR's real targets
     {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
@@ -584,11 +588,11 @@ static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, parse_fla
             // A dotted name is a legal token but not a legal ZPAUTO - record it and consume just the name.
             semantic_error(b, flags, error_type_expected_var_name, def);
         }
-        else if (rc_str_is_equal_insensitive(name, RC_STR("a")) ||
-                 rc_str_is_equal_insensitive(name, RC_STR("x")) ||
-                 rc_str_is_equal_insensitive(name, RC_STR("y"))) {
-            // A register-named variable would be read as the register in operand position (STA x -> the X
-            // register, not the variable), silently escaping attribution. Reject it rather than miscompile.
+        else if (rc_str_is_equal_insensitive(name, RC_STR("a"))) {
+            // `a` alone stays forbidden: it collides with accumulator addressing, so `ASL a` would read as
+            // `ASL A` (accumulator) and silently drop the variable - and it even changes size (1 byte, not 2),
+            // so no patch could rescue it. X and Y are safe now: they are registers only after a comma (an
+            // index position a base operand never occupies), so `STA x` / `LDA (y),Y` attribute correctly.
             semantic_error(b, flags, error_type_zpauto_register_name, def);
         }
         else if (flags.active) {
@@ -630,6 +634,89 @@ static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_fl
 static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     return handle_zpauto(b, at, scope, flags, 2, scratch);
+}
+
+// UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch, that control cannot fall
+// through to this point. The allocator's CFG would otherwise wire the branch's fall-through edge and treat
+// whatever is live down that dead path as live across the branch, pinning bytes needlessly. Recording this
+// pc lets zeropage_finalize prune that one edge. It is TRUSTED - a wrong UNREACHABLE (a fall-through that
+// really can happen) is one of the few ways to defeat the certainty contract, but it is the programmer's
+// explicit promise. Only meaningful on the final pass, and only with the feature enabled.
+static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    (void) scope;
+    (void) scratch;
+    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+        zeropage_add_cflow(&b->zeropage, (zp_cflow) {
+            .site   = overlays_pc(&b->overlays, b->current_overlay),
+            .target = RC_INDEX_NONE,
+            .kind   = zp_cflow_unreachable,
+            .at     = cursor_at(at, at.pos),
+        });
+    }
+    return require_separator(b, at);
+}
+
+// CANCALL <targets> - the programmer declares the real destination(s) of the JSR immediately preceding it (a
+// self-modified operand, or a dispatch the analysis cannot follow). Without it, such a call has an unknown
+// footprint and a value held live across it is refused (error_type_zpauto_across_call). With it, the callee
+// footprint is bounded by the union of the named routines. The annotation attaches to the last recorded
+// instruction, which on the final pass is that JSR; if it is not a call the targets bind to nothing and are
+// harmless. A forward-referenced target defers like any address. TRUSTED, like UNREACHABLE.
+static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+    bool unresolved = false;
+
+    // The site is the JSR this annotation qualifies. Only the final pass records instructions, so only then is
+    // there a site to attach to; the settling passes still parse the list so the statement stays well-formed.
+    uint32_t site = RC_INDEX_NONE;
+    if (flags.final) {
+        uint32_t ni = zeropage_insn_count(&b->zeropage);
+        if (ni > 0) {
+            zp_insn last = zeropage_insn_get(&b->zeropage, ni - 1);
+            if (last.flow == zp_flow_call) {
+                site = last.pc;
+            }
+        }
+    }
+
+    while (true) {
+        expr_result e = eval(b, cursor_at(at, pos), scope, scratch);
+        if (e.error != expr_error_none) {
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+        }
+
+        if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage) && site != RC_INDEX_NONE) {
+            int_argument arg = int_argument_make(e.value, flags.final, pos);
+            switch (arg.type) {
+                case int_argument_type_known:
+                    zeropage_add_cflow(&b->zeropage, (zp_cflow) {
+                        .site   = site,
+                        .target = (uint32_t) (arg.value & 0xFFFF),
+                        .kind   = zp_cflow_cancall,
+                        .at     = cursor_at(at, pos),
+                    });
+                    break;
+                case int_argument_type_unresolved:
+                    unresolved = true;   // a forward target: settle it next pass
+                    break;
+                case int_argument_type_error:
+                    semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));
+                    break;
+            }
+        }
+
+        lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;   // another target follows
+        }
+        parse_result r = require_separator(b, cursor_at(at, e.next));
+        r.unresolved = unresolved;
+        return r;
+    }
 }
 
 // Emit `bits` as `width` little-endian bytes into the current overlay.
@@ -1789,7 +1876,29 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
     rc_arena work     = rc_arena_make_default();
     rc_arena wscratch = rc_arena_make_default();
 
-    cfg g       = cfg_build(insns, &work, wscratch);
+    rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
+
+    cfg g = cfg_build(insns, &work, wscratch);
+
+    // Apply UNREACHABLE annotations before liveness: prune an always-taken branch's dead fall-through edge, so
+    // whatever lives down the never-taken path is not treated as live across the branch. Only a fall-through
+    // (branch / straight-line), never a jump's target edge, is a fall-through; succ[0] is the fall-through and
+    // succ[1] the taken target, so we only ever touch succ[0].
+    for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
+        basic_block *blk = rc_array_basic_block_at(&g.blocks, bi);
+        if (blk->num_insns == 0 || blk->succ[0] == RC_INDEX_NONE) {
+            continue;
+        }
+        zp_insn last = rc_view_zp_insn_get(insns, blk->first_insn + blk->num_insns - 1);
+        if (last.flow != zp_flow_branch && last.flow != zp_flow_normal) {
+            continue;
+        }
+        basic_block fall = rc_array_basic_block_get(&g.blocks, blk->succ[0]);
+        if (zeropage_is_unreachable(&b->zeropage, fall.pc)) {
+            blk->succ[0] = RC_INDEX_NONE;
+        }
+    }
+
     liveness lv = liveness_analyze(g, insns, nv, 0, &work, wscratch);
 
     bool refused = false;
@@ -1824,31 +1933,25 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
         for (uint32_t k = blk.num_insns; k-- > 0; ) {
             zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + k);
             if (n.flow == zp_flow_call && rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
-                uint32_t tb = (n.target == RC_INDEX_NONE) ? RC_INDEX_NONE : cfg_block_at_pc(g, n.target);
-                if (tb == RC_INDEX_NONE) {
+                // What this call reaches - CANCALL overrides an untrackable literal target with a declared set.
+                footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, wscratch);
+                if (fp.unknown_call) {
                     baron_error(b, error_type_zpauto_across_call, n.at);
                     refused = true;
                 }
+                else if (fp.recursive) {
+                    baron_error(b, error_type_zpauto_recursion, n.at);
+                    refused = true;
+                }
                 else {
-                    footprint fp = footprint_compute(g, insns, tb, nv, &work, wscratch);
-                    if (fp.unknown_call) {
-                        baron_error(b, error_type_zpauto_across_call, n.at);
-                        refused = true;
-                    }
-                    else if (fp.recursive) {
-                        baron_error(b, error_type_zpauto_recursion, n.at);
-                        refused = true;
-                    }
-                    else {
-                        // Every var live across this call interferes with every vreg the callee touches.
-                        for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
-                             c = rc_bitset_get_next_set(&live, c + 1)) {
-                            for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
-                                 t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
-                                if (c != t) {
-                                    rc_bitset_set(&lv.interfere[c], t);
-                                    rc_bitset_set(&lv.interfere[t], c);
-                                }
+                    // Every var live across this call interferes with every vreg the callee touches.
+                    for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
+                         c = rc_bitset_get_next_set(&live, c + 1)) {
+                        for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
+                             t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
+                            if (c != t) {
+                                rc_bitset_set(&lv.interfere[c], t);
+                                rc_bitset_set(&lv.interfere[t], c);
                             }
                         }
                     }
@@ -2080,6 +2183,19 @@ RC_TEST_STEP(assemble, addressing_modes, fix)
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ASL A"),        (uint8_t[]) {0x0A}, 1));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("NOP"),          (uint8_t[]) {0xEA}, 1));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("STA &70"),      (uint8_t[]) {0x85, 0x70}, 2));
+
+    // Register letters are only registers where the grammar expects one. A symbol named after a register
+    // reads as that symbol in the operand base: `x`/`y`/`a` bound to &70 give a zero-page access, not a
+    // register. (`a` is legal as a plain symbol - only ZPAUTO forbids it.)
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("x = &70 : STA x"),  (uint8_t[]) {0x85, 0x70}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("y = &71 : LDA y"),  (uint8_t[]) {0xA5, 0x71}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("a = &72 : LDA a"),  (uint8_t[]) {0xA5, 0x72}, 2));
+    // But `ASL A` is accumulator mode FIRST, even when a symbol `a` is in scope - the register wins at the
+    // accumulator slot. To shift memory at `a` you would address it another way (e.g. via a differently named
+    // label); the ambiguity resolves in the accumulator's favour by design.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("a = &72 : ASL A"),  (uint8_t[]) {0x0A}, 1));
+    // And the comma position keeps its register meaning: `x` as an index is the X register, not the symbol.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("x = &99 : LDA &70,X"), (uint8_t[]) {0xB5, 0x70}, 2));
 }
 
 RC_TEST_STEP(assemble, multiple_statements, fix)
@@ -2258,10 +2374,11 @@ RC_TEST_STEP(assemble, zpauto_errors, fix)
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 a.b") == error_type_expected_var_name);
     // Re-declaring the same name in one scope is a duplicate (mirrors labels).
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 foo : ZPAUTO1 foo") == error_type_duplicate_symbol);
-    // A register-named variable (A/X/Y, any case) is ambiguous in operand position - rejected up front.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 x") == error_type_zpauto_register_name);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO2 Y") == error_type_zpauto_register_name);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 A") == error_type_zpauto_register_name);
+    // `a` alone is rejected (ambiguous with accumulator addressing, ASL A). X and Y are fine now - they only
+    // read as registers after a comma - so a variable may be named x or y.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 A")      == error_type_zpauto_register_name);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 x") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 Y") != 0);
 }
 
 RC_TEST_STEP(assemble, zpauto_operand_is_zeropage, fix)
@@ -2289,6 +2406,11 @@ RC_TEST_STEP(assemble, zpauto_operand_is_zeropage, fix)
                           (uint8_t[]){0xA5, b0, 0xA5, (uint8_t)(b0 + 1)}, 4));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : LDA (ptr),Y"),
                           (uint8_t[]){0xB1, b0}, 2));
+
+    // A variable named `x` (or `y`) now reads as a symbol in the operand base - the register-aware table is
+    // only consulted after a comma - so it attributes and is patched to its allocated byte like any other.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 x : STA x : LDA x"),
+                          (uint8_t[]){0x85, b0, 0xA5, b0}, 4));
 }
 
 // A ZPAUTO symbol's allocated zero-page address, or -1 if it is not a plain number (unbound / failed).
@@ -2374,6 +2496,86 @@ RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
     // More simultaneously-live variables than reserved bytes is a spill: p and q overlap but only &70 is free.
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 p, q : STA p : STA q : LDA p : LDA q : RTS")
                   == error_type_zeropage_full);
+}
+
+RC_TEST_STEP(assemble, zpauto_unreachable_prunes_dead_edge, fix)
+{
+    // UNREACHABLE tells the allocator an always-taken branch cannot fall through. `hot` (used on the taken
+    // path) and `cold` (used only on the never-taken fall-through) would otherwise both be live across the
+    // branch and interfere - two variables, but only &70 reserved, so a spill.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 hot, cold\n"
+                      "STA hot : BNE taken : LDA cold : RTS\n"
+                      ".taken\n"
+                      "LDA hot : RTS") == error_type_zeropage_full);
+
+    // With UNREACHABLE after the branch, the dead fall-through edge is pruned: cold is no longer live across
+    // the branch, hot and cold no longer interfere, and they share the single reserved byte.
+    uint32_t passes = ASM("ZPRESERVE &70 : ZPAUTO1 hot, cold\n"
+                          "STA hot : BNE taken : UNREACHABLE : LDA cold : RTS\n"
+                          ".taken\n"
+                          "LDA hot : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "hot"),  ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "cold"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpauto_multi_entry_multi_exit, fix)
+{
+    // A single braced block with TWO entry points (each its own JSR target) and several RTS exits, including
+    // the BCC over : RTS : .over early-out shape. Routines are recovered from the CFG, so this is not one
+    // routine with one entry - it is two, and both allocate cleanly. v (entry1) and w (entry2) never overlap,
+    // so they share &70.
+    uint32_t p = ASM("ZPRESERVE &70..&7F\n"
+                     "JSR routine.entry1 : JSR routine.entry2 : RTS\n"
+                     ".routine {\n"
+                     "  .entry1 : ZPAUTO1 v : STA v : LDA v : RTS\n"
+                     "  .entry2 : ZPAUTO1 w : STA w : BCC over : RTS\n"
+                     "  .over : LDA w : RTS\n"
+                     "}");
+    RC_CHECK_TRUE(p != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "routine.v"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "routine.w"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpauto_control_flow_crosses_scopes, fix)
+{
+    // Scopes name; the CFG is recovered from real branches, not braces. Here `n` is written inside .work and is
+    // live across a BEQ that leaves the block for the shared .done label in another scope (referenced there by
+    // its dotted path - naming IS by scope). Liveness follows the edge across the brace, so the allocation is
+    // still correct and `n` settles on &70. A statically-known target may cross a scope boundary freely.
+    uint32_t p = ASM("ZPRESERVE &70..&7F\n"
+                     ".work { ZPAUTO1 n : STA n : BEQ done : LDA n : STA n }\n"
+                     ".done : LDA work.n : RTS");
+    RC_CHECK_TRUE(p != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "work.n"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpauto_cancall_bounds_dispatched_call, fix)
+{
+    // Baseline: the JSR is taken at its literal target (handlerA) alone, so `keep` (live across the call)
+    // interferes only with handlerA's footprint. handlerB is never called, so its local is a free agent and
+    // reuses keep's byte.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                      "STA keep : JSR handlerA : LDA keep : RTS\n"
+                      ".handlerA { ZPAUTO1 ha : STA ha : LDA ha : RTS }\n"
+                      ".handlerB { ZPAUTO1 hb : STA hb : LDA hb : RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"),        ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "handlerB.hb"), ==, 0x70);   // unseen callee -> reuses keep's byte
+
+    // CANCALL declares the call may reach handlerA OR handlerB (a self-modified / dispatched JSR). Now its
+    // footprint covers both, keep interferes with handlerB.hb too, and hb is forced off keep's byte.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                          "STA keep : JSR handlerA : CANCALL handlerA, handlerB : LDA keep : RTS\n"
+                          ".handlerA { ZPAUTO1 ha : STA ha : LDA ha : RTS }\n"
+                          ".handlerB { ZPAUTO1 hb : STA hb : LDA hb : RTS }");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"),        ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "handlerB.hb"), !=, 0x70);   // now inside the call footprint
 }
 
 RC_TEST_STEP(assemble, zpauto_macro_local_is_per_invocation, fix)

@@ -23,10 +23,19 @@ typedef struct footprint {
 // Compute the footprint of the routine entered at `entry_block`: the union of vregs touched by every block
 // reachable from it via INTRAprocedural edges (loops are fine), plus the footprint of every routine it calls
 // (each JSR target), transitively. A cycle in the CALL graph sets `recursive`; an untrackable call target (or
-// a callee that itself leaves via a computed jump) sets `unknown_call`. `touched` lives in `arena`; `scratch`
-// (by value, distinct from `arena`) backs the transient per-routine work sets.
-footprint footprint_compute(cfg g, rc_view_zp_insn insns, uint32_t entry_block, uint32_t num_vars,
-                            rc_arena *arena, rc_arena scratch);
+// a callee that itself leaves via a computed jump) sets `unknown_call`. A CANCALL annotation in `cflows`
+// overrides a JSR's literal target with the declared set (so a self-modified / dispatched call can still be
+// bounded). `touched` lives in `arena`; `scratch` (by value, distinct from `arena`) backs the transient
+// per-routine work sets.
+footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t entry_block,
+                            uint32_t num_vars, rc_arena *arena, rc_arena scratch);
+
+// The footprint of everything a single call site `call` may reach: the union over its callee(s). A CANCALL
+// annotation in `cflows` naming `call.pc` overrides the literal target with the declared set; otherwise the
+// literal target (`call.target`) is used. A target resolving to no block sets `unknown_call`. This is what a
+// caller needs to test a value held live across the call - the callee clobbers its whole footprint.
+footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, zp_insn call,
+                            uint32_t num_vars, rc_arena *arena, rc_arena scratch);
 
 
 #endif // ifndef BARON_FOOTPRINT_H_
