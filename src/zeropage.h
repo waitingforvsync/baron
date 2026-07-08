@@ -36,10 +36,34 @@ typedef struct zp_var {
 #include "richc/template/array.h"
 
 
+// How an instruction touches a variable, as a bitmask (an RMW instruction like INC is read|write). This is
+// the raw material for the liveness analysis: a write is a def, a read is a use.
+typedef enum vref_rw {
+    vref_none  = 0,
+    vref_read  = 1,
+    vref_write = 2,
+} vref_rw;
+
+// One recorded instruction that touches a ZPAUTO variable - the seed of the IR the liveness pass will walk.
+// `vreg` indexes the var list; `rw` is how this instruction touches it (for an indirect access through a
+// pointer variable, the pointer is always READ, whatever the instruction does to the pointed-to data). `at`
+// is the operand's source position (for ordering + future diagnostics). Recorded on the final pass only.
+typedef struct zp_insn {
+    uint32_t vreg;
+    uint8_t  rw;
+    cursor   at;
+} zp_insn;
+
+#define RC_ARRAY_TYPE zp_insn
+#define RC_ARRAY_NAME zp_insn
+#include "richc/template/array.h"
+
+
 typedef struct zeropage {
-    rc_arena        *arena;      // BORROWED permanent: backs the reserve bitset and the var list
+    rc_arena        *arena;      // BORROWED permanent: backs the reserve bitset, var list and insn list
     rc_bitset        reserved;   // 256 bits: reserved[b] iff zero-page byte b may be auto-allocated
     rc_array_zp_var  vars;       // the declared ZPAUTO1/ZPAUTO2s, recorded on the final pass (see zeropage.c)
+    rc_array_zp_insn insns;      // the VAR-touching instructions, recorded on the final pass
     bool             enabled;    // a ZPRESERVE directive has run -> the ZPAUTO1/ZPAUTO2 feature is active
 } zeropage;
 
@@ -74,6 +98,16 @@ uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint8_t wid
 
 uint32_t zeropage_var_count(const zeropage *zp);
 zp_var   zeropage_var_get(const zeropage *zp, uint32_t index);
+
+// The index of the variable defined at `def` (its identity cursor), or RC_INDEX_NONE if `def` is not a
+// ZPAUTO declaration. A linear scan - variables are few. Used to map an operand's resolved binding to a vreg.
+uint32_t zeropage_find_var_by_def(const zeropage *zp, cursor def);
+
+// Record a VAR-touching instruction into the IR (final pass only). Returns its index.
+uint32_t zeropage_add_insn(zeropage *zp, uint32_t vreg, uint8_t rw, cursor at);
+
+uint32_t zeropage_insn_count(const zeropage *zp);
+zp_insn  zeropage_insn_get(const zeropage *zp, uint32_t index);
 
 
 #endif // ifndef BARON_ZEROPAGE_H_

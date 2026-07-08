@@ -150,6 +150,23 @@ cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
                : rc_trie_symbol_value_get(&s->symbol_pool, found).def;
 }
 
+cursor scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
+{
+    RC_ASSERT(s != NULL);
+    if (!is_leaf_name(name)) {
+        return cursor_none();   // a dotted operand is not attributed to a single variable (yet)
+    }
+    // Same parent-walk as a bare-name value lookup, but we return the binding's def (its identity).
+    for (uint32_t i = scope_index; i != RC_INDEX_NONE; i = RC_AT(s->nodes, i).parent) {
+        rc_trie_symbol syms  = RC_AT(s->nodes, i).symbols;
+        uint32_t       found = rc_trie_symbol_find(syms, &s->symbol_pool, name);
+        if (found != RC_INDEX_NONE) {
+            return rc_trie_symbol_value_get(&s->symbol_pool, found).def;
+        }
+    }
+    return cursor_none();
+}
+
 scopes_view scopes_view_make(const scopes *s)
 {
     RC_ASSERT(s != NULL);

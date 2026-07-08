@@ -3,7 +3,10 @@
 #include "richc/macros.h"
 
 
-enum { zeropage_vars_reserve = 64 };   // a very large routine's worth of locals; grows if exceeded
+enum {
+    zeropage_vars_reserve  = 64,    // a very large routine's worth of locals; grows if exceeded
+    zeropage_insns_reserve = 256,   // a comfortable straight-line routine's worth of VAR touches
+};
 
 void zeropage_init(zeropage *zp, rc_arena *permanent)
 {
@@ -12,6 +15,7 @@ void zeropage_init(zeropage *zp, rc_arena *permanent)
     zp->reserved = (rc_bitset) {0};
     rc_bitset_resize(&zp->reserved, zeropage_size, permanent);   // 256 addressable, all zero
     zp->vars     = rc_array_zp_var_make(zeropage_vars_reserve, permanent);
+    zp->insns    = rc_array_zp_insn_make(zeropage_insns_reserve, permanent);
     zp->enabled  = false;
 }
 
@@ -19,7 +23,8 @@ void zeropage_reset(zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     rc_bitset_reset(&zp->reserved);          // clears every bit, keeps num/cap
-    rc_array_zp_var_resize(&zp->vars, 0, zp->arena);   // clears the list, keeps the backing
+    rc_array_zp_var_resize(&zp->vars, 0, zp->arena);     // clears the lists, keeps the backing
+    rc_array_zp_insn_resize(&zp->insns, 0, zp->arena);
     zp->enabled = false;
 }
 
@@ -79,6 +84,38 @@ zp_var zeropage_var_get(const zeropage *zp, uint32_t index)
 {
     RC_ASSERT(zp != NULL);
     return rc_array_zp_var_get(&zp->vars, index);
+}
+
+uint32_t zeropage_find_var_by_def(const zeropage *zp, cursor def)
+{
+    RC_ASSERT(zp != NULL);
+    for (uint32_t i = 0; i < zp->vars.num; i++) {
+        if (cursor_is_equal(rc_array_zp_var_get(&zp->vars, i).def, def)) {
+            return i;
+        }
+    }
+    return RC_INDEX_NONE;
+}
+
+uint32_t zeropage_add_insn(zeropage *zp, uint32_t vreg, uint8_t rw, cursor at)
+{
+    RC_ASSERT(zp != NULL);
+    return rc_array_zp_insn_push(
+        &zp->insns,
+        (zp_insn) {.vreg = vreg, .rw = rw, .at = at},
+        zp->arena);
+}
+
+uint32_t zeropage_insn_count(const zeropage *zp)
+{
+    RC_ASSERT(zp != NULL);
+    return zp->insns.num;
+}
+
+zp_insn zeropage_insn_get(const zeropage *zp, uint32_t index)
+{
+    RC_ASSERT(zp != NULL);
+    return rc_array_zp_insn_get(&zp->insns, index);
 }
 
 
@@ -161,6 +198,28 @@ RC_TEST(zeropage, var_registry)
     zp_var v1 = zeropage_var_get(&zp, 1);
     RC_CHECK(v1.width, ==, (uint8_t) 2);
 
+    // find_var_by_def maps a binding's identity cursor back to its vreg index (or NONE).
+    RC_CHECK(zeropage_find_var_by_def(&zp, (cursor) {.source = 0, .pos = 20}), ==, 1u);
+    RC_CHECK(zeropage_find_var_by_def(&zp, (cursor) {.source = 0, .pos = 10}), ==, 0u);
+    RC_CHECK(zeropage_find_var_by_def(&zp, (cursor) {.source = 0, .pos = 99}), ==, RC_INDEX_NONE);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(zeropage, insn_list)
+{
+    rc_arena arena = rc_arena_make_default();
+    zeropage zp;
+    zeropage_init(&zp, &arena);
+
+    RC_CHECK(zeropage_insn_count(&zp), ==, 0u);
+    zeropage_add_insn(&zp, 0, vref_write, (cursor) {.source = 0, .pos = 4});
+    zeropage_add_insn(&zp, 0, vref_read | vref_write, (cursor) {.source = 0, .pos = 8});
+    RC_CHECK(zeropage_insn_count(&zp), ==, 2u);
+    RC_CHECK((int) zeropage_insn_get(&zp, 0).rw, ==, (int) vref_write);
+    RC_CHECK((int) zeropage_insn_get(&zp, 1).rw, ==, (int) (vref_read | vref_write));
+    RC_CHECK(zeropage_insn_get(&zp, 1).at.pos, ==, 8u);
+
     rc_arena_deinit(&arena);
 }
 
@@ -173,15 +232,18 @@ RC_TEST(zeropage, reset_clears_for_next_pass)
     zeropage_reserve(&zp, 0x70);
     zeropage_reserve(&zp, 0x71);
     zeropage_add_var(&zp, RC_STR("foo"), 0, 1, (cursor) {0});
+    zeropage_add_insn(&zp, 0, vref_read, (cursor) {0});
     RC_CHECK(zeropage_reserved_count(&zp), ==, 2u);
     RC_CHECK(zeropage_var_count(&zp), ==, 1u);
+    RC_CHECK(zeropage_insn_count(&zp), ==, 1u);
 
-    // A new pass starts from an empty, dormant set with no vars (the backing is kept).
+    // A new pass starts from an empty, dormant set with no vars or insns (the backing is kept).
     zeropage_reset(&zp);
     RC_CHECK_FALSE(zeropage_is_enabled(&zp));
     RC_CHECK(zeropage_reserved_count(&zp), ==, 0u);
     RC_CHECK_FALSE(zeropage_is_reserved(&zp, 0x70));
     RC_CHECK(zeropage_var_count(&zp), ==, 0u);
+    RC_CHECK(zeropage_insn_count(&zp), ==, 0u);
 
     rc_arena_deinit(&arena);
 }

@@ -139,6 +139,13 @@ bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name);
 // here. Used to point a duplicate-symbol error back at the binding it collides with.
 cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 
+// The def cursor of the binding a BARE name resolves to from scope_index, walking up the parent chain
+// (nearest enclosing definition wins) - the same shadowing rule as scopes_get_symbol, but returning the
+// binding's IDENTITY (its def) rather than its value. cursor_none() if unbound or if the name is dotted
+// (a dotted operand is not attributed to a variable yet). Used by the ZP allocator to map an operand back
+// to the exact declaration it references.
+cursor scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
+
 // Look a symbol up, starting from scope_index. A bare name walks up the parent
 // chain and takes the nearest enclosing definition. A dotted path (a.b.sym) finds
 // its head the same way, then descends the rest strictly through the child maps

@@ -2137,6 +2137,57 @@ RC_TEST_STEP(assemble, zpauto_operand_is_zeropage, fix)
                           (uint8_t[]){0xB1, ph}, 2));
 }
 
+RC_TEST(assemble, zpauto_rw_observation)
+{
+    // The final pass records each ZPAUTO-touching instruction into the ZP IR with its read/write class,
+    // attributed to the right vreg. The IR is internal (not on baron_result yet), so we build a baron
+    // directly and read its zeropage. [Stage B1]
+    baron_arenas arenas = baron_arenas_make();
+
+    // Straight-line: STA is a write, LDA a read, INC a read-modify-write; all name the one variable (vreg 0).
+    {
+        baron b = baron_make(&arenas);
+        uint32_t s = source_files_add_string(&b.source_files, RC_STR("t1"),
+            RC_STR("ZPRESERVE &70..&7F : ZPAUTO1 foo : STA foo : LDA foo : INC foo"));
+        run_passes(&b, s, arenas.scratch);
+        RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 3u);
+        RC_CHECK((int) zeropage_insn_get(&b.zeropage, 0).rw, ==, (int) vref_write);
+        RC_CHECK((int) zeropage_insn_get(&b.zeropage, 1).rw, ==, (int) vref_read);
+        RC_CHECK((int) zeropage_insn_get(&b.zeropage, 2).rw, ==, (int) (vref_read | vref_write));
+        RC_CHECK(zeropage_insn_get(&b.zeropage, 0).vreg, ==, 0u);
+        RC_CHECK(zeropage_insn_get(&b.zeropage, 1).vreg, ==, 0u);
+        RC_CHECK(zeropage_insn_get(&b.zeropage, 2).vreg, ==, 0u);
+    }
+
+    // A 2-byte pointer: lo (ptr) and hi (ptr+1) both attribute to the one vreg; an indirect (ptr),Y READS
+    // the pointer to dereference it - even a store THROUGH it reads the pointer (the write hits the target).
+    {
+        baron b = baron_make(&arenas);
+        uint32_t s = source_files_add_string(&b.source_files, RC_STR("t2"),
+            RC_STR("ZPRESERVE &70..&7F : ZPAUTO2 ptr : STA ptr : STA ptr+1 : LDA (ptr),Y : STA (ptr),Y"));
+        run_passes(&b, s, arenas.scratch);
+        RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 4u);
+        RC_CHECK((int) zeropage_insn_get(&b.zeropage, 0).rw, ==, (int) vref_write);   // STA ptr
+        RC_CHECK((int) zeropage_insn_get(&b.zeropage, 1).rw, ==, (int) vref_write);   // STA ptr+1
+        RC_CHECK((int) zeropage_insn_get(&b.zeropage, 2).rw, ==, (int) vref_read);    // LDA (ptr),Y
+        RC_CHECK((int) zeropage_insn_get(&b.zeropage, 3).rw, ==, (int) vref_read);    // STA (ptr),Y
+        for (uint32_t i = 0; i < 4; i++) {
+            RC_CHECK(zeropage_insn_get(&b.zeropage, i).vreg, ==, 0u);
+        }
+    }
+
+    // An ordinary symbol or a literal address in operand position records nothing.
+    {
+        baron b = baron_make(&arenas);
+        uint32_t s = source_files_add_string(&b.source_files, RC_STR("t3"),
+            RC_STR("ZPRESERVE &70..&7F : label = &50 : LDA label : LDA &2000 : LDA #7"));
+        run_passes(&b, s, arenas.scratch);
+        RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 0u);
+    }
+
+    baron_arenas_deinit(&arenas);
+}
+
 RC_TEST_STEP(assemble, org_and_labels, fix)
 {
     // ORG sets the label's value but not where code lands (code still fills from index 0).

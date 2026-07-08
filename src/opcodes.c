@@ -440,6 +440,42 @@ static index_result consume_index(rc_str source, uint32_t cursor)
     };
 }
 
+// Indirect modes dereference a zero-page POINTER: the pointer variable is read to form the effective
+// address, so it is always a READ, whatever the instruction does to the pointed-to data.
+static bool is_indirect_mode(addr_mode mode)
+{
+    return mode == addr_mode_indx || mode == addr_mode_indy || mode == addr_mode_ind;
+}
+
+// Record a ZPAUTO-touching instruction into the zero-page IR, for the allocator's future liveness analysis.
+// Only on the final pass of an active branch with the feature enabled, and only when the operand's leading
+// identifier resolves (with shadowing) to a declared ZPAUTO variable. The rw class comes from the cell for a
+// DIRECT access (the variable IS the operand); an INDIRECT access reads the variable as a pointer. `operand_pos`
+// is where the operand expression begins, or RC_INDEX_NONE for a no-operand / immediate instruction.
+static void observe_var_operand(baron *b, cursor at, uint32_t scope, parse_flags flags,
+                                addr_mode mode, uint16_t cell, uint32_t operand_pos)
+{
+    if (operand_pos == RC_INDEX_NONE || !flags.final || !flags.active || !zeropage_is_enabled(&b->zeropage)) {
+        return;
+    }
+    rc_str src = source_files_text(&b->source_files, at.source);
+    lexer_result lx = lexer_next(src, operand_pos, operand_tokens);
+    if (lx.token.type != lexeme_type_identifier) {
+        return;   // a literal address or a register - not a variable reference
+    }
+    cursor def = scopes_resolve_symbol_def(&b->scopes, scope, lx.token.identifier.name);
+    uint32_t vreg = cursor_is_none(def) ? RC_INDEX_NONE : zeropage_find_var_by_def(&b->zeropage, def);
+    if (vreg == RC_INDEX_NONE) {
+        return;   // resolves to nothing, or to an ordinary symbol - not a ZPAUTO variable
+    }
+    uint8_t rw = is_indirect_mode(mode)
+                     ? (uint8_t) vref_read
+                     : (uint8_t) (((cell & op_read) ? vref_read : 0) | ((cell & op_write) ? vref_write : 0));
+    if (rw != vref_none) {
+        zeropage_add_insn(&b->zeropage, vreg, rw, cursor_at(at, operand_pos));
+    }
+}
+
 struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
                                  uint32_t scope, parse_flags flags, rc_arena scratch)
 {
@@ -449,6 +485,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     uint32_t start = at.pos;              // just past the mnemonic
     addr_mode mode;
     int_argument arg = {.type = int_argument_type_known};
+    uint32_t operand_base = RC_INDEX_NONE;   // where a memory operand's expression begins (for VAR observation)
     uint32_t  after;                       // past the operand shell, before the separator
 
     lexer_result peek = lexer_next(src, start, operand_tokens);
@@ -478,6 +515,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         after = e.next;
     }
     else if (peek.token.type == lexeme_type_open_paren) {
+        operand_base = peek.next;   // the pointer expression inside the parentheses
         expr_result e = eval(b, cursor_at(at, peek.next), scope, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
@@ -530,6 +568,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
             }
         }
         if (!handled) {
+            operand_base = start;   // the zero-page / absolute operand expression
             expr_result e = eval(b, cursor_at(at, start), scope, scratch);
             if (e.error != expr_error_none) {
                 return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
@@ -571,6 +610,10 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         semantic_error(b, flags, error_type_bad_addressing_mode, cursor_at(at, start));
         return require_separator(b, cursor_at(at, after));
     }
+
+    // Record this instruction into the ZP IR if its operand names a ZPAUTO variable (final pass, feature on).
+    observe_var_operand(b, at, scope, flags, mode, cell, operand_base);
+
     overlays_emit_u8(&b->overlays, overlay, (uint8_t)(cell & 0xFF));
 
     uint32_t width = mode_operand_bytes(mode);
