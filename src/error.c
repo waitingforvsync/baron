@@ -15,6 +15,7 @@ rc_str error_type_name(error_type e)
         case error_type_expected_separator:      return RC_STR("Expected a newline or ':' after this statement");
         case error_type_expected_label_name:     return RC_STR("Expected a label name after '.'");
         case error_type_expected_overlay_name:   return RC_STR("OVERLAY expects an overlay name");
+        case error_type_expected_var_name:        return RC_STR("ZPAUTO expects a variable name");
         case error_type_invalid_assignment:      return RC_STR("Cannot assign to a dotted name");
         case error_type_expected_assign:         return RC_STR("Expected '=' in assignment");
         case error_type_expected_close_paren:    return RC_STR("Expected ')'");
@@ -43,7 +44,8 @@ rc_str error_type_name(error_type e)
         case error_type_branch_out_of_range:     return RC_STR("Branch target is out of range");
         case error_type_skip_backwards:          return RC_STR("Cannot move the program counter backwards");
         case error_type_bad_alignment:           return RC_STR("Alignment must be at least 1");
-        case error_type_reserve_not_zeropage:    return RC_STR("RESERVE address must be within the zero page ($00-$FF)");
+        case error_type_reserve_not_zeropage:    return RC_STR("ZPRESERVE address must be within the zero page ($00-$FF)");
+        case error_type_var_without_reserve:     return RC_STR("ZPAUTO needs a ZPRESERVE block before it");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol");
         case error_type_duplicate_symbol:        return RC_STR("Symbol is already defined in this scope");
         case error_type_original_definition:     return RC_STR("Originally defined here");

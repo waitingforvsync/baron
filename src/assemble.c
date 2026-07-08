@@ -24,7 +24,9 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
 static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_reserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -196,7 +198,9 @@ static const token statement_token_entries[] = {
     {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
     {RC_STR("overlay"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_overlay}}},
-    {RC_STR("reserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_reserve}}},
+    {RC_STR("zpreserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpreserve}}},
+    {RC_STR("zpauto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto1}}},   // 1-byte ZP variable
+    {RC_STR("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
     {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
@@ -473,24 +477,24 @@ static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_fl
     return require_separator(b, cursor_at(at, nm.next));
 }
 
-// Add one RESERVE value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
+// Add one ZPRESERVE value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
 // enumerated, a list is flattened, and a scalar is one byte - but it must land in the zero page ($00-$FF).
 // A forward reference defers (marks unresolved, reserves nothing this pass); a non-numeric or out-of-page
 // value is a semantic error. A dead branch reserves nothing.
-static parse_result reserve_add(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
+static parse_result zpreserve_add(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
 {
     if (!flags.active) {
         return (parse_result) {0};
     }
 
     if (value_is_range(v)) {
-        return reserve_add(b, range_to_list(v.range, &scratch), flags, at, scratch);
+        return zpreserve_add(b, range_to_list(v.range, &scratch), flags, at, scratch);
     }
 
     if (value_is_list(v)) {
         parse_result acc = {0};
         for (uint32_t i = 0; i < v.list.num; i++) {
-            acc = fold(acc, reserve_add(b, rc_view_value_get(v.list, i), flags, at, scratch));
+            acc = fold(acc, zpreserve_add(b, rc_view_value_get(v.list, i), flags, at, scratch));
         }
         return acc;
     }
@@ -512,18 +516,18 @@ static parse_result reserve_add(baron *b, value v, parse_flags flags, cursor at,
     return (parse_result) {0};
 }
 
-// RESERVE <list> - declare the zero-page bytes the VAR1/VAR2 allocator may draw from, and (by its mere
+// ZPRESERVE <list> - declare the zero-page bytes the ZPAUTO1/ZPAUTO2 allocator may draw from, and (by its mere
 // presence) ENABLE the whole feature. A comma-separated list of values, each a zero-page address or a range
 // of them (the same operand shape as EQUB); every value must fall within $00-$FF. The set is global and
 // rebuilt each pass. A dead branch parses the operand but reserves nothing and does not enable.
-static parse_result handle_reserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
     bool unresolved = false;
 
     if (flags.active) {
-        zeropage_enable(&b->zeropage);   // RESERVE turns the feature on even if the list is empty
+        zeropage_enable(&b->zeropage);   // ZPRESERVE turns the feature on even if the list is empty
     }
 
     while (true) {
@@ -532,7 +536,7 @@ static parse_result handle_reserve(baron *b, cursor at, uint32_t scope, parse_fl
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        parse_result ra = reserve_add(b, e.value, flags, cursor_at(at, pos), scratch);
+        parse_result ra = zpreserve_add(b, e.value, flags, cursor_at(at, pos), scratch);
         unresolved |= ra.unresolved;
 
         lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
@@ -545,6 +549,73 @@ static parse_result handle_reserve(baron *b, cursor at, uint32_t scope, parse_fl
         r.unresolved = unresolved;
         return r;   // end of the list: a terminator or '}'
     }
+}
+
+// ZPAUTO1 <names> / ZPAUTO2 <names> - declare 1- or 2-byte zero-page variables, auto-allocated from the ZPRESERVE
+// set. Each name binds an ordinary scoped symbol (so `LDA foo` sizes as zero page and `routine.foo` resolves
+// from outside, all for free) to a fixed PLACEHOLDER address; the real byte is assigned later, at the
+// allocation phase. The variable's width + identity are recorded in the zeropage var registry, but only on
+// the single final pass (the settling passes need just the placeholder binding for layout to converge). ZPAUTO
+// is meaningless without a ZPRESERVE first: we flag that, but still bind the names so references do not cascade
+// into undefined-symbol errors. A dead branch removes only the binding it owns, like a dead label.
+static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, parse_flags flags, uint8_t width, rc_arena scratch)
+{
+    (void) scratch;
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+
+    if (flags.active && !zeropage_is_enabled(&b->zeropage)) {
+        semantic_error(b, flags, error_type_var_without_reserve, cursor_at(at, at.pos));
+    }
+
+    while (true) {
+        lexer_result nm = lexer_next(src, pos, statement_tokens(b));
+        if (nm.token.type != lexeme_type_identifier) {
+            return syntax_error(b, error_type_expected_var_name, cursor_at(at, pos));   // no name: malformed
+        }
+        rc_str name = nm.token.identifier.name;
+        cursor def  = cursor_at(at, pos);
+
+        if (is_dotted(name)) {
+            // A dotted name is a legal token but not a legal ZPAUTO - record it and consume just the name.
+            semantic_error(b, flags, error_type_expected_var_name, def);
+        }
+        else if (flags.active) {
+            symbol_status st = scopes_set_symbol(
+                &b->scopes, scope, name,
+                value_make_numeric((double) zeropage_var_placeholder), def);
+
+            if (st == symbol_status_duplicate) {
+                semantic_error(b, flags, error_type_duplicate_symbol, def);
+                cursor original = scopes_symbol_def(&b->scopes, scope, name);
+                if (!cursor_is_none(original)) {
+                    semantic_error(b, flags, error_type_original_definition, original);
+                }
+            }
+            else if (flags.final) {
+                zeropage_add_var(&b->zeropage, name, scope, width, def);   // record the vreg once, on the final pass
+            }
+        }
+        else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
+            scopes_remove_symbol(&b->scopes, scope, name);   // dead branch: clear only our own binding
+        }
+
+        lexer_result lr = lexer_next(src, nm.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;   // another name follows
+        }
+        return require_separator(b, cursor_at(at, nm.next));
+    }
+}
+
+static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    return handle_zpauto(b, at, scope, flags, 1, scratch);
+}
+static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+{
+    return handle_zpauto(b, at, scope, flags, 2, scratch);
 }
 
 // Emit `bits` as `width` little-endian bytes into the current overlay.
@@ -1659,7 +1730,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     // token tables are reseeded from their static bases, with room for per-name tokens).
     rc_arena_reset(b->per_pass);
     overlays_reset(&b->overlays);
-    zeropage_reset(&b->zeropage);            // RESERVE re-runs this pass and refills the (permanent) set
+    zeropage_reset(&b->zeropage);            // ZPRESERVE re-runs this pass and refills the (permanent) set
     b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
@@ -1869,6 +1940,19 @@ RC_TEST_STEP(assemble, multiple_statements, fix)
                           (uint8_t[]){0xA9, 0x01, 0x85, 0x70, 0x60}, 5));
 }
 
+RC_TEST_STEP(assemble, implied_opcode_before_close_brace, fix)
+{
+    // Regression: an implied / accumulator opcode immediately before '}' (no separator) is a no-operand
+    // statement, not an attempt to read '}' as an operand. (`.routine { RTS }` is about the commonest 6502
+    // shape there is; it used to raise a spurious expression error.)
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(".routine { RTS }"),      (uint8_t[]){0x60}, 1));         // named scope
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("{ NOP }"),               (uint8_t[]){0xEA}, 1));         // anon scope
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(".s { ASL }"),            (uint8_t[]){0x0A}, 1));          // accumulator
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDX #2 : .l { DEX }"),   (uint8_t[]){0xA2, 0x02, 0xCA}, 3));
+    // A '}' still cannot masquerade as an operand for an instruction that requires one.
+    RC_CHECK_TRUE(ERR("{ LDA }") == error_type_missing_operand);
+}
+
 RC_TEST_STEP(assemble, branch_offsets, fix)
 {
     // Backward: target at pc 0, NOP, then BNE back to it. offset = 0 - (1 + 2) = -3 = 0xFD.
@@ -1969,29 +2053,61 @@ RC_TEST_STEP(assemble, overlay_name_errors, fix)
     RC_CHECK_TRUE(ERR("OVERLAY 5") == error_type_expected_overlay_name);   // a number is not a name
 }
 
-RC_TEST_STEP(assemble, reserve_directive, fix)
+RC_TEST_STEP(assemble, zpreserve_directive, fix)
 {
     // A plain range, a comma-list of ranges and a bare byte all parse and assemble cleanly (no code).
-    RC_CHECK_TRUE(ASM("RESERVE &70..&8F") != 0);
-    RC_CHECK_TRUE(ASM("RESERVE &70..&7F, &A0..&A7") != 0);
-    RC_CHECK_TRUE(ASM("RESERVE &70") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&8F") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F, &A0..&A7") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 
     // An empty exclusive range is a legal empty list: it enables the feature but reserves nothing.
-    RC_CHECK_TRUE(ASM("RESERVE 5..<5") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE 5..<5") != 0);
 
     // The address may be forward-referenced; it defers and settles on a later pass (still converges).
-    RC_CHECK_TRUE(ASM("RESERVE base..base+3 : base = &70") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE base..base+3 : base = &70") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
-RC_TEST_STEP(assemble, reserve_errors, fix)
+RC_TEST_STEP(assemble, zpreserve_errors, fix)
 {
     // Out of the zero page (high, and via a range that overshoots) - a recoverable semantic error.
-    RC_CHECK_TRUE(ERR("RESERVE &100")      == error_type_reserve_not_zeropage);
-    RC_CHECK_TRUE(ERR("RESERVE &FE..&102") == error_type_reserve_not_zeropage);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &100")      == error_type_reserve_not_zeropage);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &FE..&102") == error_type_reserve_not_zeropage);
     // A non-numeric operand is not an address.
-    RC_CHECK_TRUE(ERR("RESERVE \"hi\"")    == error_type_operand_not_numeric);
+    RC_CHECK_TRUE(ERR("ZPRESERVE \"hi\"")    == error_type_operand_not_numeric);
+}
+
+RC_TEST_STEP(assemble, zpauto_declares_scoped_var, fix)
+{
+    // ZPAUTO1/ZPAUTO2 bind scoped symbols to the placeholder ZP address (the real byte is assigned later).
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : ZPAUTO2 ptr");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("foo")),
+                                 value_make_numeric((double) zeropage_var_placeholder)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("ptr")),
+                                 value_make_numeric((double) zeropage_var_placeholder)));
+
+    // A comma-list declares several at once.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 a, b, c") != 0);
+    RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("a"))));
+    RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("c"))));
+
+    // Declared inside a named routine, a var is reachable from outside as routine.name (a dotted path).
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : .routine { ZPAUTO1 v : RTS }") != 0);
+    RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("routine.v"))));
+}
+
+RC_TEST_STEP(assemble, zpauto_errors, fix)
+{
+    // A variable with no ZPRESERVE to allocate from is flagged (but still bound, to avoid a cascade).
+    RC_CHECK_TRUE(ERR("ZPAUTO1 foo") == error_type_var_without_reserve);
+    // A missing or dotted name.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1")     == error_type_expected_var_name);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 a.b") == error_type_expected_var_name);
+    // Re-declaring the same name in one scope is a duplicate (mirrors labels).
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 foo : ZPAUTO1 foo") == error_type_duplicate_symbol);
 }
 
 RC_TEST_STEP(assemble, org_and_labels, fix)

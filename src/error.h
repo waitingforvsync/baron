@@ -24,6 +24,7 @@ typedef enum error_type {
     error_type_expected_separator,
     error_type_expected_label_name,
     error_type_expected_overlay_name, // OVERLAY was not followed by a name
+    error_type_expected_var_name,     // ZPAUTO1/ZPAUTO2 was not followed by a (bare) name
     error_type_invalid_assignment,    // a dotted path on the left of '='
     error_type_expected_assign,       // a bare identifier statement with no '='
     error_type_expected_close_paren,
@@ -54,7 +55,8 @@ typedef enum error_type {
     error_type_branch_out_of_range,
     error_type_skip_backwards,        // SKIP / SKIPTO would move the pointer backwards
     error_type_bad_alignment,         // ALIGN n with n < 1
-    error_type_reserve_not_zeropage,  // a RESERVE address falls outside the zero page ($00-$FF)
+    error_type_reserve_not_zeropage,  // a ZPRESERVE address falls outside the zero page ($00-$FF)
+    error_type_var_without_reserve,   // a ZPAUTO1/ZPAUTO2 declared with no ZPRESERVE enabling the feature first
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

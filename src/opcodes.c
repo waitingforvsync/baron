@@ -351,6 +351,11 @@ static const token operand_token_entries[] = {
     {RC_STR("A"), {.type = lexeme_type_register, .reg = {.which = reg_a}}},
     {RC_STR("X"), {.type = lexeme_type_register, .reg = {.which = reg_x}}},
     {RC_STR("Y"), {.type = lexeme_type_register, .reg = {.which = reg_y}}},
+    // '}' closes a scope and so ends a statement: an implied/accumulator opcode may sit right before it
+    // (`.routine { RTS }`). We must recognise it here rather than let it fall through as an unexpected char
+    // that the no-operand peek would try to evaluate as an operand. It stays a `closer` in the statement
+    // table (parse_block's brace handling relies on that); this operand-table row only lets the peek see it.
+    {RC_STR("}"), {.type = lexeme_type_close_brace}},
 };
 static const token_table operand_tokens = RC_VIEW(operand_token_entries);
 
@@ -448,8 +453,10 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
 
     lexer_result peek = lexer_next(src, start, operand_tokens);
 
-    if (peek.token.type == lexeme_type_terminator) {
-        // No operand: implied, or accumulator for the shift / read-modify-write mnemonics.
+    if (peek.token.type == lexeme_type_terminator || peek.token.type == lexeme_type_close_brace) {
+        // No operand: implied, or accumulator for the shift / read-modify-write mnemonics. A '}' immediately
+        // after the mnemonic counts as end-of-statement here (it closes the enclosing scope); we leave it for
+        // require_separator, which recognises it as closing the statement.
         if (opcode_def(m, addr_mode_imp) != 0) {
             mode = addr_mode_imp;
         }

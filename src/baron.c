@@ -33,7 +33,7 @@ baron baron_make(baron_arenas *a)
     scopes_make_root(&b.scopes);              // the root is scope index 0
     overlays_init(&b.overlays, &a->per_pass);   // the default overlay is (re)made per pass by overlays_reset
     b.current_overlay = overlays_default;
-    zeropage_init(&b.zeropage, &a->permanent);   // empty + dormant; run_pass clears it, RESERVE fills it
+    zeropage_init(&b.zeropage, &a->permanent);   // empty + dormant; run_pass clears it, ZPRESERVE fills it
     source_files_init(&b.source_files, &a->permanent);
     macros_init(&b.macros, &a->per_pass);         // run_pass reseeds its store + token table each pass
     functions_init(&b.functions, &a->per_pass);   // ditto for the operand table
