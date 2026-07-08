@@ -27,6 +27,8 @@ add_executable(baron
     liveness.h
     zpalloc.c
     zpalloc.h
+    footprint.c
+    footprint.h
     source_files.c
     source_files.h
     macros.c

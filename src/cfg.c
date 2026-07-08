@@ -43,6 +43,11 @@ static uint32_t block_at_pc(rc_view_basic_block blocks, uint32_t pc)
     return RC_INDEX_NONE;
 }
 
+uint32_t cfg_block_at_pc(cfg g, uint32_t pc)
+{
+    return block_at_pc(g.blocks.view, pc);
+}
+
 cfg cfg_build(rc_view_zp_insn insns, rc_arena *arena, rc_arena scratch)
 {
     RC_ASSERT(arena != NULL);

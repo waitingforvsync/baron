@@ -58,8 +58,10 @@ typedef enum error_type {
     error_type_reserve_not_zeropage,  // a ZPRESERVE address falls outside the zero page ($00-$FF)
     error_type_var_without_reserve,   // a ZPAUTO1/ZPAUTO2 declared with no ZPRESERVE enabling the feature first
     error_type_zeropage_full,         // no free reserved byte to place a ZPAUTO variable (a spill)
-    error_type_zpauto_across_call,    // a ZPAUTO variable is live across a JSR: needs interprocedural analysis
+    error_type_zpauto_across_call,    // a var live across a JSR whose callee footprint cannot be bounded
+    error_type_zpauto_recursion,      // a var live across a recursive call (no single static byte can hold it)
     error_type_zpauto_computed_flow,  // ZPAUTO active past a computed/indirect jump the analysis cannot follow
+    error_type_zpauto_register_name,  // a ZPAUTO variable named after a register (A/X/Y) - ambiguous as an operand
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

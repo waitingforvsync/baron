@@ -5,6 +5,7 @@
 #include "expression.h"
 #include "cfg.h"                 // post-convergence zero-page allocation: recover the CFG...
 #include "liveness.h"            // ...run liveness over it...
+#include "footprint.h"           // ...find each callee's footprint for across-call interference...
 #include "zpalloc.h"             // ...and colour the interference graph into the reserved bytes
 #include "file_utils.h"          // INCLUDE / INCBIN path resolution
 #include "richc/file.h"          // INCBIN: rc_file_size / rc_file_load_binary
@@ -582,6 +583,13 @@ static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, parse_fla
         if (is_dotted(name)) {
             // A dotted name is a legal token but not a legal ZPAUTO - record it and consume just the name.
             semantic_error(b, flags, error_type_expected_var_name, def);
+        }
+        else if (rc_str_is_equal_insensitive(name, RC_STR("a")) ||
+                 rc_str_is_equal_insensitive(name, RC_STR("x")) ||
+                 rc_str_is_equal_insensitive(name, RC_STR("y"))) {
+            // A register-named variable would be read as the register in operand position (STA x -> the X
+            // register, not the variable), silently escaping attribution. Reject it rather than miscompile.
+            semantic_error(b, flags, error_type_zpauto_register_name, def);
         }
         else if (flags.active) {
             symbol_status st = scopes_set_symbol(
@@ -1797,9 +1805,12 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
         }
     }
 
-    // Guard 2: a variable live ACROSS a JSR would be clobbered by the callee's zero-page footprint, which we
-    // cannot yet see. Sweep each block backward; at a call, the current live set is exactly what is live across
-    // it (a JSR touches no variable of its own, so live-out at the call equals live-across).
+    // Guard 2 / interprocedural interference: a variable live ACROSS a JSR is clobbered by the callee's whole
+    // zero-page footprint, so it must interfere with every vreg the callee touches (transitively). Sweep each
+    // block backward; at a call, the current live set is exactly what is live across it (a JSR touches no
+    // variable of its own, so live-out at the call equals live-across). For each such call we compute the
+    // callee footprint and add the edges - UNLESS it cannot be bounded (an untrackable target -> across_call)
+    // or the call recurses (-> recursion): a value live across either cannot be statically placed, so refuse.
     rc_bitset live = {0};
     rc_bitset_resize(&live, nv, &wscratch);
     for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
@@ -1813,8 +1824,35 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
         for (uint32_t k = blk.num_insns; k-- > 0; ) {
             zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + k);
             if (n.flow == zp_flow_call && rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
-                baron_error(b, error_type_zpauto_across_call, n.at);
-                refused = true;
+                uint32_t tb = (n.target == RC_INDEX_NONE) ? RC_INDEX_NONE : cfg_block_at_pc(g, n.target);
+                if (tb == RC_INDEX_NONE) {
+                    baron_error(b, error_type_zpauto_across_call, n.at);
+                    refused = true;
+                }
+                else {
+                    footprint fp = footprint_compute(g, insns, tb, nv, &work, wscratch);
+                    if (fp.unknown_call) {
+                        baron_error(b, error_type_zpauto_across_call, n.at);
+                        refused = true;
+                    }
+                    else if (fp.recursive) {
+                        baron_error(b, error_type_zpauto_recursion, n.at);
+                        refused = true;
+                    }
+                    else {
+                        // Every var live across this call interferes with every vreg the callee touches.
+                        for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
+                             c = rc_bitset_get_next_set(&live, c + 1)) {
+                            for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
+                                 t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
+                                if (c != t) {
+                                    rc_bitset_set(&lv.interfere[c], t);
+                                    rc_bitset_set(&lv.interfere[t], c);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             if (n.vreg != RC_INDEX_NONE) {
                 if (n.rw & vref_write) { rc_bitset_clear(&live, n.vreg); }
@@ -2202,9 +2240,9 @@ RC_TEST_STEP(assemble, zpauto_declares_scoped_var, fix)
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("foo")), value_make_numeric(0x72)));
 
     // A comma-list declares several at once.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 a, b, c") != 0);
-    RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("a"))));
-    RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("c"))));
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 p, q, r") != 0);
+    RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("p"))));
+    RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("r"))));
 
     // Declared inside a named routine, a var is reachable from outside as routine.name (a dotted path).
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : .routine { ZPAUTO1 v : RTS }") != 0);
@@ -2220,6 +2258,10 @@ RC_TEST_STEP(assemble, zpauto_errors, fix)
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 a.b") == error_type_expected_var_name);
     // Re-declaring the same name in one scope is a duplicate (mirrors labels).
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 foo : ZPAUTO1 foo") == error_type_duplicate_symbol);
+    // A register-named variable (A/X/Y, any case) is ambiguous in operand position - rejected up front.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 x") == error_type_zpauto_register_name);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO2 Y") == error_type_zpauto_register_name);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 A") == error_type_zpauto_register_name);
 }
 
 RC_TEST_STEP(assemble, zpauto_operand_is_zeropage, fix)
@@ -2275,10 +2317,10 @@ RC_TEST_STEP(assemble, zpauto_allocates_and_reuses, fix)
 
     // D3 - a 2-byte pointer packs beside a 1-byte temp when they interfere. `a` is live across the pointer's
     // setup, so it cannot overlap ptr's two bytes (&70-&71) and lands at &72.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 a\n"
-                      "STA a : STA ptr : STA ptr+1 : LDA a : LDA (ptr),Y : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 t\n"
+                      "STA t : STA ptr : STA ptr+1 : LDA t : LDA (ptr),Y : RTS") != 0);
     RC_CHECK(zp_addr(&fix->r, "ptr"), ==, 0x70);
-    RC_CHECK(zp_addr(&fix->r, "a"),   ==, 0x72);
+    RC_CHECK(zp_addr(&fix->r, "t"),   ==, 0x72);
 }
 
 RC_TEST_STEP(assemble, zpauto_call_without_live_var_is_allowed, fix)
@@ -2291,22 +2333,46 @@ RC_TEST_STEP(assemble, zpauto_call_without_live_var_is_allowed, fix)
     RC_CHECK(zp_addr(&fix->r, "t"), ==, 0x70);
 }
 
+RC_TEST_STEP(assemble, zpauto_interprocedural_allocation, fix)
+{
+    // The interprocedural core: `keep` is live across a JSR to `sub`, which has its own local `loc`. The call
+    // clobbers sub's footprint, so keep must NOT share loc's byte - it interferes with the whole callee
+    // footprint and lands on a different byte. (Before this rule, both took &70 and the call would corrupt
+    // keep.) keep is placed first at &70, loc is pushed to &71.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                          "LDA #1 : STA keep : JSR sub : LDA keep : RTS\n"
+                          ".sub { ZPAUTO1 loc : STA loc : LDA loc : RTS }");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"),    ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "sub.loc"), ==, 0x71);   // forced off keep's byte by the call
+
+    // Contrast: a var DEAD across the call does not interfere with the callee, so it may reuse the byte. Here
+    // `tmp` dies before the call, so it can share sub.loc's byte.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 tmp\n"
+                      "STA tmp : LDA tmp : JSR sub : RTS\n"
+                      ".sub { ZPAUTO1 loc : STA loc : LDA loc : RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "tmp"),     ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "sub.loc"), ==, 0x70);   // dead across the call -> reuses the callee's byte
+}
+
 RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
 {
     // The certainty contract: rather than emit code it cannot prove correct, the allocator errors and points
     // at the fix. Each of these MUST fail the assemble.
 
-    // A variable live ACROSS a JSR - the callee's zero-page footprint is not yet analysed, so we refuse.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 keep : STA keep : JSR sub : LDA keep : RTS : .sub { RTS }")
-                  == error_type_zpauto_across_call);
+    // A variable live across a RECURSIVE call cannot live in one static byte (each level needs its own).
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .r { ZPAUTO1 cnt : STA cnt : JSR r : LDA cnt : RTS }")
+                  == error_type_zpauto_recursion);
 
     // A computed / indirect jump reaches code the CFG cannot follow while a variable is in play - refuse and
     // ask for an annotation.
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : JMP (&2000)")
                   == error_type_zpauto_computed_flow);
 
-    // More simultaneously-live variables than reserved bytes is a spill: a and b overlap but only &70 is free.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 a, b : STA a : STA b : LDA a : LDA b : RTS")
+    // More simultaneously-live variables than reserved bytes is a spill: p and q overlap but only &70 is free.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 p, q : STA p : STA q : LDA p : LDA q : RTS")
                   == error_type_zeropage_full);
 }
 

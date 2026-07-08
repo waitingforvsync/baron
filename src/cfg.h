@@ -42,5 +42,9 @@ typedef struct cfg {
 // program order (true without an ORG that rewinds the pointer mid-stream - a later concern).
 cfg cfg_build(rc_view_zp_insn insns, rc_arena *arena, rc_arena scratch);
 
+// The index of the block whose entry address is exactly `pc`, or RC_INDEX_NONE. Maps a call/jump TARGET
+// address to the block it enters (a linear scan - blocks are few).
+uint32_t cfg_block_at_pc(cfg g, uint32_t pc);
+
 
 #endif // ifndef BARON_CFG_H_
