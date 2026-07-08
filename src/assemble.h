@@ -5,14 +5,14 @@
 #include "richc/arena.h"   // rc_arena
 #include "symbols.h"       // symbol_entry, rc_view_symbol_entry (the harvest's output; brings value.h)
 #include "scopes.h"        // scopes_view: the read-only scope tree a result carries
-#include "overlays.h"      // overlay, rc_view_overlay: the object-code overlays a result carries
+#include "sections.h"      // section, rc_view_section: the object-code sections a result carries
 #include "cursor.h"        // cursor: where a diagnostic points
 #include "error.h"         // error_type (the diagnostic code)
 
 
 // The assembler's public face: hand it memory (baron_arenas) and a source, get back a read-only snapshot
 // (baron_result) of the object code, symbols and diagnostics. The internal machine that does the work -
-// the `baron` struct and its managers (scopes, overlays, source files, macros, functions) - is built,
+// the `baron` struct and its managers (scopes, sections, source files, macros, functions) - is built,
 // run, and discarded inside the entry points below; a caller never names it.
 
 
@@ -45,7 +45,7 @@ typedef struct diagnostic {
 // The three arenas an assemble runs on, owned by the caller and passed in by pointer so the internal
 // managers can borrow them. They differ only in lifetime: `permanent` lives the whole run (scopes/symbols,
 // source text, diagnostics, and the harvested result), `per_pass` is reset at the top of every pass
-// (overlays, macros, functions), and `scratch` is threaded by value per call so it self-cleans. Make them
+// (sections, macros, functions), and `scratch` is threaded by value per call so it self-cleans. Make them
 // once with baron_arenas_make, feed them to as many assembles as you like, and free them with
 // baron_arenas_deinit at the end. Each assemble is independent - it does not reset these between runs, so a
 // result stays valid until the NEXT assemble on the same arenas (which supersedes it).
@@ -60,22 +60,22 @@ void         baron_arenas_deinit(baron_arenas *a);
 
 // What an assemble produced: a read-only, position-independent snapshot. Every field borrows from the arenas
 // that were passed in, so the result is valid until the next assemble on those same arenas (or until
-// baron_arenas_deinit). passes == 0 means failure - `overlays` then holds only an empty default overlay,
-// `scopes` is an empty tree, and `diagnostics` carries the errors. `overlays` is the whole object-code
-// list (index 0 is the default overlay; each carries its pc + code) - iterate it directly, or use
-// baron_result_code for the default overlay's bytes alone. `scopes` is a read-only view of the resolved
+// baron_arenas_deinit). passes == 0 means failure - `sections` then holds only an empty default section,
+// `scopes` is an empty tree, and `diagnostics` carries the errors. `sections` is the whole object-code
+// list (index 0 is the default section; each carries its pc + code) - iterate it directly, or use
+// baron_result_code for the default section's bytes alone. `scopes` is a read-only view of the resolved
 // scope tree (its backing outlives the internal machine): look a single symbol up by full dotted path with
 // baron_result_symbol / scopes_view_get_symbol, or harvest the whole spellable table on demand with
 // scopes_view_flatten (which needs an arena to build the paths into).
 typedef struct baron_result {
     uint32_t           passes;        // number of passes taken; 0 == failure
-    rc_view_overlay    overlays;      // every object-code overlay (pc + code); index 0 is the default
+    rc_view_section    sections;      // every object-code section (pc + code); index 0 is the default
     rc_view_diagnostic diagnostics;   // every error + warning, in order
     scopes_view        scopes;        // the resolved scope tree, read-only (query via the functions below)
 } baron_result;
 
-// The default overlay's object code (index 0) - the common single-overlay case, empty on failure. For
-// multiple overlays, iterate `r->overlays` directly.
+// The default section's object code (index 0) - the common single-section case, empty on failure. For
+// multiple sections, iterate `r->sections` directly.
 rc_view_bytes baron_result_code(const baron_result *r);
 
 // Look a symbol up in the result by its full dotted path (e.g. "routine.core"), from the top level. Hands
@@ -83,7 +83,7 @@ rc_view_bytes baron_result_code(const baron_result *r);
 // the whole table at once, flatten `r->scopes` with scopes_view_flatten.
 value baron_result_symbol(const baron_result *r, rc_str path);
 
-// Assemble a source (a string cached under `name`, or a file loaded from `path`) into the default overlay,
+// Assemble a source (a string cached under `name`, or a file loaded from `path`) into the default section,
 // running passes until labels and forward references settle. Builds a fresh internal machine on `arenas`,
 // runs it, and returns the harvested snapshot; on failure the code/symbols come back empty with the errors
 // in `diagnostics`.

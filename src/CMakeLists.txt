@@ -17,8 +17,8 @@ add_executable(baron
     expression.h
     opcodes.c
     opcodes.h
-    overlays.c
-    overlays.h
+    sections.c
+    sections.h
     zeropage.c
     zeropage.h
     cfg.c

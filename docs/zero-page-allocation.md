@@ -21,7 +21,7 @@ This is opt-in and costs nothing until you ask for it. No `ZPRESERVE`, no alloca
 - [Scopes, blocks and control flow](#scopes-blocks-and-control-flow)
 - [Across subroutine calls](#across-subroutine-calls)
 - [Annotations](#annotations)
-- [Overlays and ORG](#overlays-and-org)
+- [Sections and addresses](#sections-and-addresses)
 - [Limitations](#limitations)
 - [What doesn't work (yet)](#what-doesnt-work-yet)
 - [Getting the most out of it](#getting-the-most-out-of-it)
@@ -64,8 +64,8 @@ Ranges use Baron's usual inclusive `..`, so `&70..&8F` is `&70` up to and includ
 
 The presence of a `ZPRESERVE` is what switches the whole feature on. With none in your source, the allocator
 never runs and the IR is never built - there is genuinely no cost. The reservation is **global**: there is one
-physical zero page shared by all your code, so there is one pool for the whole program. (Per-overlay reuse of
-the same bytes is a refinement for another day.)
+physical zero page shared by all your code, so there is one pool for the whole program. (Per-section reuse of
+the same bytes at a shared address is a refinement for another day.)
 
 A `ZPRESERVE` must appear before any variable that wants to use it. It is fine to reserve more than you think
 you need; you only pay for bytes the allocator actually hands out.
@@ -258,47 +258,44 @@ counterpart of `CANCALL`: without it a computed jump reaches code the analysis c
 variables live it is refused (see `computed jump` below). As with `CANCALL`, list every destination - a missing
 one is the way to get it wrong.
 
-## Overlays and ORG ##
+## Sections and addresses ##
 
-You can use `ORG` and `OVERLAY` freely alongside auto-variables. There is exactly one rule, and it falls
-straight out of how the analysis works: **no two instructions may share an address.** The flow analysis pins
-each instruction to its address, so if two of them claim the same one it cannot tell them apart - and that is
-the only way to make it reason wrongly. Everything else is fine.
+You can carve your program into `SECTION`s freely alongside auto-variables. There is exactly one rule, and it
+falls straight out of how the analysis works: **no two instructions may share an address.** The flow analysis
+pins each instruction to its `org` address, so if two of them claim the same one it cannot tell them apart -
+and that is the only way to make it reason wrongly. Everything else is fine.
 
 So all of this is allowed:
 
-- **Any number of `ORG`s that move forwards.** Lay routines out wherever you like; gaps are no problem.
-- **Multiple overlays, at different addresses.** Each overlay is assembled into its own image; as long as their
-  code sits at different addresses, the analysis keeps them straight.
-- **Cross-overlay calls.** A `JSR` into another overlay resolves by address like any other, so the callee's
+- **Sections at any addresses, in any order.** A section sets its start with `org =`, or simply continues from
+  wherever the previous one left off. Lay things out however you like; gaps are no problem, and within a
+  section the address only ever moves forwards.
+- **Several sections at *different* addresses.** Each is assembled at its own `org`; as long as their code
+  sits at different addresses, the analysis keeps them straight.
+- **Cross-section calls.** A `JSR` into another section resolves by address like any other, so the callee's
   footprint is accounted for - a variable held live across it is protected exactly as it would be for a
-  same-overlay call.
+  same-section call.
 
-And there is a nice bonus: two overlays at different addresses that never interact will happily *share* reserved
-bytes, because the analysis sees no flow between them and no interference - you get per-overlay reuse for free
-whenever the addresses don't collide.
+And there is a nice bonus: two sections at different addresses that never interact will happily *share*
+reserved bytes, because the analysis sees no flow between them and no interference - you get that reuse for
+free whenever the addresses don't collide.
 
-What is refused is precisely a collision:
-
-```
-    ORG &2000
-    STA v
-    ORG &2000       ; rewind onto code we already emitted - now two instructions live at &2000
-    LDA v
-```
-> An ORG that rewinds or overlaps the program counter ...
+What is refused is precisely a collision - two sections loaded into the *same* address slot:
 
 ```
-    STA v
-    OVERLAY loader  ; a second overlay loaded into the SAME slot (both start at the same address)...
-    LDA v           ; ...so this &2000 and that &2000 are indistinguishable
+    SECTION main, org = &1100
+        STA v
+    ENDSECTION
+    SECTION loader, org = &1100   ; a second section in the SAME slot...
+        LDA v                     ; ...so this &1100 and that &1100 are indistinguishable
+    ENDSECTION
 ```
-> Two overlays place code at the same address ...
+> Two sections place code at the same address ...
 
-The swap-in-place pattern - several overlays all loaded to, say, `&1100` and paged in and out - is the one that
-trips the second case. Baron cannot yet tell those apart (per-overlay allocation at a shared address is a
-planned refinement). Until then, for the overlays that share a slot, reach for hand-placed zero-page symbols
-rather than auto-variables, or keep the auto-variables to a single one of them.
+The swap-in-place pattern - several sections all loaded to, say, `&1100` and paged in and out - is the one that
+trips this. Baron cannot yet tell those apart (per-section allocation at a shared address is a planned
+refinement). Until then, for the sections that share a slot, reach for hand-placed zero-page symbols rather
+than auto-variables, or keep the auto-variables to a single one of them.
 
 ## Limitations ##
 
@@ -323,12 +320,12 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
 - **No recursion.** A value held live across a recursive call cannot live in one static byte - each level would
   need its own. Baron detects the cycle and refuses.
 - **No two instructions at the same address.** The flow analysis identifies a block purely by its address, so
-  the single rule is that your code must not put two instructions at one address. `ORG` and `OVERLAY` are
-  otherwise free: use as many as you like. What that rules out is an `ORG` that *rewinds* onto code already
-  emitted, and two overlays loaded into the *same* address slot (the classic swap-in-place pattern) - both make
-  two instructions share an address, and both are refused. Overlays at *different* addresses are completely
-  fine, and a cross-overlay `JSR` is followed correctly, because it resolves by address. See
-  [Overlays and ORG](#overlays-and-org) for the details.
+  the single rule is that your code must not put two instructions at one address. `SECTION`s are otherwise
+  free: use as many as you like, at whatever addresses. What that rules out is two sections loaded into the
+  *same* address slot (the classic swap-in-place pattern) - that makes two instructions share an address, and
+  it is refused. (A section's own address only moves forwards, so one section can never collide with itself.)
+  Sections at *different* addresses are completely fine, and a cross-section `JSR` is followed correctly,
+  because it resolves by address. See [Sections and addresses](#sections-and-addresses) for the details.
 - **You cannot name a variable `a`.** It collides with accumulator addressing: `ASL a` would read as `ASL A`
   and quietly lose the variable. Names `x` and `y` are fine - they only mean registers after a comma, which a
   plain operand never is - so `STA x` resolves to your variable, not the X register.
@@ -399,20 +396,21 @@ operand or a pointer that happens to hold an address inside the reserved block -
 instruction stream - so keep those on a hand-placed zero-page symbol, not an auto-variable.
 
 **An address collision is refused.** The analysis pins a block to its address, so two instructions at one
-address - an `ORG` rewound onto emitted code, or two overlays loaded into the same slot - would let a target
-resolve to the wrong one:
+address - two sections loaded into the same slot - would let a target resolve to the wrong one:
 
 ```
     ZPAUTO1 v
-    ORG &2000
-    STA v
-    ORG &2000           ; back onto the STA - now two instructions claim &2000
-    LDA v
+    SECTION main, org = &2000
+        STA v
+    ENDSECTION
+    SECTION loader, org = &2000   ; the same slot - now two instructions claim &2000
+        LDA v
+    ENDSECTION
 ```
-> An ORG that rewinds or overlaps the program counter ...
+> Two sections place code at the same address ...
 
-This is the *only* layout hazard: `ORG` and `OVERLAY` are otherwise free (see
-[Overlays and ORG](#overlays-and-org)). Forward `ORG`s and overlays at different addresses are all sound.
+This is the *only* layout hazard: `SECTION`s are otherwise free (see
+[Sections and addresses](#sections-and-addresses)). Sections at different addresses are all sound.
 
 ## Getting the most out of it ##
 
@@ -444,8 +442,8 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
 | A ZPAUTO variable must be reached by direct addressing only | An indexed / indexed-indirect access (`var,X`, `(var,X)`). Use a hand-placed symbol there. |
-| Two overlays place code at the same address ... | Two overlays share an address slot. Load them at different addresses (overlays elsewhere are fine), or place those by hand. |
-| An ORG that rewinds or overlaps the program counter ... | An `ORG` moved back onto emitted code. Keep the pc moving forwards, or place those bytes by hand. |
+| Two sections place code at the same address ... | Two sections share an address slot. Load them at different addresses (sections elsewhere are fine), or place those by hand. |
+| Two instructions in one section share an address ... | A nested section's low `org` dragged the cursor back onto emitted code. Keep the pc moving forwards, or place those bytes by hand. |
 
 Every one of these is a refusal, not a warning - Baron will not emit code it cannot vouch for. Fix it, annotate
 it, or fall back to a hand-placed address, and you are on solid ground again.

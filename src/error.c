@@ -14,7 +14,9 @@ rc_str error_type_name(error_type e)
         case error_type_unclosed_scope:          return RC_STR("Unclosed '{': expected a matching '}'");
         case error_type_expected_separator:      return RC_STR("Expected a newline or ':' after this statement");
         case error_type_expected_label_name:     return RC_STR("Expected a label name after '.'");
-        case error_type_expected_overlay_name:   return RC_STR("OVERLAY expects an overlay name");
+        case error_type_expected_section_name:   return RC_STR("SECTION expects a section name");
+        case error_type_unclosed_section:        return RC_STR("Unclosed SECTION: expected ENDSECTION");
+        case error_type_unexpected_endsection:   return RC_STR("ENDSECTION without a matching SECTION");
         case error_type_expected_var_name:        return RC_STR("ZPAUTO expects a variable name");
         case error_type_invalid_assignment:      return RC_STR("Cannot assign to a dotted name");
         case error_type_expected_assign:         return RC_STR("Expected '=' in assignment");
@@ -52,11 +54,12 @@ rc_str error_type_name(error_type e)
         case error_type_zpauto_computed_flow:    return RC_STR("A computed or indirect jump reaches unknown code while ZPAUTO is active; its targets cannot be proven, so annotate them (CANJUMP/CANCALL) or avoid ZPAUTO here");
         case error_type_zpauto_register_name:    return RC_STR("A ZPAUTO variable cannot be named 'A': it is ambiguous with accumulator addressing (ASL A) and would silently drop the variable");
         case error_type_zpauto_indexed_access:   return RC_STR("A ZPAUTO variable must be reached by direct addressing only: indexed (var,X / var,Y) or indexed-indirect ((var,X)) access reads a byte the allocator may have placed another variable in. Use a hand-placed zero-page symbol here");
-        case error_type_zpauto_multi_overlay:    return RC_STR("Two overlays place code at the same address while ZPAUTO is active: the allocator's flow analysis identifies code by address and cannot tell the two apart. Load them at different addresses (overlays elsewhere are fine), or place those bytes by hand");
-        case error_type_zpauto_org_rewind:       return RC_STR("An ORG that rewinds or overlaps the program counter is not supported while ZPAUTO is active: two instructions would share an address and the flow analysis could not tell them apart. Keep the program counter moving forwards here");
+        case error_type_zpauto_multi_section:    return RC_STR("Two sections place code at the same address while ZPAUTO is active: the allocator's flow analysis identifies code by address and cannot tell the two apart. Load them at different addresses (sections elsewhere are fine), or place those bytes by hand");
+        case error_type_zpauto_org_rewind:       return RC_STR("Two instructions in one section share an address while ZPAUTO is active: the flow analysis identifies code by address and cannot tell them apart. Keep the program counter moving forwards here");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol");
         case error_type_duplicate_symbol:        return RC_STR("Symbol is already defined in this scope");
         case error_type_original_definition:     return RC_STR("Originally defined here");
+        case error_type_duplicate_section:       return RC_STR("A section with this name is already defined: section names are unique (there is no concatenation)");
         case error_type_not_iterable:            return RC_STR("FOR needs a list or a range to iterate over");
         case error_type_expected_filename:       return RC_STR("INCLUDE expects a filename string");
         case error_type_include_too_deep:        return RC_STR("INCLUDE nested too deeply (a cyclic include?)");

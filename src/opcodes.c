@@ -1,7 +1,7 @@
 #include "opcodes.h"
 
 #include "assemble_internal.h"   // parse_result, int_argument, require_separator, syntax_error, semantic_error
-#include "baron.h"               // scopes / overlays / source_files reached through b
+#include "baron.h"               // scopes / sections / source_files reached through b
 #include "lexer.h"
 #include "expression.h"
 #include "richc/macros.h"
@@ -540,10 +540,10 @@ static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, 
 
     operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
 
-    // The operand byte lands right after the opcode byte we are about to emit: the overlay's current code
+    // The operand byte lands right after the opcode byte we are about to emit: the section's current code
     // length is the opcode's offset, so the operand is at +1. Recorded so the allocation patch can find it.
-    uint32_t overlay        = b->current_overlay;
-    uint32_t operand_offset = overlays_code(&b->overlays, overlay).num + 1;
+    uint32_t section        = b->current_section;
+    uint32_t operand_offset = sections_code(&b->sections, section).num + 1;
 
     zeropage_add_insn(&b->zeropage, (zp_insn) {
         .pc             = pc,
@@ -555,7 +555,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, parse_flags flags, 
         .var_def        = op.def,
         .var_indexed    = op.outside_envelope,
         .target         = target,
-        .overlay        = overlay,
+        .section        = section,
         .operand_offset = operand_offset,
         .at             = at,
     });
@@ -565,10 +565,10 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
                                  uint32_t scope, parse_flags flags, rc_arena scratch)
 {
     uint32_t source = at.source;
-    uint32_t overlay = b->current_overlay;   // the overlay we emit into now (assembler-wide state)
+    uint32_t section = b->current_section;   // the section we emit into now (assembler-wide state)
     rc_str src = source_files_text(&b->source_files, source);
     uint32_t start = at.pos;              // just past the mnemonic
-    uint32_t insn_pc = overlays_pc(&b->overlays, overlay);   // this instruction's address (before it emits)
+    uint32_t insn_pc = sections_pc(&b->sections, section);   // this instruction's address (before it emits)
     addr_mode mode;
     int_argument arg = {.type = int_argument_type_known};
     uint32_t operand_base = RC_INDEX_NONE;   // where a memory operand's expression begins (for VAR observation)
@@ -707,7 +707,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     // Record this instruction into the ZP IR (final active pass, feature on) for the CFG + liveness passes.
     record_insn(b, at, scope, flags, mode, cell, arg, operand_base, insn_pc);
 
-    overlays_emit_u8(&b->overlays, overlay, (uint8_t)(cell & 0xFF));
+    sections_emit_u8(&b->sections, section, (uint8_t)(cell & 0xFF));
 
     uint32_t width = mode_operand_bytes(mode);
     if (width == 1) {
@@ -715,20 +715,20 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
             uint8_t off = 0;
             if (arg.type == int_argument_type_known) {
                 // From the address after the instruction (the offset byte we are about to emit).
-                int64_t delta = arg.value - (int64_t)(overlays_pc(&b->overlays, overlay) + 1);
+                int64_t delta = arg.value - (int64_t)(sections_pc(&b->sections, section) + 1);
                 if (delta < -128 || delta > 127) {
                     semantic_error(b, flags, error_type_branch_out_of_range, cursor_at(at, start));
                 }
                 off = (uint8_t)(int8_t)delta;   // best-effort: the low byte of the (out-of-range) delta
             }
-            overlays_emit_u8(&b->overlays, overlay, off);
+            sections_emit_u8(&b->sections, section, off);
         }
         else {
             int64_t lo = (mode == addr_mode_imm) ? -128 : 0;   // immediates may be written signed (#-1)
             if (arg.type == int_argument_type_known && (arg.value < lo || arg.value > 0xFF)) {
                 semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, start));
             }
-            overlays_emit_u8(&b->overlays, overlay, (uint8_t)(arg.value & 0xFF));
+            sections_emit_u8(&b->sections, section, (uint8_t)(arg.value & 0xFF));
         }
     }
     else if (width == 2) {
@@ -740,7 +740,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         if (mode == addr_mode_ind16 && arg.type == int_argument_type_known && (arg.value & 0xFF) == 0xFF) {
             semantic_warning(b, flags, error_type_jmp_indirect_page_cross, cursor_at(at, start), severity_warning);
         }
-        overlays_emit_u16(&b->overlays, overlay, (uint16_t)(arg.value & 0xFFFF));
+        sections_emit_u16(&b->sections, section, (uint16_t)(arg.value & 0xFFFF));
     }
 
     // The separator follows; carry forward whether the operand was a forward reference.

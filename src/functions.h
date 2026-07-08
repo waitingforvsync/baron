@@ -7,7 +7,7 @@
 
 // The user-defined-FUNCTION store. A function is a name bound to one or more OVERLOADS (signatures), each a
 // parameter list plus the cursor of the value-expression body it evaluates. The whole thing is rebuilt from
-// source every pass (functions_reset), exactly like the macro / overlay / include state, so an entry is a
+// source every pass (functions_reset), exactly like the macro / section / include state, so an entry is a
 // transient projection of the source, not durable state.
 //
 // A function is NAMELESS here: its `name(` spelling lives in the dynamic OPERAND (even) token table, and a

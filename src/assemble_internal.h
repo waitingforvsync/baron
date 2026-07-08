@@ -83,8 +83,8 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at);
 parse_result require_separator(baron *b, cursor at);
 
 // Evaluate one expression in the assembler's current context: symbols from `scope`, plus the live PC of the
-// current overlay. The single place that projects `baron` into an expr_env, so no call site rebuilds it.
-// Defined in assemble.c (it reaches into b's overlays); shared with opcodes.c.
+// current section. The single place that projects `baron` into an expr_env, so no call site rebuilds it.
+// Defined in assemble.c (it reaches into b's sections); shared with opcodes.c.
 expr_result eval(baron *b, cursor at, uint32_t scope, rc_arena scratch);
 
 

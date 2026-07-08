@@ -7,7 +7,7 @@
 
 // The macro store. A macro is a name bound to one or more OVERLOADS (signatures); each signature is a
 // sequence of slots interleaving parameters and literal tokens, plus the cursor of the body it stamps
-// out. The whole thing is rebuilt from source every pass (macros_reset), exactly like the overlay and
+// out. The whole thing is rebuilt from source every pass (macros_reset), exactly like the section and
 // include state, so an entry is a transient projection of the source, not durable state.
 //
 // A macro is NAMELESS here: its name lives in the dynamic statement-token table (on baron), and a

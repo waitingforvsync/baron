@@ -16,7 +16,7 @@
 // colouring will grow onto this manager as the feature is built out.
 //
 // The reserve set is GLOBAL - there is one physical zero page shared by all resident code, so one map
-// for the whole program (per-overlay reuse is a later refinement). It lives in the borrowed permanent
+// for the whole program (per-section reuse is a later refinement). It lives in the borrowed permanent
 // arena, but nothing after init allocates: the 256-bit set is stood up once and only its bits move.
 // ZPRESERVE re-executes every pass, so the set is cleared at the top of each pass (zeropage_reset) and
 // refilled as the directive runs; after the final pass it holds the settled reservation.
@@ -74,8 +74,8 @@ typedef struct zp_insn {
                              // outside the direct-addressing envelope, so the allocation would be unsound; a
                              // final-pass check refuses it (see zeropage_finalize)
     uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE
-    uint32_t overlay;        // which overlay the operand byte lives in (for the allocation patch)
-    uint32_t operand_offset; // byte offset of the operand within that overlay's code buffer
+    uint32_t section;        // which section the operand byte lives in (for the allocation patch)
+    uint32_t operand_offset; // byte offset of the operand within that section's code buffer
     cursor   at;
 } zp_insn;
 

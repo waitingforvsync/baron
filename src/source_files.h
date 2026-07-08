@@ -7,7 +7,7 @@
 
 
 // One cached source: its name (the path it was loaded from, or a caller-given name for a source
-// supplied directly as a string) and its full contents as an rc_str. Like a scope or an overlay,
+// supplied directly as a string) and its full contents as an rc_str. Like a scope or a section,
 // this is an internal element of its manager - reached by index, never by pointer.
 typedef struct source_file {
     rc_str name;
@@ -20,7 +20,7 @@ typedef struct source_file {
 
 
 // The source-file cache: a manager of cached sources addressed by index, in the same spirit as
-// `scopes` and `overlays`. It owns the cached names and contents (in its own arenas), so a source
+// `scopes` and `sections`. It owns the cached names and contents (in its own arenas), so a source
 // added from a transient string or path stays valid for the manager's lifetime.
 typedef struct source_files {
     rc_arena            *arena;   // BORROWED: baron's permanent arena, backs the nodes AND the cached names/text

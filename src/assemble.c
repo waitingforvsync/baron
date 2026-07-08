@@ -20,14 +20,13 @@
 
 // Mutual recursion: a label or a scope reopens the statement loop, and the loop reaches the
 // handlers that may do so. The directive handlers are referenced by the statement table.
-// All the parse functions take the same head: the baron (its scopes / overlays / source files, and
-// the current overlay), then the cursor `at` (source file index plus offset), the scope index, and
+// All the parse functions take the same head: the baron (its scopes / sections / source files, and
+// the current section), then the cursor `at` (source file index plus offset), the scope index, and
 // the parse flags, then scratch by value. Each fetches its source rc_str from b->source_files at the top.
-static parse_result handle_org(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
-static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
+static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
 static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch);
@@ -122,6 +121,7 @@ typedef enum closer_kind {
     closer_endif,
     closer_next,
     closer_endmacro,
+    closer_endsection,
 } closer_kind;
 
 // Pre-combined: every mnemonic (its own lexeme type, carrying the id) plus the statement
@@ -200,11 +200,10 @@ static const token statement_token_entries[] = {
     {RC_STR("."),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_label}}},
     {RC_STR(".@"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_local_label}}},
     {RC_STR("{"),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_open_brace}}},
-    {RC_STR("org"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_org}}},
     {RC_STR("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
     {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
-    {RC_STR("overlay"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_overlay}}},
+    {RC_STR("section"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_section}}},
     {RC_STR("zpreserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpreserve}}},
     {RC_STR("zpauto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto1}}},   // 1-byte ZP variable
     {RC_STR("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
@@ -231,6 +230,7 @@ static const token statement_token_entries[] = {
     {RC_STR("endif"),  {.type = lexeme_type_closer, .closer = {closer_endif, error_type_unexpected_endif}}},
     {RC_STR("next"),    {.type = lexeme_type_closer, .closer = {closer_next,     error_type_unexpected_next}}},
     {RC_STR("endmacro"),{.type = lexeme_type_closer, .closer = {closer_endmacro, error_type_unexpected_endmacro}}},
+    {RC_STR("endsection"),{.type = lexeme_type_closer, .closer = {closer_endsection, error_type_unexpected_endsection}}},
     {RC_STR("}"),       {.type = lexeme_type_closer, .closer = {closer_brace,    error_type_unexpected_close_brace}}},
 };
 
@@ -247,6 +247,13 @@ static token_table statement_tokens(const baron *b)
 {
     return macros_statement_tokens(&b->macros);
 }
+
+// '=' is its own tiny table, lexed after an identifier at statement start (an assignment) and after an
+// attribute name on a SECTION line. Defined here so both the assignment handler and handle_section can reach it.
+static const token assign_token_entries[] = {
+    {RC_STR("="), {.type = lexeme_type_assign}},
+};
+static const token_table assign_tokens = RC_VIEW(assign_token_entries);
 
 // require_separator is shared with opcodes.c (declared in assemble.h); it reads the statement
 // table to recognise the '}' that implicitly closes a one-liner, so it lives here with it.
@@ -267,7 +274,7 @@ parse_result require_separator(baron *b, cursor at)
 }
 
 // The one place that projects baron into an expr_env: symbols from `scope`, the live PC of the current
-// overlay, and the reference's own position (`at`) for the impure @- / @+ locals. Every directive / operand
+// section, and the reference's own position (`at`) for the impure @- / @+ locals. Every directive / operand
 // evaluates through here, so no call site rebuilds the environment and the expression parser never sees
 // baron. The cursor's source+pos double as the parse start and the use site. Shared with opcodes.c.
 expr_result eval(baron *b, cursor at, uint32_t scope, rc_arena scratch)
@@ -276,7 +283,7 @@ expr_result eval(baron *b, cursor at, uint32_t scope, rc_arena scratch)
     expr_env env = {
         .scopes         = &b->scopes,
         .scope_index    = scope,
-        .pc             = overlays_pc(&b->overlays, b->current_overlay),
+        .pc             = sections_pc(&b->sections, b->current_section),
         .source         = at.source,
         .offset         = at.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),   // base + a token per FUNCTION name
@@ -320,36 +327,6 @@ static parse_result fold(parse_result r, parse_result sub)
 
 // ---- directive statements ----
 
-static parse_result handle_org(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
-{
-
-    expr_result e = eval(b, at, scope, scratch);
-    if (e.error != expr_error_none) {
-        return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
-    }
-
-    // A dead branch parses the operand but applies nothing - all the effect lives in this block.
-    bool unresolved = false;
-    if (flags.active) {
-        int_argument arg = int_argument_make(e.value, flags.final, at.pos);
-        switch (arg.type) {
-            case int_argument_type_known:
-                overlays_org(&b->overlays, b->current_overlay, (uint32_t) (arg.value & 0xFFFF));
-                break;
-            case int_argument_type_unresolved:
-                unresolved = true;   // an unknown ORG leaves pc as-is this pass; forces another pass
-                break;
-            case int_argument_type_error:
-                semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));   // leave pc as-is
-                break;
-        }
-    }
-
-    parse_result r = require_separator(b, cursor_at(at, e.next));
-    r.unresolved = unresolved;
-    return r;
-}
-
 // SKIP n - pad the object code with n zero bytes (advancing pc by n). A negative count would
 // rewind the pointer, which we cannot do; the layout-dependent check is deferred to the final pass.
 static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
@@ -369,7 +346,7 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, parse_flags
                     semantic_error(b, flags, error_type_skip_backwards, cursor_at(at, at.pos));   // skip nothing
                 }
                 else {
-                    overlays_skip(&b->overlays, b->current_overlay, (uint32_t) arg.value);
+                    sections_skip(&b->sections, b->current_section, (uint32_t) arg.value);
                 }
                 break;
             case int_argument_type_unresolved:
@@ -401,12 +378,12 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, parse_fla
         int_argument arg = int_argument_make(e.value, flags.final, at.pos);
         switch (arg.type) {
             case int_argument_type_known: {
-                uint32_t pc = overlays_pc(&b->overlays, b->current_overlay);
+                uint32_t pc = sections_pc(&b->sections, b->current_section);
                 if (arg.value < pc) {
                     semantic_error(b, flags, error_type_skip_backwards, cursor_at(at, at.pos));   // skip nothing
                 }
                 else {
-                    overlays_skip(&b->overlays, b->current_overlay, (uint32_t) (arg.value - pc));
+                    sections_skip(&b->sections, b->current_section, (uint32_t) (arg.value - pc));
                 }
                 break;
             }
@@ -444,9 +421,9 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
                 }
                 else {
                     uint32_t n = (uint32_t) arg.value;
-                    uint32_t rem = overlays_pc(&b->overlays, b->current_overlay) % n;
+                    uint32_t rem = sections_pc(&b->sections, b->current_section) % n;
                     if (rem != 0) {
-                        overlays_skip(&b->overlays, b->current_overlay, n - rem);
+                        sections_skip(&b->sections, b->current_section, n - rem);
                     }
                 }
                 break;
@@ -464,27 +441,119 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, parse_flag
     return r;
 }
 
-// OVERLAY <name> - select the named overlay as the current one, creating it on first sighting. Overlay names
-// live in their OWN namespace (not symbols or scopes): the name is read as a bare identifier and looked up in
-// the overlay manager alone. For now selection is all it does; attributes come later. A dead branch reads the
-// name but selects nothing - the effect lives entirely under `active`.
-static parse_result handle_overlay(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
+// SECTION name, key = expr, ... / ENDSECTION - a lexically scoped region of object code. The name is UNIQUE
+// (a repeat is error_type_duplicate_section: a name identifies one output blob, and there is no
+// concatenation). The attributes are `key = expr` pairs resolved here: the assembler acts on `org` (which
+// sets this section's start address - else the running emission cursor simply continues) and stores every
+// attribute on the section for the output utility to read out of the result. Sections nest: a child inherits
+// its parent's attributes (its own keys override) and, on ENDSECTION, hands the cursor back so the parent
+// resumes where the child left off. A SECTION does NOT open a naming scope - labels inside bind in the
+// enclosing scope, exactly as an IF body does. A dead branch parses the whole block for its extent but
+// creates nothing and emits nothing.
+static parse_result handle_section(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
 {
-    (void) scope;
-    (void) scratch;
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    // The overlay name is a bare identifier (lexed like a label name; a mnemonic-spelled name would lex as
-    // that opcode, the same limitation labels have - acceptable, and not worth a private name table).
+    // The name is a bare identifier (a mnemonic-spelled name would lex as that opcode - the same limitation
+    // labels have, and not worth a private name table).
     lexer_result nm = lexer_next(src, at.pos, statement_tokens(b));
     if (nm.token.type != lexeme_type_identifier) {
-        return syntax_error(b, error_type_expected_overlay_name, cursor_at(at, at.pos));
+        return syntax_error(b, error_type_expected_section_name, cursor_at(at, at.pos));
     }
 
+    // Create the section and switch into it (only when live). parent_section is restored on ENDSECTION; the
+    // cursor flows: the child starts where the parent's pc sits (unless an `org` attribute jumps it), and on
+    // close the parent resumes from the child's end.
+    uint32_t parent_section = b->current_section;
+    uint32_t child          = RC_INDEX_NONE;
     if (flags.active) {
-        b->current_overlay = overlays_get_or_make(&b->overlays, nm.token.identifier.name);
+        child = sections_make(&b->sections, nm.token.identifier.name);
+        if (child == RC_INDEX_NONE) {
+            return syntax_error(b, error_type_duplicate_section, cursor_at(at, at.pos));   // names are unique
+        }
+        // Inherit the parent's attributes (bar `org`, which is positional), then default the cursor to
+        // continue from the parent; an explicit `org` attribute below overrides it.
+        rc_view_attribute inherited = sections_attributes(&b->sections, parent_section);
+        for (uint32_t i = 0; i < inherited.num; i++) {
+            attribute a = rc_view_attribute_get(inherited, i);
+            if (!rc_str_is_equal_insensitive(a.key, RC_STR("org"))) {
+                sections_add_attribute(&b->sections, child, a.key, a.v, a.at);
+            }
+        }
+        sections_org(&b->sections, child, sections_pc(&b->sections, parent_section));
+        b->current_section = child;
     }
-    return require_separator(b, cursor_at(at, nm.next));
+
+    // The attribute list: `, key = expr` pairs to the end of the SECTION line. Parsed structurally even in a
+    // dead branch (to reach the body); applied only when live.
+    uint32_t pos = nm.next;
+    bool unresolved = false;
+    while (true) {
+        lexer_result comma = lexer_next(src, pos, statement_tokens(b));
+        if (comma.token.type != lexeme_type_comma) {
+            break;   // no more attributes - comma.token is the line terminator, left to require_separator
+        }
+        lexer_result key = lexer_next(src, comma.next, statement_tokens(b));
+        if (key.token.type != lexeme_type_identifier) {
+            b->current_section = parent_section;
+            return syntax_error(b, error_type_unexpected_token, cursor_at(at, comma.next));   // want an attribute name
+        }
+        lexer_result eq = lexer_next(src, key.next, assign_tokens);
+        if (eq.token.type != lexeme_type_assign) {
+            b->current_section = parent_section;
+            return syntax_error(b, error_type_expected_assign, cursor_at(at, key.next));
+        }
+        expr_result e = eval(b, cursor_at(at, eq.next), scope, scratch);
+        if (e.error != expr_error_none) {
+            b->current_section = parent_section;
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+        }
+
+        if (child != RC_INDEX_NONE) {
+            sections_add_attribute(&b->sections, child, key.token.identifier.name, e.value, cursor_at(at, comma.next));
+            if (rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"))) {
+                int_argument arg = int_argument_make(e.value, flags.final, eq.next);
+                switch (arg.type) {
+                    case int_argument_type_known:
+                        sections_org(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
+                        break;
+                    case int_argument_type_unresolved:
+                        unresolved = true;   // a forward-referenced org owes another pass; cursor stays for now
+                        break;
+                    case int_argument_type_error:
+                        semantic_error(b, flags, arg.error, cursor_at(at, eq.next));
+                        break;
+                }
+            }
+        }
+        pos = e.next;
+    }
+
+    // Close the SECTION line, parse the body up to ENDSECTION, then restore the parent (threading the cursor).
+    parse_result sep = require_separator(b, cursor_at(at, pos));
+    if (sep.fatal) {
+        b->current_section = parent_section;
+        return sep;
+    }
+
+    parse_result body = parse_block(b, cursor_at(at, sep.next), scope, flags, scratch);
+    body.unresolved |= unresolved;
+
+    if (child != RC_INDEX_NONE) {
+        sections_org(&b->sections, parent_section, sections_pc(&b->sections, child));   // parent resumes from the child's end
+    }
+    b->current_section = parent_section;
+
+    if (body.fatal) {
+        return body;
+    }
+
+    lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
+    if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
+        body.next = cl.next;
+        return fold(body, require_separator(b, cursor_at(at, body.next)));
+    }
+    return fold(body, syntax_error(b, error_type_unclosed_section, cursor_at(at, body.next)));   // a foreign closer / EOF
 }
 
 // Add one ZPRESERVE value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
@@ -650,7 +719,7 @@ static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, pars
     (void) scratch;
     if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
         zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-            .site   = overlays_pc(&b->overlays, b->current_overlay),
+            .site   = sections_pc(&b->sections, b->current_section),
             .target = RC_INDEX_NONE,
             .kind   = zp_cflow_unreachable,
             .at     = cursor_at(at, at.pos),
@@ -737,15 +806,15 @@ static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, parse_fl
     return handle_can_targets(b, at, scope, flags, zp_flow_jump, zp_cflow_canjump, scratch);
 }
 
-// Emit `bits` as `width` little-endian bytes into the current overlay.
+// Emit `bits` as `width` little-endian bytes into the current section.
 static void emit_le(baron *b, uint64_t bits, uint32_t width)
 {
     for (uint32_t i = 0; i < width; i++) {
-        overlays_emit_u8(&b->overlays, b->current_overlay, (uint8_t) (bits >> (8 * i)));
+        sections_emit_u8(&b->sections, b->current_section, (uint8_t) (bits >> (8 * i)));
     }
 }
 
-// Emit one value into the current overlay as `width`-byte little-endian units, for EQUB/EQUW/EQUD (width
+// Emit one value into the current section as `width`-byte little-endian units, for EQUB/EQUW/EQUD (width
 // 1/2/4). A string goes character by character (each char widened to `width` bytes); a range is enumerated;
 // a list is descended (so nested lists and ranges flatten out); anything else is one `width`-byte unit via
 // int_argument_make, where a forward reference emits a zero placeholder of the right size and asks for
@@ -873,7 +942,7 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, parse_flag
             &b->scopes,
             scope,
             name,
-            value_make_numeric((double)overlays_pc(&b->overlays, b->current_overlay)),
+            value_make_numeric((double)sections_pc(&b->sections, b->current_section)),
             at
         );
 
@@ -955,7 +1024,7 @@ static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, pars
             &b->scopes,
             scope,
             key.view,
-            value_make_numeric((double) overlays_pc(&b->overlays, b->current_overlay)),
+            value_make_numeric((double) sections_pc(&b->sections, b->current_section)),
             at);
         r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
     }
@@ -1099,12 +1168,6 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, parse_flags f
 
 
 // ---- the assignment statement ----
-
-// '=' is its own tiny table, lexed only after an identifier at statement start.
-static const token assign_token_entries[] = {
-    {RC_STR("="), {.type = lexeme_type_assign}},
-};
-static const token_table assign_tokens = RC_VIEW(assign_token_entries);
 
 // `name` is the identifier and `pos` sits just past it; an assignment defines a symbol and
 // emits nothing.
@@ -1264,7 +1327,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, parse_flags 
 // ---- INCLUDE ----
 
 // INCLUDE "file" splices another source in at this point - textually, so its code emits into the current
-// overlay at the current pc and its symbols bind into the current scope (no scope of its own). We re-parse
+// section at the current pc and its symbols bind into the current scope (no scope of its own). We re-parse
 // the included file every pass, exactly like the rest of the statement stream, so forward references cross
 // the boundary freely. The filename is resolved relative to THIS file's directory (see file_path_resolve).
 static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_flags flags, rc_arena scratch)
@@ -1331,9 +1394,9 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, parse_fl
     return fold(pulled, require_separator(b, cursor_at(at, e.next)));
 }
 
-// INCBIN "file" - splice a binary file's bytes into the current overlay. Its size never changes across passes,
+// INCBIN "file" - splice a binary file's bytes into the current section. Its size never changes across passes,
 // so on the settling passes we do NOT read the file at all: rc_file_size tells us how many bytes it will be and
-// we just advance pc by that much (overlays_skip pads with zeroes). Only on the FINAL pass do we actually load
+// we just advance pc by that much (sections_skip pads with zeroes). Only on the FINAL pass do we actually load
 // it and emit the real bytes (via emit_data, reusing EQUB's per-byte path over a string of the contents). The
 // filename is a string operand resolved relative to the includer, exactly like INCLUDE; a forward-referenced
 // name defers like a forward address. A missing / unreadable file is FATAL (there is no sensible recovery - the
@@ -1365,7 +1428,7 @@ static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, parse_fla
                 if (sz.error != RC_FILE_OK) {
                     return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
                 }
-                overlays_skip(&b->overlays, b->current_overlay, sz.size);
+                sections_skip(&b->sections, b->current_section, sz.size);
             }
         }
         else if (value_is_error(e.value) && e.value.error == error_type_unknown_symbol) {
@@ -1556,7 +1619,7 @@ static parse_result handle_function(baron *b, cursor at, uint32_t scope, parse_f
     expr_env env = {
         .scopes         = &b->scopes,
         .scope_index    = scope,
-        .pc             = overlays_pc(&b->overlays, b->current_overlay),
+        .pc             = sections_pc(&b->sections, b->current_section),
         .source         = at.source,
         .offset         = body.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),
@@ -1844,13 +1907,13 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, parse_flags 
 
 static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_arena scratch)
 {
-    // The per-pass arena backs overlays, macros and functions - a fresh projection of the source each pass.
-    // Reset it once, then rebuild all three stores into it (overlays gets a fresh default overlay; the two
+    // The per-pass arena backs sections, macros and functions - a fresh projection of the source each pass.
+    // Reset it once, then rebuild all three stores into it (sections gets a fresh default section; the two
     // token tables are reseeded from their static bases, with room for per-name tokens).
     rc_arena_reset(b->per_pass);
-    overlays_reset(&b->overlays);
+    sections_reset(&b->sections);
     zeropage_reset(&b->zeropage);            // ZPRESERVE re-runs this pass and refills the (permanent) set
-    b->current_overlay = overlays_default;   // each pass re-derives the current overlay from the source
+    b->current_section = sections_default;   // each pass re-derives the current section from the source
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
     b->function_depth  = 0;                  // ditto for FUNCTION recursion (balanced by the evaluator)
@@ -1894,26 +1957,27 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
     // instructions sharing a START address are indistinguishable - a branch/jump target could resolve to the
     // wrong one, a real edge be missed, and a live range wrongly shortened (a silently unsound allocation). An
     // address collision is the ONE layout hazard, and it is the only thing refused here. Everything with
-    // distinct addresses is sound: several forward ORGs, and multiple OVERLAYs at DIFFERENT addresses - even a
-    // cross-overlay JSR resolves by address and is analysed correctly; a spurious cross-overlay edge only
-    // lengthens a live range, never shortens it. A collision arises from an ORG that rewinds onto emitted code
-    // (same overlay) or two overlays loaded into the same address slot (different overlay); we name which.
+    // distinct addresses is sound: multiple sections at DIFFERENT addresses - even a cross-section JSR resolves
+    // by address and is analysed correctly; a spurious cross-section edge only lengthens a live range, never
+    // shortens it. A collision arises when a section's cursor was dragged backwards onto its own emitted code
+    // (a nested section with a low org threads back to it on close - named an org rewind) or two sections load
+    // into the same address slot (named a section clash); we name which.
     // (Gated on nv > 0: with no variable there is nothing to allocate, so no hazard.)
     if (nv > 0) {
-        uint32_t *pc_owner = rc_arena_alloc_zero_type(&scratch, uint32_t, 0x10000);   // 0 = free; else overlay+1
+        uint32_t *pc_owner = rc_arena_alloc_zero_type(&scratch, uint32_t, 0x10000);   // 0 = free; else section+1
         for (uint32_t i = 0; i < insns.num; i++) {
             zp_insn n = rc_view_zp_insn_get(insns, i);
             if (n.pc >= 0x10000) {
                 continue;   // a degenerate out-of-range pc; the CFG ignores it too (16-bit address space)
             }
             if (pc_owner[n.pc] != 0) {
-                error_type e = (pc_owner[n.pc] - 1 == n.overlay) ? error_type_zpauto_org_rewind
-                                                                 : error_type_zpauto_multi_overlay;
+                error_type e = (pc_owner[n.pc] - 1 == n.section) ? error_type_zpauto_org_rewind
+                                                                 : error_type_zpauto_multi_section;
                 baron_error(b, e, n.at);
                 refused = true;
                 break;
             }
-            pc_owner[n.pc] = n.overlay + 1;
+            pc_owner[n.pc] = n.section + 1;
         }
     }
 
@@ -2025,7 +2089,7 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
             for (uint32_t i = 0; i < insns.num; i++) {
                 zp_insn n = rc_view_zp_insn_get(insns, i);
                 if (n.vreg != RC_INDEX_NONE) {
-                    overlays_patch_add_u8(&b->overlays, n.overlay, n.operand_offset, (uint8_t) col.base[n.vreg]);
+                    sections_patch_add_u8(&b->sections, n.section, n.operand_offset, (uint8_t) col.base[n.vreg]);
                 }
             }
             // Rewrite each variable's symbol from the placeholder to its real zero-page address.
@@ -2045,7 +2109,7 @@ static void zeropage_finalize(baron *b, rc_arena scratch)
 // to consume; only the diagnostics remain. Returns 0, the failure signal the entry points hand back.
 static uint32_t assemble_failed(baron *b)
 {
-    overlays_reset(&b->overlays);   // a fresh, empty default overlay - so a failed read hands back no code
+    sections_reset(&b->sections);   // a fresh, empty default section - so a failed read hands back no code
     scopes_reset(&b->scopes);
     return 0;
 }
@@ -2092,7 +2156,7 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
     return assemble_failed(b);
 }
 
-// Turn a finished baron into the read-only snapshot the caller keeps. The overlay list (each overlay's pc +
+// Turn a finished baron into the read-only snapshot the caller keeps. The section list (each section's pc +
 // object code) lives in the per_pass arena from the final pass; diagnostics in permanent. The scope tree's
 // backing (nodes + trie pools) is in permanent too. Both are handed back as cheap views/projections that
 // outlive `b` (which dies the moment we return) - nothing is flattened up front; the caller queries on demand.
@@ -2100,7 +2164,7 @@ static baron_result baron_result_make(baron *b, uint32_t passes)
 {
     return (baron_result) {
         .passes      = passes,
-        .overlays    = overlays_all(&b->overlays),
+        .sections    = sections_all(&b->sections),
         .diagnostics = b->diagnostics.view,
         .scopes      = scopes_view_make(&b->scopes),
     };
@@ -2109,10 +2173,10 @@ static baron_result baron_result_make(baron *b, uint32_t passes)
 rc_view_bytes baron_result_code(const baron_result *r)
 {
     RC_ASSERT(r != NULL);
-    if (r->overlays.num == 0) {
+    if (r->sections.num == 0) {
         return (rc_view_bytes) {0};
     }
-    return rc_view_overlay_get(r->overlays, overlays_default).code.view;
+    return rc_view_section_get(r->sections, sections_default).code.view;
 }
 
 value baron_result_symbol(const baron_result *r, rc_str path)
@@ -2175,6 +2239,25 @@ static bool code_is(const baron_result *r, uint32_t passes, const uint8_t *exp, 
 {
     rc_view_bytes code = baron_result_code(r);
     if (passes == 0 || code.num != n) {
+        return false;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        if (rc_view_bytes_get(code, i) != exp[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Like code_is but for a named section by index - used when a test puts its code in a SECTION (rather than
+// the default at index 0) to exercise an explicit org address.
+static bool code_in_is(const baron_result *r, uint32_t passes, uint32_t index, const uint8_t *exp, uint32_t n)
+{
+    if (passes == 0 || index >= r->sections.num) {
+        return false;
+    }
+    rc_view_bytes code = rc_view_section_get(r->sections, index).code.view;
+    if (code.num != n) {
         return false;
     }
     for (uint32_t i = 0; i < n; i++) {
@@ -2292,10 +2375,10 @@ RC_TEST_STEP(assemble, skip_skipto_align, fix)
     // SKIP n emits n zero bytes.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #1 : SKIP 3 : RTS"), (uint8_t[]) {0xA9, 0x01, 0x00, 0x00, 0x00, 0x60}, 6));
 
-    // SKIPTO addr fills with zeroes until pc reaches addr (0x2001 -> 0x2004 = three bytes).
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &2000 : NOP : SKIPTO &2004 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
+    // SKIPTO addr fills with zeroes until pc reaches addr (pc 1 -> 4 = three bytes; default section, org 0).
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("NOP : SKIPTO 4 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
     // Already past addr is an error.
-    RC_CHECK_TRUE(ERR("ORG &2000 : NOP : NOP : SKIPTO &2001") == error_type_skip_backwards);
+    RC_CHECK_TRUE(ERR("NOP : NOP : SKIPTO 1") == error_type_skip_backwards);
 
     // ALIGN n pads up to the next multiple of n (pc 1 -> 4 = three bytes)...
     RC_CHECK_TRUE(code_is(&fix->r, ASM("NOP : ALIGN 4 : RTS"), (uint8_t[]) {0xEA, 0x00, 0x00, 0x00, 0x60}, 5));
@@ -2307,61 +2390,78 @@ RC_TEST_STEP(assemble, skip_skipto_align, fix)
 
 RC_TEST_STEP(assemble, skip_advances_pc, fix)
 {
-    // SKIP moves pc, so a label after it sees the advanced address.
-    uint32_t passes = ASM("ORG &2000 : .a SKIP 4 : .b");
+    // SKIP moves pc, so a label after it sees the advanced address (default section, org 0).
+    uint32_t passes = ASM(".a SKIP 4 : .b");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("a")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("b")), value_make_numeric(0x2004)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("a")), value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("b")), value_make_numeric(4)));
 }
 
-RC_TEST_STEP(assemble, overlay_selects_and_creates, fix)
+RC_TEST_STEP(assemble, section_selects_and_creates, fix)
 {
-    // OVERLAY <name> selects a named overlay (created on first sighting), so bytes after it land there, not
-    // in the default. The default (index 0) stays empty; "code" (index 1) carries the two instructions.
-    RC_CHECK_TRUE(ASM("OVERLAY code : LDA #&11 : LDX #&22") != 0);
-    RC_CHECK(fix->r.overlays.num, ==, 2u);   // default + "code"
-    overlay def  = rc_view_overlay_get(fix->r.overlays, 0);
-    overlay code = rc_view_overlay_get(fix->r.overlays, 1);
+    // A SECTION block emits into a named section, not the default. The default (index 0) stays empty;
+    // "code" (index 1) carries the two instructions. ENDSECTION returns to the default.
+    RC_CHECK_TRUE(ASM("SECTION code : LDA #&11 : LDX #&22 : ENDSECTION") != 0);
+    RC_CHECK(fix->r.sections.num, ==, 2u);   // default + "code"
+    section def  = rc_view_section_get(fix->r.sections, 0);
+    section code = rc_view_section_get(fix->r.sections, 1);
     RC_CHECK(def.code.view.num, ==, 0u);     // nothing landed in the default
     RC_CHECK(code.code.view.num, ==, 4u);    // LDA #, LDX # -> 4 bytes
     RC_CHECK_TRUE(rc_str_is_equal(code.name, RC_STR("code")));
 }
 
-RC_TEST_STEP(assemble, overlay_reselect_accumulates, fix)
+RC_TEST_STEP(assemble, section_names_are_unique, fix)
 {
-    // Re-selecting a name returns to the SAME overlay (stable index), so its code accumulates; a different
-    // name is a different overlay. a -> byte, b -> byte, back to a -> +byte, so a holds 2 and b holds 1.
-    RC_CHECK_TRUE(ASM("OVERLAY a : EQUB 1 : OVERLAY b : EQUB 2 : OVERLAY a : EQUB 3") != 0);
-    RC_CHECK(fix->r.overlays.num, ==, 3u);   // default + a + b
-    RC_CHECK(rc_view_overlay_get(fix->r.overlays, 1).code.view.num, ==, 2u);   // a got two bytes
-    RC_CHECK(rc_view_overlay_get(fix->r.overlays, 2).code.view.num, ==, 1u);   // b got one
+    // Distinct sections each hold their own bytes; there is no concatenation, so a repeated name is refused.
+    RC_CHECK_TRUE(ASM("SECTION a : EQUB 1 : ENDSECTION : SECTION b : EQUB 2 : ENDSECTION") != 0);
+    RC_CHECK(fix->r.sections.num, ==, 3u);   // default + a + b
+    RC_CHECK(rc_view_section_get(fix->r.sections, 1).code.view.num, ==, 1u);   // a got one byte
+    RC_CHECK(rc_view_section_get(fix->r.sections, 2).code.view.num, ==, 1u);   // b got one
+    RC_CHECK_TRUE(ERR("SECTION a : ENDSECTION : SECTION a : ENDSECTION") == error_type_duplicate_section);
 }
 
-RC_TEST_STEP(assemble, overlay_has_own_pc, fix)
+RC_TEST_STEP(assemble, section_org_attribute, fix)
 {
-    // Each overlay carries its own pc: ORG in a selected overlay sets that overlay's pc, and a label takes it.
-    RC_CHECK_TRUE(ASM("OVERLAY hi : ORG &3000 : .here EQUB 0") != 0);
+    // `org` on the SECTION line sets that section's start address; a label inside takes it, and the section's
+    // pc advances past the emitted byte.
+    RC_CHECK_TRUE(ASM("SECTION hi, org = &3000 : .here EQUB 0 : ENDSECTION") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x3000)));
-    RC_CHECK(rc_view_overlay_get(fix->r.overlays, 1).pc, ==, 0x3001u);   // &3000 + 1 emitted byte
+    RC_CHECK(rc_view_section_get(fix->r.sections, 1).pc, ==, 0x3001u);   // &3000 + 1 emitted byte
 }
 
-RC_TEST_STEP(assemble, overlay_name_is_own_namespace, fix)
+RC_TEST_STEP(assemble, section_cursor_continues, fix)
 {
-    // An overlay name lives in its own namespace, separate from symbols: `x` can be both a symbol (= 5) and
-    // an overlay name at once, and EQUB x still emits the SYMBOL's value into overlay "x".
-    RC_CHECK_TRUE(ASM("x = 5 : OVERLAY x : EQUB x") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(5)));
-    RC_CHECK(fix->r.overlays.num, ==, 2u);   // default + overlay "x"
-    overlay ox = rc_view_overlay_get(fix->r.overlays, 1);
-    RC_CHECK_TRUE(rc_str_is_equal(ox.name, RC_STR("x")));
-    RC_CHECK(ox.code.view.num, ==, 1u);
-    RC_CHECK((uint32_t)rc_view_bytes_get(ox.code.view, 0), ==, 5u);   // the symbol value 5, in overlay x
+    // A section with no `org` continues the running cursor: the first section runs at &2000 and emits one
+    // byte, so the second (no org) begins at &2001. Labels confirm both.
+    RC_CHECK_TRUE(ASM("SECTION a, org=&2000 : .x EQUB 0 : ENDSECTION : SECTION b : .y EQUB 0 : ENDSECTION") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x2001)));
 }
 
-RC_TEST_STEP(assemble, overlay_name_errors, fix)
+RC_TEST_STEP(assemble, section_nesting_inherits_attributes, fix)
 {
-    RC_CHECK_TRUE(ERR("OVERLAY")   == error_type_expected_overlay_name);   // nothing after the keyword
-    RC_CHECK_TRUE(ERR("OVERLAY 5") == error_type_expected_overlay_name);   // a number is not a name
+    // A nested section inherits its parent's attributes (its own keys override); `org` never inherits. Here
+    // the child inherits load=&1200 and overrides tag; a stored attribute round-trips into the result.
+    RC_CHECK_TRUE(ASM("SECTION outer, load=&1200, tag=1 : SECTION inner, tag=2 : EQUB 0 : ENDSECTION : ENDSECTION") != 0);
+    section inner = rc_view_section_get(fix->r.sections, 2);   // default, outer, inner
+    RC_CHECK_TRUE(rc_str_is_equal(inner.name, RC_STR("inner")));
+    // inner has load (inherited), tag (overridden to 2), and no org.
+    bool saw_load = false, saw_tag = false;
+    for (uint32_t i = 0; i < inner.attributes.view.num; i++) {
+        attribute a = rc_view_attribute_get(inner.attributes.view, i);
+        if (rc_str_is_equal(a.key, RC_STR("load"))) { saw_load = true; RC_CHECK(a.v.numeric, ==, 4608.0); }   // &1200 inherited
+        if (rc_str_is_equal(a.key, RC_STR("tag")))  { saw_tag  = true; RC_CHECK(a.v.numeric, ==, 2.0); }       // own override
+    }
+    RC_CHECK_TRUE(saw_load);
+    RC_CHECK_TRUE(saw_tag);
+}
+
+RC_TEST_STEP(assemble, section_name_errors, fix)
+{
+    RC_CHECK_TRUE(ERR("SECTION")   == error_type_expected_section_name);   // nothing after the keyword
+    RC_CHECK_TRUE(ERR("SECTION 5 : ENDSECTION") == error_type_expected_section_name);   // a number is not a name
+    RC_CHECK_TRUE(ERR("SECTION a : LDA #0") == error_type_unclosed_section);   // no ENDSECTION
+    RC_CHECK_TRUE(ERR("ENDSECTION") == error_type_unexpected_endsection);   // no SECTION to close
 }
 
 RC_TEST_STEP(assemble, zpreserve_directive, fix)
@@ -2564,31 +2664,34 @@ RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)
 RC_TEST_STEP(assemble, zpauto_layout_must_not_collide, fix)
 {
     // The flow analysis identifies a block by its address, so the ONLY rule is that no two instructions share
-    // an address. ORG and OVERLAY are otherwise free.
+    // an address. Distinct sections at DIFFERENT addresses are free.
 
-    // A forward ORG is fine - the pc only moves onwards.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : ORG &2000 : STA v : LDA v : RTS") != 0);
+    // A section with an explicit org is fine - the var still allocates.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : SECTION s, org=&2000 : STA v : LDA v : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
 
-    // Two overlays at DIFFERENT addresses are fine, and their variables reuse the same reserved byte (they are
-    // never resident together, and no flow connects them, so they do not interfere).
+    // Two sections at DIFFERENT addresses are fine, and their variables reuse the same reserved byte (no flow
+    // connects them, so they do not interfere).
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
-                      "ORG &2000 : STA v : LDA v : RTS\n"
-                      "OVERLAY second : ORG &3000 : STA w : LDA w : RTS") != 0);
+                      "SECTION a, org=&2000 : STA v : LDA v : RTS : ENDSECTION\n"
+                      "SECTION b, org=&3000 : STA w : LDA w : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
-    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);   // OVERLAY selects output, not a scope: w is top-level
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);
 
-    // But an ORG that rewinds the pc puts two instructions at one address - refused rather than risk a wrong
-    // edge (same overlay, so it is named as an ORG rewind).
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : ORG &2000 : STA v : ORG &2000 : LDA v : RTS")
+    // But two sections loaded into the SAME address slot put two instructions at one address - refused rather
+    // than risk a wrong edge, and named as a section clash.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      "SECTION a, org=&2000 : STA v : ENDSECTION\n"
+                      "SECTION b, org=&2000 : LDA v : RTS : ENDSECTION")
+                  == error_type_zpauto_multi_section);
+
+    // And a nested section whose low org threads the cursor BACK onto emitted code collides within one section
+    // (STA v at pc 0, then an empty org=0 section drags the default cursor back to 0, so LDA v lands on it) -
+    // named as an org rewind.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : SECTION a, org=0 : ENDSECTION : LDA v : RTS")
                   == error_type_zpauto_org_rewind);
-
-    // And two overlays loaded into the SAME address slot collide (both default to pc 0 here) - refused, and
-    // named as an overlay clash.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : OVERLAY second : LDA v : RTS")
-                  == error_type_zpauto_multi_overlay);
 }
 
 RC_TEST_STEP(assemble, zpauto_unreachable_prunes_dead_edge, fix)
@@ -2801,10 +2904,10 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
 
 RC_TEST_STEP(assemble, org_and_labels, fix)
 {
-    // ORG sets the label's value but not where code lands (code still fills from index 0).
-    uint32_t passes = ASM("ORG &2000 : LDA #1 : .here");
+    // A section's `org` sets label values but not where code lands (code still fills its buffer from index 0).
+    uint32_t passes = ASM("SECTION t, org=&2000 : LDA #1 : .here : ENDSECTION");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x01}, 2));
+    RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xA9, 0x01}, 2));   // section "t" is index 1
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")),
                                  value_make_numeric(0x2002)));
 }
@@ -2827,10 +2930,13 @@ RC_TEST_STEP(assemble, local_label_forward, fix)
 
 RC_TEST_STEP(assemble, local_label_orders_by_cursor_not_value, fix)
 {
-    // Two .@ with an ORG between them, so their VALUES run counter to source order (&34 then &12). @- picks
-    // the TEXTUALLY previous .@ (the second one, value &12) - proving the scan orders by definition position,
-    // not by the address the label captured. EQUB emits that value's low byte: 0x12, not 0x34.
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &34 : .@ : ORG &12 : .@ : EQUB @-"), (uint8_t[]){0x12}, 1));
+    // Two .@ in sections at counter-to-source-order addresses (&34 then &12). @- picks the TEXTUALLY previous
+    // .@ (the second one, value &12) - proving the scan orders by definition position, not by the address the
+    // label captured. EQUB emits that value's low byte: 0x12, not 0x34. (Sections do not scope, so both .@
+    // bind in the one enclosing scope.) The EQUB lands in section "b" (index 2).
+    RC_CHECK_TRUE(code_in_is(&fix->r,
+        ASM("SECTION a, org=&34 : .@ : ENDSECTION : SECTION b, org=&12 : .@ : EQUB @- : ENDSECTION"),
+        2, (uint8_t[]){0x12}, 1));
 }
 
 RC_TEST_STEP(assemble, local_labels_are_scoped, fix)
@@ -2891,11 +2997,11 @@ RC_TEST_STEP(assemble, forward_reference_to_absolute, fix)
 
 RC_TEST_STEP(assemble, named_scope_dotted_access, fix)
 {
-    RC_CHECK_TRUE(ASM("ORG &2000 : .routine { .core LDA #0 } : x = routine.core") != 0);
+    RC_CHECK_TRUE(ASM(".routine { .core LDA #0 } : x = routine.core") != 0);   // default section, org 0
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")),
-                                 value_make_numeric(0x2000)));
+                                 value_make_numeric(0)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("routine.core")),
-                                 value_make_numeric(0x2000)));
+                                 value_make_numeric(0)));
 }
 
 RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
@@ -2903,8 +3009,8 @@ RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
     // A result carries a read-only scopes_view; scopes_view_flatten harvests the whole spellable table on
     // demand, keyed by full dotted path (into a caller arena). The `.routine` label binds a top-level
     // `routine` AND names the child scope, so the spellable table is exactly x, routine, routine.core (all
-    // at &2000); the anonymous machinery stays hidden.
-    RC_CHECK_TRUE(ASM("ORG &2000 : .routine { .core LDA #0 } : x = routine.core") != 0);
+    // at org 0); the anonymous machinery stays hidden.
+    RC_CHECK_TRUE(ASM(".routine { .core LDA #0 } : x = routine.core") != 0);
 
     rc_arena out_arena = rc_arena_make_default();
     rc_arena scratch   = rc_arena_make_default();
@@ -2917,8 +3023,8 @@ RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
         bool known = rc_str_is_equal(e.path, RC_STR("x"))
                   || rc_str_is_equal(e.path, RC_STR("routine"))
                   || rc_str_is_equal(e.path, RC_STR("routine.core"));
-        RC_CHECK_TRUE(known);                                             // no stray / unspellable paths
-        RC_CHECK_TRUE(value_is_equal(e.v, value_make_numeric(0x2000)));   // every one resolves to &2000
+        RC_CHECK_TRUE(known);                                        // no stray / unspellable paths
+        RC_CHECK_TRUE(value_is_equal(e.v, value_make_numeric(0)));   // every one resolves to org 0
         seen++;
     }
     RC_CHECK(seen, ==, 3u);
@@ -2927,24 +3033,24 @@ RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
     rc_arena_deinit(&out_arena);
 }
 
-RC_TEST_STEP(assemble, result_exposes_overlays, fix)
+RC_TEST_STEP(assemble, result_exposes_sections, fix)
 {
-    // The result carries the whole overlay list, not just the default's bytes. Today that is exactly one
-    // overlay (index 0): its code matches baron_result_code and its pc advanced past the emitted bytes.
-    RC_CHECK_TRUE(ASM("ORG &2000 : LDA #&12 : LDX #&34") != 0);   // 4 bytes at &2000
-    RC_CHECK(fix->r.overlays.num, ==, 1u);
-    overlay o = rc_view_overlay_get(fix->r.overlays, 0);
+    // The result carries the whole section list, not just the default's bytes. With no SECTION that is exactly
+    // one section (index 0): its code matches baron_result_code and its pc advanced past the emitted bytes.
+    RC_CHECK_TRUE(ASM("LDA #&12 : LDX #&34") != 0);   // 4 bytes in the default section (org 0)
+    RC_CHECK(fix->r.sections.num, ==, 1u);
+    section o = rc_view_section_get(fix->r.sections, 0);
     RC_CHECK(o.code.view.num, ==, 4u);
-    RC_CHECK(o.pc, ==, 0x2004u);                                  // &2000 + 4 emitted bytes
-    RC_CHECK(baron_result_code(&fix->r).num, ==, o.code.view.num);   // the convenience matches overlay 0
+    RC_CHECK(o.pc, ==, 4u);                                       // org 0 + 4 emitted bytes
+    RC_CHECK(baron_result_code(&fix->r).num, ==, o.code.view.num);   // the convenience matches section 0
 }
 
 RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)
 {
     // The naming brace may sit on the next line (or after a ':').
-    RC_CHECK_TRUE(ASM("ORG &2000\n.routine\n{\n.core LDA #0\n}\nx = routine.core") != 0);
+    RC_CHECK_TRUE(ASM(".routine\n{\n.core LDA #0\n}\nx = routine.core") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("routine.core")),
-                                 value_make_numeric(0x2000)));
+                                 value_make_numeric(0)));
 }
 
 RC_TEST_STEP(assemble, anonymous_scope_is_private, fix)
@@ -2957,8 +3063,8 @@ RC_TEST_STEP(assemble, label_does_not_own_following_statement, fix)
 {
     // A label hands control straight back: a '}' may sit on the same line right after it (the label
     // no longer swallows what follows), and the inner label still binds to the current pc.
-    RC_CHECK_TRUE(ASM("ORG &2000 : .r { .e }") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r.e")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(ASM(".r { .e }") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r.e")), value_make_numeric(0)));
 }
 
 RC_TEST_STEP(assemble, errors, fix)
@@ -3003,11 +3109,12 @@ RC_TEST_STEP(assemble, if_elif_else_chain, fix)
 
 RC_TEST_STEP(assemble, if_does_not_introduce_scope, fix)
 {
-    // A label set in a live IF branch leaks to the enclosing scope (IF is not a brace).
-    uint32_t passes = ASM("ORG &2000 : IF 1 : .here : ENDIF : LDA here");
+    // A label set in a live IF branch leaks to the enclosing scope (IF is not a brace). The section org keeps
+    // `here` out of the zero page so `LDA here` is absolute (3 bytes).
+    uint32_t passes = ASM("SECTION s, org=&2000 : IF 1 : .here : ENDIF : LDA here : ENDSECTION");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xAD, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xAD, 0x00, 0x20}, 3));
 }
 
 RC_TEST_STEP(assemble, if_wraps_scope_and_nests, fix)
@@ -3112,12 +3219,14 @@ RC_TEST_STEP(assemble, nested_if_forward_ref, fix)
 
 RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
 {
-    // The "make this block end at address X" idiom: ORG is computed from a label defined AFTER it, so
-    // the 8-byte block sits at &0FF8..&0FFF and progend lands exactly on &1000. ORG is unresolved on
-    // the first pass (progstart/progend unknown) and settles once they do; JMP progstart then carries
-    // the relocated address. (Code itself still fills the output from index 0.)
-    uint32_t passes = ASM("ORG &1000 - (progend - progstart) : .progstart LDA #&41 : JSR &FFEE : JMP progstart : .progend");
-    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x41, 0x20, 0xEE, 0xFF, 0x4C, 0xF8, 0x0F}, 8));
+    // The "make this block end at address X" idiom: a section `org` computed from a label defined AFTER it, so
+    // the 8-byte block sits at &0FF8..&0FFF and progend lands exactly on &1000. The org attribute is unresolved
+    // on the first pass (progstart/progend unknown) and settles once they do; JMP progstart then carries the
+    // relocated address. (Code itself still fills the section buffer from index 0.)
+    uint32_t passes = ASM("SECTION s, org = &1000 - (progend - progstart)\n"
+                          ".progstart LDA #&41 : JSR &FFEE : JMP progstart : .progend\n"
+                          "ENDSECTION");
+    RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xA9, 0x41, 0x20, 0xEE, 0xFF, 0x4C, 0xF8, 0x0F}, 8));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("progstart")), value_make_numeric(0x0FF8)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("progend")), value_make_numeric(0x1000)));
 }
@@ -3219,9 +3328,9 @@ RC_TEST_STEP(assemble, equb_ranges_and_lists, fix)
 
 RC_TEST_STEP(assemble, equb_advances_pc, fix)
 {
-    // The three bytes move pc, so a label after them sees the advanced address.
-    RC_CHECK_TRUE(ASM("ORG &2000 : EQUB 1, 2, 3 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2003)));
+    // The three bytes move pc, so a label after them sees the advanced address (default section, org 0).
+    RC_CHECK_TRUE(ASM("EQUB 1, 2, 3 : .here") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(3)));
 }
 
 RC_TEST_STEP(assemble, equb_forward_reference, fix)
@@ -3255,9 +3364,9 @@ RC_TEST_STEP(assemble, equw_signed_range_and_pc, fix)
     RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW 65535"),  (uint8_t[]){0xFF, 0xFF}, 2));
     RC_CHECK_TRUE(ERR("EQUW 65536")  == error_type_value_out_of_range);
     RC_CHECK_TRUE(ERR("EQUW -65536") == error_type_value_out_of_range);
-    // Each word advances pc by 2; a label after two words sees +4.
-    RC_CHECK_TRUE(ASM("ORG &2000 : EQUW 1, 2 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2004)));
+    // Each word advances pc by 2; a label after two words sees +4 (default section, org 0).
+    RC_CHECK_TRUE(ASM("EQUW 1, 2 : .here") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(4)));
     // A forward reference is a 2-byte placeholder, so end - start = 2.
     uint32_t passes = ASM(".start EQUW end - start : .end");
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x02, 0x00}, 2));
@@ -3273,9 +3382,9 @@ RC_TEST_STEP(assemble, equd_emits_little_endian_dwords, fix)
     RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUD -1"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUD 4294967295"), (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF}, 4));
     RC_CHECK_TRUE(ERR("EQUD 4294967296") == error_type_value_out_of_range);
-    // Each dword advances pc by 4.
-    RC_CHECK_TRUE(ASM("ORG &2000 : EQUD 1 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2004)));
+    // Each dword advances pc by 4 (default section, org 0).
+    RC_CHECK_TRUE(ASM("EQUD 1 : .here") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(4)));
 }
 
 RC_TEST_STEP(assemble, value_errors_promote_to_specific_codes, fix)
@@ -3323,7 +3432,7 @@ RC_TEST_STEP(assemble, duplicate_symbol_signposts_original, fix)
 RC_TEST_STEP(assemble, failure_clears_outputs, fix)
 {
     // A failed assemble hands back no object code and no symbols - only the diagnostics remain.
-    RC_CHECK_TRUE(ASM("ORG &2000 : .lbl LDA #0 : TAX #5") == 0);   // TAX #5 has no encoding
+    RC_CHECK_TRUE(ASM(".lbl LDA #0 : TAX #5") == 0);   // TAX #5 has no encoding
     RC_CHECK(baron_result_code(&fix->r).num, ==, 0u);
     RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("lbl"))));
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_bad_addressing_mode));
@@ -3360,12 +3469,12 @@ RC_TEST_STEP(assemble, named_constants, fix)
 RC_TEST_STEP(assemble, pc_constant, fix)
 {
     // '*' (and its BBC Micro alias P%) is the current PC. It is evaluated before the instruction emits, so
-    // JMP * is the classic jump-to-self.
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &2000 : JMP *"),  (uint8_t[]){0x4C, 0x00, 0x20}, 3));
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ORG &2000 : JMP P%"), (uint8_t[]){0x4C, 0x00, 0x20}, 3));
+    // JMP * is the classic jump-to-self. (A section org puts * at &2000; the code lands in section index 1.)
+    RC_CHECK_TRUE(code_in_is(&fix->r, ASM("SECTION s, org=&2000 : JMP * : ENDSECTION"),  1, (uint8_t[]){0x4C, 0x00, 0x20}, 3));
+    RC_CHECK_TRUE(code_in_is(&fix->r, ASM("SECTION s, org=&2000 : JMP P% : ENDSECTION"), 1, (uint8_t[]){0x4C, 0x00, 0x20}, 3));
     // Mid-program it reads the live PC: after LDA #0 (two bytes), * is org+2.
-    uint32_t passes = ASM("ORG &2000 : LDA #0 : here = * : RTS");
-    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x00, 0x60}, 3));
+    uint32_t passes = ASM("SECTION s, org=&2000 : LDA #0 : here = * : RTS : ENDSECTION");
+    RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xA9, 0x00, 0x60}, 3));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2002)));
     // A comma list evaluates one element at a time, so the PC advances between them (org 0 here: 0, 1, 2)...
     RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB *, *, *"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
@@ -3476,17 +3585,17 @@ RC_TEST_STEP(assemble, include_cycle_is_caught, fix)
 
 RC_TEST_STEP(assemble, incbin_splices_file_bytes, fix)
 {
-    // Write a small binary, splice it, and check the exact bytes land in the overlay and pc advances by its
+    // Write a small binary, splice it, and check the exact bytes land in the section and pc advances by its
     // size (a label after INCBIN sees +size). One assemble - INC dedupes sources by name, so we cannot reuse it.
     uint8_t blob[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42};
     RC_CHECK_TRUE(rc_file_save_binary(RC_STR("blob.bin"),
                   (rc_view_bytes) {.data = blob, .num = (uint32_t) sizeof blob}) == RC_FILE_OK);
 
     uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("t"),
-                          RC_STR("ORG &2000 : incbin \"blob.bin\" : .after"))).passes;
+                          RC_STR("incbin \"blob.bin\" : .after"))).passes;   // default section, org 0
     RC_CHECK_TRUE(code_is(&fix->r, passes, blob, (uint32_t) sizeof blob));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("after")),
-                                 value_make_numeric(0x2000 + sizeof blob)));
+                                 value_make_numeric(sizeof blob)));
 
     rc_file_delete(RC_STR("blob.bin"));
 }
@@ -3760,8 +3869,8 @@ RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
     rc_arena build = rc_arena_make_default();
     rc_mstr  src   = rc_mstr_make(64 * 1024, &build);
 
-    rc_mstr_append(&src, RC_STR("ORG 0\n"), &build);
-    // Each iteration binds its own `n` in a per-iteration scope and emits a byte, so pc keeps advancing.
+    // The default section starts at org 0. Each iteration binds its own `n` in a per-iteration scope and
+    // emits a byte, so pc keeps advancing.
     rc_mstr_append(&src, RC_STR("FOR n = 0..1999\nEQUB 42\nNEXT\n"), &build);
     // Hundreds of distinct global labels, all sitting at pc 2000 (nothing emits between them).
     for (uint32_t i = 0; i < 500; i++) {

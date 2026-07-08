@@ -3,7 +3,7 @@
 #include "richc/macros.h"
 
 
-enum { baron_per_pass_reserve = 64u * 1024 * 1024 };   // one pass of overlays/macros/functions is small
+enum { baron_per_pass_reserve = 64u * 1024 * 1024 };   // one pass of sections/macros/functions is small
 
 baron_arenas baron_arenas_make(void)
 {
@@ -31,8 +31,8 @@ baron baron_make(baron_arenas *a)
 
     scopes_init(&b.scopes, &a->permanent);
     scopes_make_root(&b.scopes);              // the root is scope index 0
-    overlays_init(&b.overlays, &a->per_pass);   // the default overlay is (re)made per pass by overlays_reset
-    b.current_overlay = overlays_default;
+    sections_init(&b.sections, &a->per_pass);   // the default section is (re)made per pass by sections_reset
+    b.current_section = sections_default;
     zeropage_init(&b.zeropage, &a->permanent);   // empty + dormant; run_pass clears it, ZPRESERVE fills it
     source_files_init(&b.source_files, &a->permanent);
     macros_init(&b.macros, &a->per_pass);         // run_pass reseeds its store + token table each pass
