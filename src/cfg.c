@@ -158,14 +158,17 @@ static uint32_t push_insn(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, z
 RC_TEST(cfg, empty_stream_is_empty)
 {
     rc_arena arena = rc_arena_make_default();
-    cfg g = cfg_build((rc_view_zp_insn) {0}, &arena, arena);
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    cfg g = cfg_build((rc_view_zp_insn) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 0u);
+    rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
 }
 
 RC_TEST(cfg, straight_line_is_one_block)
 {
     rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
 
     // LDA / STA / RTS - no interior control flow, so one block ending in a return (no successor).
@@ -175,7 +178,7 @@ RC_TEST(cfg, straight_line_is_one_block)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, arena);
+    cfg g = cfg_build(insns.view, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
@@ -185,12 +188,14 @@ RC_TEST(cfg, straight_line_is_one_block)
     RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
     RC_CHECK_FALSE(b.unknown_succ);            // ...and that is fully KNOWN (a return, not a computed exit)
 
+    rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
 }
 
 RC_TEST(cfg, indirect_jump_is_unknown_successor)
 {
     rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
 
     //   2000  LDA #..  (normal)
@@ -203,7 +208,7 @@ RC_TEST(cfg, indirect_jump_is_unknown_successor)
     pc = push_insn(&insns, pc, 3, zp_flow_jump, RC_INDEX_NONE, &arena);     // JMP (ind) - unknown target
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, arena);
+    cfg g = cfg_build(insns.view, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);
@@ -211,12 +216,14 @@ RC_TEST(cfg, indirect_jump_is_unknown_successor)
     RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
     RC_CHECK_TRUE(b.unknown_succ);            // ...but control DOES leave, so stay conservative
 
+    rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
 }
 
 RC_TEST(cfg, branch_splits_into_blocks_with_edges)
 {
     rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
 
     //   2000  LDX #.. (normal, 2 bytes)
@@ -231,7 +238,7 @@ RC_TEST(cfg, branch_splits_into_blocks_with_edges)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, arena);
+    cfg g = cfg_build(insns.view, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 3u);
 
     // Block 0: LDX + BNE, leader 2000, two successors - fall-through (block 1) and target (block 2).
@@ -254,12 +261,14 @@ RC_TEST(cfg, branch_splits_into_blocks_with_edges)
     RC_CHECK(b2.num_insns, ==, 1u);
     RC_CHECK(b2.succ[0], ==, RC_INDEX_NONE);
 
+    rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
 }
 
 RC_TEST(cfg, jump_target_leads_backward_edge)
 {
     rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
 
     //   2000  LDA #..  (normal)          <- loop top, a JMP target
@@ -270,7 +279,7 @@ RC_TEST(cfg, jump_target_leads_backward_edge)
     pc = push_insn(&insns, pc, 3, zp_flow_jump, 0x2000, &arena);           // JMP 2000
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, arena);
+    cfg g = cfg_build(insns.view, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
@@ -278,12 +287,14 @@ RC_TEST(cfg, jump_target_leads_backward_edge)
     RC_CHECK(b.succ[0], ==, 0u);   // jumps back to itself
     RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
 
+    rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
 }
 
 RC_TEST(cfg, call_is_in_block_not_an_edge)
 {
     rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
 
     //   2000  JSR 3000 (call, 3 bytes)   <- callee entry 3000 is a leader, but NOT a successor edge
@@ -295,13 +306,14 @@ RC_TEST(cfg, call_is_in_block_not_an_edge)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, &arena, arena);
+    cfg g = cfg_build(insns.view, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);        // JSR and RTS in one block
     RC_CHECK(b.succ[0], ==, RC_INDEX_NONE);   // ends in RTS - no intraprocedural successor
     RC_CHECK(b.succ[1], ==, RC_INDEX_NONE);
 
+    rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
 }
 

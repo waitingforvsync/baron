@@ -1850,6 +1850,8 @@ baron_result assemble_file(baron_arenas *arenas, rc_str path)
 
 #include "richc/test.h"
 #include "richc/mstr.h"   // the stress test builds a big source with rc_mstr
+#include "cfg.h"          // the end-to-end zeropage tests flow the recorded IR through the CFG...
+#include "liveness.h"     // ...and liveness, to prove the real parse -> IR -> analysis chain
 
 RC_TEST_GROUP_DATA(assemble) {
     baron_arenas arenas;
@@ -2189,6 +2191,43 @@ RC_TEST(assemble, zpauto_rw_observation)
         }
     }
 
+    baron_arenas_deinit(&arenas);
+}
+
+RC_TEST(assemble, zpauto_liveness_end_to_end)
+{
+    // The whole Stage C chain over REAL assembler output: parse the spec's `mul` routine, take the recorded
+    // IR straight off b.zeropage, build the CFG and run liveness, and confirm the two facts the analysis
+    // exists to establish - the in/out/temp classification, and the byte-reuse (out1 reuses in1's / tmp's
+    // range because their live ranges are disjoint). vreg ids follow declaration order: in1=0, tmp=1, out1=2.
+    baron_arenas arenas = baron_arenas_make();
+    rc_arena arena = rc_arena_make_default();     // holds the cfg + liveness result
+    rc_arena scratch = rc_arena_make_default();   // distinct by-value scratch for the analysis
+
+    baron b = baron_make(&arenas);
+    uint32_t s = source_files_add_string(&b.source_files, RC_STR("mul"),
+        RC_STR("ZPRESERVE &70..&7F : ZPAUTO1 in1, tmp, out1\n"
+               ".mul { LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS }"));
+    run_passes(&b, s, arenas.scratch);
+
+    cfg g = cfg_build(zeropage_insns(&b.zeropage), &arena, scratch);
+    liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_var_count(&b.zeropage), 0,
+                                   &arena, scratch);
+
+    // Classification: in1 is read before written (input), tmp is born and consumed inside (temp), out1 is
+    // written but never read inside (output).
+    RC_CHECK_TRUE(liveness_class_of(&lv, 0) == vreg_class_input);
+    RC_CHECK_TRUE(liveness_class_of(&lv, 1) == vreg_class_temp);
+    RC_CHECK_TRUE(liveness_class_of(&lv, 2) == vreg_class_output);
+
+    // Reuse: in1 and tmp overlap (interfere), but out1 is born only after both die, so it interferes with
+    // neither - it can share a byte with either.
+    RC_CHECK_TRUE(liveness_interferes(&lv, 0, 1));    // in1 - tmp
+    RC_CHECK_FALSE(liveness_interferes(&lv, 0, 2));    // in1 - out1
+    RC_CHECK_FALSE(liveness_interferes(&lv, 1, 2));    // tmp - out1
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
     baron_arenas_deinit(&arenas);
 }
 

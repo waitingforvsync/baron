@@ -23,6 +23,8 @@ add_executable(baron
     zeropage.h
     cfg.c
     cfg.h
+    liveness.c
+    liveness.h
     source_files.c
     source_files.h
     macros.c
