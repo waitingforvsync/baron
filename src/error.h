@@ -61,7 +61,7 @@ typedef enum error_type {
     error_type_var_without_reserve,   // a ZPAUTO1/ZPAUTO2 declared with no ZPRESERVE enabling the feature first
     error_type_zeropage_full,         // no free reserved byte to place a ZPAUTO variable (a spill)
     error_type_zpauto_across_call,    // a var live across a JSR whose callee footprint cannot be bounded
-    error_type_zpauto_recursion,      // a var live across a recursive call (no single static byte can hold it)
+    error_type_zpauto_recursion,      // a var FRESHLY written then held live across a recursive call (needs a byte per level)
     error_type_zpauto_computed_flow,  // ZPAUTO active past a computed/indirect jump the analysis cannot follow
     error_type_zpauto_register_name,  // a ZPAUTO variable named 'A' - ambiguous with accumulator addressing
     error_type_zpauto_indexed_access, // a ZPAUTO reached by indexed / indexed-indirect addressing (var,X etc.)

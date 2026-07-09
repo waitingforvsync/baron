@@ -12,10 +12,13 @@
 // anything a caller holds live across a JSR collides with the callee's ENTIRE footprint, because the call
 // clobbers all of it. `unknown_call` means a JSR with an untrackable target was reached, so the footprint is
 // incomplete - the caller must refuse rather than under-approximate. `recursive` means the call graph reached
-// from this entry contains a cycle; a value live across such a call cannot be held in one static byte, so the
-// caller must refuse.
+// from this entry contains a cycle. Recursion alone is NOT fatal: a value merely read or read-modified across
+// it (a shared accumulator, DEC/INC) rides safely on one static byte. What CANNOT is a value the cycle FRESHLY
+// writes (a write-only def, in `killed`) and carries live across the call - that wants a distinct byte per
+// level. So the caller refuses only when a live-across variable is also in `killed` of a recursive footprint.
 typedef struct footprint {
     rc_bitset touched;        // vregs, width num_vars
+    rc_bitset killed;         // vregs given a write-only def (a fresh value, not an accumulation) somewhere within
     bool      unknown_call;
     bool      recursive;
 } footprint;

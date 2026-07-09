@@ -50,7 +50,7 @@ rc_str error_type_name(error_type e)
         case error_type_var_without_reserve:     return RC_STR("ZPAUTO needs a ZPRESERVE block before it");
         case error_type_zeropage_full:           return RC_STR("No free zero-page byte left to allocate this ZPAUTO variable");
         case error_type_zpauto_across_call:      return RC_STR("A ZPAUTO variable is live across a JSR whose callee footprint cannot be determined (a computed or off-stream target); annotate it (CANCALL) or restructure");
-        case error_type_zpauto_recursion:        return RC_STR("A ZPAUTO variable is live across a recursive call; a single static zero-page byte cannot hold a per-recursion value");
+        case error_type_zpauto_recursion:        return RC_STR("A ZPAUTO variable is freshly assigned and then held live across a recursive call; each recursion level would need its own byte, which one static zero-page address cannot give (a value only read or accumulated across the recursion is fine - use a hand-placed byte, or save and restore it)");
         case error_type_zpauto_computed_flow:    return RC_STR("A computed or indirect jump reaches unknown code while ZPAUTO is active; its targets cannot be proven, so annotate them (CANJUMP/CANCALL) or avoid ZPAUTO here");
         case error_type_zpauto_register_name:    return RC_STR("A ZPAUTO variable cannot be named 'A': it is ambiguous with accumulator addressing (ASL A) and would silently drop the variable");
         case error_type_zpauto_indexed_access:   return RC_STR("A ZPAUTO variable must be reached by direct addressing only: indexed (var,X / var,Y) or indexed-indirect ((var,X)) access reads a byte the allocator may have placed another variable in. Use a hand-placed zero-page symbol here");

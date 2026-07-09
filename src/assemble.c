@@ -1947,13 +1947,25 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     );
 }
 
+// Do two equally-sized bitsets share a set bit? (richc's bitset has no intersection primitive, and we only
+// need the yes/no, so we walk one's set bits and probe the other.)
+static bool bitsets_intersect(const rc_bitset *a, const rc_bitset *b)
+{
+    for (uint32_t i = rc_bitset_get_first_set(a); i != RC_INDEX_NONE; i = rc_bitset_get_next_set(a, i + 1)) {
+        if (rc_bitset_is_set(b, i)) { return true; }
+    }
+    return false;
+}
+
 // Post-convergence zero-page allocation. Layout has settled with every ZPAUTO reference sized as a
 // placeholder zero-page access, so assigning a real byte and patching the operand cannot perturb size. The
 // governing rule is CERTAINTY: this only patches a program it can prove correct, and turns anything it cannot
 // into a clear diagnostic pointing the user at a fix or an annotation. Three refusals:
 //   - a computed / indirect jump reaches code the CFG cannot follow (unknown_succ) -> error_type_zpauto_computed_flow;
-//   - a variable is live across a JSR, whose callee footprint needs interprocedural analysis we do not yet do
+//   - a variable is live across a JSR whose callee footprint cannot be bounded (a computed / off-stream target)
 //     -> error_type_zpauto_across_call;
+//   - a variable the recursion FRESHLY writes is held live across the recursive call (a per-level value one
+//     static byte cannot serve) -> error_type_zpauto_recursion; a read/accumulated value across recursion is fine;
 //   - more simultaneously-live variables than reserved bytes -> error_type_zeropage_full (a spill).
 // On any refusal it records the error(s) and patches nothing; run_passes then fails the assemble. Only a
 // fully analysable, colourable program has its operands + symbols rewritten to real addresses.
@@ -2042,7 +2054,10 @@ static void zeropage_finalize(baron *b)
                     baron_error(b, error_type_zpauto_across_call, n.at);
                     refused = true;
                 }
-                else if (fp.recursive) {
+                else if (fp.recursive && bitsets_intersect(&live, &fp.killed)) {
+                    // Recursion is fatal only for a value the cycle FRESHLY writes (a write-only def) and carries
+                    // live across itself: each level would want its own byte. A value merely read or accumulated
+                    // (DEC/INC) across the recursion shares one byte safely, so it falls through to interference.
                     baron_error(b, error_type_zpauto_recursion, n.at);
                     refused = true;
                 }
@@ -2633,7 +2648,9 @@ RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
     // The certainty contract: rather than emit code it cannot prove correct, the allocator errors and points
     // at the fix. Each of these MUST fail the assemble.
 
-    // A variable live across a RECURSIVE call cannot live in one static byte (each level needs its own).
+    // A variable FRESHLY written (STA cnt) then held live across the recursive call is a per-level value: each
+    // level wants its own byte, which one static address cannot give. (Merely reading / accumulating it across
+    // the recursion is fine - see zpauto_recursion_shared_vs_per_level.)
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .r { ZPAUTO1 cnt : STA cnt : JSR r : LDA cnt : RTS }")
                   == error_type_zpauto_recursion);
 
@@ -2645,6 +2662,29 @@ RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
     // More simultaneously-live variables than reserved bytes is a spill: p and q overlap but only &70 is free.
     RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 p, q : STA p : STA q : LDA p : LDA q : RTS")
                   == error_type_zeropage_full);
+}
+
+RC_TEST_STEP(assemble, zpauto_recursion_shared_vs_per_level, fix)
+{
+    // Recursion is only fatal for a value the cycle FRESHLY writes and then needs back after the child returns.
+    // A value merely read or accumulated (DEC/INC) across the recursion rides on one shared byte quite happily -
+    // it is a single running counter, not a distinct value per frame. So this shape is ALLOWED: `n` is seeded by
+    // the caller (outside the recursion) and only ever DEC'd inside `down`, while `keep` sits live across the
+    // whole descent. Neither is freshly assigned within the cycle, so allocation proceeds; because both are live
+    // across the call they interfere with `down`'s footprint and take distinct bytes.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, n\n"
+                      "LDA #10 : STA keep : LDA #5 : STA n : JSR down\n"
+                      "LDA keep : CLC : ADC n : RTS\n"
+                      ".down { DEC n : BEQ done : JSR down : .done RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // recursion no longer refused outright
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "n"),    ==, 0x71);   // forced off keep's byte by the live-across recursion
+
+    // Contrast (the "would infinitely allocate" case, REFUSED): `level` is written afresh at every frame and
+    // read back after the child returns, so each recursion level genuinely needs its OWN byte - unbounded in a
+    // fixed zero page. This is the shape a real per-level temp (a factorial accumulator, a saved cursor) takes.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .descend { ZPAUTO1 level : STA level : JSR descend : LDA level : RTS }")
+                  == error_type_zpauto_recursion);
 }
 
 RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)

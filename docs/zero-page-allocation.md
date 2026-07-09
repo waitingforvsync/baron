@@ -305,8 +305,10 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
   cannot follow is refused while variables are live. Annotate it (`CANJUMP` for a computed jump, `CANCALL` for a
   computed call) or keep clear. This - not the shape of your entries and exits - is the genuine boundary. (An
   RTS-dispatch still has no annotation; keep those clear.)
-- **No recursion.** A value held live across a recursive call cannot live in one static byte - each level would
-  need its own. Baron detects the cycle and refuses.
+- **No *fresh* value held across recursion.** A value the recursion assigns afresh at each level and then needs
+  back after the child returns cannot live in one static byte - each level would want its own. Baron detects the
+  cycle and refuses that case. A value merely read, or accumulated in place (`DEC`/`INC`) across the recursion,
+  is a single running quantity, not a per-level one, so it rides on one shared byte and is allowed.
 - **Cross-section transfers go through labels.** The flow analysis identifies code by `(section, address)`, so
   `SECTION`s are free - use as many as you like, at any addresses, *including two at the same address* (paged
   banks). Fall-through and in-section branches stay within a section; only a `JSR`/`JMP`/branch that names a
@@ -327,19 +329,39 @@ Some concrete shapes, and what Baron does with each. All six it catches and refu
 *cannot* see - a self-modified operand, and a pointer aimed into the reserved block - remain preconditions on
 you: there is nothing in the instruction stream to give them away.
 
-**Recursion is refused.** A value held across a call to yourself cannot live in one static byte:
+**A fresh per-level value across recursion is refused.** Here `n` is written afresh in every frame and read
+back after the child returns, so each level genuinely needs its own byte - unbounded in a fixed zero page:
 
 ```
 .countdown
 {
     ZPAUTO1 n
-    STA n
-    JSR countdown       ; n is live across a call into the same routine
-    LDA n
+    STA n               ; a new value at every level ...
+    JSR countdown
+    LDA n               ; ... needed back after the child returns
     RTS
 }
 ```
-> A ZPAUTO variable is live across a recursive call ...
+> A ZPAUTO variable is freshly assigned and then held live across a recursive call ...
+
+The neighbouring shape *is* allowed, because it is not per-level: seed the counter **outside** the recursion
+and only ever read-modify it inside, and it is a single running quantity that shares one byte quite happily.
+
+```
+    ZPRESERVE &70..&7F
+    ZPAUTO1 n
+    LDA #5 : STA n          ; seeded by the caller, outside the cycle
+    JSR down
+    ...
+.down
+{
+    DEC n                   ; read-modified in place, never freshly assigned here
+    BEQ done
+    JSR down                ; genuinely recursive, yet n survives it on one byte
+.done
+    RTS
+}
+```
 
 **An *unannotated* computed jump is refused** while variables are in play, because Baron cannot see where it
 lands - add a `CANJUMP` naming its targets and it is fine again:
@@ -426,7 +448,7 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | ZPAUTO needs a ZPRESERVE block before it    | You declared a variable with no pool reserved. Add a `ZPRESERVE` first.        |
 | No free zero-page byte left ...             | A spill: more variables are live at once than you reserved bytes for.          |
 | ... live across a JSR whose callee footprint cannot be determined | A computed or off-stream call with a variable live across it. Annotate it with `CANCALL`. |
-| ... live across a recursive call            | A cycle in the call graph. One static byte cannot hold a per-recursion value.  |
+| ... freshly assigned then held across a recursive call | A per-level value in a call cycle. One static byte cannot hold a distinct value per level (a value only read or accumulated across the recursion is fine). |
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
 | A ZPAUTO variable must be reached by direct addressing only | An indexed / indexed-indirect access (`var,X`, `(var,X)`). Use a hand-placed symbol there. |
