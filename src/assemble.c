@@ -2685,6 +2685,16 @@ RC_TEST_STEP(assemble, zpauto_recursion_shared_vs_per_level, fix)
     // fixed zero page. This is the shape a real per-level temp (a factorial accumulator, a saved cursor) takes.
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .descend { ZPAUTO1 level : STA level : JSR descend : LDA level : RTS }")
                   == error_type_zpauto_recursion);
+
+    // The same discrimination holds for MUTUAL recursion: the footprint walk spans the whole cycle (a calls b,
+    // b calls a), so a fresh write anywhere in it is seen. Per-level `v` (STA in a, live across a's JSR b) is
+    // refused; a shared counter DEC'd across the same cycle is allowed.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .a { ZPAUTO1 v : STA v : JSR b : LDA v : RTS } : .b { JSR a : RTS }")
+                  == error_type_zpauto_recursion);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, n\n"
+                      "LDA #10 : STA keep : LDA #5 : STA n : JSR a : LDA keep : CLC : ADC n : RTS\n"
+                      ".a { DEC n : BEQ done : JSR b : .done RTS } : .b { JSR a : RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)
