@@ -1947,16 +1947,6 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     );
 }
 
-// Do two equally-sized bitsets share a set bit? (richc's bitset has no intersection primitive, and we only
-// need the yes/no, so we walk one's set bits and probe the other.)
-static bool bitsets_intersect(const rc_bitset *a, const rc_bitset *b)
-{
-    for (uint32_t i = rc_bitset_get_first_set(a); i != RC_INDEX_NONE; i = rc_bitset_get_next_set(a, i + 1)) {
-        if (rc_bitset_is_set(b, i)) { return true; }
-    }
-    return false;
-}
-
 // Post-convergence zero-page allocation. Layout has settled with every ZPAUTO reference sized as a
 // placeholder zero-page access, so assigning a real byte and patching the operand cannot perturb size. The
 // governing rule is CERTAINTY: this only patches a program it can prove correct, and turns anything it cannot
@@ -2054,7 +2044,7 @@ static void zeropage_finalize(baron *b)
                     baron_error(b, error_type_zpauto_across_call, n.at);
                     refused = true;
                 }
-                else if (fp.recursive && bitsets_intersect(&live, &fp.killed)) {
+                else if (fp.recursive && rc_bitset_intersects(&live, &fp.killed)) {
                     // Recursion is fatal only for a value the cycle FRESHLY writes (a write-only def) and carries
                     // live across itself: each level would want its own byte. A value merely read or accumulated
                     // (DEC/INC) across the recursion shares one byte safely, so it falls through to interference.

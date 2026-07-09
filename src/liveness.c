@@ -3,40 +3,8 @@
 #include "richc/macros.h"
 
 
-// richc's rc_bitset ships only bit-at-a-time ops, so the small set algebra the fixpoint needs lives here.
-// Every bitset in a given analysis has the same width (num_vars), so these iterate set bits via get_next_set
-// - O(popcount), and vreg counts are small (tens per routine, low thousands program-wide).
-
-static void bitset_copy(rc_bitset *dst, const rc_bitset *src)
-{
-    rc_bitset_reset(dst);
-    for (uint32_t i = rc_bitset_get_first_set(src); i != RC_INDEX_NONE; i = rc_bitset_get_next_set(src, i + 1)) {
-        rc_bitset_set(dst, i);
-    }
-}
-
-// dst |= src
-static void bitset_union(rc_bitset *dst, const rc_bitset *src)
-{
-    for (uint32_t i = rc_bitset_get_first_set(src); i != RC_INDEX_NONE; i = rc_bitset_get_next_set(src, i + 1)) {
-        rc_bitset_set(dst, i);
-    }
-}
-
-static bool bitset_equal(const rc_bitset *a, const rc_bitset *b)
-{
-    for (uint32_t i = rc_bitset_get_first_set(a); i != RC_INDEX_NONE; i = rc_bitset_get_next_set(a, i + 1)) {
-        if (!rc_bitset_is_set(b, i)) {
-            return false;
-        }
-    }
-    for (uint32_t i = rc_bitset_get_first_set(b); i != RC_INDEX_NONE; i = rc_bitset_get_next_set(b, i + 1)) {
-        if (!rc_bitset_is_set(a, i)) {
-            return false;
-        }
-    }
-    return true;
-}
+// The small set algebra the fixpoint needs (copy / union / equality) lives in richc's rc_bitset now. Every
+// bitset in a given analysis has the same width (num_vars), so the equal-width preconditions hold throughout.
 
 // Allocate `n` zeroed bitsets each `width` bits wide (NULL if n == 0).
 static rc_bitset *make_rows(uint32_t n, uint32_t width, rc_arena *arena)
@@ -120,21 +88,21 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, uint32_t num_vars, uint3
             basic_block block = rc_array_basic_block_get(&g.blocks, bi);
             rc_bitset_reset(&new_out);
             for (uint32_t k = 0; k < block.succ_count; k++) {
-                bitset_union(&new_out, &lv.live_in[cfg_succ(g, block, k)]);
+                rc_bitset_union(&new_out, &lv.live_in[cfg_succ(g, block, k)]);
             }
             if (block.unknown_succ) {
-                bitset_union(&new_out, &full);
+                rc_bitset_union(&new_out, &full);
             }
-            bitset_copy(&new_in, &new_out);
+            rc_bitset_copy(&new_in, &new_out);
             for (uint32_t v = rc_bitset_get_first_set(&def[bi]); v != RC_INDEX_NONE;
                  v = rc_bitset_get_next_set(&def[bi], v + 1)) {
                 rc_bitset_clear(&new_in, v);
             }
-            bitset_union(&new_in, &use[bi]);
-            if (!bitset_equal(&new_out, &lv.live_out[bi]) || !bitset_equal(&new_in, &lv.live_in[bi])) {
+            rc_bitset_union(&new_in, &use[bi]);
+            if (!rc_bitset_is_equal(&new_out, &lv.live_out[bi]) || !rc_bitset_is_equal(&new_in, &lv.live_in[bi])) {
                 changed = true;
-                bitset_copy(&lv.live_out[bi], &new_out);
-                bitset_copy(&lv.live_in[bi], &new_in);
+                rc_bitset_copy(&lv.live_out[bi], &new_out);
+                rc_bitset_copy(&lv.live_in[bi], &new_in);
             }
         }
     }
@@ -146,7 +114,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, uint32_t num_vars, uint3
     rc_bitset live = {0}; rc_bitset_resize(&live, num_vars, &scratch);
     for (uint32_t b = 0; b < nb; b++) {
         basic_block block = rc_array_basic_block_get(&g.blocks, b);
-        bitset_copy(&live, &lv.live_out[b]);
+        rc_bitset_copy(&live, &lv.live_out[b]);
         for (uint32_t k = block.num_insns; k-- > 0; ) {
             zp_insn n = rc_view_zp_insn_get(insns, block.first_insn + k);
             uint32_t d = insn_def(n);
