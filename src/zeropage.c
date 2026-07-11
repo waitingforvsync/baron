@@ -71,7 +71,7 @@ uint32_t zeropage_reserved_count(const zeropage *zp)
     return count;
 }
 
-uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint8_t width, cursor def)
+uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint16_t width, cursor def)
 {
     RC_ASSERT(zp != NULL);
     return rc_array_zp_var_push(

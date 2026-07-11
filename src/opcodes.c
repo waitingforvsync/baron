@@ -563,6 +563,10 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .var_def        = is_control ? cursor_none() : op.def,
         .var_indexed    = is_control ? false : op.outside_envelope,
         .var_indirect   = is_control ? false : op.indirect,
+        // The operand evaluates against the var's PLACEHOLDER (0) until allocation, so its known value IS the
+        // offset into the var (0 for `var`, k for `var+k`). Kept so the final pass can bounds-check it.
+        .var_offset     = (is_control || cursor_is_none(op.def) || arg.type != int_argument_type_known)
+                              ? RC_INDEX_NONE : (uint32_t) arg.value,
         .target         = target,
         .target_scope   = is_control ? op.scope : RC_INDEX_NONE,
         .target_def     = is_control ? op.def : cursor_none(),

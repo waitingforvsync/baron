@@ -16,7 +16,7 @@ This is opt-in and costs nothing until you ask for it. No `ZPRESERVE`, no alloca
 ## Contents ##
 - [A first taste](#a-first-taste)
 - [Reserving the pool: ZPRESERVE](#reserving-the-pool-zpreserve)
-- [Declaring variables: ZPAUTO1 and ZPAUTO2](#declaring-variables-zpauto1-and-zpauto2)
+- [Declaring variables: ZPAUTO1, ZPAUTO2 and ZPAUTO n](#declaring-variables-zpauto1-zpauto2-and-zpauto-n)
 - [How it works](#how-it-works)
 - [Scopes, blocks and control flow](#scopes-blocks-and-control-flow)
 - [Across subroutine calls](#across-subroutine-calls)
@@ -70,19 +70,26 @@ the same bytes at a shared address is a refinement for another day.)
 A `ZPRESERVE` must appear before any variable that wants to use it. It is fine to reserve more than you think
 you need; you only pay for bytes the allocator actually hands out.
 
-## Declaring variables: ZPAUTO1 and ZPAUTO2 ##
-
-Two keywords, because the width lives in the name:
+## Declaring variables: ZPAUTO1, ZPAUTO2 and ZPAUTO n ##
 
 - `ZPAUTO1` declares one-byte variables.
 - `ZPAUTO2` declares two-byte variables - pointers, or any 16-bit quantity.
+- `ZPAUTO <count>,` declares variables `count` bytes wide - a table, a struct, a scratch buffer. `ZPAUTO1`
+  and `ZPAUTO2` are just the one- and two-byte sugar for it.
 
-Both take a comma-separated list of names:
+Each takes a comma-separated list of names (and for the generic form, the count comes first):
 
 ```
 ZPAUTO1 counter, temp, flags
 ZPAUTO2 src, dst              ; two pointers
+ZPAUTO 16, sines             ; a 16-byte table
+ZPAUTO 4, coord, delta       ; two 4-byte structs
 ```
+
+The count is an ordinary constant expression (`ZPAUTO WIDTH*2, buf`), between 1 and 256. A wider variable is
+allocated a matching run of consecutive reserved bytes, packed against the others exactly as a pointer is -
+just wider - and reached as `table`, `table+1`, ... up to `table+count-1`. Reaching past that is an error
+(see below).
 
 A variable is a normal scoped symbol. Declared inside a named block it is reachable from outside by its dotted
 path, exactly like a label:
@@ -290,14 +297,21 @@ somewhere the analysis cannot follow (an external call). Name your cross-bank en
 The analysis is sound, which means it is conservative: when it cannot be certain, it refuses rather than
 risking a miscompile. These are the shapes it needs, and the ones it will not accept without help.
 
-- **Direct addressing only.** A variable is reached as `var`, `var+1` (the high byte of a `ZPAUTO2`), or as a
-  pointer through `(var),Y`. Reaching one by an index (`var,X`, `var,Y`, `(var,X)`) is refused - it lands on
-  `var + index`, a byte the allocator cannot account for. Self-modifying its operand, or pointing into it from
-  elsewhere in zero page, is the same hazard but invisible in the instruction stream, so those Baron cannot
-  catch - use a hand-placed symbol for them.
+- **Indexed access is yours to bounds-check.** A variable declared `ZPAUTO n` is a table you can walk with an
+  index (`var,X`, `var,Y`, `(var,X)`). Baron reserves the whole variable and treats any indexed touch as using
+  all of it, so an index that stays inside the width is safe - but it cannot check the index at run time, so
+  keeping it inside the variable is on you. This is an **opt-in warning** (silent at the default level; raise
+  the warning level to audit every unchecked index), not a refusal - the same trust as `CANCALL` / `UNREACHABLE`.
+  Self-modifying an operand, or pointing into a variable from elsewhere in zero page, is the same run-time hazard
+  but invisible in the instruction stream, so those Baron cannot warn about at all.
 - **A pointer dereference needs a `ZPAUTO2`.** An indirect mode (`(var),Y` or the CMOS `(var)`) reads a
-  two-byte zero-page pointer, so `var` must be a `ZPAUTO2`. Dereferencing a one-byte `ZPAUTO1` that way is
-  refused: its high byte would fall on `var+1`, which the allocator never reserved for it. Declare it `ZPAUTO2`.
+  two-byte zero-page pointer, so `var` must be at least two bytes wide. Dereferencing a one-byte `ZPAUTO1`
+  that way is refused: its high byte would fall on `var+1`, which the allocator never reserved for it. Declare
+  it `ZPAUTO2` (or a wider `ZPAUTO n`).
+- **`var+n` must stay within the variable.** A constant offset that reaches past the declared width - `var+1`
+  on a `ZPAUTO1`, `table+16` on a `ZPAUTO 16` - is refused: it lands on a byte reserved for someone else.
+  Baron checks this automatically. The *constant base* of an indexed access is checked the same way (`table+16,X`
+  on a `ZPAUTO 16` is refused - the base is already off the end); only the *run-time* index beyond it is yours.
 - **Statically recoverable flow is the only real requirement.** Every branch and jump target must be a label
   the assembler can resolve - a known address, not a computed one. Within that you have a free hand: a block may
   have several entry points (each its own `JSR` target), several `RTS` exits, early-outs, and branches or jumps
@@ -393,19 +407,22 @@ ZPRESERVE &70                       ; one byte
 ```
 > No free zero-page byte left ...
 
-**Indexed access is refused** - it leaves the direct-addressing envelope. `var,X` with a wandering X reads
-whatever byte is at `var + X`, which the allocator may well have handed to another variable:
+**Indexed access is warned, not refused** - it is how you walk a table. `table,X` reads the byte at
+`table + X`; as long as `X` stays inside the declared width it lands on `table`'s own reserved bytes, so
+Baron allows it and only *warns* (an opt-in warning, off at the default level) that the index is yours to keep
+in range:
 
 ```
-    ZPAUTO1 table
+    ZPAUTO 8, table     ; an 8-byte table
     LDX #4
-    LDA table,X         ; reads table+4 - possibly somebody else's byte
+    LDA table,X         ; reads table+4 - fine while X < 8; your job to keep it there
 ```
-> A ZPAUTO variable must be reached by direct addressing only ...
+> This ZPAUTO variable is reached by an indexed / indexed-indirect mode ...
 
-The same goes for `var,Y` and the indexed-indirect `(var,X)`. What Baron *cannot* catch is a self-modified
-operand or a pointer that happens to hold an address inside the reserved block - neither shows up in the
-instruction stream - so keep those on a hand-placed zero-page symbol, not an auto-variable.
+The same goes for `var,Y` and the indexed-indirect `(var,X)`. The *constant base* is still checked (`table+8,X`
+on an 8-byte table is a hard error - the base is off the end already); only the run-time index is trusted to
+you. What Baron cannot see at all is a self-modified operand or a pointer that happens to hold an address
+inside the reserved block - neither shows up in the instruction stream - so those get no warning either.
 
 **Two sections may share an address.** The analysis identifies a block by `(section, address)`, so paged
 banks - two sections both at `&8000` - coexist, each keeping its own flow. Each variable is placed clear of
@@ -454,8 +471,15 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | ... freshly assigned then held across a recursive call | A per-level value in a call cycle. One static byte cannot hold a distinct value per level (a value only read or accumulated across the recursion is fine). |
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
-| A ZPAUTO variable must be reached by direct addressing only | An indexed / indexed-indirect access (`var,X`, `(var,X)`). Use a hand-placed symbol there. |
 | An indirect addressing mode dereferences a 2-byte pointer   | A one-byte `ZPAUTO1` used as a pointer (`(var),Y` / `(var)`). Declare it `ZPAUTO2`. |
+| This access reaches past the end of its ZPAUTO variable     | A `var+n` (or pointer) offset outside the declared width. Widen the variable or fix the offset. |
+| A ZPAUTO count must be between 1 and 256                     | `ZPAUTO <count>` with a count of 0, negative, or above 256. |
 
-Every one of these is a refusal, not a warning - Baron will not emit code it cannot vouch for. Fix it, annotate
-it, or fall back to a hand-placed address, and you are on solid ground again.
+Every one of these is a refusal - Baron will not emit code it cannot vouch for. Fix it, annotate it, or fall
+back to a hand-placed address, and you are on solid ground again.
+
+There is one **warning** rather than an error, reported only when you raise the warning level:
+
+| Message                                     | What happened                                                                 |
+|---------------------------------------------|-------------------------------------------------------------------------------|
+| This ZPAUTO variable is reached by an indexed / indexed-indirect mode | An indexed access (`var,X`, `var,Y`, `(var,X)`) into a variable. Allowed - it is how you walk a table - but the run-time index is yours to keep within the declared width. |

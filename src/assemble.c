@@ -30,6 +30,7 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t
 static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto_n(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -205,6 +206,7 @@ static const token statement_token_entries[] = {
     {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
     {RC_STR("section"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_section}}},
     {RC_STR("zpreserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpreserve}}},
+    {RC_STR("zpauto"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto_n}}},   // ZPAUTO <n>, <names>
     {RC_STR("zpauto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto1}}},   // 1-byte ZP variable
     {RC_STR("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
     {RC_STR("unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_unreachable}}}, // dead fall-through
@@ -632,14 +634,15 @@ static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, uint32
     }
 }
 
-// ZPAUTO1 <names> / ZPAUTO2 <names> - declare 1- or 2-byte zero-page variables, auto-allocated from the ZPRESERVE
-// set. Each name binds an ordinary scoped symbol (so `LDA foo` sizes as zero page and `routine.foo` resolves
-// from outside, all for free) to a fixed PLACEHOLDER address; the real byte is assigned later, at the
-// allocation phase. The variable's width + identity are recorded in the zeropage var registry, but only on
-// the single final pass (the settling passes need just the placeholder binding for layout to converge). ZPAUTO
-// is meaningless without a ZPRESERVE first: we flag that, but still bind the names so references do not cascade
-// into undefined-symbol errors. A dead branch removes only the binding it owns, like a dead label.
-static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint8_t width, rc_arena scratch)
+// The ZPAUTO name-binding worker, shared by ZPAUTO1 / ZPAUTO2 / ZPAUTO <n>: declare `width`-byte zero-page
+// variables, auto-allocated from the ZPRESERVE set. Each name binds an ordinary scoped symbol (so `LDA foo`
+// sizes as zero page and `routine.foo` resolves from outside, all for free) to a fixed PLACEHOLDER address;
+// the real byte is assigned later, at the allocation phase. The variable's width + identity are recorded in
+// the zeropage var registry, but only on the single final pass (the settling passes need just the placeholder
+// binding for layout to converge). ZPAUTO is meaningless without a ZPRESERVE first: we flag that, but still
+// bind the names so references do not cascade into undefined-symbol errors. A dead branch removes only the
+// binding it owns, like a dead label.
+static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
 {
     (void) section;   // ZPAUTO binds a symbol; the section it sits in is recorded later, at the instruction site
     (void) scratch;
@@ -708,6 +711,48 @@ static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, uint32_t
 static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_zpauto(b, at, scope, section, flags, 2, scratch);
+}
+
+// ZPAUTO <count>, <names> - the generic form: variables <count> bytes wide (a table or struct), of which
+// ZPAUTO1 / ZPAUTO2 are the 1- and 2-byte sugar. The count is a constant expression, evaluated here (a
+// forward reference defers a pass, like any operand); it must land in 1..256 (the zero page). Then the
+// name list is parsed by the shared worker, exactly as the fixed-width forms do.
+static parse_result handle_zpauto_n(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    expr_result e = eval(b, at, scope, section, scratch);
+    if (e.error != expr_error_none) {
+        return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+    }
+    // A comma separates the count from the names: `ZPAUTO 4, table`.
+    lexer_result comma = lexer_next(src, e.next, statement_tokens(b));
+    if (comma.token.type != lexeme_type_comma) {
+        return syntax_error(b, error_type_expected_var_name, cursor_at(at, e.next));
+    }
+
+    // Reduce the count. Unknown defers to a later pass; a known count must be a legal width; anything else is a
+    // recoverable error. On any non-known outcome we fall back to width 1 so the names still bind (references
+    // do not cascade), exactly as the feature-off / bad-name paths do.
+    uint16_t width = 1;
+    bool     unresolved = false;
+    int_argument arg = int_argument_make(e.value, flags.final, at.pos);
+    if (arg.type == int_argument_type_unresolved) {
+        unresolved = true;
+    }
+    else if (arg.type == int_argument_type_error) {
+        semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));
+    }
+    else if (arg.value < 1 || arg.value > (int64_t) zeropage_size) {
+        semantic_error(b, flags, error_type_zpauto_bad_width, cursor_at(at, at.pos));
+    }
+    else {
+        width = (uint16_t) arg.value;
+    }
+
+    parse_result r = handle_zpauto(b, cursor_at(at, comma.next), scope, section, flags, width, scratch);
+    r.unresolved = r.unresolved || unresolved;
+    return r;
 }
 
 // UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch, that control cannot fall
@@ -1977,24 +2022,41 @@ static void zeropage_finalize(baron *b)
     // at open and its cursor only advances (emission, or a forward SKIP/SKIPTO/ALIGN), so its pc is strictly
     // monotonic. cfg_build asserts that invariant in debug builds; there is nothing to refuse here.
 
-    // Guard 0 (the direct-addressing envelope): a variable reached by an indexed / indexed-indirect mode
-    // (var,X, var,Y, (var,X)) touches var+index, a byte the allocator cannot see and may have given to another
-    // variable. The whole packing is built on "a variable is reached only directly", so any such access is
-    // unsound - refuse it rather than emit code that quietly corrupts a neighbour. (Checked per recorded insn
-    // once vregs are resolved: a var_indexed insn that really names a ZPAUTO now has a vreg.)
-    // Guard 0b (pointer width): an indirect mode ((var),Y / (var)) dereferences a 2-byte zero-page pointer, so
-    // the variable must be a 2-byte ZPAUTO2. A 1-byte ZPAUTO1 there is unsound - the pointer's high byte falls
-    // on var+1, a byte the allocator never reserved for it - so refuse. (Needs the resolved vreg for the width,
-    // hence here rather than at record time.)
+    // Guard 0 (indexed access is the user's responsibility): a variable reached by an indexed / indexed-
+    // indirect mode (var,X, var,Y, (var,X)) touches var+index at run time - the intended way to walk a ZPAUTO
+    // table. The allocator reserves the WHOLE variable [base, base+width) and liveness marks it all live on any
+    // access, so an index that stays inside the width only ever reads the variable's own bytes: sound. What
+    // Baron cannot see is the run-time index - an index at or past the width walks into a neighbour, and no
+    // static check can catch that. So this is not a refusal but an OPT-IN warning (severity_optional, silent
+    // until the warning level is raised), the same trust we place in CANCALL / UNREACHABLE. The CONSTANT base
+    // of the access is still bounds-checked below (Guard 0b): LDA var+4,X on a 4-wide table is refused because
+    // the base is already off the end before any index is added. (Checked per recorded insn once vregs are
+    // resolved: a var_indexed insn that really names a ZPAUTO now has a vreg.)
+    // Guard 0b (bounds): a var+offset access must lie WITHIN the variable's declared width. The access spans
+    // `access` bytes at `var_offset`: 1 for a direct byte, 2 for an indirect pointer deref ((var),Y / (var),
+    // which reads the pointer's low+high bytes). If [offset, offset+access) runs off the end, the stray byte is
+    // one the allocator never reserved for this variable - so refuse. A 1-byte ZPAUTO1 used as a pointer is the
+    // special case that gets the pointed "declare it ZPAUTO2" message; every other overrun (a var+n past a
+    // table's end, a pointer straddling the top of a wider var) gets the general out-of-bounds message. (Both
+    // need the resolved vreg for the width, hence here rather than at record time; an unknown offset is skipped.)
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
-        if (n.vreg != RC_INDEX_NONE && n.var_indexed) {
-            baron_error(b, error_type_zpauto_indexed_access, n.at);
-            refused = true;
+        if (n.vreg == RC_INDEX_NONE) {
+            continue;
         }
-        if (n.vreg != RC_INDEX_NONE && n.var_indirect && zeropage_var_get(&b->zeropage, n.vreg).width != 2) {
-            baron_error(b, error_type_zpauto_narrow_pointer, n.at);
-            refused = true;
+        if (n.var_indexed) {
+            baron_warning(b, error_type_zpauto_indexed_access, n.at, severity_optional);
+        }
+        if (n.var_offset != RC_INDEX_NONE) {
+            uint32_t width  = zeropage_var_get(&b->zeropage, n.vreg).width;
+            uint32_t access = n.var_indirect ? 2u : 1u;
+            if ((uint64_t) n.var_offset + access > width) {
+                error_type code = (n.var_indirect && width < 2)
+                                      ? error_type_zpauto_narrow_pointer   // never wide enough to be a pointer
+                                      : error_type_zpauto_out_of_bounds;
+                baron_error(b, code, n.at);
+                refused = true;
+            }
         }
     }
 
@@ -2695,28 +2757,72 @@ RC_TEST_STEP(assemble, zpauto_recursion_shared_vs_per_level, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
-RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)
+RC_TEST_STEP(assemble, zpauto_indexed_access_warns, fix)
 {
-    // The direct-addressing envelope: an auto-variable reached by an indexed mode touches var+index - a byte
-    // the allocator cannot account for and may have placed another variable in. It is refused rather than
-    // silently miscompiled. `v,X` (zero-page indexed), `v,Y` (widens to absolute indexed, no zp form), and
-    // `(p,X)` (indexed-indirect) are all outside the envelope.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA v,X") == error_type_zpauto_indexed_access);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA v,Y") == error_type_zpauto_indexed_access);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO2 p : LDA (p,X)") == error_type_zpauto_indexed_access);
+    // Indexed / indexed-indirect access into an auto-variable (var,X / var,Y / (var,X)) touches var+index at
+    // run time - the intended way to walk a ZPAUTO table. The allocator reserves the whole variable and marks
+    // it all live on the access, so an index within its width is sound; the run-time index itself is unprovable,
+    // so it is an OPT-IN warning (silent until the level is raised), not a refusal. The variable still allocates.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, table : STA table : LDA table,X : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);              // it assembles: no error-severity diagnostic
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_indexed_access));  // ... but the opt-in warning is recorded
+    RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);                       // and the table is placed as usual
 
-    // Pointer width: an indirect mode dereferences a 2-byte zero-page pointer, so a 1-byte ZPAUTO1 is refused
-    // (its high byte would land on var+1, a byte reserved for nobody, or for a neighbour). Both (v),Y and the
-    // CMOS (v) forms are caught.
+    // `v,Y` (widens to absolute indexed, no zp form) and `(p,X)` (indexed-indirect) are likewise warned, not refused.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, v : STA v : LDA v,Y : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_indexed_access));
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, p : STA p : LDA (p,X) : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_indexed_access));
+
+    // The CONSTANT base of an indexed access is still bounds-checked (Guard 0b): `t+4,X` on a 4-wide table is
+    // refused because the base is already off the end, before any index is added.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 4, t : LDA t+4,X : RTS") == error_type_zpauto_out_of_bounds);
+
+    // Pointer width is unchanged: a 1-byte ZPAUTO1 dereferenced as a pointer ((v),Y / (v)) is still refused -
+    // that is a compile-time-known 2-byte access off a 1-byte variable, nothing to do with a run-time index.
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA (v),Y") == error_type_zpauto_narrow_pointer);
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA (v),Y") == error_type_zpauto_narrow_pointer);
 
-    // The envelope-safe forms stay legal: direct `var`, the `var+1` hi byte, and the whole-pointer `(var),Y`
-    // dereference of a 2-byte ZPAUTO2 (the intended use - only the DATA is indexed by Y, the pointer is read direct).
+    // The envelope-safe forms stay legal AND raise no warning: direct `var`, the `var+1` hi byte, and the
+    // whole-pointer `(var),Y` dereference of a 2-byte ZPAUTO2 (only the DATA is indexed by Y; the pointer is direct).
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_indexed_access));
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_indexed_access));
+}
+
+RC_TEST_STEP(assemble, zpauto_generic_width, fix)
+{
+    // ZPAUTO <n>, names declares n-byte variables (a table / struct); ZPAUTO1 / ZPAUTO2 are the 1/2-byte sugar.
+    // A 4-byte table takes 4 consecutive reserved bytes; a 1-byte var that interferes packs after it, at +4.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, table : ZPAUTO1 flag\n"
+                      "STA table : STA table+3 : LDA flag : LDA table : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "flag"),  ==, 0x74);   // forced past the 4-byte table's span
+
+    // The count is an ordinary constant expression.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 2+2, big : STA big+3 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // Bounds: var+n within the width is fine; reaching past the end is refused (the byte belongs to nobody /
+    // a neighbour). This also now catches a ZPAUTO1 `var+1` hi-byte access that used to slip through silently.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 4, t : STA t+4 : RTS") == error_type_zpauto_out_of_bounds);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA v+1 : RTS")   == error_type_zpauto_out_of_bounds);
+
+    // A pointer needs 2 bytes AT THE OFFSET, not exactly a ZPAUTO2: the first two bytes of a wider table work.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 3, t : STA t : STA t+1 : LDA (t),Y : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    // ... but a pointer straddling the top of the table is out of bounds ((t+2),Y reads t+2, t+3 of a 3-wide t).
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 3, t : LDA (t+2),Y : RTS") == error_type_zpauto_out_of_bounds);
+
+    // A count outside 1..256 is rejected.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 0, x : STA x")   == error_type_zpauto_bad_width);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 300, x : STA x") == error_type_zpauto_bad_width);
 }
 
 RC_TEST_STEP(assemble, zpauto_layout_must_not_collide, fix)

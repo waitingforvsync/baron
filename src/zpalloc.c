@@ -50,10 +50,18 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
         col.base[v] = RC_INDEX_NONE;
     }
 
-    // First-fit-decreasing over widths {2, 1}: place the wider (more constrained) variables first, each at the
-    // lowest reserved base that clashes with no already-placed conflicting variable. Left-edge-optimal for the
-    // equal-width common case; good enough for the 1/2-byte mix.
-    for (uint32_t pass_w = 2; pass_w >= 1; pass_w--) {
+    // First-fit-decreasing over widths (widest first): place the more constrained wide variables before the
+    // narrow ones, each at the lowest reserved base that clashes with no already-placed conflicting variable.
+    // Left-edge-optimal for the equal-width common case; good enough for a mix of widths (1, 2, or a ZPAUTO <n>
+    // table). The width set is unknown, so we sweep every width from the widest present down to 1.
+    uint32_t max_w = 1;
+    for (uint32_t v = 0; v < n; v++) {
+        uint32_t w = rc_view_zp_var_get(vars, v).width;
+        if (w > max_w) {
+            max_w = w;
+        }
+    }
+    for (uint32_t pass_w = max_w; pass_w >= 1; pass_w--) {
         for (uint32_t v = 0; v < n; v++) {
             uint32_t w = rc_view_zp_var_get(vars, v).width;
             if (w != pass_w) {

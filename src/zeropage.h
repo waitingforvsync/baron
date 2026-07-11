@@ -27,7 +27,7 @@
 typedef struct zp_var {
     rc_str   name;
     uint32_t scope;
-    uint8_t  width;
+    uint16_t width;   // byte count: 1 (ZPAUTO1), 2 (ZPAUTO2), or a generic ZPAUTO <n> table (up to 256)
     cursor   def;
 } zp_var;
 
@@ -75,6 +75,8 @@ typedef struct zp_insn {
                              // final-pass check refuses it (see zeropage_finalize)
     bool     var_indirect;   // the operand dereferences its var as a zero-page POINTER ((var),Y / (var)) - a
                              // 2-byte access, so a 1-byte ZPAUTO1 here is refused (final-pass width check)
+    uint32_t var_offset;     // the compile-time-known byte offset into the var (0 for `var`, k for `var+k`), or
+                             // RC_INDEX_NONE if not statically known; a final-pass check bounds it against width
     uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE. Resolves WITHIN this
                              // instruction's own section only (locals @+/@-, in-section expression branches);
                              // it never crosses a section - only a named label (below) can do that.
@@ -171,7 +173,7 @@ uint32_t zeropage_reserved_count(const zeropage *zp);
 
 // Record a declared variable (ZPAUTO1/ZPAUTO2). Returns its index in the var list. Called once per ZPAUTO on the
 // final pass; the settling passes only need the placeholder symbol binding, not the registry.
-uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint8_t width, cursor def);
+uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint16_t width, cursor def);
 
 uint32_t         zeropage_var_count(const zeropage *zp);
 zp_var           zeropage_var_get(const zeropage *zp, uint32_t index);

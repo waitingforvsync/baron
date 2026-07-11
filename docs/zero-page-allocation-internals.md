@@ -28,7 +28,7 @@ after the final assembly pass. The stages, in order:
   assembly passes (settling)                 zeropage_finalize (once, post-convergence)
   --------------------------                 -------------------------------------------
   ZPRESERVE  -> reserved-byte set            0. resolve vregs   (def cursor -> vreg id)
-  ZPAUTO     -> placeholder symbol           1. Guard 0         (indexed-addressing envelope)
+  ZPAUTO     -> placeholder symbol           1. Guard 0         (indexed-access warning + var+n bounds)
   final pass -> record IR:                   2. build CFG       (per (section, pc), label-resolved edges)
                 zp_var  (declarations)       3. liveness        (backward fixpoint -> interference graph)
                 zp_insn (var touches)        4. footprint       (interprocedural Touch(R) per call)
@@ -39,6 +39,8 @@ after the final assembly pass. The stages, in order:
 
 If any guard refuses, the function records diagnostics, patches nothing, and `run_passes` fails the assemble.
 Only a fully analysable, colourable program has its operand bytes and symbols rewritten to real addresses.
+(Guard 0's indexed-access *warning* is the exception - it records a diagnostic but does not refuse; the
+allocation runs to completion.)
 
 ## Stage 0 - recording during assembly ##
 
@@ -49,7 +51,7 @@ allocator does nothing during settling except keep the layout *convergent*:
 - **`ZPRESERVE a..b`** fills the 256-bit `reserved` set (`zeropage.reserved`) - which bytes the allocator may
   draw from - and enables the feature. It re-runs every pass; the set is cleared at the top of each pass and
   refilled, so after the final pass it holds the settled reservation.
-- **`ZPAUTO1 v` / `ZPAUTO2 v`** binds `v` to a *placeholder* symbol at address `zeropage_var_placeholder`
+- **`ZPAUTO1 v` / `ZPAUTO2 v` / `ZPAUTO n, v`** binds `v` to a *placeholder* symbol at `zeropage_var_placeholder`
   (0), typed as a zero-page access. The placeholder's only job is to size `LDA v` as a 2-byte zero-page
   instruction. Because it is a fixed constant, the binding never "changes" pass-to-pass, so it does not by
   itself prevent convergence.
@@ -57,7 +59,7 @@ allocator does nothing during settling except keep the layout *convergent*:
 Only on the **final pass**, once addresses have settled, does the manager capture the IR the analyses walk
 (`src/zeropage.c`):
 
-- `zp_var` - one per declared variable: name, owning scope, width (1 or 2), and its **def cursor** (the source
+- `zp_var` - one per declared variable: name, owning scope, width (1, 2, or a `ZPAUTO n` table up to 256), and its **def cursor** (the source
   position of its `ZPAUTO` statement), which is its identity across passes and instantiations.
 - `zp_insn` - one per instruction that *touches* a variable (plus enough control-flow metadata on every
   instruction to build the CFG): its `pc`, `size`, control-flow class (`zp_flow`), how it touches the variable
@@ -80,21 +82,29 @@ ZPAUTO). The `(scope, def)` **pair** is the identity: a def cursor alone collide
 a macro or `FOR` body (they share one def), but each instantiation runs in its own child scope, which tells
 them apart. After this, `vreg` indexes the global id space `[0, num_vars)` that every later stage uses.
 
-## Stage 1 - Guard 0: the direct-addressing envelope ##
+## Stage 1 - Guard 0: indexed access and bounds ##
 
-The entire packing rests on the assumption that a variable is reached *only* by direct addressing, so that the
-byte the operand names is exactly the byte the allocator placed. An indexed or indexed-indirect access
-(`var,X`, `var,Y`, `(var,X)`) touches `var + index` - a byte the allocator never accounted for and may have
-handed to a neighbour. Any such access on a real ZPAUTO is **refused** (`error_type_zpauto_indexed_access`),
-recorded per instruction via the `var_indexed` flag.
+The allocator reserves the *whole* variable `[base, base + width)` and liveness marks all of it live on any
+access, so an index that stays inside the width only ever reads the variable's own bytes. An indexed or
+indexed-indirect access (`var,X`, `var,Y`, `(var,X)`) is therefore sound *given* a run-time index below the
+width - which the compiler cannot check. So it is not refused but **warned** at `severity_optional`
+(`error_type_zpauto_indexed_access`, silent until the warning level is raised - the same trust as
+`CANCALL` / `UNREACHABLE`), recorded per instruction via the `var_indexed` flag. The allocation proceeds
+normally: the variable colours and its full span is reserved.
 
-A second, narrower check lives here too. An indirect mode (`(var),Y` or the CMOS `(var)`) dereferences a
-*2-byte* zero-page pointer, so the variable must be a 2-byte `ZPAUTO2`. Applied to a 1-byte `ZPAUTO1`, the
-pointer's high byte falls on `var + 1` - a byte the allocator never reserved for that variable - so it is
-**refused** (`error_type_zpauto_narrow_pointer`), recorded via the `var_indirect` flag and checked once the
-vreg (hence the width) is resolved. Both checks are decided from the instruction stream alone, so they run
-before the CFG is built and bail immediately if either fires (building a CFG over a stream we have already
-judged unsound would be wasted work).
+A **bounds check** lives here too, and it *is* a refusal - it catches the compile-time-known part. Every access
+spans a window `[offset, offset + access)` of its variable: `offset` is the constant in `var + offset` (recorded
+on the instruction - during assembly the variable's symbol is still the placeholder `0`, so the operand's
+evaluated value *is* the offset), and `access` is 1 for a direct byte or 2 for an indirect pointer dereference
+(`(var),Y` / `(var)`, which reads the pointer's low+high bytes). If that window runs past the variable's declared
+`width`, the stray byte is one the allocator never reserved for it, so it is **refused**. This applies to the
+constant *base* of an indexed access too: `var+4,X` on a 4-wide variable is refused because the base is already
+off the end, before any index is added. A 1-byte `ZPAUTO1` used as a pointer is the special case that gets the
+pointed `error_type_zpauto_narrow_pointer` ("declare it `ZPAUTO2`"); every other overrun - a `var + n` past the
+end of a table, a pointer straddling the top of a wider variable - gets `error_type_zpauto_out_of_bounds`. An
+unknown (forward-referenced) offset is simply skipped. These checks are decided from the instruction stream
+alone, so they run before the CFG is built and a *refusal* bails immediately (an indexed-access warning alone
+does not - the allocation carries on).
 
 ## Stage 2 - the control-flow graph ##
 
@@ -187,16 +197,19 @@ strict minimum (a fresh write in a non-cyclic callee of a recursive call), never
 
 ## Stage 5 - colouring ##
 
-`zp_color` (`src/zpalloc.c`) is **first-fit-decreasing** over the two widths `{2, 1}`: place the wider (more
-constrained) 2-byte pointers first, then the 1-byte variables. Each variable is placed at the lowest reserved
-base whose byte span `[base, base + width)` is fully reserved and overlaps no already-placed *conflicting*
-variable's span. Two variables conflict if they interfere, or if either is `unused` (an unused variable has no
-liveness to reason about, so we never prove any sharing safe and keep it on its own byte). A 2-byte variable
-takes consecutive reserved bytes. A variable that finds no base **spills** - `any_spilled` is set and the
-finalizer reports `error_type_zeropage_full` at that variable's declaration.
+`zp_color` (`src/zpalloc.c`) is **first-fit-decreasing** over the widths present, widest first: it sweeps every
+width from the widest declared down to 1, placing the more constrained wide variables (a `ZPAUTO 8` table, a
+2-byte pointer) before the narrow ones. Each variable is placed at the lowest reserved base whose byte span
+`[base, base + width)` is fully reserved and overlaps no already-placed *conflicting* variable's span. Two
+variables conflict if they interfere, or if either is `unused` (an unused variable has no liveness to reason
+about, so we never prove any sharing safe and keep it on its own byte). A multi-byte variable takes consecutive
+reserved bytes. A variable that finds no base **spills** - `any_spilled` is set and the finalizer reports
+`error_type_zeropage_full` at that variable's declaration.
 
-First-fit-decreasing is left-edge-optimal for the equal-width common case and good enough for the 1/2-byte mix;
-the graphs are tiny, so the O(vars^2 x bytes) scan is irrelevant in practice.
+First-fit-decreasing is left-edge-optimal for the equal-width common case and good enough for a mix of widths;
+the graphs are tiny, so the O(vars^2 x bytes) scan is irrelevant in practice. The span logic (`span_reserved` /
+`spans_overlap`) is width-generic, so an arbitrary-width `ZPAUTO <n>` table packs exactly like a pointer, just
+wider.
 
 ## Stage 6 - patch and rewrite ##
 
@@ -217,7 +230,7 @@ thing can run *after* convergence without perturbing it.
 | Type | File | Role |
 |------|------|------|
 | `zp_var` | zeropage.h | a declared variable: name, scope, width, def cursor (identity) |
-| `zp_insn` | zeropage.h | one var-touching instruction: pc, size, flow, `rw`, vreg, target, `(section, offset)` |
+| `zp_insn` | zeropage.h | one var-touching instruction: pc, size, flow, `rw`, vreg, `var_offset`, target, `(section, offset)` |
 | `zp_cflow` | zeropage.h | a trusted annotation: `UNREACHABLE` / `CANCALL` / `CANJUMP` at a site |
 | `zp_label` | zeropage.h | label identity `(scope, def)` -> physical `(section, pc)` |
 | `basic_block` | cfg.h | `(section, pc)` identity, insn slice, successor slice, `unknown_succ` |
@@ -233,16 +246,24 @@ becomes a clear diagnostic pointing at the fix. The refusals, all fatal to the a
 
 | Guard | Code | Cause |
 |-------|------|-------|
-| 0 | `zpauto_indexed_access` | a ZPAUTO reached by indexed / indexed-indirect addressing |
 | 0b | `zpauto_narrow_pointer` | a 1-byte ZPAUTO1 dereferenced as a pointer (`(var),Y` / `(var)`) - needs ZPAUTO2 |
+| 0b | `zpauto_out_of_bounds` | a constant `var + n` (or pointer, or indexed base) reaches past the declared width |
+| parse | `zpauto_bad_width` | `ZPAUTO <count>` with a count outside 1..256 |
 | 1 | `zpauto_computed_flow` | a computed/indirect jump reaches unmodelled code with variables live |
 | 2 | `zpauto_across_call` | a variable live across a call whose footprint cannot be bounded |
 | 2 | `zpauto_recursion` | a freshly-written per-level value held live across a recursive call |
 | colour | `zeropage_full` | more simultaneously-live variables than reserved bytes (a spill) |
 
+One diagnostic is a **warning**, not a refusal - the deliberate relaxation for run-time indexing:
+
+| Guard | Code | Severity | Cause |
+|-------|------|----------|-------|
+| 0 | `zpauto_indexed_access` | `severity_optional` | a ZPAUTO reached by indexed / indexed-indirect addressing; the whole variable is reserved, so an in-width index is sound, but the run-time index is the user's responsibility |
+
 The `CANCALL` / `CANJUMP` / `UNREACHABLE` annotations are the escape hatch: they are *trusted* assertions that
 sit exactly where the analysis would otherwise refuse, turning "cannot prove it" into the programmer's explicit
-"I promise it is these". A wrong annotation is the one way to defeat the contract.
+"I promise it is these". A wrong annotation is the one way to defeat the contract - and the indexed-access
+warning extends that same trust to the one thing no static check can ever see, the value of an index register.
 
 ## Sections / paged banks ##
 
