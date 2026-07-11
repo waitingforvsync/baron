@@ -86,8 +86,14 @@ The entire packing rests on the assumption that a variable is reached *only* by 
 byte the operand names is exactly the byte the allocator placed. An indexed or indexed-indirect access
 (`var,X`, `var,Y`, `(var,X)`) touches `var + index` - a byte the allocator never accounted for and may have
 handed to a neighbour. Any such access on a real ZPAUTO is **refused** (`error_type_zpauto_indexed_access`),
-recorded per instruction via the `var_indexed` flag. This is decided from the instruction stream alone, so it
-runs before the CFG is built and bails immediately if it fires (building a CFG over a stream we have already
+recorded per instruction via the `var_indexed` flag.
+
+A second, narrower check lives here too. An indirect mode (`(var),Y` or the CMOS `(var)`) dereferences a
+*2-byte* zero-page pointer, so the variable must be a 2-byte `ZPAUTO2`. Applied to a 1-byte `ZPAUTO1`, the
+pointer's high byte falls on `var + 1` - a byte the allocator never reserved for that variable - so it is
+**refused** (`error_type_zpauto_narrow_pointer`), recorded via the `var_indirect` flag and checked once the
+vreg (hence the width) is resolved. Both checks are decided from the instruction stream alone, so they run
+before the CFG is built and bail immediately if either fires (building a CFG over a stream we have already
 judged unsound would be wasted work).
 
 ## Stage 2 - the control-flow graph ##
@@ -228,6 +234,7 @@ becomes a clear diagnostic pointing at the fix. The refusals, all fatal to the a
 | Guard | Code | Cause |
 |-------|------|-------|
 | 0 | `zpauto_indexed_access` | a ZPAUTO reached by indexed / indexed-indirect addressing |
+| 0b | `zpauto_narrow_pointer` | a 1-byte ZPAUTO1 dereferenced as a pointer (`(var),Y` / `(var)`) - needs ZPAUTO2 |
 | 1 | `zpauto_computed_flow` | a computed/indirect jump reaches unmodelled code with variables live |
 | 2 | `zpauto_across_call` | a variable live across a call whose footprint cannot be bounded |
 | 2 | `zpauto_recursion` | a freshly-written per-level value held live across a recursive call |

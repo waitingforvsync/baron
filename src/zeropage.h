@@ -73,6 +73,8 @@ typedef struct zp_insn {
     bool     var_indexed;    // the operand reaches its var by an indexed / indexed-indirect mode (var,X etc.) -
                              // outside the direct-addressing envelope, so the allocation would be unsound; a
                              // final-pass check refuses it (see zeropage_finalize)
+    bool     var_indirect;   // the operand dereferences its var as a zero-page POINTER ((var),Y / (var)) - a
+                             // 2-byte access, so a 1-byte ZPAUTO1 here is refused (final-pass width check)
     uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE. Resolves WITHIN this
                              // instruction's own section only (locals @+/@-, in-section expression branches);
                              // it never crosses a section - only a named label (below) can do that.

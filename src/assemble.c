@@ -1982,10 +1982,18 @@ static void zeropage_finalize(baron *b)
     // variable. The whole packing is built on "a variable is reached only directly", so any such access is
     // unsound - refuse it rather than emit code that quietly corrupts a neighbour. (Checked per recorded insn
     // once vregs are resolved: a var_indexed insn that really names a ZPAUTO now has a vreg.)
+    // Guard 0b (pointer width): an indirect mode ((var),Y / (var)) dereferences a 2-byte zero-page pointer, so
+    // the variable must be a 2-byte ZPAUTO2. A 1-byte ZPAUTO1 there is unsound - the pointer's high byte falls
+    // on var+1, a byte the allocator never reserved for it - so refuse. (Needs the resolved vreg for the width,
+    // hence here rather than at record time.)
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.vreg != RC_INDEX_NONE && n.var_indexed) {
             baron_error(b, error_type_zpauto_indexed_access, n.at);
+            refused = true;
+        }
+        if (n.vreg != RC_INDEX_NONE && n.var_indirect && zeropage_var_get(&b->zeropage, n.vreg).width != 2) {
+            baron_error(b, error_type_zpauto_narrow_pointer, n.at);
             refused = true;
         }
     }
@@ -2697,8 +2705,14 @@ RC_TEST_STEP(assemble, zpauto_indexed_access_is_refused, fix)
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA v,Y") == error_type_zpauto_indexed_access);
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO2 p : LDA (p,X)") == error_type_zpauto_indexed_access);
 
+    // Pointer width: an indirect mode dereferences a 2-byte zero-page pointer, so a 1-byte ZPAUTO1 is refused
+    // (its high byte would land on var+1, a byte reserved for nobody, or for a neighbour). Both (v),Y and the
+    // CMOS (v) forms are caught.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA (v),Y") == error_type_zpauto_narrow_pointer);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA (v),Y") == error_type_zpauto_narrow_pointer);
+
     // The envelope-safe forms stay legal: direct `var`, the `var+1` hi byte, and the whole-pointer `(var),Y`
-    // dereference (the intended ZPAUTO2 use - only the DATA is indexed by Y, the pointer itself is read direct).
+    // dereference of a 2-byte ZPAUTO2 (the intended use - only the DATA is indexed by Y, the pointer is read direct).
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y") != 0);

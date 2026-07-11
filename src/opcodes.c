@@ -8,39 +8,44 @@
 
 
 // (mnemonic, addr_mode) -> cell. Bytes are the predecessor's verbatim. A cell ORs in `cmos`
-// only when the encoding is CMOS-only (a plain cell means both CPUs), and, for a future
-// zero-page allocator, the call-analysis class: op_read / op_write (a memory operand; both =
-// rmw) on the memory addressing modes only, and op_branch / op_jump / op_call / op_return on
-// the relevant control-flow cells. Immediate, accumulator and implied carry no access flag.
+// only when the encoding is CMOS-only (a plain cell means both CPUs), and, for the zero-page
+// allocator, the call-analysis class. op_zpread / op_zpwrite describe how the ZERO-PAGE OPERAND
+// is touched, populated exactly per addressing mode: a direct zero-page access (zp / zpx / zpy)
+// reads / writes / rmw's the byte as the instruction dictates; an INDIRECT mode (indx / indy /
+// ind) READS the zero-page pointer to form the address, whatever it then does to the pointed-to
+// data, so it carries op_zpread ONLY (a `STA (zp),Y` reads its pointer, it does not write it);
+// and ABSOLUTE addressing (abs / absx / absy) touches no zero-page byte, so it carries neither.
+// op_branch / op_jump / op_call / op_return sit on the control-flow cells. Immediate, accumulator,
+// implied and the JMP vector modes carry no access flag.
 static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     [mnemonic_adc] = {
         [addr_mode_imm]  = 0x69,
-        [addr_mode_zp]   = 0x65 | op_read,
-        [addr_mode_zpx]  = 0x75 | op_read,
-        [addr_mode_abs]  = 0x6D | op_read,
-        [addr_mode_absx] = 0x7D | op_read,
-        [addr_mode_absy] = 0x79 | op_read,
-        [addr_mode_indx] = 0x61 | op_read,
-        [addr_mode_indy] = 0x71 | op_read,
-        [addr_mode_ind]  = 0x72 | cmos | op_read,
+        [addr_mode_zp]   = 0x65 | op_zpread,
+        [addr_mode_zpx]  = 0x75 | op_zpread,
+        [addr_mode_abs]  = 0x6D,
+        [addr_mode_absx] = 0x7D,
+        [addr_mode_absy] = 0x79,
+        [addr_mode_indx] = 0x61 | op_zpread,
+        [addr_mode_indy] = 0x71 | op_zpread,
+        [addr_mode_ind]  = 0x72 | cmos | op_zpread,
     },
     [mnemonic_and] = {
         [addr_mode_imm]  = 0x29,
-        [addr_mode_zp]   = 0x25 | op_read,
-        [addr_mode_zpx]  = 0x35 | op_read,
-        [addr_mode_abs]  = 0x2D | op_read,
-        [addr_mode_absx] = 0x3D | op_read,
-        [addr_mode_absy] = 0x39 | op_read,
-        [addr_mode_indx] = 0x21 | op_read,
-        [addr_mode_indy] = 0x31 | op_read,
-        [addr_mode_ind]  = 0x32 | cmos | op_read,
+        [addr_mode_zp]   = 0x25 | op_zpread,
+        [addr_mode_zpx]  = 0x35 | op_zpread,
+        [addr_mode_abs]  = 0x2D,
+        [addr_mode_absx] = 0x3D,
+        [addr_mode_absy] = 0x39,
+        [addr_mode_indx] = 0x21 | op_zpread,
+        [addr_mode_indy] = 0x31 | op_zpread,
+        [addr_mode_ind]  = 0x32 | cmos | op_zpread,
     },
     [mnemonic_asl] = {
         [addr_mode_acc]  = 0x0A,
-        [addr_mode_zp]   = 0x06 | op_read | op_write,
-        [addr_mode_zpx]  = 0x16 | op_read | op_write,
-        [addr_mode_abs]  = 0x0E | op_read | op_write,
-        [addr_mode_absx] = 0x1E | op_read | op_write,
+        [addr_mode_zp]   = 0x06 | op_zpread | op_zpwrite,
+        [addr_mode_zpx]  = 0x16 | op_zpread | op_zpwrite,
+        [addr_mode_abs]  = 0x0E,
+        [addr_mode_absx] = 0x1E,
     },
     [mnemonic_bcc] = {
         [addr_mode_rel] = 0x90 | op_branch,
@@ -53,10 +58,10 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     },
     [mnemonic_bit] = {
         [addr_mode_imm]  = 0x89 | cmos,
-        [addr_mode_zp]   = 0x24 | op_read,
-        [addr_mode_zpx]  = 0x34 | op_read,
-        [addr_mode_abs]  = 0x2C | op_read,
-        [addr_mode_absx] = 0x3C | op_read,
+        [addr_mode_zp]   = 0x24 | op_zpread,
+        [addr_mode_zpx]  = 0x34 | op_zpread,
+        [addr_mode_abs]  = 0x2C,
+        [addr_mode_absx] = 0x3C,
     },
     [mnemonic_bmi] = {
         [addr_mode_rel] = 0x30 | op_branch,
@@ -90,31 +95,31 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     },
     [mnemonic_cmp] = {
         [addr_mode_imm]  = 0xC9,
-        [addr_mode_zp]   = 0xC5 | op_read,
-        [addr_mode_zpx]  = 0xD5 | op_read,
-        [addr_mode_abs]  = 0xCD | op_read,
-        [addr_mode_absx] = 0xDD | op_read,
-        [addr_mode_absy] = 0xD9 | op_read,
-        [addr_mode_indx] = 0xC1 | op_read,
-        [addr_mode_indy] = 0xD1 | op_read,
-        [addr_mode_ind]  = 0xD2 | cmos | op_read,
+        [addr_mode_zp]   = 0xC5 | op_zpread,
+        [addr_mode_zpx]  = 0xD5 | op_zpread,
+        [addr_mode_abs]  = 0xCD,
+        [addr_mode_absx] = 0xDD,
+        [addr_mode_absy] = 0xD9,
+        [addr_mode_indx] = 0xC1 | op_zpread,
+        [addr_mode_indy] = 0xD1 | op_zpread,
+        [addr_mode_ind]  = 0xD2 | cmos | op_zpread,
     },
     [mnemonic_cpx] = {
         [addr_mode_imm] = 0xE0,
-        [addr_mode_zp]  = 0xE4 | op_read,
-        [addr_mode_abs] = 0xEC | op_read,
+        [addr_mode_zp]  = 0xE4 | op_zpread,
+        [addr_mode_abs] = 0xEC,
     },
     [mnemonic_cpy] = {
         [addr_mode_imm] = 0xC0,
-        [addr_mode_zp]  = 0xC4 | op_read,
-        [addr_mode_abs] = 0xCC | op_read,
+        [addr_mode_zp]  = 0xC4 | op_zpread,
+        [addr_mode_abs] = 0xCC,
     },
     [mnemonic_dec] = {
         [addr_mode_acc]  = 0x3A | cmos,
-        [addr_mode_zp]   = 0xC6 | op_read | op_write,
-        [addr_mode_zpx]  = 0xD6 | op_read | op_write,
-        [addr_mode_abs]  = 0xCE | op_read | op_write,
-        [addr_mode_absx] = 0xDE | op_read | op_write,
+        [addr_mode_zp]   = 0xC6 | op_zpread | op_zpwrite,
+        [addr_mode_zpx]  = 0xD6 | op_zpread | op_zpwrite,
+        [addr_mode_abs]  = 0xCE,
+        [addr_mode_absx] = 0xDE,
     },
     [mnemonic_dex] = {
         [addr_mode_imp] = 0xCA,
@@ -124,21 +129,21 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     },
     [mnemonic_eor] = {
         [addr_mode_imm]  = 0x49,
-        [addr_mode_zp]   = 0x45 | op_read,
-        [addr_mode_zpx]  = 0x55 | op_read,
-        [addr_mode_abs]  = 0x4D | op_read,
-        [addr_mode_absx] = 0x5D | op_read,
-        [addr_mode_absy] = 0x59 | op_read,
-        [addr_mode_indx] = 0x41 | op_read,
-        [addr_mode_indy] = 0x51 | op_read,
-        [addr_mode_ind]  = 0x52 | cmos | op_read,
+        [addr_mode_zp]   = 0x45 | op_zpread,
+        [addr_mode_zpx]  = 0x55 | op_zpread,
+        [addr_mode_abs]  = 0x4D,
+        [addr_mode_absx] = 0x5D,
+        [addr_mode_absy] = 0x59,
+        [addr_mode_indx] = 0x41 | op_zpread,
+        [addr_mode_indy] = 0x51 | op_zpread,
+        [addr_mode_ind]  = 0x52 | cmos | op_zpread,
     },
     [mnemonic_inc] = {
         [addr_mode_acc]  = 0x1A | cmos,
-        [addr_mode_zp]   = 0xE6 | op_read | op_write,
-        [addr_mode_zpx]  = 0xF6 | op_read | op_write,
-        [addr_mode_abs]  = 0xEE | op_read | op_write,
-        [addr_mode_absx] = 0xFE | op_read | op_write,
+        [addr_mode_zp]   = 0xE6 | op_zpread | op_zpwrite,
+        [addr_mode_zpx]  = 0xF6 | op_zpread | op_zpwrite,
+        [addr_mode_abs]  = 0xEE,
+        [addr_mode_absx] = 0xFE,
     },
     [mnemonic_inx] = {
         [addr_mode_imp] = 0xE8,
@@ -156,49 +161,49 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     },
     [mnemonic_lda] = {
         [addr_mode_imm]  = 0xA9,
-        [addr_mode_zp]   = 0xA5 | op_read,
-        [addr_mode_zpx]  = 0xB5 | op_read,
-        [addr_mode_abs]  = 0xAD | op_read,
-        [addr_mode_absx] = 0xBD | op_read,
-        [addr_mode_absy] = 0xB9 | op_read,
-        [addr_mode_indx] = 0xA1 | op_read,
-        [addr_mode_indy] = 0xB1 | op_read,
-        [addr_mode_ind]  = 0xB2 | cmos | op_read,
+        [addr_mode_zp]   = 0xA5 | op_zpread,
+        [addr_mode_zpx]  = 0xB5 | op_zpread,
+        [addr_mode_abs]  = 0xAD,
+        [addr_mode_absx] = 0xBD,
+        [addr_mode_absy] = 0xB9,
+        [addr_mode_indx] = 0xA1 | op_zpread,
+        [addr_mode_indy] = 0xB1 | op_zpread,
+        [addr_mode_ind]  = 0xB2 | cmos | op_zpread,
     },
     [mnemonic_ldx] = {
         [addr_mode_imm]  = 0xA2,
-        [addr_mode_zp]   = 0xA6 | op_read,
-        [addr_mode_zpy]  = 0xB6 | op_read,
-        [addr_mode_abs]  = 0xAE | op_read,
-        [addr_mode_absy] = 0xBE | op_read,
+        [addr_mode_zp]   = 0xA6 | op_zpread,
+        [addr_mode_zpy]  = 0xB6 | op_zpread,
+        [addr_mode_abs]  = 0xAE,
+        [addr_mode_absy] = 0xBE,
     },
     [mnemonic_ldy] = {
         [addr_mode_imm]  = 0xA0,
-        [addr_mode_zp]   = 0xA4 | op_read,
-        [addr_mode_zpx]  = 0xB4 | op_read,
-        [addr_mode_abs]  = 0xAC | op_read,
-        [addr_mode_absx] = 0xBC | op_read,
+        [addr_mode_zp]   = 0xA4 | op_zpread,
+        [addr_mode_zpx]  = 0xB4 | op_zpread,
+        [addr_mode_abs]  = 0xAC,
+        [addr_mode_absx] = 0xBC,
     },
     [mnemonic_lsr] = {
         [addr_mode_acc]  = 0x4A,
-        [addr_mode_zp]   = 0x46 | op_read | op_write,
-        [addr_mode_zpx]  = 0x56 | op_read | op_write,
-        [addr_mode_abs]  = 0x4E | op_read | op_write,
-        [addr_mode_absx] = 0x5E | op_read | op_write,
+        [addr_mode_zp]   = 0x46 | op_zpread | op_zpwrite,
+        [addr_mode_zpx]  = 0x56 | op_zpread | op_zpwrite,
+        [addr_mode_abs]  = 0x4E,
+        [addr_mode_absx] = 0x5E,
     },
     [mnemonic_nop] = {
         [addr_mode_imp] = 0xEA,
     },
     [mnemonic_ora] = {
         [addr_mode_imm]  = 0x09,
-        [addr_mode_zp]   = 0x05 | op_read,
-        [addr_mode_zpx]  = 0x15 | op_read,
-        [addr_mode_abs]  = 0x0D | op_read,
-        [addr_mode_absx] = 0x1D | op_read,
-        [addr_mode_absy] = 0x19 | op_read,
-        [addr_mode_indx] = 0x01 | op_read,
-        [addr_mode_indy] = 0x11 | op_read,
-        [addr_mode_ind]  = 0x12 | cmos | op_read,
+        [addr_mode_zp]   = 0x05 | op_zpread,
+        [addr_mode_zpx]  = 0x15 | op_zpread,
+        [addr_mode_abs]  = 0x0D,
+        [addr_mode_absx] = 0x1D,
+        [addr_mode_absy] = 0x19,
+        [addr_mode_indx] = 0x01 | op_zpread,
+        [addr_mode_indy] = 0x11 | op_zpread,
+        [addr_mode_ind]  = 0x12 | cmos | op_zpread,
     },
     [mnemonic_pha] = {
         [addr_mode_imp] = 0x48,
@@ -214,17 +219,17 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     },
     [mnemonic_rol] = {
         [addr_mode_acc]  = 0x2A,
-        [addr_mode_zp]   = 0x26 | op_read | op_write,
-        [addr_mode_zpx]  = 0x36 | op_read | op_write,
-        [addr_mode_abs]  = 0x2E | op_read | op_write,
-        [addr_mode_absx] = 0x3E | op_read | op_write,
+        [addr_mode_zp]   = 0x26 | op_zpread | op_zpwrite,
+        [addr_mode_zpx]  = 0x36 | op_zpread | op_zpwrite,
+        [addr_mode_abs]  = 0x2E,
+        [addr_mode_absx] = 0x3E,
     },
     [mnemonic_ror] = {
         [addr_mode_acc]  = 0x6A,
-        [addr_mode_zp]   = 0x66 | op_read | op_write,
-        [addr_mode_zpx]  = 0x76 | op_read | op_write,
-        [addr_mode_abs]  = 0x6E | op_read | op_write,
-        [addr_mode_absx] = 0x7E | op_read | op_write,
+        [addr_mode_zp]   = 0x66 | op_zpread | op_zpwrite,
+        [addr_mode_zpx]  = 0x76 | op_zpread | op_zpwrite,
+        [addr_mode_abs]  = 0x6E,
+        [addr_mode_absx] = 0x7E,
     },
     [mnemonic_rti] = {
         [addr_mode_imp] = 0x40 | op_return,
@@ -234,14 +239,14 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     },
     [mnemonic_sbc] = {
         [addr_mode_imm]  = 0xE9,
-        [addr_mode_zp]   = 0xE5 | op_read,
-        [addr_mode_zpx]  = 0xF5 | op_read,
-        [addr_mode_abs]  = 0xED | op_read,
-        [addr_mode_absx] = 0xFD | op_read,
-        [addr_mode_absy] = 0xF9 | op_read,
-        [addr_mode_indx] = 0xE1 | op_read,
-        [addr_mode_indy] = 0xF1 | op_read,
-        [addr_mode_ind]  = 0xF2 | cmos | op_read,
+        [addr_mode_zp]   = 0xE5 | op_zpread,
+        [addr_mode_zpx]  = 0xF5 | op_zpread,
+        [addr_mode_abs]  = 0xED,
+        [addr_mode_absx] = 0xFD,
+        [addr_mode_absy] = 0xF9,
+        [addr_mode_indx] = 0xE1 | op_zpread,
+        [addr_mode_indy] = 0xF1 | op_zpread,
+        [addr_mode_ind]  = 0xF2 | cmos | op_zpread,
     },
     [mnemonic_sec] = {
         [addr_mode_imp] = 0x38,
@@ -253,24 +258,24 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
         [addr_mode_imp] = 0x78,
     },
     [mnemonic_sta] = {
-        [addr_mode_zp]   = 0x85 | op_write,
-        [addr_mode_zpx]  = 0x95 | op_write,
-        [addr_mode_abs]  = 0x8D | op_write,
-        [addr_mode_absx] = 0x9D | op_write,
-        [addr_mode_absy] = 0x99 | op_write,
-        [addr_mode_indx] = 0x81 | op_write,
-        [addr_mode_indy] = 0x91 | op_write,
-        [addr_mode_ind]  = 0x92 | cmos | op_write,
+        [addr_mode_zp]   = 0x85 | op_zpwrite,
+        [addr_mode_zpx]  = 0x95 | op_zpwrite,
+        [addr_mode_abs]  = 0x8D,
+        [addr_mode_absx] = 0x9D,
+        [addr_mode_absy] = 0x99,
+        [addr_mode_indx] = 0x81 | op_zpread,
+        [addr_mode_indy] = 0x91 | op_zpread,
+        [addr_mode_ind]  = 0x92 | cmos | op_zpread,
     },
     [mnemonic_stx] = {
-        [addr_mode_zp]  = 0x86 | op_write,
-        [addr_mode_zpy] = 0x96 | op_write,
-        [addr_mode_abs] = 0x8E | op_write,
+        [addr_mode_zp]  = 0x86 | op_zpwrite,
+        [addr_mode_zpy] = 0x96 | op_zpwrite,
+        [addr_mode_abs] = 0x8E,
     },
     [mnemonic_sty] = {
-        [addr_mode_zp]  = 0x84 | op_write,
-        [addr_mode_zpx] = 0x94 | op_write,
-        [addr_mode_abs] = 0x8C | op_write,
+        [addr_mode_zp]  = 0x84 | op_zpwrite,
+        [addr_mode_zpx] = 0x94 | op_zpwrite,
+        [addr_mode_abs] = 0x8C,
     },
     [mnemonic_tax] = {
         [addr_mode_imp] = 0xAA,
@@ -312,18 +317,18 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
         [addr_mode_imp] = 0x7A | cmos,
     },
     [mnemonic_stz] = {
-        [addr_mode_zp]   = 0x64 | cmos | op_write,
-        [addr_mode_zpx]  = 0x74 | cmos | op_write,
-        [addr_mode_abs]  = 0x9C | cmos | op_write,
-        [addr_mode_absx] = 0x9E | cmos | op_write,
+        [addr_mode_zp]   = 0x64 | cmos | op_zpwrite,
+        [addr_mode_zpx]  = 0x74 | cmos | op_zpwrite,
+        [addr_mode_abs]  = 0x9C | cmos,
+        [addr_mode_absx] = 0x9E | cmos,
     },
     [mnemonic_trb] = {
-        [addr_mode_zp]  = 0x14 | cmos | op_read | op_write,
-        [addr_mode_abs] = 0x1C | cmos | op_read | op_write,
+        [addr_mode_zp]  = 0x14 | cmos | op_zpread | op_zpwrite,
+        [addr_mode_abs] = 0x1C | cmos,
     },
     [mnemonic_tsb] = {
-        [addr_mode_zp]  = 0x04 | cmos | op_read | op_write,
-        [addr_mode_abs] = 0x0C | cmos | op_read | op_write,
+        [addr_mode_zp]  = 0x04 | cmos | op_zpread | op_zpwrite,
+        [addr_mode_abs] = 0x0C | cmos,
     },
 };
 
@@ -454,13 +459,6 @@ static index_result consume_index(rc_str source, uint32_t cursor)
     };
 }
 
-// Indirect modes dereference a zero-page POINTER: the pointer variable is read to form the effective
-// address, so it is always a READ, whatever the instruction does to the pointed-to data.
-static bool is_indirect_mode(addr_mode mode)
-{
-    return mode == addr_mode_indx || mode == addr_mode_indy || mode == addr_mode_ind;
-}
-
 // Is `mode` within the auto-variable direct-addressing envelope? The allocator gives a variable a byte on the
 // assumption it is reached ONLY directly - the variable IS the operand (`var` / `var+k` -> zp), or the whole
 // pair is dereferenced as a pointer (`(var),Y` -> indy, `(var)` -> ind). Every other form that names the
@@ -490,14 +488,16 @@ typedef struct operand_ref {
     uint32_t scope;
     uint8_t  rw;
     bool     outside_envelope;   // the variable is reached by an indexed / indexed-indirect mode (unsound)
+    bool     indirect;           // the variable is dereferenced as a zero-page POINTER ((var),Y / (var)) - it
+                                 // needs 2 bytes, so a 1-byte ZPAUTO1 here is refused (see zeropage_finalize)
 } operand_ref;
 
 // If the operand's leading identifier resolves (with shadowing) to a bound symbol, return its identity and rw
 // class; otherwise an all-none ref. The identity is mapped to a concrete vreg LATER (zeropage_resolve_vregs),
 // once the whole ZPAUTO registry is populated, so a use before the declaration still attributes. The rw class
-// comes from the cell for a DIRECT access (the variable IS the operand); an INDIRECT access reads the variable
-// as a pointer to dereference, whatever the instruction does to the pointed-to data. `operand_pos` is where
-// the operand expression begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable).
+// is read straight off the cell's op_zpread / op_zpwrite flags, which already encode the zero-page-operand
+// semantics per addressing mode (see the opcode table header). `operand_pos` is where the operand expression
+// begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable).
 static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
                                      uint32_t operand_pos)
 {
@@ -514,11 +514,13 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
     if (cursor_is_none(ref.def)) {
         return none;   // resolves to nothing (undefined / not a bare symbol)
     }
-    uint8_t rw = is_indirect_mode(mode)
-                     ? (uint8_t) vref_read
-                     : (uint8_t) (((cell & op_read) ? vref_read : 0) | ((cell & op_write) ? vref_write : 0));
+    // op_zpread / op_zpwrite already encode how the zero-page operand is touched per mode (a direct access
+    // reads/writes the byte; an indirect mode reads the pointer only; absolute carries neither), so the rw
+    // class is a straight read of the cell - no per-mode special-casing here.
+    uint8_t rw = (uint8_t) (((cell & op_zpread) ? vref_read : 0) | ((cell & op_zpwrite) ? vref_write : 0));
     return (operand_ref) {.def = ref.def, .scope = ref.scope, .rw = rw,
-                          .outside_envelope = !mode_in_var_envelope(mode)};
+                          .outside_envelope = !mode_in_var_envelope(mode),
+                          .indirect = (mode == addr_mode_indy || mode == addr_mode_ind)};
 }
 
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
@@ -560,6 +562,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .var_scope      = is_control ? RC_INDEX_NONE : op.scope,
         .var_def        = is_control ? cursor_none() : op.def,
         .var_indexed    = is_control ? false : op.outside_envelope,
+        .var_indirect   = is_control ? false : op.indirect,
         .target         = target,
         .target_scope   = is_control ? op.scope : RC_INDEX_NONE,
         .target_def     = is_control ? op.def : cursor_none(),
@@ -777,21 +780,34 @@ RC_TEST(opcodes, bytes_and_jsr_fix)
 
 RC_TEST(opcodes, call_analysis_class)
 {
-    // Per-(mnemonic, mode) classification: the accumulator form touches no memory operand,
-    // the zero-page form is a read-modify-write.
+    // op_zpread / op_zpwrite describe how the ZERO-PAGE operand is touched, per addressing mode.
+    // The accumulator / immediate / implied forms name no zero-page byte at all.
     RC_CHECK_TRUE((opcode_def(mnemonic_asl, addr_mode_acc) & op_class_mask) == 0);
-    RC_CHECK_TRUE((opcode_def(mnemonic_asl, addr_mode_zp)  & op_class_mask) == (op_read | op_write));
-
-    // Immediate is no memory operand; a real address is a read.
     RC_CHECK_TRUE((opcode_def(mnemonic_lda, addr_mode_imm) & op_class_mask) == 0);
-    RC_CHECK_TRUE((opcode_def(mnemonic_lda, addr_mode_zp)  & op_class_mask) == op_read);
+    RC_CHECK_TRUE((opcode_def(mnemonic_tax, addr_mode_imp) & op_class_mask) == 0);
 
-    RC_CHECK_TRUE((opcode_def(mnemonic_sta, addr_mode_zp)  & op_class_mask) == op_write);
+    // A DIRECT zero-page access reads / writes / rmw's the byte as the instruction dictates.
+    RC_CHECK_TRUE((opcode_def(mnemonic_lda, addr_mode_zp)  & op_class_mask) == op_zpread);
+    RC_CHECK_TRUE((opcode_def(mnemonic_sta, addr_mode_zp)  & op_class_mask) == op_zpwrite);
+    RC_CHECK_TRUE((opcode_def(mnemonic_asl, addr_mode_zp)  & op_class_mask) == (op_zpread | op_zpwrite));
+
+    // ABSOLUTE addressing touches no zero-page byte -> neither flag, even for a store or an rmw.
+    RC_CHECK_TRUE((opcode_def(mnemonic_lda, addr_mode_abs) & op_class_mask) == 0);
+    RC_CHECK_TRUE((opcode_def(mnemonic_sta, addr_mode_abs) & op_class_mask) == 0);
+    RC_CHECK_TRUE((opcode_def(mnemonic_asl, addr_mode_abs) & op_class_mask) == 0);
+
+    // An INDIRECT mode reads the zero-page POINTER to form the address -> op_zpread ONLY, whatever it
+    // does to the pointed-to data. So a STA through a pointer READS its zero-page operand, never writes it.
+    RC_CHECK_TRUE((opcode_def(mnemonic_lda, addr_mode_indy) & op_class_mask) == op_zpread);
+    RC_CHECK_TRUE((opcode_def(mnemonic_sta, addr_mode_indy) & op_class_mask) == op_zpread);
+    RC_CHECK_TRUE((opcode_def(mnemonic_sta, addr_mode_indx) & op_class_mask) == op_zpread);
+    RC_CHECK_TRUE((opcode_def(mnemonic_lda, addr_mode_ind)  & op_class_mask) == op_zpread);
+
+    // Control-flow classes are unchanged.
     RC_CHECK_TRUE((opcode_def(mnemonic_jsr, addr_mode_abs) & op_class_mask) == op_call);
     RC_CHECK_TRUE((opcode_def(mnemonic_rts, addr_mode_imp) & op_class_mask) == op_return);
     RC_CHECK_TRUE((opcode_def(mnemonic_beq, addr_mode_rel) & op_class_mask) == op_branch);
     RC_CHECK_TRUE((opcode_def(mnemonic_jmp, addr_mode_abs) & op_class_mask) == op_jump);
-    RC_CHECK_TRUE((opcode_def(mnemonic_tax, addr_mode_imp) & op_class_mask) == 0);
 }
 
 #endif // BARON_TESTS

@@ -50,9 +50,11 @@ typedef enum mnemonic {
 // Flags OR'd into each opcode_defs cell, above the 8-bit opcode byte.
 enum opcode_flag {
     cmos = 0x100,                                                              // CMOS-only; absent = both CPUs
-    op_read = 0x0200, op_write = 0x0400,                                       // memory access (combine for rmw)
+    op_zpread = 0x0200, op_zpwrite = 0x0400,                                   // how the ZERO-PAGE operand is
+                                                                               // accessed (combine for rmw);
+                                                                               // absolute carries neither
     op_branch = 0x0800, op_jump = 0x1000, op_call = 0x2000, op_return = 0x4000,// control flow (exclusive)
-    op_class_mask = op_read | op_write | op_branch | op_jump | op_call | op_return,
+    op_class_mask = op_zpread | op_zpwrite | op_branch | op_jump | op_call | op_return,
 };
 
 // The raw cell for (m, mode): byte | (cmos) | class flags, or 0 when the mode is unsupported.

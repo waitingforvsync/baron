@@ -295,6 +295,9 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
   `var + index`, a byte the allocator cannot account for. Self-modifying its operand, or pointing into it from
   elsewhere in zero page, is the same hazard but invisible in the instruction stream, so those Baron cannot
   catch - use a hand-placed symbol for them.
+- **A pointer dereference needs a `ZPAUTO2`.** An indirect mode (`(var),Y` or the CMOS `(var)`) reads a
+  two-byte zero-page pointer, so `var` must be a `ZPAUTO2`. Dereferencing a one-byte `ZPAUTO1` that way is
+  refused: its high byte would fall on `var+1`, which the allocator never reserved for it. Declare it `ZPAUTO2`.
 - **Statically recoverable flow is the only real requirement.** Every branch and jump target must be a label
   the assembler can resolve - a known address, not a computed one. Within that you have a free hand: a block may
   have several entry points (each its own `JSR` target), several `RTS` exits, early-outs, and branches or jumps
@@ -452,6 +455,7 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
 | A ZPAUTO variable must be reached by direct addressing only | An indexed / indexed-indirect access (`var,X`, `(var,X)`). Use a hand-placed symbol there. |
+| An indirect addressing mode dereferences a 2-byte pointer   | A one-byte `ZPAUTO1` used as a pointer (`(var),Y` / `(var)`). Declare it `ZPAUTO2`. |
 
 Every one of these is a refusal, not a warning - Baron will not emit code it cannot vouch for. Fix it, annotate
 it, or fall back to a hand-placed address, and you are on solid ground again.
