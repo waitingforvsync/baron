@@ -2004,7 +2004,10 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 //   - more simultaneously-live variables than reserved bytes -> error_type_zeropage_full (a spill).
 // On any refusal it records the error(s) and patches nothing; run_passes then fails the assemble. Only a
 // fully analysable, colourable program has its operands + symbols rewritten to real addresses.
-static void zeropage_finalize(baron *b)
+// `work` (cfg + liveness results) and `scratch` (their by-value scratch) are two working arenas the caller
+// hands in BY VALUE; nothing here outlives the call, so both are reclaimed by the caller. They must have
+// distinct backing (the scratch-aliasing lesson), which the caller guarantees by passing two different arenas.
+static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 {
     if (!zeropage_is_enabled(&b->zeropage)) {
         return;
@@ -2066,17 +2069,12 @@ static void zeropage_finalize(baron *b)
         return;
     }
 
-    // Own working arenas: cfg + liveness results in `work`, their by-value scratch in `wscratch` (never the
-    // same arena - see the scratch-aliasing lesson).
-    rc_arena work     = rc_arena_make_default();
-    rc_arena wscratch = rc_arena_make_default();
-
     rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
 
     // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
     // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
-    cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), &work, wscratch);
-    liveness lv = liveness_analyze(g, insns, nv, 0, &work, wscratch);
+    cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), &work, scratch);
+    liveness lv = liveness_analyze(g, insns, nv, 0, &work, scratch);
 
     // Guard 1: a computed / indirect jump (unknown_succ) leaves for code we cannot model. With any variable in
     // play we cannot prove it is not clobbered there, so refuse and ask for an annotation.
@@ -2096,7 +2094,7 @@ static void zeropage_finalize(baron *b)
     // callee footprint and add the edges - UNLESS it cannot be bounded (an untrackable target -> across_call)
     // or the call recurses (-> recursion): a value live across either cannot be statically placed, so refuse.
     rc_bitset live = {0};
-    rc_bitset_resize(&live, nv, &wscratch);
+    rc_bitset_resize(&live, nv, &scratch);
     for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
         basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
         rc_bitset_reset(&live);
@@ -2109,7 +2107,7 @@ static void zeropage_finalize(baron *b)
             zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + k);
             if (n.flow == zp_flow_call && rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
                 // What this call reaches - CANCALL overrides an untrackable literal target with a declared set.
-                footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, wscratch);
+                footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, scratch);
                 if (fp.unknown_call) {
                     baron_error(b, error_type_zpauto_across_call, n.at);
                     refused = true;
@@ -2144,7 +2142,7 @@ static void zeropage_finalize(baron *b)
 
     if (!refused) {
         zp_coloring col = zp_color(&lv, zeropage_vars(&b->zeropage), zeropage_reserved(&b->zeropage),
-                                   &work, wscratch);
+                                   &work, scratch);
         if (col.any_spilled) {
             for (uint32_t v = 0; v < nv; v++) {
                 if (col.base[v] == RC_INDEX_NONE) {
@@ -2169,9 +2167,6 @@ static void zeropage_finalize(baron *b)
             }
         }
     }
-
-    rc_arena_deinit(&wscratch);
-    rc_arena_deinit(&work);
 }
 
 // Discard the half-built outputs - object code and symbols - so a failed assemble hands back nothing
@@ -2208,7 +2203,7 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             // Layout has settled: now assign real zero-page bytes to the ZPAUTO variables and patch the
             // placeholder operands. This refuses (records errors, patches nothing) on anything it cannot prove
             // correct, so a fresh error here fails the assemble just like a pass error would.
-            zeropage_finalize(b);
+            zeropage_finalize(b, *b->per_pass, scratch);
             if (baron_has_errors(b)) {
                 return assemble_failed(b);
             }
