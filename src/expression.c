@@ -1665,7 +1665,12 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
 
 function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena)
 {
-    parser p = {.text = text, .env = env, .arena = arena, .live = false};   // scan: nested calls do not execute
+    parser p = {   // scan: nested calls do not execute
+        .text  = text,
+        .env   = env,
+        .arena = arena,
+        .live  = false,
+    };
     body_result br = interpret_statements(&p, pos, false);   // inactive: just walk to the top-level '='
 
     if (br.error != error_type_none) {

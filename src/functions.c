@@ -97,7 +97,12 @@ function_add_status functions_add_signature(functions *f, uint32_t index, rc_vie
 
     rc_array_function_signature_push(
         &e->signatures,
-        (function_signature) {.params = params, .body = body, .def_scope = def_scope, .defined = defined},
+        (function_signature) {
+            .params    = params,
+            .body      = body,
+            .def_scope = def_scope,
+            .defined   = defined,
+        },
         f->arena);
     return function_add_inserted;
 }

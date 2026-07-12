@@ -96,7 +96,12 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
 footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t entry_block,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
 {
-    footprint fp = {.touched = {0}, .killed = {0}, .unknown_call = false, .recursive = false};
+    footprint fp = {
+        .touched      = {0},
+        .killed       = {0},
+        .unknown_call = false,
+        .recursive    = false,
+    };
     rc_bitset_resize(&fp.touched, num_vars, arena);
     rc_bitset_resize(&fp.killed, num_vars, arena);
     if (entry_block >= g.blocks.num || num_vars == 0) {
@@ -105,8 +110,14 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
     rc_bitset on_stack = {0};
     rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
     fp_ctx c = {
-        .g = g, .insns = insns, .cflows = cflows, .touched = &fp.touched, .killed = &fp.killed,
-        .on_stack = &on_stack, .unknown = &fp.unknown_call, .recursive = &fp.recursive,
+        .g         = g,
+        .insns     = insns,
+        .cflows    = cflows,
+        .touched   = &fp.touched,
+        .killed    = &fp.killed,
+        .on_stack  = &on_stack,
+        .unknown   = &fp.unknown_call,
+        .recursive = &fp.recursive,
     };
     fp_visit(&c, entry_block, scratch);
     return fp;
@@ -115,7 +126,12 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
 footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, zp_insn call,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
 {
-    footprint fp = {.touched = {0}, .killed = {0}, .unknown_call = false, .recursive = false};
+    footprint fp = {
+        .touched      = {0},
+        .killed       = {0},
+        .unknown_call = false,
+        .recursive    = false,
+    };
     rc_bitset_resize(&fp.touched, num_vars, arena);
     rc_bitset_resize(&fp.killed, num_vars, arena);
     if (num_vars == 0) {
@@ -124,8 +140,14 @@ footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
     rc_bitset on_stack = {0};
     rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
     fp_ctx c = {
-        .g = g, .insns = insns, .cflows = cflows, .touched = &fp.touched, .killed = &fp.killed,
-        .on_stack = &on_stack, .unknown = &fp.unknown_call, .recursive = &fp.recursive,
+        .g         = g,
+        .insns     = insns,
+        .cflows    = cflows,
+        .touched   = &fp.touched,
+        .killed    = &fp.killed,
+        .on_stack  = &on_stack,
+        .unknown   = &fp.unknown_call,
+        .recursive = &fp.recursive,
     };
     fp_visit_call(&c, call, scratch);
     return fp;

@@ -121,7 +121,13 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
             return value_make_error(error_type_domain);   // the end does not continue the same way
         }
         int64_t end = start + step * ((r.end - start) / step);   // canonical last element
-        return value_make_range((value_range) {.start = start, .end = end, .step = step, .has_start = true, .has_end = true});
+        return value_make_range((value_range) {
+            .start     = start,
+            .end       = end,
+            .step      = step,
+            .has_start = true,
+            .has_end   = true,
+        });
     }
 
     // Simple form a..b: step stays 0 (the direction is inferred from the endpoints).
@@ -136,7 +142,12 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
         }
         end -= 1;
     }
-    return value_make_range((value_range) {.start = start, .end = end, .has_start = true, .has_end = true});
+    return value_make_range((value_range) {
+        .start     = start,
+        .end       = end,
+        .has_start = true,
+        .has_end   = true,
+    });
 }
 
 value value_make_range_open_end(value lhs, bool exclusive)

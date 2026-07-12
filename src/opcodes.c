@@ -501,7 +501,12 @@ typedef struct operand_ref {
 static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
                                      uint32_t operand_pos)
 {
-    operand_ref none = {.def = cursor_none(), .scope = RC_INDEX_NONE, .rw = vref_none, .outside_envelope = false};
+    operand_ref none = {
+        .def              = cursor_none(),
+        .scope            = RC_INDEX_NONE,
+        .rw               = vref_none,
+        .outside_envelope = false,
+    };
     if (operand_pos == RC_INDEX_NONE) {
         return none;
     }
@@ -518,9 +523,13 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
     // reads/writes the byte; an indirect mode reads the pointer only; absolute carries neither), so the rw
     // class is a straight read of the cell - no per-mode special-casing here.
     uint8_t rw = (uint8_t) (((cell & op_zpread) ? vref_read : 0) | ((cell & op_zpwrite) ? vref_write : 0));
-    return (operand_ref) {.def = ref.def, .scope = ref.scope, .rw = rw,
-                          .outside_envelope = !mode_in_var_envelope(mode),
-                          .indirect = (mode == addr_mode_indy || mode == addr_mode_ind)};
+    return (operand_ref) {
+        .def              = ref.def,
+        .scope            = ref.scope,
+        .rw               = rw,
+        .outside_envelope = !mode_in_var_envelope(mode),
+        .indirect         = (mode == addr_mode_indy || mode == addr_mode_ind),
+    };
 }
 
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +

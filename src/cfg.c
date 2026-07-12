@@ -187,8 +187,15 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         if (i == 0 || insn.section != prev_sec || addr_is_leader(&leaders, insn.section, insn.pc)) {
             current = rc_array_basic_block_push(
                 &result.blocks,
-                (basic_block) {.section = insn.section, .pc = insn.pc, .first_insn = i, .num_insns = 0,
-                               .succ_first = 0, .succ_count = 0, .unknown_succ = false},
+                (basic_block) {
+                    .section      = insn.section,
+                    .pc           = insn.pc,
+                    .first_insn   = i,
+                    .num_insns    = 0,
+                    .succ_first   = 0,
+                    .succ_count   = 0,
+                    .unknown_succ = false,
+                },
                 arena);
         }
         rc_array_basic_block_at(&result.blocks, current)->num_insns++;

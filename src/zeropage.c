@@ -76,7 +76,12 @@ uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint16_t wi
     RC_ASSERT(zp != NULL);
     return rc_array_zp_var_push(
         &zp->vars,
-        (zp_var) {.name = name, .scope = scope, .width = width, .def = def},
+        (zp_var) {
+            .name  = name,
+            .scope = scope,
+            .width = width,
+            .def   = def,
+        },
         zp->arena);
 }
 
@@ -169,7 +174,12 @@ uint32_t zeropage_add_label(zeropage *zp, uint32_t scope, cursor def, uint32_t s
     RC_ASSERT(zp != NULL);
     return rc_array_zp_label_push(
         &zp->labels,
-        (zp_label) {.scope = scope, .def = def, .section = section, .pc = pc},
+        (zp_label) {
+            .scope   = scope,
+            .def     = def,
+            .section = section,
+            .pc      = pc,
+        },
         zp->arena);
 }
 
