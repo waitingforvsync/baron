@@ -105,7 +105,8 @@ typedef enum error_type {
     error_type_jmp_indirect_page_cross,   // JMP (&xxFF): the NMOS vector-fetch page-wrap bug
 } error_type;
 
-// A short lowercase name for a code (its enumerator tail), for diagnostics and tests.
+// The human-readable message for a code (a short sentence, not the enumerator tail) - what a rendered
+// diagnostic prints after its location.
 rc_str error_type_name(error_type e);
 
 

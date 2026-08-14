@@ -1,6 +1,7 @@
 #include "sections.h"
 
 #include "richc/macros.h"
+#include "richc/mstr.h"   // rc_mstr_from_str: durable copies of a section's name / attribute keys
 
 
 enum {
@@ -127,6 +128,38 @@ void sections_patch_add_u8(sections *sec, uint32_t id, uint32_t offset, uint8_t 
     *byte = (uint8_t) (*byte + delta);
 }
 
+// Copy an rc_str into the arena. The nameless default's {0} name stays {0} - there is nothing to own.
+static rc_str str_make_copy(rc_str s, rc_arena *arena)
+{
+    if (s.len == 0) {
+        return (rc_str) {0};
+    }
+    return rc_mstr_from_str(s, 0, arena).view;
+}
+
+section section_make_copy(section s, rc_arena *arena)
+{
+    RC_ASSERT(arena != NULL);
+    // Everything the section references is copied, not just the code: the name and attribute keys are views
+    // into source text held by a DIFFERENT arena, and a copy that borrowed them would quietly die with it.
+    section copy = {
+        .name = str_make_copy(s.name, arena),
+        .pc   = s.pc,
+        .code = rc_array_bytes_make_copy(s.code.view, 0, arena),
+    };
+    if (s.attributes.num != 0) {
+        copy.attributes = rc_array_attribute_make(s.attributes.num, arena);
+        for (uint32_t i = 0; i < s.attributes.num; i++) {
+            attribute a = RC_AT(s.attributes, i);
+            rc_array_attribute_push(
+                &copy.attributes,
+                (attribute) {.key = str_make_copy(a.key, arena), .v = value_make_copy(a.v, arena), .at = a.at},
+                arena);
+        }
+    }
+    return copy;
+}
+
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
@@ -189,6 +222,44 @@ RC_TEST(sections, make_unique_and_attributes)
     RC_CHECK(rc_view_attribute_get(sections_attributes(&sec, a), 0).v.numeric, ==, 6400.0);   // 0x1900
 
     rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, make_copy_owns_its_backing)
+{
+    rc_arena original = rc_arena_make_default();
+    rc_arena kept     = rc_arena_make_default();
+
+    // Build the strings in the original arena rather than using literals, so a copy that merely borrowed
+    // them would genuinely dangle once that arena dies (a literal never dies, and would mask the bug).
+    rc_str name = rc_mstr_from_cstr("code", 0, &original).view;
+    rc_str key  = rc_mstr_from_cstr("filename", 0, &original).view;
+    rc_str file = rc_mstr_from_cstr("game.bin", 0, &original).view;
+
+    sections sec;
+    sections_init(&sec, &original);
+    sections_reset(&sec);
+    uint32_t id = sections_make(&sec, name);
+    sections_org(&sec, id, 0x1900);
+    sections_emit_u8(&sec, id, 0xA9);
+    sections_emit_u8(&sec, id, 0x2A);
+    sections_add_attribute(&sec, id, key, value_make_string(file), cursor_none());
+
+    section copy = section_make_copy(RC_AT(sec.nodes, id), &kept);
+
+    // The decisive move: kill the arena everything was built in. If the copy borrowed any of it, the reads
+    // below touch freed memory (which the sanitizer build turns into a hard failure).
+    rc_arena_deinit(&original);
+
+    RC_CHECK(copy.name, ==, RC_STR("code"));
+    RC_CHECK(copy.pc, ==, 0x1902u);
+    RC_CHECK(copy.code.num, ==, 2u);
+    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 0), ==, 0xA9u);
+    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 1), ==, 0x2Au);
+    RC_CHECK(copy.attributes.num, ==, 1u);
+    RC_CHECK(RC_AT(copy.attributes, 0).key, ==, RC_STR("filename"));
+    RC_CHECK_TRUE(value_is_equal(RC_AT(copy.attributes, 0).v, value_make_string(RC_STR("game.bin"))));
+
+    rc_arena_deinit(&kept);
 }
 
 #endif // BARON_TESTS

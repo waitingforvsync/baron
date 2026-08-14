@@ -37,6 +37,8 @@ add_executable(baron
     functions.h
     file_utils.c
     file_utils.h
+    report.c
+    report.h
     assemble.c
     assemble.h
     assemble_internal.h

@@ -2221,8 +2221,8 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
 }
 
 // Turn a finished baron into the read-only snapshot the caller keeps. The section list (each section's pc +
-// object code) lives in the per_pass arena from the final pass; diagnostics in permanent. The scope tree's
-// backing (nodes + trie pools) is in permanent too. Both are handed back as cheap views/projections that
+// object code) lives in the per_pass arena from the final pass; diagnostics, the source cache and the scope
+// tree's backing (nodes + trie pools) are in permanent. All are handed back as cheap views/projections that
 // outlive `b` (which dies the moment we return) - nothing is flattened up front; the caller queries on demand.
 static baron_result baron_result_make(baron *b, uint32_t passes)
 {
@@ -2230,6 +2230,7 @@ static baron_result baron_result_make(baron *b, uint32_t passes)
         .passes      = passes,
         .sections    = sections_all(&b->sections),
         .diagnostics = b->diagnostics.view,
+        .sources     = b->source_files.nodes.view,
         .scopes      = scopes_view_make(&b->scopes),
     };
 }
@@ -3226,6 +3227,36 @@ RC_TEST_STEP(assemble, result_exposes_sections, fix)
     RC_CHECK(o.code.view.num, ==, 4u);
     RC_CHECK(o.pc, ==, 4u);                                       // org 0 + 4 emitted bytes
     RC_CHECK(baron_result_code(&fix->r).num, ==, o.code.view.num);   // the convenience matches section 0
+}
+
+RC_TEST_STEP(assemble, result_exposes_sources, fix)
+{
+    // The result carries every source the assemble touched (root first, INCLUDEs after), so a diagnostic's
+    // cursor - a source index + byte offset - is resolvable to a name and text by the caller.
+    uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("top"), RC_STR("include \"inc_child.6502\"")),
+                       fix->r.passes);
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK(fix->r.sources.num, ==, 2u);
+    RC_CHECK(rc_view_source_file_get(fix->r.sources, 0).name, ==, RC_STR("top"));
+    RC_CHECK(rc_view_source_file_get(fix->r.sources, 1).name, ==, RC_STR("inc_child.6502"));
+}
+
+RC_TEST_STEP(assemble, section_copies_survive_next_assemble, fix)
+{
+    // The contract the CLI stands on: a result's sections die at the next assemble on the same arenas
+    // (per_pass reset), but section_make_copy into a caller arena keeps them. Assemble A, copy, assemble B,
+    // and A's copied bytes must be untouched by B's pass machinery.
+    rc_arena kept = rc_arena_make_default();
+    RC_CHECK_TRUE(ASM("LDA #&12 : RTS") != 0);
+    section copy = section_make_copy(rc_view_section_get(fix->r.sections, 0), &kept);
+
+    RC_CHECK_TRUE(ASM("LDX #&EE : LDY #&FF : NOP") != 0);   // supersedes the first result's sections
+
+    RC_CHECK(copy.code.num, ==, 3u);
+    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 0), ==, 0xA9u);
+    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 1), ==, 0x12u);
+    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 2), ==, 0x60u);
+    rc_arena_deinit(&kept);
 }
 
 RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)

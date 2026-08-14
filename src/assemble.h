@@ -6,6 +6,7 @@
 #include "symbols.h"       // symbol_entry, rc_view_symbol_entry (the harvest's output; brings value.h)
 #include "scopes.h"        // scopes_view: the read-only scope tree a result carries
 #include "sections.h"      // section, rc_view_section: the object-code sections a result carries
+#include "source_files.h"  // source_file, rc_view_source_file: the sources a result's cursors index into
 #include "cursor.h"        // cursor: where a diagnostic points
 #include "error.h"         // error_type (the diagnostic code)
 
@@ -66,12 +67,20 @@ void         baron_arenas_deinit(baron_arenas *a);
 // baron_result_code for the default section's bytes alone. `scopes` is a read-only view of the resolved
 // scope tree (its backing outlives the internal machine): look a single symbol up by full dotted path with
 // baron_result_symbol / scopes_view_get_symbol, or harvest the whole spellable table on demand with
-// scopes_view_flatten (which needs an arena to build the paths into).
+// scopes_view_flatten (which needs an arena to build the paths into). `sources` is every source the assemble
+// touched (the root plus anything INCLUDEd), each a name + full text: a diagnostic's cursor holds a source
+// INDEX and a byte OFFSET, and this view is what turns them back into a file name and a line/column. Range-
+// check the index before resolving - the one diagnostic with nowhere real to point (an unreadable root file)
+// carries a cursor no source was ever registered for.
+// Lifetimes differ by field: `sections` borrow from the per_pass arena and are superseded by the next
+// assemble on the same arenas; `diagnostics`, `scopes` and `sources` are permanent-backed, so earlier
+// results' copies of those remain readable (if superseded) until baron_arenas_deinit.
 typedef struct baron_result {
-    uint32_t           passes;        // number of passes taken; 0 == failure
-    rc_view_section    sections;      // every object-code section (pc + code); index 0 is the default
-    rc_view_diagnostic diagnostics;   // every error + warning, in order
-    scopes_view        scopes;        // the resolved scope tree, read-only (query via the functions below)
+    uint32_t            passes;        // number of passes taken; 0 == failure
+    rc_view_section     sections;      // every object-code section (pc + code); index 0 is the default
+    rc_view_diagnostic  diagnostics;   // every error + warning, in order
+    rc_view_source_file sources;       // every source touched (name + text), indexed by a cursor's source
+    scopes_view         scopes;        // the resolved scope tree, read-only (query via the functions below)
 } baron_result;
 
 // The default section's object code (index 0) - the common single-section case, empty on failure. For

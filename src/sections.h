@@ -95,5 +95,11 @@ void sections_add_attribute(sections *sec, uint32_t id, rc_str key, value v, cur
 // first time round (there is no separate sections_make_default).
 void sections_reset(sections *sec);
 
+// A deep copy of one section into the given arena - the copy owns its backing outright (name, code bytes,
+// attribute keys and values alike), so it outlives the per-pass original AND the source text its name was a
+// view into. This is how a caller keeps a result's sections beyond the next assemble: copy the ones worth
+// keeping before they are superseded (mirrors value_make_copy's promotion role).
+section section_make_copy(section s, rc_arena *arena);
+
 
 #endif // ifndef BARON_SECTIONS_H_
