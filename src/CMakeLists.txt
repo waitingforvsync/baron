@@ -19,6 +19,10 @@ add_executable(baron
     opcodes.h
     sections.c
     sections.h
+    output.c
+    output.h
+    disc_ssd.c
+    disc_ssd.h
     zeropage.c
     zeropage.h
     cfg.c

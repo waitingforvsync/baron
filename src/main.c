@@ -1,7 +1,12 @@
 #include "assemble.h"
 #include "report.h"
+#include "output.h"
+#include "disc_ssd.h"
+
+#include "richc/file.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef BARON_TESTS
@@ -9,12 +14,32 @@
 #endif
 
 
-// baron <list of source files>. Each file is assembled in a fresh environment - symbols never leak between
-// files (the job BeebAsm's CLEAR used to do) - and its diagnostics are reported as soon as it finishes.
-// Success is silent; any error anywhere makes the exit code 1 (but every file is still assembled first, so
-// one run reports everything). The sections of each successful file are deep-copied into `saved`: nothing
-// reads them yet, but they are the deliverable the coming output stage (-t) will write from, kept alive
-// here precisely because the next assemble_file supersedes the previous result's sections.
+static const char usage[] =
+    "usage: baron [-v] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>] [--cycle <0-99>] <source files>\n";
+
+// A decimal option value in [0, max], or -1 with a complaint printed. `what` names the switch.
+static long parse_option_value(const char *what, const char *s, long max)
+{
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (*s == '\0' || *end != '\0' || v < 0 || v > max) {
+        fprintf(stderr, "baron: %s must be 0-%ld\n", what, max);
+        return -1;
+    }
+    return v;
+}
+
+// baron [options] <list of source files>. Each file is assembled in a fresh environment - symbols never
+// leak between files (the job BeebAsm's CLEAR used to do) - and its diagnostics are reported as soon as it
+// finishes. Success is silent; any error anywhere makes the exit code 1 (but every file is still assembled
+// first, so one run reports everything). The sections of each successful file are deep-copied into `saved`:
+// they are what the output stage below writes from, kept alive here precisely because the next
+// assemble_file supersedes the previous result's sections.
+//
+// The output stage runs once everything has assembled: with no -o, every section marked save = TRUE is
+// written as a plain binary in the current directory (--inf adds a .inf sidecar carrying its addresses);
+// with -o <image.ssd>, the same sections become a DFS disc image instead, in the order they were collected,
+// with --title / --opt / --cycle supplying the disc-level metadata no section can know.
 int main(int argc, char **argv)
 {
 #ifdef BARON_TESTS
@@ -23,31 +48,75 @@ int main(int argc, char **argv)
     }
 #endif
 
-    // Options first: -v prints each file's assembly listing. Anything else dash-shaped is refused (so -t
-    // and friends stay free to claim later), and at least one real file must remain.
+    // Options first. A value-taking switch as the last argument falls through to the unknown-option
+    // complaint (there is no value to take), and at least one real file must remain.
     bool verbose = false;
+    bool inf = false;
+    const char *out = NULL;
+    const char *title = "";
+    long boot = 0;
+    long cycle = 0;
+    bool disc_options = false;   // any of --title/--opt/--cycle, which only mean something with -o
     int files = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) {
             verbose = true;
         }
+        else if (strcmp(argv[i], "--inf") == 0) {
+            inf = true;
+        }
+        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        }
+        else if (strcmp(argv[i], "--title") == 0 && i + 1 < argc) {
+            title = argv[++i];
+            disc_options = true;
+        }
+        else if (strcmp(argv[i], "--opt") == 0 && i + 1 < argc) {
+            boot = parse_option_value("--opt", argv[++i], 3);
+            disc_options = true;
+        }
+        else if (strcmp(argv[i], "--cycle") == 0 && i + 1 < argc) {
+            cycle = parse_option_value("--cycle", argv[++i], 99);
+            disc_options = true;
+        }
         else if (argv[i][0] == '-') {
-            fprintf(stderr, "baron: unknown option '%s'\nusage: baron [-v] <source files>\n", argv[i]);
+            fprintf(stderr, "baron: unknown option '%s'\n%s", argv[i], usage);
             return 1;
         }
         else {
             files++;
         }
     }
+    if (boot < 0 || cycle < 0) {
+        return 1;   // parse_option_value already complained
+    }
     if (files == 0) {
-        fprintf(stderr, "usage: baron [-v] <source files>\n");
+        fprintf(stderr, "%s", usage);
         return 1;
     }
+    if (out == NULL && disc_options) {
+        fprintf(stderr, "baron: --title/--opt/--cycle describe a disc image and need -o\n%s", usage);
+        return 1;
+    }
+    if (out != NULL && inf) {
+        fprintf(stderr, "baron: --inf applies to loose file output only (drop -o)\n%s", usage);
+        return 1;
+    }
+    if (out != NULL) {
+        // The extension picks the writer; only DFS discs exist so far, and refusing the rest up front
+        // keeps the namespace free for .adf / .uef later.
+        rc_str o = rc_str_from_cstr(out);
+        if (o.len < 5 || !rc_str_is_equal_insensitive(rc_str_right(o, 4), RC_STR(".ssd"))) {
+            fprintf(stderr, "baron: unsupported output format '%s' (expected a .ssd image)\n", out);
+            return 1;
+        }
+    }
 
-    // One arena for everything the CLI itself keeps (section copies, rendered reports); one baron_desc -
-    // arenas plus options - REUSED across all files. Reuse is safe because nothing outlives its turn: each
-    // report is printed before the next assemble supersedes the result it came from, and the sections worth
-    // keeping are copied.
+    // One arena for everything the CLI itself keeps (section copies, rendered reports, the output spec and
+    // image); one baron_desc - arenas plus options - REUSED across all files. Reuse is safe because nothing
+    // outlives its turn: each report is printed before the next assemble supersedes the result it came
+    // from, and the sections worth keeping are copied.
     rc_arena cli = rc_arena_make_default();
     baron_desc desc = {
         .permanent = rc_arena_make_default(),
@@ -60,6 +129,11 @@ int main(int argc, char **argv)
     bool listed_any = false;
 
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--title") == 0
+            || strcmp(argv[i], "--opt") == 0 || strcmp(argv[i], "--cycle") == 0) {
+            i++;        // skip the switch and its value
+            continue;
+        }
         if (argv[i][0] == '-') {
             continue;   // options were handled above
         }
@@ -84,6 +158,40 @@ int main(int argc, char **argv)
         }
         else {
             failed = true;
+        }
+    }
+
+    // The output stage. Nothing is written unless EVERY file assembled - a partial batch would quietly
+    // produce outputs with sections missing.
+    if (!failed) {
+        output_spec_result sr = output_spec_make(saved.view, rc_str_from_cstr(title),
+                                                 (uint32_t) boot, (uint32_t) cycle, &cli);
+        if (sr.error.len != 0) {
+            fprintf(stderr, "baron: %.*s\n", (int) sr.error.len, sr.error.data);
+            failed = true;
+        }
+        else if (out == NULL) {
+            rc_str err = output_write_files(&sr.spec, inf, &cli);
+            if (err.len != 0) {
+                fprintf(stderr, "baron: %.*s\n", (int) err.len, err.data);
+                failed = true;
+            }
+        }
+        else {
+            // An empty disc is still a valid disc - a bare catalogue - but it is more likely a forgotten
+            // save attribute, so say so.
+            if (sr.spec.entries.num == 0) {
+                fprintf(stderr, "baron: warning: no sections marked save = TRUE; writing an empty disc image\n");
+            }
+            disc_ssd_result d = disc_ssd_make(&sr.spec, &cli);
+            if (d.error.len != 0) {
+                fprintf(stderr, "baron: %.*s\n", (int) d.error.len, d.error.data);
+                failed = true;
+            }
+            else if (rc_file_save_binary(rc_str_from_cstr(out), d.image.view) != RC_FILE_OK) {
+                fprintf(stderr, "baron: cannot write '%s'\n", out);
+                failed = true;
+            }
         }
     }
 
