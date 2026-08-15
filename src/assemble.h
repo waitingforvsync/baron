@@ -28,6 +28,10 @@ enum {
     severity_optional = 2,   // reported only when the warning level is raised
 };
 
+// How many PRINT output channels there are: `PRINT #n, ...` takes a single digit, so exactly ten.
+// Channel 0 is the default (no #n), and is also where the -v listing goes.
+enum { baron_num_channels = 10 };
+
 // A single diagnostic: a code, where it happened, and its severity level. Diagnostics accumulate into a
 // flat array (in `baron`) rather than aborting at the first - the location's `cursor` names both the
 // source and the offset, and a further entry can point at a related site (an INCLUDE / macro "included
@@ -59,13 +63,13 @@ typedef struct diagnostic {
 // as many assembles as it likes, and deinits the three arenas at the end. Each assemble is independent -
 // it does not reset the arenas between runs, so a result stays valid until the NEXT assemble on the same
 // desc (which supersedes it).
-// `verbose` asks for the assembly listing (baron_result.verbose): it costs one extra pass over the source,
-// so it is off unless someone wants it.
+// `verbose` asks for the assembly listing (baron_result.channels[0]): it costs one extra pass over the
+// source, so it is off unless someone wants it.
 typedef struct baron_desc {
     rc_arena permanent;
     rc_arena per_pass;
     rc_arena scratch;
-    bool     verbose;   // build the assembly listing (one extra pass; see baron_result.verbose)
+    bool     verbose;   // build the assembly listing (one extra pass; see baron_result.channels)
 } baron_desc;
 
 // What an assemble produced: a read-only, position-independent snapshot. Every field borrows from the arenas
@@ -84,18 +88,19 @@ typedef struct baron_desc {
 // Lifetimes differ by field: `sections` borrow from the per_pass arena and are superseded by the next
 // assemble on the same arenas; `diagnostics`, `scopes` and `sources` are permanent-backed, so earlier
 // results' copies of those remain readable (if superseded) until the desc's arenas are freed.
-// `verbose` is the assembly listing: source echoed statement by statement, emitting lines prefixed with
-// their address and (final, post-allocation) bytes. Built only when the desc asked for it
-// (baron_desc.verbose), on one extra listing pass run after zero-page allocation - which is then also the
-// pass the returned `sections` come from, so what it shows IS the output (without it, the sections are the
-// settling pass's, patched by the allocator - the same bytes either way). Same per_pass lifetime as
-// `sections`; empty when not requested or when the assemble failed.
+// `channels` is the PRINT output, one text stream per channel (`PRINT #n, ...`; no #n means 0). Channel 0
+// also carries the assembly listing when the desc asked for it (baron_desc.verbose): the listing pass then
+// runs after zero-page allocation and both write the same buffer, so PRINT output lands interleaved between
+// listing lines - and the returned `sections` come from that pass too, so what the listing shows IS the
+// output (without -v, the sections are the settling pass's, patched by the allocator - the same bytes either
+// way, and PRINT writes on that pass instead). Same per_pass lifetime as `sections`; all empty when the
+// assemble failed.
 typedef struct baron_result {
     uint32_t            passes;        // number of passes taken (the listing pass is not counted); 0 == failure
     rc_view_section     sections;      // every object-code section (pc + code); index 0 is the default
     rc_view_diagnostic  diagnostics;   // every error + warning, in order
     rc_view_source_file sources;       // every source touched (name + text), indexed by a cursor's source
-    rc_str              verbose;       // the assembly listing text (see above); empty unless requested
+    rc_str              channels[baron_num_channels];   // PRINT output per channel; 0 also holds the -v listing
     scopes_view         scopes;        // the resolved scope tree, read-only (query via the functions below)
 } baron_result;
 

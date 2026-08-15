@@ -20,9 +20,14 @@ typedef struct target_loc {
 // Where does `n`'s control-transfer target land? A named-label target (target_scope set) resolves through the
 // markers to the label's OWN section - this is what crosses a section, because the label picks the bank the
 // raw address never could. If it named no label, or a label with no marker (a bare constant), we fall back to
-// the numeric target, resolved WITHIN n's own section only. A computed / absent target is `found = false`.
+// the numeric target, resolved WITHIN n's own section only. A computed / absent target is `found = false` -
+// and so is ANY indirect jump: its operand names the vector cell it dispatches through, never the place
+// control lands, so there is no direct location to hand back.
 static target_loc resolve_target_loc(rc_view_zp_label labels, zp_insn n)
 {
+    if (n.target_via != zp_target_via_direct) {
+        return (target_loc) {.section = 0, .pc = 0, .found = false};
+    }
     if (n.target_scope != RC_INDEX_NONE) {
         for (uint32_t i = 0; i < labels.num; i++) {
             zp_label l = rc_view_zp_label_get(labels, i);
@@ -82,6 +87,47 @@ static uint32_t block_at(rc_view_basic_block blocks, uint32_t section, uint32_t 
 uint32_t cfg_block_at(cfg g, uint32_t section, uint32_t pc)
 {
     return block_at(g.blocks.view, section, pc);
+}
+
+// Does `n`'s control transfer leave the assembled program for EXTERNAL code (an OS or ROM entry)? Only
+// meaningful once the caller has failed to place the target as a block. The policy: a destination we can pin
+// to a constant address, yet which matches nothing we assembled, is a transfer OUT of the program - and
+// external code cannot touch a ZPAUTO variable, because ZPRESERVE names precisely the bytes nothing outside
+// the program uses. So a JSR &FFEE is a benign call with an empty footprint and a JMP (&FFFC) a clean exit,
+// no annotation required. What stays conservative is flow whose destination we genuinely cannot pin down:
+// a jump through a vector WE assembled (its contents may point back into our own code), an indexed dispatch
+// table, or an unresolved target.
+static bool target_is_external(rc_view_zp_label labels, zp_insn n)
+{
+    switch (n.target_via) {
+        case zp_target_via_direct:
+            // A known constant (or a named non-label constant, or even a label off the code stream): the
+            // caller found no block there, so it points outside the program.
+            return resolve_target_loc(labels, n).found;
+        case zp_target_via_vector:
+            // A literal vector address (JMP (&FFFC)) - or a named constant standing for one (wrchv = &20E) -
+            // is a cell outside the program: whatever it dispatches to is by policy external. A vector that
+            // IS one of our labels is a cell we assembled, whose run-time contents may point anywhere,
+            // including back at us - that stays computed (annotate with CANJUMP).
+            if (n.target_scope == RC_INDEX_NONE) {
+                return true;
+            }
+            for (uint32_t i = 0; i < labels.num; i++) {
+                zp_label l = rc_view_zp_label_get(labels, i);
+                if (l.scope == n.target_scope && cursor_is_equal(l.def, n.target_def)) {
+                    return false;
+                }
+            }
+            return true;
+        case zp_target_via_table:
+        default:
+            return false;   // JMP (table,X): an indexed dispatch through our own memory - always computed
+    }
+}
+
+bool cfg_target_is_external(cfg g, zp_insn n)
+{
+    return target_is_external(g.labels, n);
 }
 
 uint32_t cfg_target_block(cfg g, zp_insn n)
@@ -170,6 +216,19 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
             default:
                 break;
         }
+        // A declared CANJUMP / CANCALL target is a code entry just as a literal target is: mark it a leader,
+        // so an in-program declared target always gets its own block (even mid-run). That is what lets a
+        // declared target with NO block reliably mean "off the assembled stream" - an external arm - in the
+        // edge wiring and the footprint walk, rather than an address we merely failed to split at.
+        if (insn.flow == zp_flow_jump || insn.flow == zp_flow_call) {
+            zp_cflow_kind want = (insn.flow == zp_flow_jump) ? zp_cflow_canjump : zp_cflow_cancall;
+            for (uint32_t j = 0; j < cflows.num; j++) {
+                zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
+                if (cf.kind == (uint8_t) want && cf.site == insn.pc) {
+                    mark_leader(&leaders, insn.section, cf.target);
+                }
+            }
+        }
     }
 
     // Pass 2: cut the instruction stream into blocks. A new block starts at the first instruction, at every
@@ -208,7 +267,9 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // terminator falls through to the next block. Fall-through stays in the block's own section; the target is
     // resolved by resolve_target_loc (a named label may cross sections). Annotations adjust this: an
     // UNREACHABLE at a branch's fall-through prunes that edge; a CANJUMP at a computed JMP supplies its
-    // (same-section) targets. A target that names no block and is not annotated yields the unknown_succ taint.
+    // (same-section) targets. A target that names no block and is not annotated yields the unknown_succ taint -
+    // UNLESS it is external (a constant destination off the stream, or a constant OS vector), which is a clean
+    // exit out of the program (see target_is_external).
     for (uint32_t bi = 0; bi < result.blocks.num; bi++) {
         basic_block *block = rc_array_basic_block_at(&result.blocks, bi);
         zp_insn last = rc_view_zp_insn_get(insns, block->first_insn + block->num_insns - 1);
@@ -226,9 +287,11 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 if (taken != RC_INDEX_NONE) {
                     add_succ(&result, block, taken, arena);
                 }
-                else {
+                else if (!target_is_external(labels, last)) {
                     block->unknown_succ = true;   // taken target we cannot place -> conservative
                 }
+                // else: a branch out of the program (a constant destination off the stream) - that arm
+                // leaves for external code, so only the fall-through edge remains and there is no taint.
                 break;
             }
             case zp_flow_jump: {
@@ -238,7 +301,10 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 }
                 else {
                     // Computed / indirect JMP. If CANJUMP names its targets, wire each as a real edge (resolved
-                    // in the jump's own section); a declared target we still cannot place keeps the taint.
+                    // in the jump's own section). A declared target with no block is an EXTERNAL arm of the
+                    // dispatch - the pass-1 leader marking guarantees every in-program declared target has its
+                    // own block, so "no block" reliably means off the assembled stream: a clean exit,
+                    // contributing no edge and no taint (same policy as an unannotated JSR to a constant).
                     bool annotated = false;
                     for (uint32_t i = 0; i < cflows.num; i++) {
                         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
@@ -248,14 +314,13 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                             if (tb != RC_INDEX_NONE) {
                                 add_succ(&result, block, tb, arena);
                             }
-                            else {
-                                block->unknown_succ = true;
-                            }
                         }
                     }
-                    if (!annotated) {
-                        block->unknown_succ = true;   // indirect/computed JMP, or a jump leaving the stream
+                    if (!annotated && !target_is_external(labels, last)) {
+                        block->unknown_succ = true;   // computed JMP into code we might own
                     }
+                    // An external jump (JMP &FFEE, or JMP (&FFFC) through an OS vector) is a clean exit,
+                    // exactly like a return: control leaves for code that touches none of our variables.
                 }
                 break;
             }
@@ -492,6 +557,116 @@ RC_TEST(cfg, canjump_wires_declared_targets)
     basic_block b2 = rc_array_basic_block_get(&g2.blocks, cfg_block_at(g2, 0, 0x2006));
     RC_CHECK_TRUE(b2.unknown_succ);
     RC_CHECK(b2.succ_count, ==, 0u);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, canjump_external_arm_and_midblock_target)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  LDA #    (normal)
+    //   2002  LDA #    (normal)  <- a declared CANJUMP target that sits MID-RUN: the leader marking must
+    //   2004  RTS                   split the block here so the edge can be wired
+    //   2005  JMP (ind) (dispatcher, target unknown)
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2004
+    pc = push_insn(&insns, pc, 3, zp_flow_jump,   RC_INDEX_NONE, &arena);   // JMP (ind) @2005
+    (void) pc;
+
+    // CANJUMP @2005 -> {2002, FFEE}: one in-program arm (mid-run, forcing a block split) and one EXTERNAL
+    // arm (an OS entry - off the stream, so it contributes a clean exit, not an edge and not a taint).
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(2, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0x2002, .kind = zp_cflow_canjump}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0xFFEE, .kind = zp_cflow_canjump}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 3u);   // [2000], [2002,2004] (split by the declared target), [2005]
+    basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2005));
+    RC_CHECK_FALSE(b.unknown_succ);   // both arms accounted for - no taint
+    RC_CHECK(b.succ_count, ==, 1u);   // only the in-program arm is an edge
+    RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2002));
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, external_constant_targets_are_clean_exits)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  BNE FFEE (branch out of the program - the taken arm leaves for external code)
+    //   2002  JMP FFEE (jump out of the program)
+    // A constant destination that matches nothing we assembled is a transfer to EXTERNAL code (an OS entry),
+    // which by policy touches no ZPAUTO variable: the branch keeps only its fall-through edge and the jump is
+    // as clean an exit as an RTS - neither taints.
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0xFFEE, &arena);   // BNE &FFEE
+    pc = push_insn(&insns, pc, 3, zp_flow_jump,   0xFFEE, &arena);   // JMP &FFEE
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 2u);
+    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b0.succ_count, ==, 1u);          // fall-through to the JMP block only
+    RC_CHECK(cfg_succ(g, b0, 0), ==, 1u);
+    RC_CHECK_FALSE(b0.unknown_succ);          // the taken arm exits the program - fully known
+    basic_block b1 = rc_array_basic_block_get(&g.blocks, 1);
+    RC_CHECK(b1.succ_count, ==, 0u);
+    RC_CHECK_FALSE(b1.unknown_succ);          // an exit, not computed flow
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, vector_jump_external_vs_own_label)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+
+    // One instruction: JMP (vector) at 2000. Its operand names the vector CELL, so target stays NONE and the
+    // via field says how control leaves. Three flavours of vector:
+    cursor vec_def = {.source = 0, .pos = 42};
+    zp_insn jmp = {.pc = 0x2000, .size = 3, .flow = zp_flow_jump, .rw = vref_none, .vreg = RC_INDEX_NONE,
+                   .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE, .target_def = cursor_none(),
+                   .target_via = (uint8_t) zp_target_via_vector, .at = (cursor) {0}};
+
+    // (a) a literal constant cell - JMP (&FFFC): a fixed OS vector, so control leaves for external code.
+    rc_array_zp_insn constant = rc_array_zp_insn_make(1, &arena);
+    rc_array_zp_insn_push(&constant, jmp, &arena);
+    cfg ga = cfg_build(constant.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    basic_block ba = rc_array_basic_block_get(&ga.blocks, 0);
+    RC_CHECK_FALSE(ba.unknown_succ);   // a clean exit, no annotation needed
+    RC_CHECK(ba.succ_count, ==, 0u);
+
+    // (b) a NAMED cell that is one of OUR labels (a vector we assembled): its run-time contents may point
+    // back into our own code, so this is genuinely computed - the taint stands until a CANJUMP says otherwise.
+    zp_insn through_ours = jmp;
+    through_ours.target_scope = 5;
+    through_ours.target_def   = vec_def;
+    rc_array_zp_insn owned = rc_array_zp_insn_make(1, &arena);
+    rc_array_zp_insn_push(&owned, through_ours, &arena);
+    rc_array_zp_label labels = rc_array_zp_label_make(1, &arena);
+    rc_array_zp_label_push(&labels,
+        (zp_label) {.scope = 5, .def = vec_def, .section = 0, .pc = 0x2100}, &arena);
+    cfg gb = cfg_build(owned.view, (rc_view_zp_cflow) {0}, labels.view, &arena, scratch);
+    basic_block bb = rc_array_basic_block_get(&gb.blocks, 0);
+    RC_CHECK_TRUE(bb.unknown_succ);
+    RC_CHECK(bb.succ_count, ==, 0u);   // and NO edge to the vector cell's own address (it is data, not a target)
+
+    // (c) the same named cell with NO marker (a `wrchv = &20E` constant, not a code label): a cell outside
+    // the program, so external again.
+    cfg gc = cfg_build(owned.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    basic_block bc = rc_array_basic_block_get(&gc.blocks, 0);
+    RC_CHECK_FALSE(bc.unknown_succ);
+    RC_CHECK(bc.succ_count, ==, 0u);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

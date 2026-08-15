@@ -49,6 +49,7 @@ typedef enum error_type {
     error_type_function_name_reserved,  // a function named like a mnemonic / keyword / constant, or a dotted name
     error_type_expected_function_params,// a malformed parameter list (no '(', or a non-identifier parameter)
     error_type_unclosed_function,       // a FUNCTION body reached EOF / a foreign closer with no '=' return
+    error_type_bad_print_channel,       // PRINT's '#' not followed by a single digit 0-9 and a comma
 
     // Semantic: the statement parses, but its meaning is wrong.
     error_type_bad_addressing_mode,   // the mnemonic has no encoding for that operand shape

@@ -4,6 +4,7 @@
 #include "disc_ssd.h"
 
 #include "richc/file.h"
+#include "richc/mstr.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +16,8 @@
 
 
 static const char usage[] =
-    "usage: baron [-v] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>] [--cycle <0-99>] <source files>\n";
+    "usage: baron [-v] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>] [--cycle <0-99>]"
+    " [-log<n> <file>] <source files>\n";
 
 // A decimal option value in [0, max], or -1 with a complaint printed. `what` names the switch.
 static long parse_option_value(const char *what, const char *s, long max)
@@ -27,6 +29,24 @@ static long parse_option_value(const char *what, const char *s, long max)
         return -1;
     }
     return v;
+}
+
+// A channel-redirect switch -log0 .. -log9, or -1. Its channel digit is the switch's own last character.
+static int log_channel(const char *arg)
+{
+    if (strncmp(arg, "-log", 4) == 0 && arg[4] >= '0' && arg[4] <= '9' && arg[5] == '\0') {
+        return arg[4] - '0';
+    }
+    return -1;
+}
+
+// True for a switch that consumes the following argument as its value - shared by the option pass and the
+// assemble pass, which must SKIP those values or it would try to assemble them.
+static bool option_takes_value(const char *arg)
+{
+    return strcmp(arg, "-o") == 0 || strcmp(arg, "--title") == 0
+        || strcmp(arg, "--opt") == 0 || strcmp(arg, "--cycle") == 0
+        || log_channel(arg) >= 0;
 }
 
 // baron [options] <list of source files>. Each file is assembled in a fresh environment - symbols never
@@ -54,6 +74,7 @@ int main(int argc, char **argv)
     bool inf = false;
     const char *out = NULL;
     const char *title = "";
+    const char *log_paths[baron_num_channels] = {0};   // -logN: write PRINT channel N to this file
     long boot = 0;
     long cycle = 0;
     bool disc_options = false;   // any of --title/--opt/--cycle, which only mean something with -o
@@ -67,6 +88,10 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
+        }
+        else if (log_channel(argv[i]) >= 0 && i + 1 < argc) {
+            log_paths[log_channel(argv[i])] = argv[i + 1];
+            i++;
         }
         else if (strcmp(argv[i], "--title") == 0 && i + 1 < argc) {
             title = argv[++i];
@@ -128,9 +153,10 @@ int main(int argc, char **argv)
     bool failed = false;
     bool listed_any = false;
 
+    rc_mstr logs[baron_num_channels] = {0};   // the redirected channels, accumulated across files
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--title") == 0
-            || strcmp(argv[i], "--opt") == 0 || strcmp(argv[i], "--cycle") == 0) {
+        if (option_takes_value(argv[i])) {
             i++;        // skip the switch and its value
             continue;
         }
@@ -146,11 +172,18 @@ int main(int argc, char **argv)
         }
 
         if (r.passes != 0) {
-            // The listing goes to stdout (it is the product; diagnostics are commentary), one blank line
-            // between files so a multi-file run reads as chapters.
-            if (verbose && r.verbose.len != 0) {
-                fprintf(stdout, "%s%.*s", listed_any ? "\n" : "", (int) r.verbose.len, r.verbose.data);
+            // Channel 0 - the PRINT output, with the -v listing interleaved when asked for - goes to
+            // stdout unless -log0 claims it (it is the product; diagnostics are commentary), one blank
+            // line between files so a multi-file run reads as chapters. Redirected channels accumulate
+            // across files and are written once at the end.
+            if (log_paths[0] == NULL && r.channels[0].len != 0) {
+                fprintf(stdout, "%s%.*s", listed_any ? "\n" : "", (int) r.channels[0].len, r.channels[0].data);
                 listed_any = true;
+            }
+            for (uint32_t c = 0; c < baron_num_channels; c++) {
+                if (log_paths[c] != NULL && r.channels[c].len != 0) {
+                    rc_mstr_append(&logs[c], r.channels[c], &cli);
+                }
             }
             for (uint32_t s = 0; s < r.sections.num; s++) {
                 rc_array_section_push(&saved, section_make_copy(rc_view_section_get(r.sections, s), &cli), &cli);
@@ -158,6 +191,22 @@ int main(int argc, char **argv)
         }
         else {
             failed = true;
+        }
+    }
+
+    // The -logN files: each redirected channel's accumulated text lands in its file. Same rule as the
+    // output stage below - nothing is written unless every file assembled. A channel nothing printed to
+    // still writes its (empty) file: the switch asked for the file to exist.
+    if (!failed) {
+        for (uint32_t c = 0; c < baron_num_channels; c++) {
+            if (log_paths[c] == NULL) {
+                continue;
+            }
+            rc_str text = logs[c].len != 0 ? logs[c].view : RC_STR("");
+            if (rc_file_save_text(rc_str_from_cstr(log_paths[c]), text) != RC_FILE_OK) {
+                fprintf(stderr, "baron: cannot write '%s'\n", log_paths[c]);
+                failed = true;
+            }
         }
     }
 

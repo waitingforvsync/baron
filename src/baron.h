@@ -8,7 +8,7 @@
 #include "macros.h"      // the macro store, and rc_array_token (the dynamic statement table)
 #include "functions.h"   // the user-FUNCTION store (and its dynamic operand-token table)
 #include "assemble.h"   // error_type, diagnostic, rc_array_diagnostic
-#include "richc/mstr.h" // rc_mstr: the verbose-listing buffer
+#include "richc/mstr.h" // rc_mstr: the PRINT / listing channel buffers
 
 
 // Baron's global state, threaded through the parser as a single `baron *` first argument. It holds
@@ -36,8 +36,9 @@ typedef struct baron {
     macros              macros;            // the macro store (and its dynamic statement-token table), rebuilt each pass
     functions           functions;         // the user-FUNCTION store (and its dynamic operand-token table), rebuilt each pass
     rc_array_diagnostic diagnostics;   // errors from the last assemble (in permanent); empty means it succeeded
-    rc_mstr             verbose;           // the -v listing text (in per_pass), built ONLY on the listing pass;
-                                           // PRINT's channel buffers will sit beside it when PRINT lands
+    rc_mstr             channels[baron_num_channels];   // PRINT's output streams (in per_pass), written only on
+                                           // the output pass (final, or listing under -v); channel 0 also
+                                           // carries the -v listing, so PRINTs interleave it
     bool                want_verbose;      // copied from baron_desc.verbose: run the listing pass at all?
     uint32_t            include_depth;     // how many INCLUDEs deep the parser is now, to catch runaway recursion
     uint32_t            macro_depth;       // how many macro expansions deep, to catch runaway recursion

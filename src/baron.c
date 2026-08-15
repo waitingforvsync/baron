@@ -22,8 +22,10 @@ baron baron_make(baron_desc *a)
     b.macro_depth    = 0;
     b.function_depth = 0;
     b.diagnostics    = rc_array_diagnostic_make(256, &a->permanent);
-    b.verbose        = (rc_mstr) {0};   // only the listing pass gives it a buffer (see run_pass)
-    b.want_verbose   = a->verbose;      // whether to run that pass at all
+    for (uint32_t i = 0; i < baron_num_channels; i++) {
+        b.channels[i] = (rc_mstr) {0};   // empty handles; run_pass re-zeroes them, appends allocate lazily
+    }
+    b.want_verbose   = a->verbose;      // whether to run the listing pass at all
     return b;
 }
 

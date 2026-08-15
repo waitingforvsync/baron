@@ -549,6 +549,13 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         target = (uint32_t) (arg.value & 0xFFFF);
     }
 
+    // An indirect JMP reaches its destination THROUGH its operand: the operand names the vector cell (or the
+    // dispatch table for the indexed form), so the target identity recorded below describes the vector, not
+    // where control lands. The CFG needs to know the difference to apply the external-vector rule.
+    zp_target_via via = (mode == addr_mode_ind16)  ? zp_target_via_vector
+                      : (mode == addr_mode_ind16x) ? zp_target_via_table
+                                                   : zp_target_via_direct;
+
     operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
 
     // The same resolved operand identity plays one of two roles by control-flow class. For a branch/jump/call
@@ -579,6 +586,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .target         = target,
         .target_scope   = is_control ? op.scope : RC_INDEX_NONE,
         .target_def     = is_control ? op.def : cursor_none(),
+        .target_via     = (uint8_t) via,
         .section        = section,
         .operand_offset = operand_offset,
         .at             = at,

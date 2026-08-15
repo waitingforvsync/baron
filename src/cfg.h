@@ -20,9 +20,11 @@ typedef struct basic_block {
     uint32_t num_insns;      // instruction count
     uint32_t succ_first;     // index of this block's first successor in cfg.succs
     uint32_t succ_count;     // number of successor block indices
-    bool     unknown_succ;   // control may ALSO leave to an address we cannot model: an indirect / computed
-                             // JMP with no CANJUMP, or a jump/branch target outside the recorded stream. The
-                             // succ slice then lists only the successors we CAN place, and liveness must treat
+    bool     unknown_succ;   // control may ALSO leave to an address we cannot model: an indirect JMP through
+                             // a vector WE assembled (no CANJUMP), an indexed dispatch, or an unresolved
+                             // target. A CONSTANT destination off the recorded stream is NOT this - that is a
+                             // transfer out of the program to external code, a clean exit (cfg_target_is_external).
+                             // The succ slice then lists only the successors we CAN place, and liveness must treat
                              // live-out conservatively (everything live) rather than trust the slice as
                              // complete. This is NOT a plain RTS/RTI return - a return has NO successor and is
                              // fully known. (An RTS-dispatch masquerading as a return, and a self-modified JSR,
@@ -65,6 +67,14 @@ uint32_t cfg_block_at(cfg g, uint32_t section, uint32_t pc);
 // `n`'s own section only; a computed / unregistered target resolves to nothing. This is the one place that
 // turns a target into a block, shared by the CFG's edge wiring and the callee-footprint walk.
 uint32_t cfg_target_block(cfg g, zp_insn n);
+
+// Does `n`'s control transfer leave the assembled program for external code (an OS or ROM entry)? True for a
+// direct branch/jump/call whose constant destination matches no assembled code, and for an indirect JMP
+// through a vector that is not one of our own labels (a fixed OS vector). Meaningful once cfg_target_block
+// has come back RC_INDEX_NONE: it separates "went somewhere we did not assemble" (benign - external code
+// touches no ZPAUTO, since ZPRESERVE names bytes nothing outside the program uses) from "went somewhere we
+// cannot pin down" (the conservative taint / unknown-call case).
+bool cfg_target_is_external(cfg g, zp_insn n);
 
 // The i-th successor block index of `b` (i < b.succ_count). Reads the shared successor pool.
 uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);

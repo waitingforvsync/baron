@@ -48,6 +48,7 @@ static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scop
 static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch);
 static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_reserved_constant(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -144,11 +145,11 @@ static void verbose_source(baron *b, cursor stmt, uint32_t end_pos)
             end--;
         }
     }
-    rc_mstr_append(&b->verbose, rc_str_substr(text, begin, end - begin), b->per_pass);
+    rc_mstr_append(&b->channels[0], rc_str_substr(text, begin, end - begin), b->per_pass);
     if (cut) {
-        rc_mstr_append(&b->verbose, RC_STR("..."), b->per_pass);
+        rc_mstr_append(&b->channels[0], RC_STR("..."), b->per_pass);
     }
-    rc_mstr_append_char(&b->verbose, '\n', b->per_pass);
+    rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
 }
 
 // The listing gate mirrors semantic_error's: only the listing pass of a live branch leaves a trace.
@@ -163,9 +164,9 @@ void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
     if (!verbose_on(flags)) {
         return;
     }
-    rc_mstr_append(&b->verbose, RC_STR("  "), b->per_pass);
-    rc_mstr_append_hex16(&b->verbose, (uint16_t) pc, b->per_pass);
-    rc_mstr_append(&b->verbose, RC_STR("  "), b->per_pass);
+    rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
+    rc_mstr_append_hex16(&b->channels[0], (uint16_t) pc, b->per_pass);
+    rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
 
     // The bytes are read back from the section rather than passed in: this runs on the listing pass,
     // after zero-page allocation, so what sits there IS the final output.
@@ -175,16 +176,16 @@ void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
     uint32_t width = 0;
     for (uint32_t i = 0; i < shown; i++) {
         if (i > 0) {
-            rc_mstr_append_char(&b->verbose, ' ', b->per_pass);
+            rc_mstr_append_char(&b->channels[0], ' ', b->per_pass);
         }
-        rc_mstr_append_hex8(&b->verbose, rc_view_bytes_get(code, code_begin + i), b->per_pass);
+        rc_mstr_append_hex8(&b->channels[0], rc_view_bytes_get(code, code_begin + i), b->per_pass);
         width += (i > 0) ? 3 : 2;
     }
     if (num > verbose_max_bytes) {
-        rc_mstr_append(&b->verbose, RC_STR("..."), b->per_pass);
+        rc_mstr_append(&b->channels[0], RC_STR("..."), b->per_pass);
         width += 3;
     }
-    rc_mstr_append_n(&b->verbose, ' ', verbose_byte_field - width, b->per_pass);
+    rc_mstr_append_n(&b->channels[0], ' ', verbose_byte_field - width, b->per_pass);
     verbose_source(b, stmt, end_pos);
 }
 
@@ -197,9 +198,9 @@ void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
     if (!margin) {
         // An address but no bytes: the line marks where something lands (a macro expansion, an
         // included file, a section boundary) - the bytes belong to the statements that follow.
-        rc_mstr_append(&b->verbose, RC_STR("  "), b->per_pass);
-        rc_mstr_append_hex16(&b->verbose, (uint16_t) pc, b->per_pass);
-        rc_mstr_append_n(&b->verbose, ' ', 2 + verbose_byte_field, b->per_pass);
+        rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
+        rc_mstr_append_hex16(&b->channels[0], (uint16_t) pc, b->per_pass);
+        rc_mstr_append_n(&b->channels[0], ' ', 2 + verbose_byte_field, b->per_pass);
     }
     verbose_source(b, stmt, end_pos);
 }
@@ -317,6 +318,7 @@ static const token statement_token_entries[] = {
     {RC_STR("incbin"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incbin}}},
     {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
     {RC_STR("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
+    {RC_STR("print"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_print}}},
     // The pure expression constants are reserved at statement start too, so `pi = 5` is rejected rather than
     // quietly binding a shadowed symbol. Three near-identical rows, but it is only three tokens.
     {RC_STR("true"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
@@ -671,7 +673,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             // Note the start cursor is built here: `stmt` is the SECTION statement, not this closer.
             verbose_text_line(b, flags, cursor_at(at, body.next), cl.next, sections_pc(&b->sections, child), false);
             if (verbose_on(flags)) {
-                rc_mstr_append_char(&b->verbose, '\n', b->per_pass);
+                rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
             }
         }
         body.next = cl.next;
@@ -966,9 +968,11 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
 }
 
 // CANCALL <targets> - the programmer declares the real destination(s) of the JSR immediately preceding it (a
-// self-modified operand, or a dispatch the analysis cannot follow). Without it, such a call has an unknown
-// footprint and a value held live across it is refused (error_type_zpauto_across_call); with it, the callee
-// footprint is bounded by the union of the named routines. TRUSTED, like UNREACHABLE.
+// self-modified operand, or a dispatch the analysis cannot follow); with it, the callee footprint is bounded
+// by the union of the named routines. TRUSTED, like UNREACHABLE. Note that a constant target off the
+// assembled stream reads as a call OUT of the program (an external OS/ROM entry, empty footprint) - so a
+// self-modified JSR whose placeholder operand is such a constant is NOT caught by the analysis, and the
+// annotation is what makes it sound.
 static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_can_targets(b, stmt, at, scope, section, flags, zp_flow_call, zp_cflow_cancall, scratch);
@@ -1090,6 +1094,110 @@ static parse_result handle_equw(baron *b, cursor stmt, cursor at, uint32_t scope
 static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_equ(b, stmt, at, scope, section, flags, 4, scratch);
+}
+
+// The '#' that may introduce a PRINT channel. It is not a statement token ('#' never starts a
+// statement), so PRINT peeks with its own tiny table - the same trick as assign_tokens.
+static const token print_token_entries[] = {
+    {RC_STR("#"), {.type = lexeme_type_hash}},
+};
+static const token_table print_tokens = RC_VIEW(print_token_entries);
+
+// True on the one pass whose PRINT output the caller receives: the listing pass under -v (so the text
+// lands in channel 0 between the listing lines being built there), the final pass otherwise. Everything
+// has settled by either, so each PRINT speaks exactly once.
+static bool print_on(const baron *b, parse_flags flags)
+{
+    return flags.active && (b->want_verbose ? flags.listing : flags.final);
+}
+
+// Append one PRINT value to its channel: strings raw (concatenation is the point - spacing belongs to
+// the writer), everything else in value_format's diagnostic form (decimal numbers, {..} lists with
+// nested strings quoted - just what a debug dump wants).
+static void print_value(baron *b, uint32_t channel, value v)
+{
+    if (value_is_string(v)) {
+        rc_mstr_append(&b->channels[channel], v.string, b->per_pass);
+    }
+    else {
+        value_format(&b->channels[channel], v, b->per_pass);
+    }
+}
+
+// PRINT [#n,] value [, value...] - write the values, concatenated, to output channel n (a single digit;
+// 0 when no #n is given), one newline at the end. Channel 0 reaches stdout by default and the CLI can
+// redirect any channel to a file (-logN). A PRINT with no values is a blank line. Output happens on one
+// pass only (see print_on); a PRINT is not echoed in the -v listing - like an assignment it emits no
+// bytes, and its output is its own trace.
+static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) stmt;
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+    uint32_t channel = 0;
+
+    // The optional channel: '#', a single digit, and a comma - anything else after the '#' is malformed.
+    lexer_result hash = lexer_next(src, pos, print_tokens);
+    if (hash.token.type == lexeme_type_hash) {
+        lexer_result num = lexer_next(src, hash.next, print_tokens);
+        double n = num.token.numeric_literal.value;
+        if (num.token.type != lexeme_type_numeric_literal || n != (double) (uint32_t) n || n >= baron_num_channels) {
+            return syntax_error(b, error_type_bad_print_channel, cursor_at(at, hash.next));
+        }
+        lexer_result comma = lexer_next(src, num.next, print_tokens);
+        if (comma.token.type != lexeme_type_comma) {
+            return syntax_error(b, error_type_bad_print_channel, cursor_at(at, num.next));
+        }
+        channel = (uint32_t) n;
+        pos = comma.next;
+    }
+
+    // Nothing (or nothing after the channel) is a blank line; require_separator re-reads the terminator.
+    lexer_result peek = lexer_next(src, pos, statement_tokens(b));
+    if (peek.token.type == lexeme_type_terminator ||
+        (peek.token.type == lexeme_type_closer && peek.token.closer.id == closer_brace)) {
+        if (print_on(b, flags)) {
+            rc_mstr_append_char(&b->channels[channel], '\n', b->per_pass);
+        }
+        return require_separator(b, cursor_at(at, pos));
+    }
+
+    bool unresolved = false;
+    while (true) {
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        if (e.error != expr_error_none) {
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+        }
+
+        if (value_is_error(e.value)) {
+            if (e.value.error == error_type_unknown_symbol && !flags.final) {
+                unresolved = true;   // a forward reference; it prints once everything settles
+            }
+            else {
+                // The undefined-on-final promotion, matching int_argument_make; any other error value
+                // carries its own cause through. semantic_error self-gates on the settling pass.
+                error_type code = e.value.error == error_type_unknown_symbol
+                                ? error_type_undefined_symbol : e.value.error;
+                semantic_error(b, flags, code, cursor_at(at, pos));
+            }
+        }
+        else if (print_on(b, flags)) {
+            print_value(b, channel, e.value);
+        }
+
+        lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;   // another value follows
+        }
+
+        if (print_on(b, flags)) {
+            rc_mstr_append_char(&b->channels[channel], '\n', b->per_pass);
+        }
+        parse_result r = require_separator(b, cursor_at(at, e.next));
+        r.unresolved = unresolved;
+        return r;
+    }
 }
 
 static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
@@ -2141,8 +2249,15 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     macros_reset(&b->macros, base_statement_tokens, 128);
     functions_reset(&b->functions, expression_operand_base(), 128);
 
-    // Only the listing pass writes the verbose buffer; every other pass carries the empty handle.
-    b->verbose = flags.listing ? rc_mstr_make(4096, b->per_pass) : (rc_mstr) {0};
+    // Fresh channel buffers each pass (the previous pass's died with the arena reset above). They fill
+    // lazily on first append - only the output pass writes them at all - except channel 0 on the listing
+    // pass, which is certain to grow and gets its buffer up front.
+    for (uint32_t i = 0; i < baron_num_channels; i++) {
+        b->channels[i] = (rc_mstr) {0};
+    }
+    if (flags.listing) {
+        b->channels[0] = rc_mstr_make(4096, b->per_pass);
+    }
 
     const uint32_t scope   = 0;
     const uint32_t section = sections_default;   // each pass starts in the default section (index 0)
@@ -2161,13 +2276,17 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 // governing rule is CERTAINTY: this only patches a program it can prove correct, and turns anything it cannot
 // into a clear diagnostic pointing the user at a fix or an annotation. Three refusals:
 //   - a computed / indirect jump reaches code the CFG cannot follow (unknown_succ) -> error_type_zpauto_computed_flow;
-//   - a variable is live across a JSR whose callee footprint cannot be bounded (a computed / off-stream target)
-//     -> error_type_zpauto_across_call;
+//   - a variable is live across a JSR whose callee footprint cannot be bounded (the callee reaches computed
+//     flow) -> error_type_zpauto_across_call;
 //   - a variable the recursion FRESHLY writes is held live across the recursive call (a per-level value one
 //     static byte cannot serve) -> error_type_zpauto_recursion; a read/accumulated value across recursion is fine;
 //   - more simultaneously-live variables than reserved bytes -> error_type_zeropage_full (a spill).
 // On any refusal it records the error(s) and patches nothing; run_passes then fails the assemble. Only a
 // fully analysable, colourable program has its operands + symbols rewritten to real addresses.
+// One deliberate leniency: a transfer to a CONSTANT destination matching nothing we assembled - JSR &FFEE,
+// JMP &FFEE, or JMP (&FFFC) through a fixed OS vector - is a transfer OUT of the program. External code
+// touches none of our variables (ZPRESERVE names exactly the bytes nothing outside the program uses), so
+// such a call has an empty footprint and such a jump is a clean exit; neither needs an annotation.
 // `work` (cfg + liveness results) and `scratch` (their by-value scratch) are two working arenas the caller
 // hands in BY VALUE; nothing here outlives the call, so both are reclaimed by the caller. They must have
 // distinct backing (the scratch-aliasing lesson), which the caller guarantees by passing two different arenas.
@@ -2340,7 +2459,9 @@ static uint32_t assemble_failed(baron *b)
 {
     sections_reset(&b->sections);   // a fresh, empty default section - so a failed read hands back no code
     scopes_reset(&b->scopes);
-    b->verbose = (rc_mstr) {0};     // usually already empty (only the listing pass writes it)
+    for (uint32_t i = 0; i < baron_num_channels; i++) {
+        b->channels[i] = (rc_mstr) {0};   // no PRINT output / listing from a failed assemble
+    }
     return 0;
 }
 
@@ -2404,14 +2525,17 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
 // outlive `b` (which dies the moment we return) - nothing is flattened up front; the caller queries on demand.
 static baron_result baron_result_make(baron *b, uint32_t passes)
 {
-    return (baron_result) {
+    baron_result r = {
         .passes      = passes,
         .sections    = sections_all(&b->sections),
         .diagnostics = b->diagnostics.view,
         .sources     = b->source_files.nodes.view,
-        .verbose     = b->verbose.view,
         .scopes      = scopes_view_make(&b->scopes),
     };
+    for (uint32_t i = 0; i < baron_num_channels; i++) {
+        r.channels[i] = b->channels[i].view;
+    }
+    return r;
 }
 
 rc_view_bytes baron_result_code(const baron_result *r)
@@ -2483,9 +2607,10 @@ RC_TEST_GROUP_DEINIT(assemble, fix)
 // symbols and diagnostics are then read back from fix->r via the helpers.
 #define ASM(src) (fix->r = assemble_string(&fix->desc, RC_STR(src), RC_STR(src)), fix->r.passes)
 
-// The verbose listing of the last ASM - built on the listing pass, so it shows the final (post-allocation)
-// bytes. Tests compare it whole: a mis-set column or a stray line fails loudly and prints the actual text.
-#define VERB() (fix->r.verbose)
+// The verbose listing of the last ASM - channel 0, built on the listing pass, so it shows the final
+// (post-allocation) bytes with any PRINT output interleaved. Tests compare it whole: a mis-set column
+// or a stray line fails loudly and prints the actual text.
+#define VERB() (fix->r.channels[0])
 
 // Whether a clean assemble (passes != 0) laid down exactly these bytes. `passes` is taken explicitly so a
 // call can wrap ASM directly - code_is(&fix->r, ASM(src), exp, n) - reading the freshly stashed result.
@@ -2900,8 +3025,10 @@ RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
                   == error_type_zpauto_recursion);
 
     // A computed / indirect jump reaches code the CFG cannot follow while a variable is in play - refuse and
-    // ask for an annotation.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : JMP (&2000)")
+    // ask for an annotation. The vector must be one of OUR labels: a cell we assembled holds a run-time value
+    // that may point back into our own code. (A CONSTANT vector - JMP (&FFFC) - is a fixed OS vector and
+    // reads as a clean exit instead; see zpauto_external_calls_and_jumps.)
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : JMP (vec) : .vec EQUW &2000")
                   == error_type_zpauto_computed_flow);
 
     // More simultaneously-live variables than reserved bytes is a spill: p and q overlap but only &70 is free.
@@ -3148,22 +3275,76 @@ RC_TEST_STEP(assemble, zpauto_cancall_bounds_dispatched_call, fix)
 
 RC_TEST_STEP(assemble, zpauto_canjump_bounds_computed_jump, fix)
 {
-    // A computed / indirect JMP with a variable live across it is refused: the CFG cannot see where control
-    // goes, so it cannot prove `keep` survives.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 keep : vector = &2000\n"
+    // An indirect JMP through a vector WE assembled is refused with a variable live across it: the cell's
+    // run-time contents may point back into our own code, so the CFG cannot prove `keep` survives. (Only an
+    // in-program vector is computed flow - a constant vector cell like JMP (&FFFC) lies outside the program
+    // and reads as a clean exit; see zpauto_external_calls_and_jumps.)
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
                       "STA keep : JMP (vector)\n"
                       ".hA : LDA keep : RTS\n"
-                      ".hB : LDA keep : RTS") == error_type_zpauto_computed_flow);
+                      ".hB : LDA keep : RTS\n"
+                      ".vector EQUW hA") == error_type_zpauto_computed_flow);
 
     // CANJUMP declares the jump table's targets, so the CFG wires each as a real successor edge: keep is live
     // into both arms and allocates cleanly onto &70.
-    uint32_t p = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep : vector = &2000\n"
+    uint32_t p = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
                      "STA keep : JMP (vector) : CANJUMP hA, hB\n"
                      ".hA : LDA keep : RTS\n"
-                     ".hB : LDA keep : RTS");
+                     ".hB : LDA keep : RTS\n"
+                     ".vector EQUW hA");
     RC_CHECK_TRUE(p != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+
+    // A declared destination may itself be EXTERNAL: here one arm of the dispatch leaves the program for the
+    // OS. That arm reads as a clean exit (external code touches none of our variables), the in-program arm is
+    // wired as usual, and keep still allocates. This is how you tell Baron a vector you own can hold an
+    // external address - no separate annotation needed.
+    uint32_t q = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                     "STA keep : JMP (vector) : CANJUMP hA, &FFEE\n"
+                     ".hA : LDA keep : RTS\n"
+                     ".vector EQUW hA");
+    RC_CHECK_TRUE(q != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpauto_external_calls_and_jumps, fix)
+{
+    // A call or jump to a CONSTANT destination that matches nothing we assembled leaves the program - an OS
+    // or ROM entry. ZPRESERVE names precisely the bytes nothing outside the program uses, so external code
+    // cannot touch a ZPAUTO: the call contributes an EMPTY footprint and needs no CANCALL. Here `keep` rides
+    // straight across JSR &FFEE (OSWRCH) and still allocates.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                          "STA keep : JSR &FFEE : LDA keep : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+
+    // The idiomatic named OS entry is the same thing: a `name = expr` constant is not a code label, so the
+    // destination still reads as external.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : oswrch = &FFEE : ZPAUTO1 keep\n"
+                      "STA keep : JSR oswrch : LDA keep : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // An indirect JMP through a CONSTANT vector cell (JMP (&FFFC)) dispatches through memory outside the
+    // program: wherever it lands is external code, so the block is a clean exit, not computed flow.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : JMP (&FFFC)") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // A direct tail-jump out of the program is likewise a clean exit...
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : JMP &FFEE") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // ...and a callee ENDING in an external transfer still has a bounded footprint: sub touches only its own
+    // loc (the tail JMP &FFEE contributes nothing), so keep - live across the JSR - is forced off loc's byte
+    // and both allocate.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                      "STA keep : JSR sub : LDA keep : RTS\n"
+                      ".sub { ZPAUTO1 loc : STA loc : LDA loc : JMP &FFEE }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"),    ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "sub.loc"), ==, 0x71);
 }
 
 RC_TEST_STEP(assemble, zpauto_macro_local_is_per_invocation, fix)
@@ -3513,7 +3694,7 @@ RC_TEST_STEP(assemble, listing_include_child, fix)
     // Named explicitly ("top") because ASM's name-is-the-text would grow a bogus directory from the slashes.
     fix->r = assemble_string(&fix->desc, RC_STR("top"), RC_STR("include \"inc_child.6502\""));
     RC_CHECK_TRUE(fix->r.passes != 0);
-    RC_CHECK(fix->r.verbose, ==,
+    RC_CHECK(fix->r.channels[0], ==,
              RC_STR("  0000                  include \"inc_child.6502\"\n"
                     ".child\n"
                     "  0000  A2 02           ldx #2\n"));
@@ -3563,6 +3744,64 @@ RC_TEST_STEP(assemble, listing_skip_and_multiline, fix)
 
     RC_CHECK_TRUE(ASM("equb {1,\n2}") != 0);
     RC_CHECK(VERB(), ==, RC_STR("  0000  01 02           equb {1,...\n"));
+}
+
+RC_TEST_STEP(assemble, print_to_channel_zero, fix)
+{
+    // Without -v, PRINT writes its channel on the final pass - so each statement speaks exactly once,
+    // multi-pass or not. Values concatenate with NO separator (spacing belongs to the writer): strings
+    // raw, everything else in value_format's shape. A bare PRINT is a blank line.
+    RC_CHECK_TRUE(ASM("print \"x = \", 42\nprint\nprint 1, \" and \", {2, 3}") != 0);
+    RC_CHECK(fix->r.channels[0], ==, RC_STR("x = 42\n\n1 and {2, 3}\n"));
+    RC_CHECK(fix->r.channels[1].len, ==, 0u);
+}
+
+RC_TEST_STEP(assemble, print_channels_and_syntax, fix)
+{
+    // #n, routes to channel n; #0 is just the default spelled out.
+    RC_CHECK_TRUE(ASM("print #1, \"debug\"\nprint #0, \"main\"") != 0);
+    RC_CHECK(fix->r.channels[0], ==, RC_STR("main\n"));
+    RC_CHECK(fix->r.channels[1], ==, RC_STR("debug\n"));
+
+    // A malformed channel is fatal: two digits, or a missing comma.
+    RC_CHECK(ASM("print #12, 1"), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_bad_print_channel);
+    RC_CHECK(ASM("print #1 1"), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_bad_print_channel);
+}
+
+RC_TEST_STEP(assemble, print_interleaves_listing, fix)
+{
+    fix->desc.verbose = true;   // now PRINT speaks on the LISTING pass, into the listing's own channel 0
+    RC_CHECK_TRUE(ASM("lda #1\nprint \"pc is \", *\nrts") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000  A9 01           lda #1\n"
+                    "pc is 2\n"
+                    "  0002  60              rts\n"));
+}
+
+RC_TEST_STEP(assemble, print_forward_reference_and_for, fix)
+{
+    // A forward reference defers like any other and prints its settled value, once.
+    RC_CHECK_TRUE(ASM("print target\nskip 5\n.target") != 0);
+    RC_CHECK(fix->r.channels[0], ==, RC_STR("5\n"));
+
+    // A FOR body prints per iteration.
+    RC_CHECK_TRUE(ASM("for i = 1..3\nprint i\nnext") != 0);
+    RC_CHECK(fix->r.channels[0], ==, RC_STR("1\n2\n3\n"));
+}
+
+RC_TEST_STEP(assemble, print_dead_branch_and_undefined, fix)
+{
+    // A dead branch parses its PRINT but says nothing.
+    RC_CHECK_TRUE(ASM("if false\nprint \"no\"\nendif\nprint \"yes\"") != 0);
+    RC_CHECK(fix->r.channels[0], ==, RC_STR("yes\n"));
+
+    // An operand still unknown on the final pass is the usual undefined symbol, and a failed assemble
+    // hands back empty channels - same contract as the listing.
+    RC_CHECK(ASM("print nosuch"), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_undefined_symbol);
+    RC_CHECK(fix->r.channels[0].len, ==, 0u);
 }
 
 RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)

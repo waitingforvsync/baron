@@ -123,14 +123,28 @@ without crossing a call or return.
   collision is impossible and there is nothing to refuse there.
 - **Targets** resolve through `cfg_target_block`: a named-label target goes through the markers to its own
   section's block (crossing sections); a bare numeric target resolves within the instruction's own section
-  only; a computed / unregistered target resolves to nothing.
-- **`unknown_succ`** marks a block whose control may *also* leave to an address we cannot model (an indirect
-  `JMP` with no `CANJUMP`, or a target outside the recorded stream). It is not a plain return - a return has no
-  successor and is fully known. `unknown_succ` is the conservative taint that later forces "everything live"
-  out of that block.
+  only; a computed target resolves to nothing. An indirect `JMP`'s operand names its *vector cell*, never its
+  destination, so it too resolves to nothing directly - `zp_insn.target_via` records the distinction
+  (direct / vector / indexed table) so the CFG never mistakes the cell's own address for an edge.
+- **External transfers.** A transfer whose *constant* destination matches nothing we assembled is a transfer
+  *out of the program*: a `JSR &FFEE` into the OS, a tail `JMP &FFEE`, or a `JMP (&FFFC)` through a vector
+  cell that is not one of our own labels (a literal address or a named constant). External code cannot touch
+  a ZPAUTO variable - `ZPRESERVE` names precisely the bytes nothing outside the program uses - so an external
+  jump/branch arm is as clean an exit as an `RTS` (no taint) and an external call contributes an empty
+  footprint. `cfg_target_is_external` is the shared test, consulted only after a target fails to place as a
+  block.
+- **`unknown_succ`** marks a block whose control may *also* leave to an address we cannot model: an indirect
+  `JMP` through a vector *we* assembled (its run-time contents may point back into our own code) with no
+  `CANJUMP`, an indexed dispatch (`JMP (table,X)`), or an unresolved target. It is not a plain return - a
+  return has no successor and is fully known - and it is not an external exit. `unknown_succ` is the
+  conservative taint that later forces "everything live" out of that block.
 - Annotations apply here: `UNREACHABLE` prunes a branch's dead fall-through edge; `CANJUMP` wires a computed
   jump's declared targets as real successors (a variable-count successor slice makes a jump table
-  representable, not just the one/two edges of a jump/branch).
+  representable, not just the one/two edges of a jump/branch). Declared `CANJUMP` / `CANCALL` targets are
+  marked as block *leaders* in pass 1, so an in-program declared target always gets its own block even when
+  it sits mid-run - which is what lets a declared target with *no* block reliably mean "off the assembled
+  stream": an **external arm** of the dispatch (`CANJUMP handler_a, &FFEE`), a clean exit contributing no
+  edge and no taint, the annotation-side twin of the external-transfer rule above.
 
 ## Stage 3 - liveness and the interference graph ##
 
@@ -164,9 +178,13 @@ with, because the call clobbers all of it.
 The walk is a DFS over the call graph seeded at the call target, with an `on_stack` set of routine entries
 being computed; revisiting one flags **recursion**. It gathers two sets: `touched` (any vreg touched) and
 `killed` (vregs given a *write-only* def - `vref_write` without `vref_read` - anywhere in the walked subtree).
-An untrackable target (a computed / off-stream call, or a callee that itself leaves via a computed jump) sets
-`unknown_call`. A `CANCALL` annotation overrides an untrackable literal target with the declared set, so a
-self-modified or dispatched call can still be bounded.
+A call whose constant target lies off the assembled stream is *external* (see stage 2) and contributes an
+empty footprint; an untrackable target (a computed call, or a callee that itself leaves via a computed jump)
+sets `unknown_call`. A `CANCALL` annotation overrides the literal target with the declared set, so a
+self-modified or dispatched call can still be bounded (a declared target with no block reads as an external
+entry in the dispatch set, contributing nothing). Note the flip side of the external rule: a self-modified
+`JSR` whose placeholder operand is a constant now *looks* external, so `CANCALL` is what makes it sound - the
+analysis can no longer catch the unannotated case.
 
 Two guards consume this, sweeping each block backward with the live set (so at a call, the live set is exactly
 what is live *across* it - a `JSR` touches no variable of its own):
@@ -230,7 +248,7 @@ thing can run *after* convergence without perturbing it.
 | Type | File | Role |
 |------|------|------|
 | `zp_var` | zeropage.h | a declared variable: name, scope, width, def cursor (identity) |
-| `zp_insn` | zeropage.h | one var-touching instruction: pc, size, flow, `rw`, vreg, `var_offset`, target, `(section, offset)` |
+| `zp_insn` | zeropage.h | one var-touching instruction: pc, size, flow, `rw`, vreg, `var_offset`, target (+ `target_via`), `(section, offset)` |
 | `zp_cflow` | zeropage.h | a trusted annotation: `UNREACHABLE` / `CANCALL` / `CANJUMP` at a site |
 | `zp_label` | zeropage.h | label identity `(scope, def)` -> physical `(section, pc)` |
 | `basic_block` | cfg.h | `(section, pc)` identity, insn slice, successor slice, `unknown_succ` |
@@ -249,8 +267,8 @@ becomes a clear diagnostic pointing at the fix. The refusals, all fatal to the a
 | 0b | `zpauto_narrow_pointer` | a 1-byte ZPAUTO1 dereferenced as a pointer (`(var),Y` / `(var)`) - needs ZPAUTO2 |
 | 0b | `zpauto_out_of_bounds` | a constant `var + n` (or pointer, or indexed base) reaches past the declared width |
 | parse | `zpauto_bad_width` | `ZPAUTO <count>` with a count outside 1..256 |
-| 1 | `zpauto_computed_flow` | a computed/indirect jump reaches unmodelled code with variables live |
-| 2 | `zpauto_across_call` | a variable live across a call whose footprint cannot be bounded |
+| 1 | `zpauto_computed_flow` | a jump through a vector/table in our own memory reaches unmodelled code with variables live |
+| 2 | `zpauto_across_call` | a variable live across a call whose footprint cannot be bounded (the callee reaches computed flow) |
 | 2 | `zpauto_recursion` | a freshly-written per-level value held live across a recursive call |
 | colour | `zeropage_full` | more simultaneously-live variables than reserved bytes (a spill) |
 
@@ -264,6 +282,10 @@ The `CANCALL` / `CANJUMP` / `UNREACHABLE` annotations are the escape hatch: they
 sit exactly where the analysis would otherwise refuse, turning "cannot prove it" into the programmer's explicit
 "I promise it is these". A wrong annotation is the one way to defeat the contract - and the indexed-access
 warning extends that same trust to the one thing no static check can ever see, the value of an index register.
+The external-target policy is a third, *implicit* trust: a constant destination off the assembled stream is
+assumed to be an OS/ROM entry that leaves the reserved bytes alone - true for real OS calls (which is the whole
+point: `JSR &FFEE` and `JMP (&FFFC)` need no markup), and the programmer's responsibility for a self-modified
+placeholder operand or a bare cross-bank number, both of which now read as external rather than refusing.
 
 ## Sections / paged banks ##
 
@@ -271,8 +293,9 @@ Because block identity is `(section, pc)` and control transfers resolve targets 
 at the same address are fully distinct to the allocator. Two banks can both define a `.draw` routine at `&8000`
 and use ZPAUTO independently; a `JSR bank5.entry` from one into the other resolves through the label marker to
 the right bank's block, so the footprint walk crosses banks correctly. A cross-section transfer to a bare
-number (`JSR &8003`) cannot say which bank it means and is treated as leaving for unmodelled code - name the
-target instead.
+number (`JSR &8003`) cannot say which bank it means; under the external-target policy it is assumed to leave
+the program for external code (an empty footprint) - name the target instead when the number really means one
+of our own banks, or the analysis will under-approximate.
 
 ## Deferred / known limitations ##
 

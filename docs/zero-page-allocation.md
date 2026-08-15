@@ -208,6 +208,20 @@ other's way in the interference graph. A variable that is dead across the same c
 `work.scratch`'s byte instead - the graph is what decides, so you get the tightest packing that is provably
 safe.
 
+### Calling the OS ###
+
+A call *out of the program* needs none of this machinery. `JSR &FFEE` - or the idiomatic `JSR oswrch` with
+`oswrch = &FFEE` - targets code Baron never assembled, so it is treated as an **external call**: an OS or ROM
+entry with an *empty* footprint. `ZPRESERVE` names precisely the bytes nothing outside your program uses, so
+an external routine cannot touch an auto-variable, and anything live across the call simply survives it - no
+annotation required. Leaving by jump is just as free: a tail `JMP &FFEE`, or a `JMP (&FFFC)` through a fixed
+OS vector, is as clean an exit as an `RTS`.
+
+The rule keys on the *destination*: a constant address (or a named constant - anything that is not one of your
+own labels) matching nothing you assembled means external code. A `JMP (vector)` through a vector cell you
+assembled *yourself* is different - its run-time contents may point back into your own code - so that stays
+computed flow and wants a `CANJUMP` (below).
+
 ## Annotations ##
 
 Baron will only allocate a byte when it can prove the assignment is correct. Some things it cannot see from the
@@ -244,9 +258,13 @@ address, or a dispatch through a table - and list the routines it might actually
 ```
 
 Now Baron bounds the call's footprint by the union of those routines, exactly as if you had called them
-directly, so a variable held live across the call is protected from all of them. Without the annotation, such a
-call has an unknown footprint and Baron refuses to allocate anything live across it (see `across_call` below).
-List every routine the call can reach - an omission is the one way to get it wrong.
+directly, so a variable held live across the call is protected from all of them. List every routine the call
+can reach - an omission is the one way to get it wrong. And do annotate a *self-modified* call even though its
+placeholder operand looks like an innocent constant: a constant matching none of your code reads as an
+external OS call with an empty footprint, which is not what the patched `JSR` will do at run time.
+
+A declared destination may itself be **external**: `CANCALL handler_a, &FFEE` says one arm of the dispatch is
+an OS entry, which contributes nothing to the footprint - the same rule as calling `&FFEE` directly.
 
 ### CANJUMP ###
 
@@ -263,7 +281,13 @@ Baron wires each named label as a real successor edge in the control-flow graph,
 into every arm and a variable held live across the jump is protected in all of them. It is the jump-table
 counterpart of `CANCALL`: without it a computed jump reaches code the analysis cannot follow, and with
 variables live it is refused (see `computed jump` below). As with `CANCALL`, list every destination - a missing
-one is the way to get it wrong.
+one is the way to get it wrong. (This is only for vectors and tables in your *own* memory: a jump through a
+constant OS vector - `JMP (&FFFC)` - is an exit into external code and needs no annotation at all.)
+
+Destinations may be **external** too: `CANJUMP mode_draw, &FFEE` says one arm of the dispatch leaves the
+program, and that arm is treated as a clean exit. So a vector you own that can hold an OS address is spelled
+`JMP (myvec) : CANJUMP &FFEE` - no separate "external" annotation needed. A declared destination is also free
+to sit anywhere in your code, not just at a routine entry; Baron splits a block there as required.
 
 ## Sections and addresses ##
 
@@ -289,8 +313,9 @@ analysis sees no flow between them and no interference. Two paged banks at one a
 zero-page bytes for free - the reuse you most want, since they are never resident together.
 
 One thing to know: a cross-section transfer must go through a **label**, not a bare number. `JSR bank5_entry`
-resolves to that bank; `JSR &8003` cannot say *which* bank `&8003` it means, so it is treated as leaving for
-somewhere the analysis cannot follow (an external call). Name your cross-bank entry points and you are fine.
+resolves to that bank; `JSR &8003` cannot say *which* bank `&8003` it means, so Baron assumes it is a call out
+of the program - an external OS/ROM entry with an empty footprint. That assumption is wrong precisely when
+`&8003` really is one of your own banks, so name your cross-bank entry points and you are fine.
 
 ## Limitations ##
 
@@ -312,16 +337,18 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
   on a `ZPAUTO1`, `table+16` on a `ZPAUTO 16` - is refused: it lands on a byte reserved for someone else.
   Baron checks this automatically. The *constant base* of an indexed access is checked the same way (`table+16,X`
   on a `ZPAUTO 16` is refused - the base is already off the end); only the *run-time* index beyond it is yours.
-- **Statically recoverable flow is the only real requirement.** Every branch and jump target must be a label
-  the assembler can resolve - a known address, not a computed one. Within that you have a free hand: a block may
+- **Statically recoverable flow is the only real requirement.** Every branch and jump target must be a known
+  address, not a computed one. (A constant that matches none of your code is fine too - it reads as a transfer
+  out of the program to external code, like `JSR &FFEE`.) Within that you have a free hand: a block may
   have several entry points (each its own `JSR` target), several `RTS` exits, early-outs, and branches or jumps
   that cross scope boundaries. A routine is whatever the CFG reconstructs, not what the braces suggest, so none
   of that is a restriction - see [Scopes, blocks and control flow](#scopes-blocks-and-control-flow). It is only
   flow the assembler cannot *see* that is off-limits (next item).
-- **No unannotated computed flow.** An indirect `JMP`, a jump table or an RTS-dispatch whose target the analysis
-  cannot follow is refused while variables are live. Annotate it (`CANJUMP` for a computed jump, `CANCALL` for a
-  computed call) or keep clear. This - not the shape of your entries and exits - is the genuine boundary. (An
-  RTS-dispatch still has no annotation; keep those clear.)
+- **No unannotated computed flow.** An indirect `JMP` through a vector you assembled, a jump table or an
+  RTS-dispatch whose target the analysis cannot follow is refused while variables are live. Annotate it
+  (`CANJUMP` for a computed jump, `CANCALL` for a computed call) or keep clear. This - not the shape of your
+  entries and exits - is the genuine boundary. (An RTS-dispatch still has no annotation; keep those clear. A
+  `JMP` through a *constant* OS vector is not computed flow at all - it is an exit to external code.)
 - **No *fresh* value held across recursion.** A value the recursion assigns afresh at each level and then needs
   back after the child returns cannot live in one static byte - each level would want its own. Baron detects the
   cycle and refuses that case. A value merely read, or accumulated in place (`DEC`/`INC`) across the recursion,
@@ -330,8 +357,9 @@ risking a miscompile. These are the shapes it needs, and the ones it will not ac
   `SECTION`s are free - use as many as you like, at any addresses, *including two at the same address* (paged
   banks). Fall-through and in-section branches stay within a section; only a `JSR`/`JMP`/branch that names a
   **label** crosses between sections, and the label picks the section. A cross-section transfer to a bare
-  number (`JSR &8003`) cannot say which section it means, so it is treated as leaving for code the analysis
-  cannot follow - name the target instead. See [Sections and addresses](#sections-and-addresses) for details.
+  number (`JSR &8003`) cannot say which section it means, so it is assumed to leave the program for external
+  code (an empty footprint) - name the target instead when you mean your own bank. See
+  [Sections and addresses](#sections-and-addresses) for details.
 - **You cannot name a variable `a`.** It collides with accumulator addressing: `ASL a` would read as `ASL A`
   and quietly lose the variable. Names `x` and `y` are fine - they only mean registers after a comma, which a
   plain operand never is - so `STA x` resolves to your variable, not the X register.
@@ -390,6 +418,9 @@ lands - add a `CANJUMP` naming its targets and it is fine again:
     ; CANJUMP arm_a, arm_b   ; ...so tell it, and the refusal lifts
 ```
 > A computed or indirect jump reaches unknown code ...
+
+(`vector` here is a cell of your own. A jump through a *constant* OS vector - `JMP (&FFFC)` - is not refused:
+that cell lies outside the program, so control is leaving for external code, as clean an exit as an `RTS`.)
 
 **A variable named `a` is refused** at the point of declaration - it clashes with accumulator addressing:
 
@@ -467,7 +498,7 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 |---------------------------------------------|-------------------------------------------------------------------------------|
 | ZPAUTO needs a ZPRESERVE block before it    | You declared a variable with no pool reserved. Add a `ZPRESERVE` first.        |
 | No free zero-page byte left ...             | A spill: more variables are live at once than you reserved bytes for.          |
-| ... live across a JSR whose callee footprint cannot be determined | A computed or off-stream call with a variable live across it. Annotate it with `CANCALL`. |
+| ... live across a JSR whose callee footprint cannot be determined | A variable is live across a call whose callee reaches computed flow. Annotate it with `CANCALL`. (A call to a constant address outside the program is an external OS call - empty footprint, never this error.) |
 | ... freshly assigned then held across a recursive call | A per-level value in a call cycle. One static byte cannot hold a distinct value per level (a value only read or accumulated across the recursion is fine). |
 | A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
 | A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |

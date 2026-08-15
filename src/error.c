@@ -40,6 +40,7 @@ rc_str error_type_name(error_type e)
         case error_type_function_name_reserved:  return RC_STR("A function cannot be named after a mnemonic, keyword or constant");
         case error_type_expected_function_params:return RC_STR("Expected a parenthesised parameter list");
         case error_type_unclosed_function:       return RC_STR("Unclosed FUNCTION: expected an '=' return");
+        case error_type_bad_print_channel:       return RC_STR("PRINT channel must be '#' followed by a single digit 0-9 and a comma");
         case error_type_bad_addressing_mode:     return RC_STR("This instruction has no such addressing mode");
         case error_type_operand_not_numeric:     return RC_STR("Operand is not a number");
         case error_type_value_out_of_range:      return RC_STR("Value out of range");
@@ -49,7 +50,7 @@ rc_str error_type_name(error_type e)
         case error_type_reserve_not_zeropage:    return RC_STR("ZPRESERVE address must be within the zero page ($00-$FF)");
         case error_type_var_without_reserve:     return RC_STR("ZPAUTO needs a ZPRESERVE block before it");
         case error_type_zeropage_full:           return RC_STR("No free zero-page byte left to allocate this ZPAUTO variable");
-        case error_type_zpauto_across_call:      return RC_STR("A ZPAUTO variable is live across a JSR whose callee footprint cannot be determined (a computed or off-stream target); annotate it (CANCALL) or restructure");
+        case error_type_zpauto_across_call:      return RC_STR("A ZPAUTO variable is live across a JSR whose callee footprint cannot be determined (the callee reaches computed flow); annotate it (CANCALL) or restructure");
         case error_type_zpauto_recursion:        return RC_STR("A ZPAUTO variable is freshly assigned and then held live across a recursive call; each recursion level would need its own byte, which one static zero-page address cannot give (a value only read or accumulated across the recursion is fine - use a hand-placed byte, or save and restore it)");
         case error_type_zpauto_computed_flow:    return RC_STR("A computed or indirect jump reaches unknown code while ZPAUTO is active; its targets cannot be proven, so annotate them (CANJUMP/CANCALL) or avoid ZPAUTO here");
         case error_type_zpauto_register_name:    return RC_STR("A ZPAUTO variable cannot be named 'A': it is ambiguous with accumulator addressing (ASL A) and would silently drop the variable");

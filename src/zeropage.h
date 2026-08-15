@@ -56,6 +56,18 @@ typedef enum zp_flow {
     zp_flow_return,
 } zp_flow;
 
+// How a control transfer reaches its destination. A DIRECT transfer's operand IS the destination (abs / rel).
+// An indirect JMP goes THROUGH a vector: its operand names the vector cell, and the destination is whatever
+// that cell holds at run time. We can still reason about it when the cell lies OUTSIDE the program - a fixed
+// OS vector like (&FFFC), which by policy dispatches to external code - but a vector that is one of our own
+// labels holds a value we cannot see (annotate with CANJUMP). The indexed form (JMP (table,X)) is a dispatch
+// through our own table, always computed.
+typedef enum zp_target_via {
+    zp_target_via_direct = 0,
+    zp_target_via_vector,        // JMP (addr)
+    zp_target_via_table,         // JMP (addr,X)
+} zp_target_via;
+
 // One recorded instruction - the IR the CFG + liveness passes walk. EVERY instruction on the final pass is
 // recorded (so pc ordering and branch targets are complete), each carrying its address + size (to find the
 // fall-through / next block), its control-flow class + resolved target address (branch/jump/call; else
@@ -83,6 +95,9 @@ typedef struct zp_insn {
     uint32_t target_scope;   // scope of the target LABEL, when the operand named one, else RC_INDEX_NONE
     cursor   target_def;     // def cursor of the target label, or cursor_none; with target_scope it identifies
                              // the label - and so the exact block - even where banks share the address
+    uint8_t  target_via;     // zp_target_via: how the transfer reaches its destination. For an indirect jump
+                             // the operand (and so target_scope/def) names the VECTOR, never the destination -
+                             // the CFG must not wire an edge to the vector cell's own address
     uint32_t section;        // which section the operand byte lives in (for the allocation patch)
     uint32_t operand_offset; // byte offset of the operand within that section's code buffer
     cursor   at;

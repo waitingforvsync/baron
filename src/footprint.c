@@ -21,7 +21,9 @@ typedef struct fp_ctx {
 static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch);
 
 // Descend into what call site `n` reaches. A CANCALL annotation for n.pc overrides the literal target with the
-// declared set; otherwise the literal target is followed. A target that resolves to no block is untrackable.
+// declared set; otherwise the literal target is followed. A target that resolves to no block is either
+// EXTERNAL (a constant address off the assembled stream - a JSR &FFEE into the OS, which touches none of our
+// variables, so it contributes an empty footprint) or untrackable (computed), which sets the unknown flag.
 static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
 {
     bool annotated = false;
@@ -30,15 +32,18 @@ static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
         if (cf.kind == zp_cflow_cancall && cf.site == n.pc) {
             annotated = true;
             uint32_t tb = cfg_block_at(c->g, n.section, cf.target);   // CANCALL names a same-section address
-            if (tb == RC_INDEX_NONE) { *c->unknown = true; }
-            else { fp_visit(c, tb, scratch); }
+            // A declared target with no block is an address outside the program: an external entry in the
+            // dispatch set, contributing nothing - same policy as an unannotated JSR to a constant. (The
+            // CFG marks every declared target as a block leader, so an in-program address always HAS a
+            // block, even one that would otherwise sit mid-run.)
+            if (tb != RC_INDEX_NONE) { fp_visit(c, tb, scratch); }
         }
     }
     if (!annotated) {
         // The callee, resolved by label - so a JSR into another section (a paged bank) finds the right block.
         uint32_t tb = cfg_target_block(c->g, n);
-        if (tb == RC_INDEX_NONE) { *c->unknown = true; }   // a computed / off-stream / cross-bank-numeric call
-        else { fp_visit(c, tb, scratch); }
+        if (tb != RC_INDEX_NONE) { fp_visit(c, tb, scratch); }
+        else if (!cfg_target_is_external(c->g, n)) { *c->unknown = true; }   // a computed call we cannot follow
     }
 }
 
@@ -242,6 +247,30 @@ RC_TEST(footprint, unknown_call_target_is_flagged)
     rc_view_zp_cflow none = {0};
     footprint fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 1, &arena, scratch);
     RC_CHECK_TRUE(fp.unknown_call);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(footprint, external_call_has_empty_footprint)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+
+    //   2000 JSR FFEE : RTS - a CONSTANT target off the assembled stream is a call OUT of the program (an OS
+    // entry). External code touches none of our variables, so the call is trackable with an EMPTY footprint -
+    // not an unknown_call refusal.
+    uint32_t pc = 0x2000;
+    pc = fp_push(&insns, pc, 3, zp_flow_call,   0xFFEE,        RC_INDEX_NONE, &arena);   // JSR &FFEE
+    pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    rc_view_zp_cflow none = {0};
+    footprint fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 1, &arena, scratch);
+    RC_CHECK_FALSE(fp.unknown_call);
+    RC_CHECK_FALSE(rc_bitset_is_set(&fp.touched, 0));   // the OS does not touch our vreg
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
