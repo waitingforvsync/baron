@@ -3,26 +3,7 @@
 #include "richc/macros.h"
 
 
-enum { baron_per_pass_reserve = 64u * 1024 * 1024 };   // one pass of sections/macros/functions is small
-
-baron_arenas baron_arenas_make(void)
-{
-    return (baron_arenas) {
-        .permanent = rc_arena_make_default(),
-        .per_pass  = rc_arena_make(baron_per_pass_reserve),
-        .scratch   = rc_arena_make_default(),
-    };
-}
-
-void baron_arenas_deinit(baron_arenas *a)
-{
-    RC_ASSERT(a != NULL);
-    rc_arena_deinit(&a->permanent);
-    rc_arena_deinit(&a->per_pass);
-    rc_arena_deinit(&a->scratch);
-}
-
-baron baron_make(baron_arenas *a)
+baron baron_make(baron_desc *a)
 {
     RC_ASSERT(a != NULL);
     baron b;
@@ -41,6 +22,8 @@ baron baron_make(baron_arenas *a)
     b.macro_depth    = 0;
     b.function_depth = 0;
     b.diagnostics    = rc_array_diagnostic_make(256, &a->permanent);
+    b.verbose        = (rc_mstr) {0};   // only the listing pass gives it a buffer (see run_pass)
+    b.want_verbose   = a->verbose;      // whether to run that pass at all
     return b;
 }
 
@@ -82,14 +65,20 @@ bool baron_has_errors(const baron *b)
 
 RC_TEST(baron, init_set_get)
 {
-    baron_arenas arenas = baron_arenas_make();
-    baron b = baron_make(&arenas);
+    baron_desc desc = (baron_desc) {
+        .permanent = rc_arena_make_default(),
+        .per_pass  = rc_arena_make_default(),
+        .scratch   = rc_arena_make_default(),
+    };
+    baron b = baron_make(&desc);
 
     // baron_make already made the root at scope index 0.
     RC_CHECK_TRUE(scopes_set_symbol(&b.scopes, 0, RC_STR("answer"), value_make_numeric(42.0), (cursor){0, 0}) == symbol_status_unchanged);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&b.scopes, 0, RC_STR("answer")), value_make_numeric(42.0)));
 
-    baron_arenas_deinit(&arenas);
+    rc_arena_deinit(&desc.permanent);
+    rc_arena_deinit(&desc.per_pass);
+    rc_arena_deinit(&desc.scratch);
 }
 
 #endif // BARON_TESTS

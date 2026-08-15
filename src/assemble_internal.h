@@ -17,11 +17,15 @@ typedef struct baron baron;
 // Per-statement parse context, threaded by value alongside the cursor. `final` arms the deferred
 // checks (range, undefined-on-final) on the settling pass. `active` says whether a statement's
 // effects apply: inside a false IF branch it is cleared, so the statement is parsed for structure
-// (to find the matching ENDIF) but emits nothing, binds nothing and raises nothing. The two are
-// independent, hence a struct not a bool.
+// (to find the matching ENDIF) but emits nothing, binds nothing and raises nothing. `listing` marks
+// the one extra pass run after zero-page allocation: everything is settled and the ZPAUTO symbols
+// hold their real addresses, so re-emission produces the true output bytes and the verbose listing
+// is built as we go (diagnostics stay quiet - their gate is final, which a listing pass is not).
+// The flags are independent, hence a struct not a bool.
 typedef struct parse_flags {
     bool final;
     bool active;
+    bool listing;
 } parse_flags;
 
 // The outputs of a parse, returned by value for the caller to fold into its own running state.
@@ -86,6 +90,19 @@ parse_result require_separator(baron *b, cursor at);
 // current section. The single place that projects `baron` into an expr_env, so no call site rebuilds it.
 // Defined in assemble.c (it reaches into b's sections); shared with opcodes.c.
 expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch);
+
+// Append one line to the verbose listing - but ONLY on the listing pass of a live branch
+// (flags.listing && flags.active), the verbose twin of semantic_error's gate. The statement's source
+// text is sliced [stmt.pos, end_pos) and echoed verbatim (first line only - a multi-line list literal
+// gets an ellipsis). verbose_code_line is an emitting statement: address + hex dump (truncated after
+// four bytes) + source, with the bytes read back from the section between code_begin and its current
+// end. verbose_text_line covers the rest: a label (at the margin, no address) when `margin`, otherwise
+// an address + empty byte field + source (macro invocations, INCLUDE, SECTION framing).
+// Defined in assemble.c (they append to b's buffer); shared with opcodes.c.
+void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
+                       uint32_t section, uint32_t pc, uint32_t code_begin);
+void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
+                       uint32_t pc, bool margin);
 
 
 #endif // ifndef BARON_ASSEMBLE_INTERNAL_H_

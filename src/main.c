@@ -2,10 +2,10 @@
 #include "report.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #ifdef BARON_TESTS
 #include "richc/test.h"
-#include <string.h>
 #endif
 
 
@@ -23,30 +23,48 @@ int main(int argc, char **argv)
     }
 #endif
 
-    if (argc < 2) {
-        fprintf(stderr, "usage: baron <source files>\n");
-        return 1;
-    }
+    // Options first: -v prints each file's assembly listing. Anything else dash-shaped is refused (so -t
+    // and friends stay free to claim later), and at least one real file must remain.
+    bool verbose = false;
+    int files = 0;
     for (int i = 1; i < argc; i++) {
-        // No options exist yet, but -v and -t are coming: refuse anything dash-shaped now rather than
-        // quietly treating it as a filename and changing behaviour later.
-        if (argv[i][0] == '-') {
-            fprintf(stderr, "baron: unknown option '%s'\nusage: baron <source files>\n", argv[i]);
+        if (strcmp(argv[i], "-v") == 0) {
+            verbose = true;
+        }
+        else if (argv[i][0] == '-') {
+            fprintf(stderr, "baron: unknown option '%s'\nusage: baron [-v] <source files>\n", argv[i]);
             return 1;
         }
+        else {
+            files++;
+        }
+    }
+    if (files == 0) {
+        fprintf(stderr, "usage: baron [-v] <source files>\n");
+        return 1;
     }
 
-    // One arena for everything the CLI itself keeps (section copies, rendered reports); one set of assembler
-    // arenas REUSED across all files. Reuse is safe because nothing outlives its turn: each report is printed
-    // before the next assemble supersedes the result it came from, and the sections worth keeping are copied.
+    // One arena for everything the CLI itself keeps (section copies, rendered reports); one baron_desc -
+    // arenas plus options - REUSED across all files. Reuse is safe because nothing outlives its turn: each
+    // report is printed before the next assemble supersedes the result it came from, and the sections worth
+    // keeping are copied.
     rc_arena cli = rc_arena_make_default();
-    baron_arenas arenas = baron_arenas_make();
+    baron_desc desc = {
+        .permanent = rc_arena_make_default(),
+        .per_pass  = rc_arena_make_default(),
+        .scratch   = rc_arena_make_default(),
+        .verbose   = verbose,   // -v: ask the assembler for the listing pass
+    };
     rc_array_section saved = rc_array_section_make(8, &cli);
     bool failed = false;
+    bool listed_any = false;
 
     for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            continue;   // options were handled above
+        }
         rc_str path = rc_str_from_cstr(argv[i]);
-        baron_result r = assemble_file(&arenas, path);
+        baron_result r = assemble_file(&desc, path);
 
         rc_str rep = report_render(&r, path, severity_warning, &cli);
         if (rep.len != 0) {
@@ -54,6 +72,12 @@ int main(int argc, char **argv)
         }
 
         if (r.passes != 0) {
+            // The listing goes to stdout (it is the product; diagnostics are commentary), one blank line
+            // between files so a multi-file run reads as chapters.
+            if (verbose && r.verbose.len != 0) {
+                fprintf(stdout, "%s%.*s", listed_any ? "\n" : "", (int) r.verbose.len, r.verbose.data);
+                listed_any = true;
+            }
             for (uint32_t s = 0; s < r.sections.num; s++) {
                 rc_array_section_push(&saved, section_make_copy(rc_view_section_get(r.sections, s), &cli), &cli);
             }
@@ -63,7 +87,9 @@ int main(int argc, char **argv)
         }
     }
 
-    baron_arenas_deinit(&arenas);
+    rc_arena_deinit(&desc.permanent);
+    rc_arena_deinit(&desc.per_pass);
+    rc_arena_deinit(&desc.scratch);
     rc_arena_deinit(&cli);
     return failed ? 1 : 0;
 }

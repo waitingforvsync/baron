@@ -11,7 +11,7 @@
 #include "error.h"         // error_type (the diagnostic code)
 
 
-// The assembler's public face: hand it memory (baron_arenas) and a source, get back a read-only snapshot
+// The assembler's public face: hand it memory (baron_desc) and a source, get back a read-only snapshot
 // (baron_result) of the object code, symbols and diagnostics. The internal machine that does the work -
 // the `baron` struct and its managers (scopes, sections, source files, macros, functions) - is built,
 // run, and discarded inside the entry points below; a caller never names it.
@@ -43,25 +43,34 @@ typedef struct diagnostic {
 #define RC_ARRAY_NAME diagnostic
 #include "richc/template/array.h"
 
-// The three arenas an assemble runs on, owned by the caller and passed in by pointer so the internal
-// managers can borrow them. They differ only in lifetime: `permanent` lives the whole run (scopes/symbols,
-// source text, diagnostics, and the harvested result), `per_pass` is reset at the top of every pass
-// (sections, macros, functions), and `scratch` is threaded by value per call so it self-cleans. Make them
-// once with baron_arenas_make, feed them to as many assembles as you like, and free them with
-// baron_arenas_deinit at the end. Each assemble is independent - it does not reset these between runs, so a
-// result stays valid until the NEXT assemble on the same arenas (which supersedes it).
-typedef struct baron_arenas {
+// Everything an assemble runs on: the three arenas (owned by the caller, passed by pointer so the internal
+// managers can borrow them) plus the options. The arenas differ only in lifetime: `permanent` lives the
+// whole run (scopes/symbols, source text, diagnostics, and the harvested result), `per_pass` is reset at
+// the top of every pass (sections, macros, functions), and `scratch` is threaded by value per call so it
+// self-cleans. The caller builds one directly - there is no constructor to learn:
+//
+//     baron_desc desc = {
+//         .permanent = rc_arena_make_default(),
+//         .per_pass  = rc_arena_make_default(),
+//         .scratch   = rc_arena_make_default(),
+//     };
+//
+// (reserves are virtual address space, so defaults are fine for all three), sets any options, feeds it to
+// as many assembles as it likes, and deinits the three arenas at the end. Each assemble is independent -
+// it does not reset the arenas between runs, so a result stays valid until the NEXT assemble on the same
+// desc (which supersedes it).
+// `verbose` asks for the assembly listing (baron_result.verbose): it costs one extra pass over the source,
+// so it is off unless someone wants it.
+typedef struct baron_desc {
     rc_arena permanent;
     rc_arena per_pass;
     rc_arena scratch;
-} baron_arenas;
-
-baron_arenas baron_arenas_make(void);        // permanent + scratch default reserves; per_pass 64 MB
-void         baron_arenas_deinit(baron_arenas *a);
+    bool     verbose;   // build the assembly listing (one extra pass; see baron_result.verbose)
+} baron_desc;
 
 // What an assemble produced: a read-only, position-independent snapshot. Every field borrows from the arenas
 // that were passed in, so the result is valid until the next assemble on those same arenas (or until
-// baron_arenas_deinit). passes == 0 means failure - `sections` then holds only an empty default section,
+// the arenas are freed). passes == 0 means failure - `sections` then holds only an empty default section,
 // `scopes` is an empty tree, and `diagnostics` carries the errors. `sections` is the whole object-code
 // list (index 0 is the default section; each carries its pc + code) - iterate it directly, or use
 // baron_result_code for the default section's bytes alone. `scopes` is a read-only view of the resolved
@@ -74,12 +83,19 @@ void         baron_arenas_deinit(baron_arenas *a);
 // carries a cursor no source was ever registered for.
 // Lifetimes differ by field: `sections` borrow from the per_pass arena and are superseded by the next
 // assemble on the same arenas; `diagnostics`, `scopes` and `sources` are permanent-backed, so earlier
-// results' copies of those remain readable (if superseded) until baron_arenas_deinit.
+// results' copies of those remain readable (if superseded) until the desc's arenas are freed.
+// `verbose` is the assembly listing: source echoed statement by statement, emitting lines prefixed with
+// their address and (final, post-allocation) bytes. Built only when the desc asked for it
+// (baron_desc.verbose), on one extra listing pass run after zero-page allocation - which is then also the
+// pass the returned `sections` come from, so what it shows IS the output (without it, the sections are the
+// settling pass's, patched by the allocator - the same bytes either way). Same per_pass lifetime as
+// `sections`; empty when not requested or when the assemble failed.
 typedef struct baron_result {
-    uint32_t            passes;        // number of passes taken; 0 == failure
+    uint32_t            passes;        // number of passes taken (the listing pass is not counted); 0 == failure
     rc_view_section     sections;      // every object-code section (pc + code); index 0 is the default
     rc_view_diagnostic  diagnostics;   // every error + warning, in order
     rc_view_source_file sources;       // every source touched (name + text), indexed by a cursor's source
+    rc_str              verbose;       // the assembly listing text (see above); empty unless requested
     scopes_view         scopes;        // the resolved scope tree, read-only (query via the functions below)
 } baron_result;
 
@@ -96,8 +112,8 @@ value baron_result_symbol(const baron_result *r, rc_str path);
 // running passes until labels and forward references settle. Builds a fresh internal machine on `arenas`,
 // runs it, and returns the harvested snapshot; on failure the code/symbols come back empty with the errors
 // in `diagnostics`.
-baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text);
-baron_result assemble_file(baron_arenas *arenas, rc_str path);
+baron_result assemble_string(baron_desc *arenas, rc_str name, rc_str text);
+baron_result assemble_file(baron_desc *arenas, rc_str path);
 
 
 

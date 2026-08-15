@@ -585,7 +585,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     });
 }
 
-struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
+struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
                                  uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     uint32_t source = at.source;
@@ -730,6 +730,8 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
     // Record this instruction into the ZP IR (final active pass, feature on) for the CFG + liveness passes.
     record_insn(b, at, scope, section, flags, mode, cell, arg, operand_base, insn_pc);
 
+    uint32_t code0 = sections_code(&b->sections, section).num;   // where this instruction's bytes begin
+
     sections_emit_u8(&b->sections, section, (uint8_t)(cell & 0xFF));
 
     uint32_t width = mode_operand_bytes(mode);
@@ -765,6 +767,8 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor at,
         }
         sections_emit_u16(&b->sections, section, (uint16_t)(arg.value & 0xFFFF));
     }
+
+    verbose_code_line(b, flags, stmt, after, section, insn_pc, code0);
 
     // The separator follows; carry forward whether the operand was a forward reference.
     parse_result r = require_separator(b, cursor_at(at, after));

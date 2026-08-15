@@ -175,7 +175,9 @@ typedef struct parse_result parse_result;
 typedef struct parse_flags parse_flags;
 typedef struct cursor cursor;
 typedef struct lexeme_keyword {
-    parse_result (*handle)(baron *b, cursor at, uint32_t scope, uint32_t section,
+    // `stmt` is the statement's true start (before the keyword token itself); `at` is just past it.
+    // Handlers that echo source into the verbose listing slice from stmt, everyone else ignores it.
+    parse_result (*handle)(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section,
                            parse_flags flags, rc_arena scratch);
 } lexeme_keyword;
 

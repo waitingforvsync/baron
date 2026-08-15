@@ -116,27 +116,33 @@ RC_TEST(report, line_col_from_offset)
 }
 
 RC_TEST_GROUP_DATA(report) {
-    baron_arenas arenas;
+    baron_desc desc;
     baron_result r;
 };
 
 RC_TEST_GROUP_INIT(report, fix)
 {
-    fix->arenas = baron_arenas_make();
+    fix->desc = (baron_desc) {
+        .permanent = rc_arena_make_default(),
+        .per_pass  = rc_arena_make_default(),
+        .scratch   = rc_arena_make_default(),
+    };
 }
 
 RC_TEST_GROUP_DEINIT(report, fix)
 {
-    baron_arenas_deinit(&fix->arenas);
+    rc_arena_deinit(&fix->desc.permanent);
+    rc_arena_deinit(&fix->desc.per_pass);
+    rc_arena_deinit(&fix->desc.scratch);
 }
 
 // Assemble a snippet under an explicit name (INCLUDE resolution peels a directory off the name, so tests
 // that include a file need a slash-free one) and stash the result for rendering.
-#define ASM(name, src) (fix->r = assemble_string(&fix->arenas, RC_STR(name), RC_STR(src)), fix->r.passes)
+#define ASM(name, src) (fix->r = assemble_string(&fix->desc, RC_STR(name), RC_STR(src)), fix->r.passes)
 
 // Render the stashed result at a threshold. The origin only shows for an unresolvable cursor, which these
 // string-based assembles never produce - the file-based test below calls report_render itself.
-#define RENDER(threshold) report_render(&fix->r, RC_STR("origin"), (threshold), &fix->arenas.permanent)
+#define RENDER(threshold) report_render(&fix->r, RC_STR("origin"), (threshold), &fix->desc.permanent)
 
 RC_TEST_STEP(report, renders_error_with_location, fix)
 {
@@ -170,10 +176,10 @@ RC_TEST_STEP(report, unreadable_file_renders_from_origin, fix)
 {
     // An unreadable root file never registers a source, so its diagnostic has nowhere to point: the render
     // falls back to the origin - the path the caller knows the input by - with no line/col at all.
-    fix->r = assemble_file(&fix->arenas, RC_STR("no_such_baron_file.6502"));
+    fix->r = assemble_file(&fix->desc, RC_STR("no_such_baron_file.6502"));
     RC_CHECK(fix->r.passes, ==, 0u);
     rc_str rep = report_render(&fix->r, RC_STR("no_such_baron_file.6502"), severity_warning,
-                               &fix->arenas.permanent);
+                               &fix->desc.permanent);
     RC_CHECK(rep, ==, RC_STR("no_such_baron_file.6502: error: Could not read the source file\n"));
 }
 

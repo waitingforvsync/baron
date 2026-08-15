@@ -23,31 +23,31 @@
 // All the parse functions take the same head: the baron (its scopes / sections / source files, and
 // the current section), then the cursor `at` (source file index plus offset), the scope index, and
 // the parse flags, then scratch by value. Each fetches its source rc_str from b->source_files at the top.
-static parse_result handle_skip(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_align(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto_n(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_equb(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_equw(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_equd(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_for(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_include(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_macro(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch);
-static parse_result handle_function(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto1(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto2(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_equb(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_equw(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_open_brace(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch);
+static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_reserved_constant(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -107,6 +107,101 @@ void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, u
     if (flags.final && flags.active) {
         baron_warning(b, code, at, severity);
     }
+}
+
+
+// ---- the verbose listing ----
+
+// Column layout: "  0900  AD 34 12        LDA magic" - a two-space margin, four hex digits of address,
+// two spaces, a byte field wide enough for four "XX " triplets plus a truncation ellipsis, then the
+// statement's source text. Everything hangs off these two numbers.
+enum {
+    verbose_max_bytes  = 4,    // hex bytes shown before the dump is truncated with "..."
+    verbose_byte_field = 16,   // the byte field's total width including the gap before the source text
+};
+
+// Echo the statement's source [stmt.pos, end_pos) into the listing. Leading blanks are trimmed (a
+// statement after a same-line label starts on the space that followed the name); everything else is
+// kept verbatim, because relating what was WRITTEN to what assembled is the listing's whole point.
+// Only a list literal may legally span lines, so a span containing a newline is cut at the first one
+// and finished with an ellipsis.
+static void verbose_source(baron *b, cursor stmt, uint32_t end_pos)
+{
+    rc_str text = source_files_text(&b->source_files, stmt.source);
+    uint32_t begin = stmt.pos;
+    while (begin < end_pos && (text.data[begin] == ' ' || text.data[begin] == '\t')) {
+        begin++;
+    }
+    uint32_t end = begin;
+    while (end < end_pos && text.data[end] != '\n') {
+        end++;
+    }
+    bool cut = end < end_pos;
+    if (cut) {
+        // A multi-line literal's first line may end in blanks (or a CR); tidy them before the ellipsis.
+        while (end > begin && (text.data[end - 1] == ' ' || text.data[end - 1] == '\t' ||
+                               text.data[end - 1] == '\r')) {
+            end--;
+        }
+    }
+    rc_mstr_append(&b->verbose, rc_str_substr(text, begin, end - begin), b->per_pass);
+    if (cut) {
+        rc_mstr_append(&b->verbose, RC_STR("..."), b->per_pass);
+    }
+    rc_mstr_append_char(&b->verbose, '\n', b->per_pass);
+}
+
+// The listing gate mirrors semantic_error's: only the listing pass of a live branch leaves a trace.
+static bool verbose_on(parse_flags flags)
+{
+    return flags.listing && flags.active;
+}
+
+void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
+                       uint32_t section, uint32_t pc, uint32_t code_begin)
+{
+    if (!verbose_on(flags)) {
+        return;
+    }
+    rc_mstr_append(&b->verbose, RC_STR("  "), b->per_pass);
+    rc_mstr_append_hex16(&b->verbose, (uint16_t) pc, b->per_pass);
+    rc_mstr_append(&b->verbose, RC_STR("  "), b->per_pass);
+
+    // The bytes are read back from the section rather than passed in: this runs on the listing pass,
+    // after zero-page allocation, so what sits there IS the final output.
+    rc_view_bytes code = sections_code(&b->sections, section);
+    uint32_t num = code.num - code_begin;
+    uint32_t shown = num > verbose_max_bytes ? verbose_max_bytes : num;
+    uint32_t width = 0;
+    for (uint32_t i = 0; i < shown; i++) {
+        if (i > 0) {
+            rc_mstr_append_char(&b->verbose, ' ', b->per_pass);
+        }
+        rc_mstr_append_hex8(&b->verbose, rc_view_bytes_get(code, code_begin + i), b->per_pass);
+        width += (i > 0) ? 3 : 2;
+    }
+    if (num > verbose_max_bytes) {
+        rc_mstr_append(&b->verbose, RC_STR("..."), b->per_pass);
+        width += 3;
+    }
+    rc_mstr_append_n(&b->verbose, ' ', verbose_byte_field - width, b->per_pass);
+    verbose_source(b, stmt, end_pos);
+}
+
+void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
+                       uint32_t pc, bool margin)
+{
+    if (!verbose_on(flags)) {
+        return;
+    }
+    if (!margin) {
+        // An address but no bytes: the line marks where something lands (a macro expansion, an
+        // included file, a section boundary) - the bytes belong to the statements that follow.
+        rc_mstr_append(&b->verbose, RC_STR("  "), b->per_pass);
+        rc_mstr_append_hex16(&b->verbose, (uint16_t) pc, b->per_pass);
+        rc_mstr_append_n(&b->verbose, ' ', 2 + verbose_byte_field, b->per_pass);
+    }
+    verbose_source(b, stmt, end_pos);
 }
 
 
@@ -331,13 +426,16 @@ static parse_result fold(parse_result r, parse_result sub)
 
 // SKIP n - pad the object code with n zero bytes (advancing pc by n). A negative count would
 // rewind the pointer, which we cannot do; the layout-dependent check is deferred to the final pass.
-static parse_result handle_skip(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
     expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
+
+    uint32_t pc0   = sections_pc(&b->sections, section);
+    uint32_t code0 = sections_code(&b->sections, section).num;
 
     bool unresolved = false;
     if (flags.active) {
@@ -359,6 +457,7 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, uint32_t se
                 break;
         }
     }
+    verbose_code_line(b, flags, stmt, e.next, section, pc0, code0);
 
     parse_result r = require_separator(b, cursor_at(at, e.next));
     r.unresolved = unresolved;
@@ -367,13 +466,16 @@ static parse_result handle_skip(baron *b, cursor at, uint32_t scope, uint32_t se
 
 // SKIPTO addr - pad with zeroes until pc reaches addr. Being already past addr is an error,
 // deferred to the final pass since pc only settles once preceding forward references resolve.
-static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
     expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
+
+    uint32_t pc0   = sections_pc(&b->sections, section);
+    uint32_t code0 = sections_code(&b->sections, section).num;
 
     bool unresolved = false;
     if (flags.active) {
@@ -397,6 +499,7 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, uint32_t 
                 break;
         }
     }
+    verbose_code_line(b, flags, stmt, e.next, section, pc0, code0);
 
     parse_result r = require_separator(b, cursor_at(at, e.next));
     r.unresolved = unresolved;
@@ -405,13 +508,16 @@ static parse_result handle_skipto(baron *b, cursor at, uint32_t scope, uint32_t 
 
 // ALIGN n - pad with zeroes until pc is a multiple of n. n < 1 is meaningless (and would divide
 // by zero), so it is an error; the modulo is only evaluated once we know n is sound.
-static parse_result handle_align(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
     expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
+
+    uint32_t pc0   = sections_pc(&b->sections, section);
+    uint32_t code0 = sections_code(&b->sections, section).num;
 
     bool unresolved = false;
     if (flags.active) {
@@ -437,6 +543,7 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, uint32_t s
                 break;
         }
     }
+    verbose_code_line(b, flags, stmt, e.next, section, pc0, code0);
 
     parse_result r = require_separator(b, cursor_at(at, e.next));
     r.unresolved = unresolved;
@@ -453,7 +560,7 @@ static parse_result handle_align(baron *b, cursor at, uint32_t scope, uint32_t s
 // each other; only a control transfer that names a label crosses between them). A SECTION does NOT open a
 // naming scope - labels inside bind in the enclosing scope, exactly as an IF body does. A dead branch parses
 // the whole block for its extent but creates nothing and emits nothing.
-static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -539,6 +646,11 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t
         return sep;
     }
 
+    // The header line: the child's pc (its org attribute already applied above), no bytes.
+    if (child != RC_INDEX_NONE) {
+        verbose_text_line(b, flags, stmt, pos, sections_pc(&b->sections, child), false);
+    }
+
     // A dead branch has no child section: the body parses (for its extent) in the parent section, emitting
     // nothing.
     uint32_t body_section = (child != RC_INDEX_NONE) ? child : section;
@@ -554,6 +666,14 @@ static parse_result handle_section(baron *b, cursor at, uint32_t scope, uint32_t
 
     lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
     if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
+        if (child != RC_INDEX_NONE) {
+            // The ENDSECTION line carries the section's closing pc, and a blank line sets sections apart.
+            // Note the start cursor is built here: `stmt` is the SECTION statement, not this closer.
+            verbose_text_line(b, flags, cursor_at(at, body.next), cl.next, sections_pc(&b->sections, child), false);
+            if (verbose_on(flags)) {
+                rc_mstr_append_char(&b->verbose, '\n', b->per_pass);
+            }
+        }
         body.next = cl.next;
         return fold(body, require_separator(b, cursor_at(at, body.next)));
     }
@@ -603,8 +723,9 @@ static parse_result zpreserve_add(baron *b, value v, parse_flags flags, cursor a
 // presence) ENABLE the whole feature. A comma-separated list of values, each a zero-page address or a range
 // of them (the same operand shape as EQUB); every value must fall within $00-$FF. The set is global and
 // rebuilt each pass. A dead branch parses the operand but reserves nothing and does not enable.
-static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
     bool unresolved = false;
@@ -642,8 +763,9 @@ static parse_result handle_zpreserve(baron *b, cursor at, uint32_t scope, uint32
 // binding for layout to converge). ZPAUTO is meaningless without a ZPRESERVE first: we flag that, but still
 // bind the names so references do not cascade into undefined-symbol errors. A dead branch removes only the
 // binding it owns, like a dead label.
-static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
+static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
 {
+    (void) stmt;      // declarations emit nothing, so they take no line in the listing
     (void) section;   // ZPAUTO binds a symbol; the section it sits in is recorded later, at the instruction site
     (void) scratch;
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -673,22 +795,27 @@ static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, uint32_t 
             semantic_error(b, flags, error_type_zpauto_register_name, def);
         }
         else if (flags.active) {
-            symbol_status st = scopes_set_symbol(
-                &b->scopes, scope, name,
-                value_make_numeric((double) zeropage_var_placeholder), def);
+            // The listing pass leaves the binding ALONE: zeropage_finalize has already rewritten it to the
+            // allocated address, which is exactly what re-emission must see. Re-binding the placeholder here
+            // would put the un-allocated bytes back into the listing (and the output).
+            if (!flags.listing) {
+                symbol_status st = scopes_set_symbol(
+                    &b->scopes, scope, name,
+                    value_make_numeric((double) zeropage_var_placeholder), def);
 
-            if (st == symbol_status_duplicate) {
-                semantic_error(b, flags, error_type_duplicate_symbol, def);
-                cursor original = scopes_symbol_def(&b->scopes, scope, name);
-                if (!cursor_is_none(original)) {
-                    semantic_error(b, flags, error_type_original_definition, original);
+                if (st == symbol_status_duplicate) {
+                    semantic_error(b, flags, error_type_duplicate_symbol, def);
+                    cursor original = scopes_symbol_def(&b->scopes, scope, name);
+                    if (!cursor_is_none(original)) {
+                        semantic_error(b, flags, error_type_original_definition, original);
+                    }
                 }
-            }
-            else if (flags.final) {
-                // Record the vreg. Its identity is the (scope, def) pair: a macro / FOR body shares one def
-                // across every instantiation, but each runs in its own child scope, so each instance becomes a
-                // distinct variable here - exactly as two sibling blocks declaring the same name would.
-                zeropage_add_var(&b->zeropage, name, scope, width, def);
+                else if (flags.final) {
+                    // Record the vreg. Its identity is the (scope, def) pair: a macro / FOR body shares one def
+                    // across every instantiation, but each runs in its own child scope, so each instance becomes
+                    // a distinct variable here - exactly as two sibling blocks declaring the same name would.
+                    zeropage_add_var(&b->zeropage, name, scope, width, def);
+                }
             }
         }
         else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
@@ -704,20 +831,20 @@ static parse_result handle_zpauto(baron *b, cursor at, uint32_t scope, uint32_t 
     }
 }
 
-static parse_result handle_zpauto1(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpauto1(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_zpauto(b, at, scope, section, flags, 1, scratch);
+    return handle_zpauto(b, stmt, at, scope, section, flags, 1, scratch);
 }
-static parse_result handle_zpauto2(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpauto2(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_zpauto(b, at, scope, section, flags, 2, scratch);
+    return handle_zpauto(b, stmt, at, scope, section, flags, 2, scratch);
 }
 
 // ZPAUTO <count>, <names> - the generic form: variables <count> bytes wide (a table or struct), of which
 // ZPAUTO1 / ZPAUTO2 are the 1- and 2-byte sugar. The count is a constant expression, evaluated here (a
 // forward reference defers a pass, like any operand); it must land in 1..256 (the zero page). Then the
 // name list is parsed by the shared worker, exactly as the fixed-width forms do.
-static parse_result handle_zpauto_n(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -750,7 +877,7 @@ static parse_result handle_zpauto_n(baron *b, cursor at, uint32_t scope, uint32_
         width = (uint16_t) arg.value;
     }
 
-    parse_result r = handle_zpauto(b, cursor_at(at, comma.next), scope, section, flags, width, scratch);
+    parse_result r = handle_zpauto(b, stmt, cursor_at(at, comma.next), scope, section, flags, width, scratch);
     r.unresolved = r.unresolved || unresolved;
     return r;
 }
@@ -761,8 +888,9 @@ static parse_result handle_zpauto_n(baron *b, cursor at, uint32_t scope, uint32_
 // pc lets zeropage_finalize prune that one edge. It is TRUSTED - a wrong UNREACHABLE (a fall-through that
 // really can happen) is one of the few ways to defeat the certainty contract, but it is the programmer's
 // explicit promise. Only meaningful on the final pass, and only with the feature enabled.
-static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    (void) stmt;
     (void) scope;
     (void) scratch;
     if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
@@ -781,9 +909,10 @@ static parse_result handle_unreachable(baron *b, cursor at, uint32_t scope, uint
 // only when that instruction's flow is `expect_flow`, so a stray CANCALL after a JMP (or vice versa) binds to
 // nothing rather than mis-annotating. Only the final pass records instructions, so only then is there a site;
 // the settling passes still parse the list so the statement stays well-formed. A forward target defers.
-static parse_result handle_can_targets(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
+static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
                                        zp_flow expect_flow, zp_cflow_kind kind, rc_arena scratch)
 {
+    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
     bool unresolved = false;
@@ -840,18 +969,18 @@ static parse_result handle_can_targets(baron *b, cursor at, uint32_t scope, uint
 // self-modified operand, or a dispatch the analysis cannot follow). Without it, such a call has an unknown
 // footprint and a value held live across it is refused (error_type_zpauto_across_call); with it, the callee
 // footprint is bounded by the union of the named routines. TRUSTED, like UNREACHABLE.
-static parse_result handle_cancall(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, at, scope, section, flags, zp_flow_call, zp_cflow_cancall, scratch);
+    return handle_can_targets(b, stmt, at, scope, section, flags, zp_flow_call, zp_cflow_cancall, scratch);
 }
 
 // CANJUMP <targets> - the programmer declares the possible destinations of the computed / indirect JMP
 // immediately preceding it (a jump table). Without it, the jump reaches code the CFG cannot follow and, with
 // variables live, is refused (error_type_zpauto_computed_flow); with it, the CFG wires every named target as a
 // real successor edge, so liveness follows control to each one. TRUSTED, like UNREACHABLE.
-static parse_result handle_canjump(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, at, scope, section, flags, zp_flow_jump, zp_cflow_canjump, scratch);
+    return handle_can_targets(b, stmt, at, scope, section, flags, zp_flow_jump, zp_cflow_canjump, scratch);
 }
 
 // Emit `bits` as `width` little-endian bytes into the current section.
@@ -915,11 +1044,13 @@ static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags f
 
 // EQUB / EQUS (width 1) / EQUW (2) / EQUD (4): a comma-separated list of values, each emitted as `width`-byte
 // little-endian units (see emit_data). All take numbers, strings, ranges and lists alike; EQUS is an EQUB alias.
-static parse_result handle_equ(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t width, rc_arena scratch)
+static parse_result handle_equ(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t width, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
     bool unresolved = false;
+    uint32_t pc0   = sections_pc(&b->sections, section);
+    uint32_t code0 = sections_code(&b->sections, section).num;
 
     while (true) {
         expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
@@ -939,6 +1070,8 @@ static parse_result handle_equ(baron *b, cursor at, uint32_t scope, uint32_t sec
             continue;   // another value follows
         }
 
+        verbose_code_line(b, flags, stmt, e.next, section, pc0, code0);   // one line spans the whole list
+
         parse_result r = require_separator(b, cursor_at(at, e.next));
         r.unresolved = unresolved;
         return r;   // end of the list: a terminator or '}'
@@ -946,20 +1079,20 @@ static parse_result handle_equ(baron *b, cursor at, uint32_t scope, uint32_t sec
 }
 
 // The width-specialised entry points named in the statement table. EQUS is an alias of EQUB.
-static parse_result handle_equb(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_equb(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_equ(b, at, scope, section, flags, 1, scratch);
+    return handle_equ(b, stmt, at, scope, section, flags, 1, scratch);
 }
-static parse_result handle_equw(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_equw(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_equ(b, at, scope, section, flags, 2, scratch);
+    return handle_equ(b, stmt, at, scope, section, flags, 2, scratch);
 }
-static parse_result handle_equd(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_equ(b, at, scope, section, flags, 4, scratch);
+    return handle_equ(b, stmt, at, scope, section, flags, 4, scratch);
 }
 
-static parse_result handle_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1016,6 +1149,8 @@ static parse_result handle_label(baron *b, cursor at, uint32_t scope, uint32_t s
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
     }
 
+    verbose_text_line(b, flags, stmt, nm.next, 0, true);   // ".name" at the margin (never its scope's braces)
+
     // What follows decides the label's shape. A '{' - optionally one separator away, so it may sit
     // on the next line - makes the label name a scope. Anything else is not the label's to parse: we
     // drop back to the parent loop, which takes the next token as its own statement (or, on a '}',
@@ -1067,7 +1202,7 @@ static rc_mstr anon_for_scope_key(char *storage, uint32_t cap, cursor at, uint32
 // branch, and defers a forward @+ exactly as a named label would. Its cursor is unique per '.@', so it can
 // never be a duplicate. A '.@' is a whole statement with nothing following it, so we consume just the token
 // and leave the rest of the line to the statement loop.
-static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scratch;
     char storage[64];
@@ -1088,11 +1223,13 @@ static parse_result handle_local_label(baron *b, cursor at, uint32_t scope, uint
         // position, so the guard is a no-op here, but we keep it uniform with the named-label / assignment cases.
         r.changed = scopes_remove_symbol(&b->scopes, scope, key.view);
     }
+    verbose_text_line(b, flags, stmt, at.pos, 0, true);   // the ".@" token is the whole statement
     return r;
 }
 
-static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_open_brace(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    (void) stmt;
     // The just-passed pos gives the anonymous scope a stable per-pass identity, so re-walking it
     // on a later pass keeps the same bindings.
     char storage[64];
@@ -1109,7 +1246,7 @@ static parse_result handle_open_brace(baron *b, cursor at, uint32_t scope, uint3
 // known FALSE. At most one is live - and neither when the condition cannot yet be evaluated, which
 // owes another pass (a hard error on the final pass). Entered just past the IF - or, via the
 // recursion, the ELIF - at the condition.
-static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1153,7 +1290,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t sect
             cursor_at(at, acc.next),
             scope,
             section,
-            (parse_flags) {flags.final, flags.active && if_cond},
+            (parse_flags) {flags.final, flags.active && if_cond, flags.listing},
             scratch
         )
     );
@@ -1170,10 +1307,11 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t sect
             acc,
             handle_if(
                 b,
+                stmt,   // the chain shares the IF statement's start (unused - IF lines are not listed)
                 cursor_at(at, t.next),
                 scope,
                 section,
-                (parse_flags) {flags.final, flags.active && else_cond},
+                (parse_flags) {flags.final, flags.active && else_cond, flags.listing},
                 scratch
             )
         );
@@ -1195,7 +1333,7 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t sect
                 cursor_at(at, sep.next),
                 scope,
                 section,
-                (parse_flags) {flags.final, flags.active && else_cond},
+                (parse_flags) {flags.final, flags.active && else_cond, flags.listing},
                 scratch
             )
         );
@@ -1229,8 +1367,9 @@ static parse_result handle_if(baron *b, cursor at, uint32_t scope, uint32_t sect
 
 // `name` is the identifier and `pos` sits just past it; an assignment defines a symbol and
 // emits nothing.
-static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_str name, rc_arena scratch)
+static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_str name, rc_arena scratch)
 {
+    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     lexer_result eq = lexer_next(src, at.pos, assign_tokens);
@@ -1293,8 +1432,9 @@ static parse_result handle_assignment(baron *b, cursor at, uint32_t scope, uint3
 // A sequence whose count is not yet known (a forward reference) does the same and forces another pass;
 // on the final pass that is a hard undefined_symbol. Like IF, FOR opens no scope of its own for the loop
 // control (only the per-iteration body scopes) and must close (NEXT) inside the scope it began in.
-static parse_result handle_for(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     // The loop variable: a bare identifier (a dotted path cannot be a binding target). A malformed
@@ -1366,7 +1506,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, uint32_t sec
             scopes_set_symbol(&b->scopes, child, name, rc_view_value_get(items, i), at);
         }
         acc = fold(acc, parse_block(b, cursor_at(at, body_start), child, section,
-                                    (parse_flags) {flags.final, active_body}, scratch));
+                                    (parse_flags) {flags.final, active_body, flags.listing}, scratch));
     }
     if (acc.fatal) {
         return acc;
@@ -1388,7 +1528,7 @@ static parse_result handle_for(baron *b, cursor at, uint32_t scope, uint32_t sec
 // section at the current pc and its symbols bind into the current scope (no scope of its own). We re-parse
 // the included file every pass, exactly like the rest of the statement stream, so forward references cross
 // the boundary freely. The filename is resolved relative to THIS file's directory (see file_path_resolve).
-static parse_result handle_include(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
     // The filename is a string operand, evaluated on the spot - we load the file this very pass, so a
@@ -1414,6 +1554,8 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, uint32_t
                     semantic_error(b, flags, error_type_source_load, cursor_at(at, at.pos));
                 }
                 else {
+                    // The INCLUDE line itself: address, no bytes - the spliced file's lines follow.
+                    verbose_text_line(b, flags, stmt, e.next, sections_pc(&b->sections, section), false);
                     uint32_t errors_before = baron_error_count(b);
                     b->include_depth++;
                     pulled = parse_file(b, (cursor) {.source = inc_source, .pos = 0}, scope, section, flags, scratch);
@@ -1459,20 +1601,25 @@ static parse_result handle_include(baron *b, cursor at, uint32_t scope, uint32_t
 // filename is a string operand resolved relative to the includer, exactly like INCLUDE; a forward-referenced
 // name defers like a forward address. A missing / unreadable file is FATAL (there is no sensible recovery - the
 // output would be the wrong size), so it unwinds the whole assemble rather than accumulating.
-static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
 
+    uint32_t pc0   = sections_pc(&b->sections, section);
+    uint32_t code0 = sections_code(&b->sections, section).num;
+
     parse_result pulled = {0};
     if (flags.active) {
         if (value_is_string(e.value)) {
             rc_str base = source_files_name(&b->source_files, at.source);
             rc_str path = file_path_resolve(base, e.value.string, &scratch);
-            if (flags.final) {
+            if (flags.final || flags.listing) {
                 // Final pass: load the file and emit its bytes for real (one byte at a time, via emit_data).
+                // The listing pass repeats this - its sections are the ones the result carries, so it must
+                // hold the real bytes too (and the listing's hex dump reads them back).
                 rc_file_load_binary_result f = rc_file_load_binary(path, 0, &scratch);
                 if (f.error != RC_FILE_OK) {
                     return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
@@ -1503,6 +1650,7 @@ static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, uint32_t 
             semantic_error(b, flags, error_type_expected_filename, cursor_at(at, at.pos));
         }
     }
+    verbose_code_line(b, flags, stmt, e.next, section, pc0, code0);
 
     return fold(pulled, require_separator(b, cursor_at(at, e.next)));
 }
@@ -1516,8 +1664,9 @@ static parse_result handle_incbin(baron *b, cursor at, uint32_t scope, uint32_t 
 // cursor and only ever PARSED at invocation; here we scan it inactively (the trick FOR uses to locate NEXT),
 // which finds ENDMACRO through the real parser - handling multi-line list literals and nested IF/FOR/{} -
 // without expanding anything. The definition emits nothing itself.
-static parse_result handle_macro(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     // The name, from the STATIC base table (so an already-defined macro name reads as a plain identifier
@@ -1580,7 +1729,7 @@ static parse_result handle_macro(baron *b, cursor at, uint32_t scope, uint32_t s
 
     // Scan the body inactively to find its ENDMACRO. Nested calls consume their arguments but do not expand
     // (see handle_macro_invocation), so the scan never recurses and always stops at this macro's ENDMACRO.
-    parse_result scan = parse_block(b, body, scope, section, (parse_flags) {flags.final, false}, scratch);
+    parse_result scan = parse_block(b, body, scope, section, (parse_flags) {flags.final, false, flags.listing}, scratch);
     if (scan.fatal) {
         return scan;   // a structurally broken body aborts, reported at the definition
     }
@@ -1614,8 +1763,9 @@ static const token_table func_paren_tokens = RC_VIEW(func_paren_entries);
 // STATEMENT (it emits nothing); the body's value semantics live in the evaluator (expression.c), which we
 // call here only to locate the top-level '=' return and learn whether this is a real body or a forward
 // declaration (an empty body plus an empty return expression).
-static parse_result handle_function(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     // The name, from the STATIC base table (so an already-defined function name reads as a plain identifier
@@ -1749,7 +1899,7 @@ static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_sig
 // scope with the arguments bound as symbols. Mirrors handle_for's body re-walk and handle_include's error
 // breadcrumb. An inactive call consumes its arguments but expands nothing - which is what makes a recursive
 // call terminate once its base-case branch goes inactive.
-static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch)
+static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     macro *m = macros_at(&b->macros, macro_index);
@@ -1820,6 +1970,9 @@ static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope,
         }
     }
 
+    // The invocation itself: address, no bytes - the expansion's own lines follow with the bytes.
+    verbose_text_line(b, flags, stmt, args_end, sections_pc(&b->sections, section), false);
+
     // Expand the body in the child scope. Its errors point at the definition (parsed in place); if it raised
     // any, drop an "expanded from here" breadcrumb at the call site - the handle_include idiom.
     uint32_t errors_before = baron_error_count(b);
@@ -1852,8 +2005,9 @@ static parse_result handle_macro_invocation(baron *b, cursor at, uint32_t scope,
 // TRUE / FALSE / PI are expression constants, reserved so that a name always resolves to the constant.
 // Meeting one at statement start is someone assigning to it (pi = 5) or otherwise misusing it as a name -
 // a fatal error, the same way a name that clashes with a mnemonic is rejected.
-static parse_result handle_reserved_constant(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_reserved_constant(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    (void) stmt;
     (void) scope;
     (void) section;
     (void) flags;
@@ -1869,15 +2023,17 @@ static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uin
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lr = lexer_next(src, at.pos, statement_tokens(b));
 
+    // `at` is the statement's true start; the handlers get it as `stmt` (for source echoing) alongside
+    // the post-token cursor they parse from.
     switch (lr.token.type) {
         case lexeme_type_opcode:
-            return opcode_parse(b, (mnemonic)lr.token.opcode.id, cursor_at(at, lr.next), scope, section, flags, scratch);
+            return opcode_parse(b, (mnemonic)lr.token.opcode.id, at, cursor_at(at, lr.next), scope, section, flags, scratch);
         case lexeme_type_keyword:
-            return lr.token.keyword.handle(b, cursor_at(at, lr.next), scope, section, flags, scratch);
+            return lr.token.keyword.handle(b, at, cursor_at(at, lr.next), scope, section, flags, scratch);
         case lexeme_type_macro:
-            return handle_macro_invocation(b, cursor_at(at, lr.next), scope, section, flags, lr.token.macro.index, scratch);
+            return handle_macro_invocation(b, at, cursor_at(at, lr.next), scope, section, flags, lr.token.macro.index, scratch);
         case lexeme_type_identifier:
-            return handle_assignment(b, cursor_at(at, lr.next), scope, section, flags, lr.token.identifier.name, scratch);
+            return handle_assignment(b, at, cursor_at(at, lr.next), scope, section, flags, lr.token.identifier.name, scratch);
         default:
             return syntax_error(b, error_type_unexpected_token, at);
     }
@@ -1971,7 +2127,12 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     // token tables are reseeded from their static bases, with room for per-name tokens).
     rc_arena_reset(b->per_pass);
     sections_reset(&b->sections);
-    zeropage_reset(&b->zeropage);            // ZPRESERVE re-runs this pass and refills the (permanent) set
+    if (!flags.listing) {
+        // ZPRESERVE re-runs this pass and refills the (permanent) set. The LISTING pass leaves the whole
+        // zeropage subsystem alone: allocation already ran, and the final pass's IR/vars stay readable
+        // (everything that appends to them is final-gated; ZPRESERVE re-marking its bits is idempotent).
+        zeropage_reset(&b->zeropage);
+    }
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
     b->function_depth  = 0;                  // ditto for FUNCTION recursion (balanced by the evaluator)
@@ -1979,6 +2140,9 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 
     macros_reset(&b->macros, base_statement_tokens, 128);
     functions_reset(&b->functions, expression_operand_base(), 128);
+
+    // Only the listing pass writes the verbose buffer; every other pass carries the empty handle.
+    b->verbose = flags.listing ? rc_mstr_make(4096, b->per_pass) : (rc_mstr) {0};
 
     const uint32_t scope   = 0;
     const uint32_t section = sections_default;   // each pass starts in the default section (index 0)
@@ -2169,12 +2333,14 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     }
 }
 
-// Discard the half-built outputs - object code and symbols - so a failed assemble hands back nothing
-// to consume; only the diagnostics remain. Returns 0, the failure signal the entry points hand back.
+// Discard the half-built outputs - object code, symbols and the listing - so a failed assemble hands
+// back nothing to consume; only the diagnostics remain. Returns 0, the failure signal the entry points
+// hand back.
 static uint32_t assemble_failed(baron *b)
 {
     sections_reset(&b->sections);   // a fresh, empty default section - so a failed read hands back no code
     scopes_reset(&b->scopes);
+    b->verbose = (rc_mstr) {0};     // usually already empty (only the listing pass writes it)
     return 0;
 }
 
@@ -2207,6 +2373,18 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             if (baron_has_errors(b)) {
                 return assemble_failed(b);
             }
+            // When asked for (baron_desc.verbose), one last LISTING pass, now that the ZPAUTO symbols hold
+            // their allocated addresses: re-emission reproduces the final output (so the sections the result
+            // carries then come from HERE - byte-identical to the patched settling pass's) and builds the
+            // verbose listing beside it, with the true bytes in every line. It runs final=false, so nothing
+            // gated on the settling pass (diagnostics, the zeropage IR) records twice; nothing can newly fail
+            // in a converged program, but the guard costs one line.
+            if (b->want_verbose) {
+                parse_result lst = run_pass(b, source, (parse_flags) {.active = true, .listing = true}, scratch);
+                if (lst.fatal || baron_has_errors(b)) {
+                    return assemble_failed(b);
+                }
+            }
             return pass + 1;
         }
     }
@@ -2231,6 +2409,7 @@ static baron_result baron_result_make(baron *b, uint32_t passes)
         .sections    = sections_all(&b->sections),
         .diagnostics = b->diagnostics.view,
         .sources     = b->source_files.nodes.view,
+        .verbose     = b->verbose.view,
         .scopes      = scopes_view_make(&b->scopes),
     };
 }
@@ -2250,24 +2429,24 @@ value baron_result_symbol(const baron_result *r, rc_str path)
     return scopes_view_get_symbol(r->scopes, path);
 }
 
-baron_result assemble_string(baron_arenas *arenas, rc_str name, rc_str text)
+baron_result assemble_string(baron_desc *desc, rc_str name, rc_str text)
 {
-    RC_ASSERT(arenas != NULL);
-    baron b = baron_make(arenas);
+    RC_ASSERT(desc != NULL);
+    baron b = baron_make(desc);
     uint32_t source = source_files_add_string(&b.source_files, name, text);
-    return baron_result_make(&b, run_passes(&b, source, arenas->scratch));
+    return baron_result_make(&b, run_passes(&b, source, desc->scratch));
 }
 
-baron_result assemble_file(baron_arenas *arenas, rc_str path)
+baron_result assemble_file(baron_desc *desc, rc_str path)
 {
-    RC_ASSERT(arenas != NULL);
-    baron b = baron_make(arenas);
+    RC_ASSERT(desc != NULL);
+    baron b = baron_make(desc);
     uint32_t source = source_files_add_file(&b.source_files, path);
     if (source == RC_INDEX_NONE) {
         baron_error(&b, error_type_source_load, (cursor) {0});
         return baron_result_make(&b, assemble_failed(&b));   // assemble_failed clears outputs and returns 0
     }
-    return baron_result_make(&b, run_passes(&b, source, arenas->scratch));
+    return baron_result_make(&b, run_passes(&b, source, desc->scratch));
 }
 
 
@@ -2279,24 +2458,34 @@ baron_result assemble_file(baron_arenas *arenas, rc_str path)
 #include "richc/mstr.h"   // the stress test builds a big source with rc_mstr
 
 RC_TEST_GROUP_DATA(assemble) {
-    baron_arenas arenas;
+    baron_desc desc;
     baron_result r;      // the last assemble's snapshot; the helpers below read it back
 };
 
 RC_TEST_GROUP_INIT(assemble, fix)
 {
-    fix->arenas = baron_arenas_make();
+    fix->desc = (baron_desc) {
+        .permanent = rc_arena_make_default(),
+        .per_pass  = rc_arena_make_default(),
+        .scratch   = rc_arena_make_default(),
+    };
 }
 
 RC_TEST_GROUP_DEINIT(assemble, fix)
 {
-    baron_arenas_deinit(&fix->arenas);
+    rc_arena_deinit(&fix->desc.permanent);
+    rc_arena_deinit(&fix->desc.per_pass);
+    rc_arena_deinit(&fix->desc.scratch);
 }
 
 // Assemble a snippet, stash its result in fix->r, and yield the pass count (0 on failure). Each call is an
-// independent assemble on the shared arenas, so distinct snippets need no distinct names. Object code,
+// independent assemble on the shared desc, so distinct snippets need no distinct names. Object code,
 // symbols and diagnostics are then read back from fix->r via the helpers.
-#define ASM(src) (fix->r = assemble_string(&fix->arenas, RC_STR(src), RC_STR(src)), fix->r.passes)
+#define ASM(src) (fix->r = assemble_string(&fix->desc, RC_STR(src), RC_STR(src)), fix->r.passes)
+
+// The verbose listing of the last ASM - built on the listing pass, so it shows the final (post-allocation)
+// bytes. Tests compare it whole: a mis-set column or a stray line fails loudly and prints the actual text.
+#define VERB() (fix->r.verbose)
 
 // Whether a clean assemble (passes != 0) laid down exactly these bytes. `passes` is taken explicitly so a
 // call can wrap ASM directly - code_is(&fix->r, ASM(src), exp, n) - reading the freshly stashed result.
@@ -2998,14 +3187,18 @@ RC_TEST(assemble, zpauto_rw_observation)
     // The final pass records each ZPAUTO-touching instruction into the ZP IR with its read/write class,
     // attributed to the right vreg. The IR is internal (not on baron_result yet), so we build a baron
     // directly and read its zeropage. [Stage B1]
-    baron_arenas arenas = baron_arenas_make();
+    baron_desc desc = (baron_desc) {
+        .permanent = rc_arena_make_default(),
+        .per_pass  = rc_arena_make_default(),
+        .scratch   = rc_arena_make_default(),
+    };
 
     // Straight-line: STA is a write, LDA a read, INC a read-modify-write; all name the one variable (vreg 0).
     {
-        baron b = baron_make(&arenas);
+        baron b = baron_make(&desc);
         uint32_t s = source_files_add_string(&b.source_files, RC_STR("t1"),
             RC_STR("ZPRESERVE &70..&7F : ZPAUTO1 foo : STA foo : LDA foo : INC foo"));
-        run_passes(&b, s, arenas.scratch);
+        run_passes(&b, s, desc.scratch);
         RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 3u);
         RC_CHECK((int) zeropage_insn_get(&b.zeropage, 0).rw, ==, (int) vref_write);
         RC_CHECK((int) zeropage_insn_get(&b.zeropage, 1).rw, ==, (int) vref_read);
@@ -3018,10 +3211,10 @@ RC_TEST(assemble, zpauto_rw_observation)
     // A 2-byte pointer: lo (ptr) and hi (ptr+1) both attribute to the one vreg; an indirect (ptr),Y READS
     // the pointer to dereference it - even a store THROUGH it reads the pointer (the write hits the target).
     {
-        baron b = baron_make(&arenas);
+        baron b = baron_make(&desc);
         uint32_t s = source_files_add_string(&b.source_files, RC_STR("t2"),
             RC_STR("ZPRESERVE &70..&7F : ZPAUTO2 ptr : STA ptr : STA ptr+1 : LDA (ptr),Y : STA (ptr),Y"));
-        run_passes(&b, s, arenas.scratch);
+        run_passes(&b, s, desc.scratch);
         RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 4u);
         RC_CHECK((int) zeropage_insn_get(&b.zeropage, 0).rw, ==, (int) vref_write);   // STA ptr
         RC_CHECK((int) zeropage_insn_get(&b.zeropage, 1).rw, ==, (int) vref_write);   // STA ptr+1
@@ -3035,17 +3228,19 @@ RC_TEST(assemble, zpauto_rw_observation)
     // Every instruction is recorded (the CFG needs the whole stream), but an ordinary symbol or a literal
     // address in operand position attributes to NO vreg - only ZPAUTO operands do.
     {
-        baron b = baron_make(&arenas);
+        baron b = baron_make(&desc);
         uint32_t s = source_files_add_string(&b.source_files, RC_STR("t3"),
             RC_STR("ZPRESERVE &70..&7F : label = &50 : LDA label : LDA &2000 : LDA #7"));
-        run_passes(&b, s, arenas.scratch);
+        run_passes(&b, s, desc.scratch);
         RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 3u);   // all three LDAs are recorded...
         for (uint32_t i = 0; i < 3; i++) {
             RC_CHECK(zeropage_insn_get(&b.zeropage, i).vreg, ==, RC_INDEX_NONE);   // ...but touch no vreg
         }
     }
 
-    baron_arenas_deinit(&arenas);
+    rc_arena_deinit(&desc.permanent);
+    rc_arena_deinit(&desc.per_pass);
+    rc_arena_deinit(&desc.scratch);
 }
 
 RC_TEST(assemble, zpauto_liveness_end_to_end)
@@ -3054,15 +3249,19 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
     // IR straight off b.zeropage, build the CFG and run liveness, and confirm the two facts the analysis
     // exists to establish - the in/out/temp classification, and the byte-reuse (out1 reuses in1's / tmp's
     // range because their live ranges are disjoint). vreg ids follow declaration order: in1=0, tmp=1, out1=2.
-    baron_arenas arenas = baron_arenas_make();
+    baron_desc desc = (baron_desc) {
+        .permanent = rc_arena_make_default(),
+        .per_pass  = rc_arena_make_default(),
+        .scratch   = rc_arena_make_default(),
+    };
     rc_arena arena = rc_arena_make_default();     // holds the cfg + liveness result
     rc_arena scratch = rc_arena_make_default();   // distinct by-value scratch for the analysis
 
-    baron b = baron_make(&arenas);
+    baron b = baron_make(&desc);
     uint32_t s = source_files_add_string(&b.source_files, RC_STR("mul"),
         RC_STR("ZPRESERVE &70..&7F : ZPAUTO1 in1, tmp, out1\n"
                ".mul { LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS }"));
-    run_passes(&b, s, arenas.scratch);
+    run_passes(&b, s, desc.scratch);
 
     cfg g = cfg_build(zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage), zeropage_labels(&b.zeropage),
                       &arena, scratch);
@@ -3083,7 +3282,9 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
-    baron_arenas_deinit(&arenas);
+    rc_arena_deinit(&desc.permanent);
+    rc_arena_deinit(&desc.per_pass);
+    rc_arena_deinit(&desc.scratch);
 }
 
 RC_TEST_STEP(assemble, org_and_labels, fix)
@@ -3233,7 +3434,7 @@ RC_TEST_STEP(assemble, result_exposes_sources, fix)
 {
     // The result carries every source the assemble touched (root first, INCLUDEs after), so a diagnostic's
     // cursor - a source index + byte offset - is resolvable to a name and text by the caller.
-    uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("top"), RC_STR("include \"inc_child.6502\"")),
+    uint32_t passes = (fix->r = assemble_string(&fix->desc, RC_STR("top"), RC_STR("include \"inc_child.6502\"")),
                        fix->r.passes);
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK(fix->r.sources.num, ==, 2u);
@@ -3257,6 +3458,111 @@ RC_TEST_STEP(assemble, section_copies_survive_next_assemble, fix)
     RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 1), ==, 0x12u);
     RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 2), ==, 0x60u);
     rc_arena_deinit(&kept);
+}
+
+RC_TEST_STEP(assemble, listing_is_opt_in, fix)
+{
+    // Without baron_desc.verbose the listing pass never runs: the result's listing is empty and the
+    // sections are the settling pass's (patched by the allocator - the same bytes either way).
+    RC_CHECK_TRUE(ASM("lda #1 : rts") != 0);
+    RC_CHECK(VERB().len, ==, 0u);
+    RC_CHECK_TRUE(code_is(&fix->r, fix->r.passes, (uint8_t[]){0xA9, 0x01, 0x60}, 3));
+}
+
+RC_TEST_STEP(assemble, listing_full_shape, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // The whole listing format in one program: section framing (address, no bytes, blank line after the
+    // close), labels at the margin, instructions and data with address + hex + verbatim source, EQUS
+    // truncated after four bytes - and the ZPAUTO crown jewel: `sta var` shows the ALLOCATED byte (&70),
+    // not the placeholder, because the listing pass runs after allocation has rewritten the symbols.
+    RC_CHECK_TRUE(ASM("section main, org=&900\nzpreserve &70..&7F\nzpauto1 var\n.label\nlda #&12\n"
+                      "sta var\n.inner\nldx #1\nlda var\nrts\nequs \"ABCDEFGH\"\nequb 0\nendsection\nx = 5") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0900                  section main, org=&900\n"
+                    ".label\n"
+                    "  0900  A9 12           lda #&12\n"
+                    "  0902  85 70           sta var\n"
+                    ".inner\n"
+                    "  0904  A2 01           ldx #1\n"
+                    "  0906  A5 70           lda var\n"
+                    "  0908  60              rts\n"
+                    "  0909  41 42 43 44...  equs \"ABCDEFGH\"\n"
+                    "  0911  00              equb 0\n"
+                    "  0912                  endsection\n"
+                    "\n"));
+}
+
+RC_TEST_STEP(assemble, listing_macro_expansion, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // The invocation line carries the address and an empty byte field; the expansion's lines follow with
+    // the bytes, echoing the BODY's source (parameter names and all).
+    RC_CHECK_TRUE(ASM("macro add8 addr\nclc\nlda addr\nendmacro\nadd8 &70") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000                  add8 &70\n"
+                    "  0000  18              clc\n"
+                    "  0001  A5 70           lda addr\n"));
+}
+
+RC_TEST_STEP(assemble, listing_include_child, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // The INCLUDE line, then the child's lines echoed from the CHILD's source (which is also the left-trim
+    // case: inc_child.6502 is `.child ldx #2` on one line, so the ldx statement's span leads with a space).
+    // Named explicitly ("top") because ASM's name-is-the-text would grow a bogus directory from the slashes.
+    fix->r = assemble_string(&fix->desc, RC_STR("top"), RC_STR("include \"inc_child.6502\""));
+    RC_CHECK_TRUE(fix->r.passes != 0);
+    RC_CHECK(fix->r.verbose, ==,
+             RC_STR("  0000                  include \"inc_child.6502\"\n"
+                    ".child\n"
+                    "  0000  A2 02           ldx #2\n"));
+}
+
+RC_TEST_STEP(assemble, listing_for_repeats, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // A FOR body lists once per iteration - that is what actually assembled.
+    RC_CHECK_TRUE(ASM("for i = 1..3\nequb i\nnext") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000  01              equb i\n"
+                    "  0001  02              equb i\n"
+                    "  0002  03              equb i\n"));
+}
+
+RC_TEST_STEP(assemble, listing_dead_branch_and_failure, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // A dead branch leaves no trace (the gate is listing && active), and a failed assemble has no listing
+    // at all.
+    RC_CHECK_TRUE(ASM("if false\nlda #1\nendif\nrts") != 0);
+    RC_CHECK(VERB(), ==, RC_STR("  0000  60              rts\n"));
+
+    RC_CHECK(ASM("lda"), ==, 0u);
+    RC_CHECK(VERB().len, ==, 0u);
+}
+
+RC_TEST_STEP(assemble, listing_local_label, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    RC_CHECK_TRUE(ASM("ldx #2\n.@\ndex\nbne @-") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000  A2 02           ldx #2\n"
+                    ".@\n"
+                    "  0002  CA              dex\n"
+                    "  0003  D0 FD           bne @-\n"));
+}
+
+RC_TEST_STEP(assemble, listing_skip_and_multiline, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // SKIP's zero padding truncates like any long dump; a multi-line list literal echoes only its first
+    // line, closed with an ellipsis (the BYTES are all there - only the source echo is cut).
+    RC_CHECK_TRUE(ASM("skip 8") != 0);
+    RC_CHECK(VERB(), ==, RC_STR("  0000  00 00 00 00...  skip 8\n"));
+
+    RC_CHECK_TRUE(ASM("equb {1,\n2}") != 0);
+    RC_CHECK(VERB(), ==, RC_STR("  0000  01 02           equb {1,...\n"));
 }
 
 RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)
@@ -3295,10 +3601,10 @@ RC_TEST_STEP(assemble, errors, fix)
 RC_TEST_STEP(assemble, from_file, fix)
 {
     // src/test/sample.6502 (copied next to the tests by CMake) holds "LDA #1 : RTS".
-    uint32_t passes = (fix->r = assemble_file(&fix->arenas, RC_STR("sample.6502"))).passes;
+    uint32_t passes = (fix->r = assemble_file(&fix->desc, RC_STR("sample.6502"))).passes;
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x01, 0x60}, 3));
 
-    RC_CHECK_TRUE((fix->r = assemble_file(&fix->arenas, RC_STR("no_such_file.6502")),
+    RC_CHECK_TRUE((fix->r = assemble_file(&fix->desc, RC_STR("no_such_file.6502")),
                    first_error(&fix->r)) == error_type_source_load);
 }
 
@@ -3728,7 +4034,7 @@ RC_TEST_STEP(assemble, random, fix)
 // INCLUDE tests give the top source an explicit slash-free name: ASM names a source after its own text,
 // which would drop the include's own slashes into the cache key and wreck the relative-path peel. Like ASM,
 // this stashes the result in fix->r and yields the pass count.
-#define INC(src) (fix->r = assemble_string(&fix->arenas, RC_STR("top"), RC_STR(src)), fix->r.passes)
+#define INC(src) (fix->r = assemble_string(&fix->desc, RC_STR("top"), RC_STR(src)), fix->r.passes)
 
 RC_TEST_STEP(assemble, include_splices_file, fix)
 {
@@ -3777,7 +4083,7 @@ RC_TEST_STEP(assemble, include_forward_declared_filename, fix)
     uint32_t passes = INC("include fname : fname = \"inc_child.6502\"");
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA2, 0x02}, 2));
     // A name that never binds (nothing defines it) is an undefined symbol at the INCLUDE, not a hang.
-    RC_CHECK((fix->r = assemble_string(&fix->arenas, RC_STR("top2"), RC_STR("include missing_name"))).passes, ==, 0u);
+    RC_CHECK((fix->r = assemble_string(&fix->desc, RC_STR("top2"), RC_STR("include missing_name"))).passes, ==, 0u);
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_undefined_symbol));
 }
 
@@ -3792,7 +4098,7 @@ RC_TEST_STEP(assemble, include_in_dead_branch_is_skipped, fix)
 RC_TEST_STEP(assemble, include_cycle_is_caught, fix)
 {
     // inc_cycle.6502 includes itself; the depth cap stops the recursion rather than blowing the C stack.
-    uint32_t passes = (fix->r = assemble_file(&fix->arenas, RC_STR("inc_cycle.6502"))).passes;
+    uint32_t passes = (fix->r = assemble_file(&fix->desc, RC_STR("inc_cycle.6502"))).passes;
     RC_CHECK(passes, ==, 0u);
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_include_too_deep));
 }
@@ -3805,7 +4111,7 @@ RC_TEST_STEP(assemble, incbin_splices_file_bytes, fix)
     RC_CHECK_TRUE(rc_file_save_binary(RC_STR("blob.bin"),
                   (rc_view_bytes) {.data = blob, .num = (uint32_t) sizeof blob}) == RC_FILE_OK);
 
-    uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("t"),
+    uint32_t passes = (fix->r = assemble_string(&fix->desc, RC_STR("t"),
                           RC_STR("incbin \"blob.bin\" : .after"))).passes;   // default section, org 0
     RC_CHECK_TRUE(code_is(&fix->r, passes, blob, (uint32_t) sizeof blob));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("after")),
@@ -4094,7 +4400,7 @@ RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
     }
     rc_mstr_append(&src, RC_STR("last = &BEEF\n"), &build);
 
-    uint32_t passes = (fix->r = assemble_string(&fix->arenas, RC_STR("stress"), src.view)).passes;
+    uint32_t passes = (fix->r = assemble_string(&fix->desc, RC_STR("stress"), src.view)).passes;
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK(baron_result_code(&fix->r).num, ==, 2000u);   // 2000 bytes from the loop; the labels emit nothing
     // A symbol bound last, after every relocation, is still correct...

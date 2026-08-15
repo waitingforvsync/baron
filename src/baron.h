@@ -8,6 +8,7 @@
 #include "macros.h"      // the macro store, and rc_array_token (the dynamic statement table)
 #include "functions.h"   // the user-FUNCTION store (and its dynamic operand-token table)
 #include "assemble.h"   // error_type, diagnostic, rc_array_diagnostic
+#include "richc/mstr.h" // rc_mstr: the verbose-listing buffer
 
 
 // Baron's global state, threaded through the parser as a single `baron *` first argument. It holds
@@ -20,14 +21,14 @@
 // (it holds no pointer into its pool), every member is trivially movable, so the whole struct copies
 // cleanly. The parser still threads a `baron *` - to mutate one shared instance, not out of any move
 // hazard. `baron` is now an INTERNAL detail: it is built on the stack inside assemble_string / assemble_file,
-// BORROWING the caller's three arenas (a `baron_arenas`), run, and discarded - the caller sees only the
+// BORROWING the caller's three arenas (a `baron_desc`), run, and discarded - the caller sees only the
 // harvested `baron_result`, never this struct. The two borrowed pointers are all it needs: `permanent`
 // to push diagnostics into, `per_pass` to reset at the top of each pass. scratch is threaded by value
 // straight from the arenas into the pass loop, so it is not stored here. The subsystems below borrow
 // `permanent` (scopes / source_files) or `per_pass` (sections / macros / functions) in turn.
 typedef struct baron {
-    rc_arena           *permanent;   // BORROWED from baron_arenas: scopes/symbols, source text, diagnostics
-    rc_arena           *per_pass;    // BORROWED from baron_arenas: sections, macros, functions (reset each pass)
+    rc_arena           *permanent;   // BORROWED from baron_desc: scopes/symbols, source text, diagnostics
+    rc_arena           *per_pass;    // BORROWED from baron_desc: sections, macros, functions (reset each pass)
     scopes              scopes;
     sections            sections;
     zeropage            zeropage;          // the global RESERVE set; dormant until a RESERVE directive runs
@@ -35,6 +36,9 @@ typedef struct baron {
     macros              macros;            // the macro store (and its dynamic statement-token table), rebuilt each pass
     functions           functions;         // the user-FUNCTION store (and its dynamic operand-token table), rebuilt each pass
     rc_array_diagnostic diagnostics;   // errors from the last assemble (in permanent); empty means it succeeded
+    rc_mstr             verbose;           // the -v listing text (in per_pass), built ONLY on the listing pass;
+                                           // PRINT's channel buffers will sit beside it when PRINT lands
+    bool                want_verbose;      // copied from baron_desc.verbose: run the listing pass at all?
     uint32_t            include_depth;     // how many INCLUDEs deep the parser is now, to catch runaway recursion
     uint32_t            macro_depth;       // how many macro expansions deep, to catch runaway recursion
     uint32_t            function_depth;    // how many FUNCTION calls deep the evaluator is, to catch runaway recursion
@@ -42,13 +46,13 @@ typedef struct baron {
 
 // Build a fresh baron on `a`'s three arenas (borrowing them - they stay the caller's to free) and return it
 // by value. Seeds the scope root and the default section, so it is ready to assemble into. There is no
-// baron_deinit: the arenas own everything, and baron_arenas_deinit frees them.
+// baron_deinit: the arenas own everything, and the caller frees them (rc_arena_deinit on each).
 //
 // Returning by value is safe because every member is position-independent: a trie is now a plain `{ root }`
 // value (it holds no pointer into its pool - the pool is passed to each op), the managers hold only borrowed
 // arena pointers (into `a`, never into the baron) plus arena-backed arrays, and all inter-container links are
 // indices. So the copy a `return b;` may make - C not guaranteeing copy elision - dangles nothing.
-baron baron_make(baron_arenas *a);
+baron baron_make(baron_desc *a);
 
 // Append a diagnostic to b's list. baron_error records a failing error (severity 0); baron_warning
 // records a harmless warning at a positive `severity` level. baron_has_errors reports whether any
