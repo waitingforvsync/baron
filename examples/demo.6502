@@ -210,8 +210,7 @@ ZPAUTO2 mulnegtabptr
     ; loop to the next dot
 
     INX:CPX #numdots
-    BEQ waitforvsync
-    JMP plotdotloop
+    BNE plotdotloop
 
     \\ Wait for VSync here
 
