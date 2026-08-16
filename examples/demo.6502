@@ -1,6 +1,6 @@
 \ ******************************************************************
 \ *
-\ *		BeebAsm demo
+\ *		Baron demo
 \ *
 \ *		Spinning star globe
 \ *
@@ -28,9 +28,9 @@
 
 \\ Define globals
 
-numdots			= 160
-radius			= 100
-timerlength		= 64*8*26
+numdots			= 180
+radius			= 110
+timerlength		= 64*8*27
 debugrasters	= FALSE
 
 
@@ -43,6 +43,8 @@ debugrasters	= FALSE
 ; at the end of the frame, we go through these tables, storing zeroes to
 ; all these addresses in order to delete the last frame
 
+multab          = &3900
+mulnegtab       = &3B00
 olddotaddrlo    = &3D00
 olddotaddrhi    = &3E00
 olddotaddry     = &3F00
@@ -50,10 +52,12 @@ olddotaddry     = &3F00
 screenbase      = &4000
 
 
-SECTION Code, org = &1100, load = &1100, exec = start, filename = "CODE", save = TRUE
+SECTION Code, org = &1100, load = &1100, exec = start, filename = "CODE"
 
-vsync = &00
-ZPRESERVE &01..<&20
+vsync = &FF
+ZPRESERVE &00..&FC
+ZPAUTO2 multabptr
+ZPAUTO2 mulnegtabptr
 
 \ ******************************************************************
 \ *	The entry point of the demo
@@ -68,7 +72,6 @@ ZPRESERVE &01..<&20
     ZPAUTO2 angle
     ZPAUTO2 speed
     ZPAUTO1 counter
-    ZPAUTO1 temp
     ZPAUTO1 behindflag
 
     \\ Set up hardware state and interrupts
@@ -78,12 +81,11 @@ ZPRESERVE &01..<&20
     STX &FE44:STX &FE45
     LDA #&7F:STA &FE4E          ; disable all interrupts
     STA &FE43                   ; set keyboard data direction
-    LDA #&C2:STA &FE4E          ; enable VSync and timer interrupt
+    LDA #&C0:STA &FE4E          ; enable timer 1 interrupt
+    LDA #&40:STA &FE4B          ; timer 1 free running mode
+    LDA #&00:STA &FE4C          ; default PCR
     LDA #&0F:STA &FE42          ; set addressable latch for writing
     LDA #3:STA &FE40            ; keyboard write enable
-    LDA #0:STA &FE4B            ; timer 1 one shot mode
-    LDA #LO(irq):STA &204
-    LDA #HI(irq):STA &205       ; set interrupt handler
 
     \\ Clear the screen
 
@@ -126,13 +128,26 @@ ZPRESERVE &01..<&20
 
     \\ Initialise vars
 
+    JSR calcmultables
     LDA #0:STA angle:STA angle+1
     STA vsync
     STA speed
     LDA #1:STA speed+1
 
-    \\ Enable interrupts, ready to start the main loop
+    \\ Initialise IRQ
 
+    LDA #2:STA &FE4D
+    .synctimer
+    BIT &FE4D:BEQ synctimer
+    STA &FE4D
+
+    LDA #LO(timerlength):STA &FE44
+    LDA #HI(timerlength):STA &FE45
+    LDA #LO(312*64-2):STA &FE46
+    LDA #HI(312*64-2):STA &FE47
+
+    LDA #LO(irq):STA &204
+    LDA #HI(irq):STA &205
     CLI
 
     \\ First we wait for 'vsync' so we are synchronised
@@ -144,76 +159,56 @@ ZPRESERVE &01..<&20
 
 .mainloop
 
+    IF debugrasters
+        LDA #&00 + PAL_black:STA &FE21
+    ENDIF
+
     \\ Plot every dot on the screen
 
     LDX #0
 .plotdotloop
-    STX counter
-
-    ; setup y pos ready for plot routine
-
-    LDA doty,X:STA ypos
-
     ; get sin index
 
     CLC:LDA dotx,X:ADC angle+1:TAY
     CLC:ADC #64:STA behindflag
-
-    ; get colour from sin index
+    LDA sintable,Y:STA multabptr:EOR #255:STA mulnegtabptr
 
     LDA coltable,Y:STA colour
 
-    ; perform sin(x) * radius
-    ; discussion of the multiplication method below in the table setup
-
-    SEC:LDA sintable,Y:STA temp:SBC dotr,X
-    BCS noneg:EOR #&FF:ADC #1:.noneg
-    CPY #128:TAY:BCS negativesine
-
-    CLC:LDA dotr,X:ADC temp:TAX
-    BCS morethan256:SEC
-    LDA multtab1,X:SBC multtab1,Y:JMP donemult
-    .morethan256
-    LDA multtab2,X:SBC multtab1,Y:JMP donemult
-
+    CPY #128:LDY dotr,X:BCS negativesine
+    SEC:LDA (multabptr),Y:SBC (mulnegtabptr),Y:JMP positivesine
     .negativesine
-    CLC:LDA dotr,X:ADC temp:TAX
-    BCS morethan256b:SEC
-    LDA multtab1,Y:SBC multtab1,X:JMP donemult
-    .morethan256b
-    LDA multtab1,Y:SBC multtab2,X
-    .donemult
-
+    LDA (mulnegtabptr),Y:SBC (multabptr),Y
+    .positivesine
     CLC:ADC #64:STA xpos
 
-    ; routine to plot a dot
-    ; also we remember the calculated screen address in the dot tables
+    AND #1:ORA colour:TAY:LDA colours,Y:STA colour
 
-    LDA ypos:LSR A:LSR A:AND #&FE
-    TAX
-    LDA xpos:AND #&FE:ASL A:ASL A
-    STA write
-    LDY counter:STA olddotaddrlo,Y
-    TXA:ADC #&40:STA write+1:STA olddotaddrhi,Y
-    LDA ypos:AND #7:STA olddotaddry,Y:TAY
-    LDA xpos:LSR A:LDA colour:ROL A:TAX
-    LDA colours,X
+    ; routine to plot a dot
+
+    LDA xpos:AND #&FE:ASL A:ASL A:STA write:STA olddotaddrlo,X:PHP
+    LDA doty,X:LSR A:LSR A:AND #&FE
+    PLP:ADC #HI(screenbase):STA write+1:STA olddotaddrhi,X
+    LDA doty,X:AND #7:STA olddotaddry,X:TAY
+
+    LDA colour
     ORA (write),Y
     STA (write),Y
+
     BIT behindflag:BMI behind
 
     ; if the dot is in front, we double its size
 
-    DEY:BPL samescreenrow
-    DEC write+1:DEC write+1:LDY #7:.samescreenrow
-    LDA colours,X
+    DEY:BPL @+
+    DEC write+1:DEC write+1:LDY #7:.@
+
+    LDA colour
     ORA (write),Y
     STA (write),Y
     .behind
 
     ; loop to the next dot
 
-    LDX counter
     INX:CPX #numdots
     BEQ waitforvsync
     JMP plotdotloop
@@ -222,11 +217,16 @@ ZPRESERVE &01..<&20
 
 .waitforvsync
     IF debugrasters
-        LDA #&00 + PAL_magenta:STA &FE21
+        LDA #&00 + PAL_red:STA &FE21
     ENDIF
 .waitingforvsync
     LDA vsync:BEQ waitingforvsync
     CMP #2:BCS exit		; insist that it runs in a frame!
+
+    IF debugrasters
+        LDA #&00 + PAL_blue:STA &FE21
+    ENDIF
+
     LDA #0:STA vsync
 
     \\ Now delete all the old dots.
@@ -244,10 +244,6 @@ ZPRESERVE &01..<&20
     INX:CPX #numdots
     BNE eraseloop
 
-    IF debugrasters
-        LDA #&00 + PAL_red:STA &FE21
-    ENDIF
-
     \\ Add to rotation
 
     CLC:LDA angle:ADC speed:STA angle
@@ -255,10 +251,12 @@ ZPRESERVE &01..<&20
 
     \\ Check keypresses
 
-    LDA #66:STA &FE4F:LDA &FE4F:BPL notx
-    CLC:LDA speed:ADC #16:STA speed:BCC notx:INC speed+1:.notx
-    LDA #97:STA &FE4F:LDA &FE4F:BPL notz
-    SEC:LDA speed:SBC #16:STA speed:BCS notz:DEC speed+1:.notz
+    LDA #66:STA &FE4F:LDA &FE4F:BPL @+
+    CLC:LDA speed:ADC #16:STA speed:BCC @+:INC speed+1:.@
+
+    LDA #97:STA &FE4F:LDA &FE4F:BPL @+
+    SEC:LDA speed:SBC #16:STA speed:BCS @+:DEC speed+1:.@
+
     LDA #112:STA &FE4F:LDA &FE4F:BMI exit
 
     JMP mainloop
@@ -275,21 +273,7 @@ ZPRESERVE &01..<&20
 \ ******************************************************************
 
 .irq
-    LDA &FE4D:AND #2:BNE irqvsync
-.irqtimer
     LDA #&40:STA &FE4D:INC vsync
-    IF debugrasters
-        LDA #&00 + PAL_blue:STA &FE21
-    ENDIF
-    LDA &FC
-    RTI
-.irqvsync
-    STA &FE4D
-    LDA #LO(timerlength):STA &FE44
-    LDA #HI(timerlength):STA &FE45
-    IF debugrasters
-        LDA #&00 + PAL_black:STA &FE21
-    ENDIF
     LDA &FC
     RTI
 
@@ -367,7 +351,7 @@ PAL_white	= (7 EOR 7)
 
 ALIGN &100	; so we don't incur page-crossed penalties
 .sintable
-    EQUB abs(sin((0..255) / 128 * pi)) * 255
+    EQUB ABS(SIN((0..255) / 128 * PI)) * 255 + 0.5
 
 
 \ ******************************************************************
@@ -376,7 +360,46 @@ ALIGN &100	; so we don't incur page-crossed penalties
 
 ALIGN &100
 .coltable
-    EQUB (sin((0..255) / 128 * pi) + 1) / 2.0001 * 7 + 1
+    EQUB INT((SIN((0..255) / 128 * PI) + 1) / 2.0001 * 7 + 1) * 2
+
+
+\ ******************************************************************
+\ *	dot tables
+\ ******************************************************************
+
+; contains the phase of this dot
+
+ALIGN &100
+.dotx
+    EQUB RND(FULL(numdots, 256))
+
+
+; contains the y position of the dot
+; the dots are sorted by y positions, highest on screen first - this means we can do
+; 'raster chasing'!
+; the y positions are also biased so there are fewer at the poles, and more at the equator!
+
+FUNCTION ball_ypos(n)
+    x = (n - numdots/2 + 0.5) / (numdots/2)
+    y = (x - SIN(x*PI) * 0.1) * radius
+= 128 + y
+
+ALIGN &100
+.doty
+    EQUB ball_ypos(0..numdots-1)
+
+
+; contains the radius of the ball at this y position
+
+FUNCTION ball_radius(n)
+    x = (n - numdots/2 + 0.5) / (numdots/2)
+    y = (x - SIN(x*PI) * 0.1) * radius
+= SQRT(radius*radius - y*y) / 2
+
+ALIGN &100
+.dotr
+    EQUB ball_radius(0..numdots-1)
+
 
 
 \ ******************************************************************
@@ -400,58 +423,50 @@ ALIGN &100
 ; only need the high bytes, and can do just 2 table lookups and a
 ; simple 8-bit subtract.
 
-ALIGN &100
-.multtab1
-    EQUB hi((0..255)^2 div 4)
-.multtab2
-    EQUB hi((256..511)^2 div 4)
+.calcmultables
+{
+    ZPAUTO2 sqr
+    ZPAUTO1 delta
 
+    LDX #0
+    STX sqr:STX sqr+1
+    STX delta
+    STX multabptr
+    STX mulnegtabptr
+    LDA #HI(multab):STA multabptr+1
+    LDA #HI(mulnegtab):STA mulnegtabptr+1
+    
+    \\ Build HI(x^2 DIV 4) table for x=0..511
 
-\ ******************************************************************
-\ *	dot tables
-\ ******************************************************************
+    LDY #2
+.multableloop
+    LDA sqr+1
+.tabstore STA multab,X  ; operand +2 is self-modified for second page
+    CLC
+    LDA sqr:ADC delta:STA sqr
+    BCC @+:INC sqr+1:.@
 
-; contains the phase of this dot
+    ; step delta on even x
+    TXA:LSR A:BCS @+:INC delta:.@
 
-ALIGN &100
-.dotx
-FOR n = 0..numdots-1
-    EQUB rnd(256)
-NEXT
+    INX
+    BNE multableloop
+    INC tabstore+2
+    DEY
+    BNE multableloop
+ 
+    \\ Build HI((x-255)^2 DIV 4) table for x=0..255
 
+    DEY ; X= 0, Y = 255
+.loop2
+    LDA multab,X           ; f(x)   -> g(255-x)
+    STA mulnegtab,Y
+    LDA multab+1,X         ; f(x+1) -> g(256+x)
+    STA mulnegtab+256,X
+    DEY
+    INX
+    BNE loop2
+    RTS    
+}
 
-; contains the y position of the dot
-; the dots are sorted by y positions, highest on screen first - this means we can do
-; 'raster chasing'!
-; the y positions are also biased so there are fewer at the poles, and more at the equator!
-
-ALIGN &100
-.doty
-FOR n = 0..numdots-1
-    x = (n - numdots/2 + 0.5) / (numdots/2)
-    y = (x - sin(x*pi) * 0.1) * radius
-    EQUB 128 + y
-NEXT
-
-
-; contains the radius of the ball at this y position
-
-ALIGN &100
-.dotr
-FOR n = 0..numdots-1
-    x = (n - numdots/2 + 0.5) / (numdots/2)
-    y = (x - sin(x*pi) * 0.1) * radius
-    r = sqrt(radius*radius - y*y) / 2
-    EQUB r
-NEXT
-
-
-\ ******************************************************************
-\ *	End address to be saved
-\ ******************************************************************
-.end
 ENDSECTION
-
-
-
-

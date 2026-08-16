@@ -33,11 +33,13 @@ typedef struct liveness {
 } liveness;
 
 // Run the backward liveness fixpoint over `g`, build the per-instruction interference graph, and classify
-// each vreg. `insns` is the instruction stream the CFG indexes; `num_vars` bounds the global vreg id space;
-// `entry_block` is the routine's entry (block 0 for a whole-stream analysis). A block flagged unknown_succ
-// contributes ALL vars to its live-out - the conservative taint that keeps a computed/indirect exit from
-// silently shrinking a live range. Results live in `arena`; `scratch` (by value) backs the transient state.
-liveness liveness_analyze(cfg g, rc_view_zp_insn insns, uint32_t num_vars, uint32_t entry_block,
+// each vreg. `insns` is the instruction stream the CFG indexes; `vars` is the variable registry - vreg ids
+// index into it, its length bounds the id space, and the WIDTHS drive the partial-def rule (a write kills a
+// live range only when it covers the whole variable; see zp_insn_write_kills). `entry_block` is the
+// routine's entry (block 0 for a whole-stream analysis). A block flagged unknown_succ contributes ALL vars
+// to its live-out - the conservative taint that keeps a computed/indirect exit from silently shrinking a
+// live range. Results live in `arena`; `scratch` (by value) backs the transient state.
+liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_var vars, uint32_t entry_block,
                           rc_arena *arena, rc_arena scratch);
 
 // Do vregs `a` and `b` interfere (live ranges overlap)? False if either is out of range or a == b.

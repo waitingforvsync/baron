@@ -91,18 +91,26 @@ parse_result require_separator(baron *b, cursor at);
 // Defined in assemble.c (it reaches into b's sections); shared with opcodes.c.
 expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch);
 
+// How a non-emitting statement sits in the listing: at the margin (a label, a scope brace, an
+// assignment, SECTION framing - things that land nowhere), or with an address + empty byte field (a
+// macro invocation, INCLUDE - the line marks where something lands).
+typedef enum verbose_text_kind {
+    verbose_text_margin = 0,
+    verbose_text_address,
+} verbose_text_kind;
+
 // Append one line to the verbose listing - but ONLY on the listing pass of a live branch
 // (flags.listing && flags.active), the verbose twin of semantic_error's gate. The statement's source
 // text is sliced [stmt.pos, end_pos) and echoed verbatim (first line only - a multi-line list literal
 // gets an ellipsis). verbose_code_line is an emitting statement: address + hex dump (truncated after
 // four bytes) + source, with the bytes read back from the section between code_begin and its current
-// end. verbose_text_line covers the rest: a label (at the margin, no address) when `margin`, otherwise
-// an address + empty byte field + source (macro invocations, INCLUDE, SECTION framing).
+// end. verbose_text_line covers the rest, laid out by `kind` (above); `pc` is read only for
+// verbose_text_address.
 // Defined in assemble.c (they append to b's buffer); shared with opcodes.c.
 void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
                        uint32_t section, uint32_t pc, uint32_t code_begin);
 void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
-                       uint32_t pc, bool margin);
+                       uint32_t pc, verbose_text_kind kind);
 
 
 #endif // ifndef BARON_ASSEMBLE_INTERNAL_H_

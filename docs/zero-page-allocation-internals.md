@@ -148,23 +148,37 @@ without crossing a call or return.
 
 ## Stage 3 - liveness and the interference graph ##
 
-`liveness_analyze` (`src/liveness.c`) is a standard backward dataflow fixpoint, plus interference construction:
+`liveness_analyze` (`src/liveness.c`) is a standard backward dataflow fixpoint, plus interference
+construction. The dataflow runs over a **byte id space**, not the vreg space: variable `v`'s bytes occupy
+`[base[v], base[v] + width[v])`, and every set below is a byte set. This is what makes *partial writes* come
+out right: a 6502 store writes one byte, so `STA ptr` on a `ZPAUTO2` redefines only the LSB - the MSB's old
+value (say, written once at init) flows straight through it and keeps the pointer live - while a
+`STA ptr : STA ptr+1` pair accumulates, byte by byte and across blocks, into a genuine full kill that ends
+the old range. (Treating any store as a whole-variable kill was the bug that severed a pointer's MSB from
+its derefs and let another variable overlap it.) The *public* results are projected back to variable level -
+a variable is live iff any of its bytes is - because the allocator places whole variables.
 
-1. **Per-block use/def.** `use[b]` = variables read before any write in the block; `def[b]` = variables
-   written anywhere in it.
-2. **Backward fixpoint.** `live_out[b] = union of successors' live_in` (plus *all* variables if `b` is
-   `unknown_succ` - the taint), and `live_in[b] = use[b] union (live_out[b] - def[b])`. Iterated round-robin in
-   reverse block order until nothing changes. The CFGs are tiny, so there is no worklist. This is the hot loop,
-   and the set algebra (`copy` / `union` / equality) is richc's `rc_bitset` word-at-a-time ops.
-3. **Interference graph.** Sweep each block backward from its `live_out`: at a def of `a`, `a` interferes with
-   everything else live at that point; then advance the live set to *before* the instruction (remove the def,
-   add the use). Two vregs interfere iff their live ranges overlap at some program point. All the "output reuses
-   input's byte", "the temp cannot overlap the pointer" legality falls out of these overlaps - no special
-   cases. `interfere` is a symmetric adjacency structure, one `rc_bitset` row per vreg.
-4. **Entry inputs.** Every variable live-in at the routine entry is a synthetic input; they pairwise interfere
+1. **Per-instruction byte windows.** Each instruction's touch maps to offset windows (`insn_window`): a read
+   consumes the addressed byte (two for an indirect pointer deref `(var),Y` / `(var)`), or the *whole*
+   variable for an indexed / unknown-offset access; a write provably redefines only a direct store's one
+   byte - an indexed or unknown-offset store redefines nothing provable (it still pins the variable for
+   interference).
+2. **Per-block use/kill.** `use[b]` = bytes whose old value flows in (read before being rewritten in the
+   block); `kill[b]` = bytes provably rewritten anywhere in it.
+3. **Backward fixpoint.** `live_out[b] = union of successors' live_in` (plus *all* bytes if `b` is
+   `unknown_succ` - the taint), and `live_in[b] = use[b] union (live_out[b] - kill[b])`. Iterated round-robin
+   in reverse block order until nothing changes. The CFGs are tiny, so there is no worklist. This is the hot
+   loop, and the set algebra (`copy` / `union` / equality) is richc's `rc_bitset` word-at-a-time ops.
+4. **Interference graph.** Sweep each block backward from its byte `live_out`: at any write, the variable is
+   pinned to its bytes, so it interferes with the owner of every other live byte; then advance the live set
+   to *before* the instruction (remove the provably-rewritten bytes, add the read ones). Two vregs interfere
+   iff some pair of their bytes' live ranges overlap at some program point. All the "output reuses input's
+   byte", "the temp cannot overlap the pointer" legality falls out of these overlaps - no special cases.
+   `interfere` is a symmetric adjacency structure, one `rc_bitset` row per vreg.
+5. **Entry inputs.** Every variable live-in at the routine entry is a synthetic input; they pairwise interfere
    (read-only inputs coexist at entry even if no instruction ever has them simultaneously live). See
    *Deferred*, below, for the single-entry limitation.
-5. **Classification.** Each vreg is `input` (live-in at entry), `output` (written, never read inside), `temp`
+6. **Classification.** Each vreg is `input` (live-in at entry), `output` (written, never read inside), `temp`
    (written and read inside), or `unused`. This feeds the colouring's conflict test and diagnostics.
 
 ## Stage 4 - interprocedural footprint (calls) ##
@@ -187,7 +201,11 @@ entry in the dispatch set, contributing nothing). Note the flip side of the exte
 analysis can no longer catch the unannotated case.
 
 Two guards consume this, sweeping each block backward with the live set (so at a call, the live set is exactly
-what is live *across* it - a `JSR` touches no variable of its own):
+what is live *across* it - a `JSR` touches no variable of its own). This sweep runs at *variable* granularity
+with a per-instruction kill test (`zp_insn_write_kills`: only a direct store to a one-byte variable ends a
+range on its own; a partial write keeps the variable live). That is coarser than stage 3's byte-accurate
+liveness - a store *pair* that fully rewrites a pointer conservatively keeps it live here - but a too-live
+set only adds interference edges or refusals, never misses any, so it stays sound:
 
 - **Guard 1 - computed flow.** A block flagged `unknown_succ` with any variable in play is refused
   (`error_type_zpauto_computed_flow`): control leaves for code we cannot model, so we cannot prove the variable
@@ -219,10 +237,13 @@ strict minimum (a fresh write in a non-cyclic callee of a recursive call), never
 width from the widest declared down to 1, placing the more constrained wide variables (a `ZPAUTO 8` table, a
 2-byte pointer) before the narrow ones. Each variable is placed at the lowest reserved base whose byte span
 `[base, base + width)` is fully reserved and overlaps no already-placed *conflicting* variable's span. Two
-variables conflict if they interfere, or if either is `unused` (an unused variable has no liveness to reason
-about, so we never prove any sharing safe and keep it on its own byte). A multi-byte variable takes consecutive
-reserved bytes. A variable that finds no base **spills** - `any_spilled` is set and the finalizer reports
-`error_type_zeropage_full` at that variable's declaration.
+variables conflict iff they interfere. An `unused` variable (touched by no recorded instruction) is **skipped
+entirely** - no address, and not a spill: the finalizer warns at its declaration
+(`error_type_zpauto_unused`, default warning level) and **removes its binding** at the rewrite stage, so it
+ends up exactly as if never declared - absent from the symbol table and from the listing's `var = &xx [auto]`
+lines - and costs the pool nothing. A multi-byte variable takes consecutive reserved bytes. A *used* variable
+that finds no base **spills** - `any_spilled` is set and the finalizer reports `error_type_zeropage_full` at
+that variable's declaration.
 
 First-fit-decreasing is left-edge-optimal for the equal-width common case and good enough for a mix of widths;
 the graphs are tiny, so the O(vars^2 x bytes) scan is irrelevant in practice. The span logic (`span_reserved` /
@@ -253,7 +274,7 @@ thing can run *after* convergence without perturbing it.
 | `zp_label` | zeropage.h | label identity `(scope, def)` -> physical `(section, pc)` |
 | `basic_block` | cfg.h | `(section, pc)` identity, insn slice, successor slice, `unknown_succ` |
 | `cfg` | cfg.h | blocks + shared successor pool + retained label markers |
-| `liveness` | liveness.h | per-block live-in/out, interference rows, per-vreg class |
+| `liveness` | liveness.h | per-block live-in/out, interference rows, per-vreg class (dataflow is byte-accurate internally) |
 | `footprint` | footprint.h | `touched` + `killed` sets, `unknown_call`, `recursive` |
 | `zp_coloring` | zpalloc.h | per-vreg assigned base (or `RC_INDEX_NONE`), `any_spilled` |
 
@@ -272,11 +293,12 @@ becomes a clear diagnostic pointing at the fix. The refusals, all fatal to the a
 | 2 | `zpauto_recursion` | a freshly-written per-level value held live across a recursive call |
 | colour | `zeropage_full` | more simultaneously-live variables than reserved bytes (a spill) |
 
-One diagnostic is a **warning**, not a refusal - the deliberate relaxation for run-time indexing:
+Two diagnostics are **warnings**, not refusals:
 
 | Guard | Code | Severity | Cause |
 |-------|------|----------|-------|
 | 0 | `zpauto_indexed_access` | `severity_optional` | a ZPAUTO reached by indexed / indexed-indirect addressing; the whole variable is reserved, so an in-width index is sound, but the run-time index is the user's responsibility |
+| colour | `zpauto_unused` | `severity_warning` | a ZPAUTO no instruction touches; it is given no address and its binding is removed (one warning per declaration site, even across a macro / FOR body's instantiations) |
 
 The `CANCALL` / `CANJUMP` / `UNREACHABLE` annotations are the escape hatch: they are *trusted* assertions that
 sit exactly where the analysis would otherwise refuse, turning "cannot prove it" into the programmer's explicit

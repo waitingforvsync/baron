@@ -65,30 +65,20 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
     for (uint32_t i = 0; i < sections.num; i++) {
         section s = rc_view_section_get(sections, i);
 
-        // `save` is the opt-in: absent or zero means the section is not an output (which quietly covers
-        // the nameless default sections too - they can never carry attributes).
-        value save = section_attr(s, RC_STR("save"));
-        if (value_is_none(save)) {
-            continue;
-        }
-        if (!value_is_numeric(save)) {
-            return (output_spec_result) {.error = spec_error(s.name, "save attribute must be a number", arena)};
-        }
-        if (save.numeric == 0.0) {
-            continue;
-        }
-
-        rc_str filename = s.name;
+        // `filename` is the opt-in: a section becomes an output by naming the file it saves to. Absent
+        // means not an output (which quietly covers the nameless default sections too - they can never
+        // carry attributes), and an EMPTY filename opts back out, cancelling an inherited one.
         value fname = section_attr(s, RC_STR("filename"));
-        if (!value_is_none(fname)) {
-            if (!value_is_string(fname)) {
-                return (output_spec_result) {.error = spec_error(s.name, "filename attribute must be a string", arena)};
-            }
-            filename = fname.string;
+        if (value_is_none(fname)) {
+            continue;
         }
-        if (filename.len == 0) {
-            return (output_spec_result) {.error = spec_error(s.name, "a saved section needs a filename", arena)};
+        if (!value_is_string(fname)) {
+            return (output_spec_result) {.error = spec_error(s.name, "filename attribute must be a string", arena)};
         }
+        if (fname.string.len == 0) {
+            continue;
+        }
+        rc_str filename = fname.string;
 
         // load: the `load` attribute, else `org` (the section's start address), else where the code
         // started - pc ran on to the end of it, so back the length off.
@@ -172,30 +162,30 @@ RC_TEST(output, spec_from_sections)
     sections_init(&sec, &arena);
     sections_reset(&sec);
 
-    // "main": saved, with an org attribute and its own exec. Its load should come from org.
+    // "main": saved (a filename names the output), with an org attribute and its own exec. Its load
+    // should come from org.
     uint32_t a = sections_make(&sec, RC_STR("main"));
-    sections_add_attribute(&sec, a, RC_STR("save"), value_make_numeric(1), cursor_none());
+    sections_add_attribute(&sec, a, RC_STR("filename"), value_make_string(RC_STR("main")), cursor_none());
     sections_add_attribute(&sec, a, RC_STR("org"), value_make_numeric(0x1900), cursor_none());
     sections_add_attribute(&sec, a, RC_STR("exec"), value_make_numeric(0x1903), cursor_none());
     sections_org(&sec, a, 0x1900);
     sections_emit_u8(&sec, a, 0xA9);
     sections_emit_u8(&sec, a, 0x2A);
 
-    // "quiet": no save attribute, so not an output at all.
+    // "quiet": no filename attribute, so not an output at all.
     uint32_t q = sections_make(&sec, RC_STR("quiet"));
     sections_emit_u8(&sec, q, 0x60);
 
     // "data": saved under a directory-specified filename, no org ATTRIBUTE - load falls back to where
     // the code started (pc minus length), and exec follows load.
     uint32_t d = sections_make(&sec, RC_STR("data"));
-    sections_add_attribute(&sec, d, RC_STR("save"), value_make_numeric(1), cursor_none());
     sections_add_attribute(&sec, d, RC_STR("filename"), value_make_string(RC_STR("X.tab")), cursor_none());
     sections_org(&sec, d, 0x2000);
     sections_emit_u8(&sec, d, 0x0D);
 
-    // "off": save = 0 opts back out (an inherited save can be cancelled this way).
+    // "off": filename = "" opts back out (an inherited filename can be cancelled this way).
     uint32_t off = sections_make(&sec, RC_STR("off"));
-    sections_add_attribute(&sec, off, RC_STR("save"), value_make_numeric(0), cursor_none());
+    sections_add_attribute(&sec, off, RC_STR("filename"), value_make_string(RC_STR("")), cursor_none());
     sections_emit_u8(&sec, off, 0xEA);
 
     output_spec_result r = output_spec_make(sections_all(&sec), RC_STR("T"), 3, 42, &arena);
@@ -228,14 +218,14 @@ RC_TEST(output, spec_rejects_bad_attributes)
     sections_reset(&sec);
 
     uint32_t a = sections_make(&sec, RC_STR("code"));
-    sections_add_attribute(&sec, a, RC_STR("save"), value_make_string(RC_STR("yes")), cursor_none());
+    sections_add_attribute(&sec, a, RC_STR("filename"), value_make_numeric(7), cursor_none());
     output_spec_result r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
     RC_CHECK_TRUE(r.error.len != 0);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("code")));
-    RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("save")));
+    RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("filename")));
 
     // A fractional load is refused too (addresses are whole numbers).
-    sections_add_attribute(&sec, a, RC_STR("save"), value_make_numeric(1), cursor_none());
+    sections_add_attribute(&sec, a, RC_STR("filename"), value_make_string(RC_STR("code")), cursor_none());
     sections_add_attribute(&sec, a, RC_STR("load"), value_make_numeric(0.5), cursor_none());
     r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
     RC_CHECK_TRUE(r.error.len != 0);

@@ -107,6 +107,23 @@ typedef struct zp_insn {
 #define RC_ARRAY_NAME zp_insn
 #include "richc/template/array.h"
 
+// Does this instruction's write, ON ITS OWN, fully redefine its variable - so the old value is dead just
+// before it? A 6502 store writes ONE byte, so a single write covers the variable only when the variable IS
+// one byte (a direct store at known offset 0). Everything else - the LSB store of a ZPAUTO2 pointer, an
+// indexed store into a table, an unknown offset - is a PARTIAL def: the bytes it does not touch flow
+// through it. Treating a partial def as a kill is how a pointer's MSB, written once at init, got severed
+// from its derefs and clobbered by an overlapping allocation. The liveness analysis itself tracks bytes
+// (liveness.c) so an LSB+MSB store PAIR does accumulate into a kill there; this per-instruction test
+// serves the finalizer's variable-granularity live-across-call sweep, where the pair conservatively does
+// not (a too-live set only adds interference - sound).
+static inline bool zp_insn_write_kills(zp_insn n, uint16_t width)
+{
+    return (n.rw & vref_write) != 0
+        && !n.var_indexed
+        && n.var_offset == 0
+        && width == 1;
+}
+
 
 // A control-flow annotation: the programmer's assertion where static analysis cannot see the truth on its
 // own. UNREACHABLE says control cannot fall through to its own pc (an always-taken branch's dead edge, which

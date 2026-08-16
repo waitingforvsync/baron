@@ -6,14 +6,12 @@
 enum { zp_bytes = 256 };   // the zero page is one 256-byte page; a base + width must fit inside it
 
 
-// Do vregs a and b conflict for colouring? They conflict if their live ranges overlap (they interfere), OR if
-// either is unused - an unused variable has no liveness to reason about, so we refuse to prove any sharing
-// safe and keep it on its own byte.
+// Do vregs a and b conflict for colouring? They conflict iff their live ranges overlap (they interfere).
+// Unused variables never reach this test: they are skipped by the placement loop (no address at all -
+// the finalizer warns and undefines them), so a placed variable is always a used one.
 static bool conflicts(const liveness *lv, uint32_t a, uint32_t b)
 {
-    return liveness_interferes(lv, a, b)
-        || liveness_class_of(lv, a) == vreg_class_unused
-        || liveness_class_of(lv, b) == vreg_class_unused;
+    return liveness_interferes(lv, a, b);
 }
 
 // Are all `width` bytes starting at `base` reserved (and inside the page)?
@@ -66,6 +64,9 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
             uint32_t w = rc_view_zp_var_get(vars, v).width;
             if (w != pass_w) {
                 continue;
+            }
+            if (liveness_class_of(lv, v) == vreg_class_unused) {
+                continue;   // no instruction touches it: no address (base stays NONE, and NOT a spill)
             }
             for (uint32_t base = 0; base + w <= zp_bytes; base++) {
                 if (!span_reserved(reserved, base, w)) {
@@ -127,8 +128,8 @@ RC_TEST(zpalloc, disjoint_share_interfering_split)
     rc_arena scratch = rc_arena_make_default();
 
     // Three width-1 vars; the test wires the interference directly by handing zp_color a liveness whose graph
-    // we build by hand: v0 and v1 interfere, v2 is disjoint from both. All three must be "used" so they are
-    // shareable (an unused var is deliberately never shared - covered below).
+    // we build by hand: v0 and v1 interfere, v2 is disjoint from both. All three are "used" so they place
+    // (an unused var is skipped entirely - covered below).
     rc_array_zp_var vars = rc_array_zp_var_make(4, &arena);
     add_var(&vars, 1, &arena); add_var(&vars, 1, &arena); add_var(&vars, 1, &arena);
 
@@ -176,6 +177,36 @@ RC_TEST(zpalloc, width_two_takes_consecutive_bytes)
     RC_CHECK_FALSE(col.any_spilled);
     RC_CHECK(col.base[0], ==, 0x70u);   // 2-byte pointer, first by FFD, at 0x70-0x71
     RC_CHECK(col.base[1], ==, 0x72u);   // 1-byte temp cannot overlap -> 0x72
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(zpalloc, unused_variable_is_skipped)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();
+
+    // An unused variable gets NO address - not a byte of its own, and not a spill either - so the pool is
+    // spent only on variables the instruction stream actually touches. v1 (unused) is skipped; v0 and v2
+    // interfere and pack as if it were never declared.
+    rc_array_zp_var vars = rc_array_zp_var_make(4, &arena);
+    add_var(&vars, 1, &arena); add_var(&vars, 1, &arena); add_var(&vars, 1, &arena);
+
+    liveness lv = {.num_vars = 3, .num_blocks = 0};
+    lv.interfere = rc_arena_alloc_type(&arena, rc_bitset, 3);
+    for (uint32_t i = 0; i < 3; i++) { lv.interfere[i] = (rc_bitset) {0}; rc_bitset_resize(&lv.interfere[i], 3, &arena); }
+    rc_bitset_set(&lv.interfere[0], 2); rc_bitset_set(&lv.interfere[2], 0);
+    lv.classes = rc_arena_alloc_type(&arena, vreg_class, 3);
+    lv.classes[0] = vreg_class_temp; lv.classes[1] = vreg_class_unused; lv.classes[2] = vreg_class_temp;
+
+    rc_bitset reserved = reserve_range(0x70, 0x7F, &arena);
+    zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
+
+    RC_CHECK_FALSE(col.any_spilled);            // a skipped unused var is NOT a spill
+    RC_CHECK(col.base[0], ==, 0x70u);
+    RC_CHECK(col.base[1], ==, RC_INDEX_NONE);   // no address at all
+    RC_CHECK(col.base[2], ==, 0x71u);           // packs as if v1 were never declared
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

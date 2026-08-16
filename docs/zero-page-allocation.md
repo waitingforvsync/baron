@@ -480,6 +480,11 @@ Reuse is driven by lifetimes, so the way to pack tightly is to keep lifetimes sh
 - **Read a variable for the last time as early as you can.** The moment after its final read it is dead, and its
   byte is up for grabs. A value you stash "just in case" and read much later pins its byte for the whole span
   in between.
+- **Pointer lifetimes are byte-accurate.** A multi-byte variable dies only when *every* byte has been
+  rewritten (or after its last read). Rewriting just a pointer's LSB before each use keeps its once-written
+  MSB safely alive - nothing will be allocated over it - while rewriting both bytes ends the old value and
+  frees the pair for reuse. Nothing to do on your part; it just means fully re-initialising a pointer is
+  what releases its bytes.
 - **Don't hold values across calls you don't have to.** A variable live across a `JSR` has to dodge the callee's
   entire footprint. If you can finish with it before the call, or recompute it after, it costs far less.
 - **Prefer many short-lived temporaries to a few long-lived ones.** Ten temps that take turns can share two or
@@ -509,8 +514,9 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 Every one of these is a refusal - Baron will not emit code it cannot vouch for. Fix it, annotate it, or fall
 back to a hand-placed address, and you are on solid ground again.
 
-There is one **warning** rather than an error, reported only when you raise the warning level:
+Two are **warnings** rather than errors:
 
-| Message                                     | What happened                                                                 |
-|---------------------------------------------|-------------------------------------------------------------------------------|
-| This ZPAUTO variable is reached by an indexed / indexed-indirect mode | An indexed access (`var,X`, `var,Y`, `(var,X)`) into a variable. Allowed - it is how you walk a table - but the run-time index is yours to keep within the declared width. |
+| Message                                     | Level | What happened                                                                 |
+|---------------------------------------------|-------|-------------------------------------------------------------------------------|
+| This ZPAUTO variable is never used          | default | No instruction touches the variable, so it gets **no address and no definition** - it costs the pool nothing, and referencing it is an error, exactly as if the declaration were not there. Remove the declaration (or use the variable). |
+| This ZPAUTO variable is reached by an indexed / indexed-indirect mode | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) into a variable. Allowed - it is how you walk a table - but the run-time index is yours to keep within the declared width. Reported only when you raise the warning level. |

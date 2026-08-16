@@ -56,8 +56,9 @@ static bool option_takes_value(const char *arg)
 // they are what the output stage below writes from, kept alive here precisely because the next
 // assemble_file supersedes the previous result's sections.
 //
-// The output stage runs once everything has assembled: with no -o, every section marked save = TRUE is
-// written as a plain binary in the current directory (--inf adds a .inf sidecar carrying its addresses);
+// The output stage runs once everything has assembled: with no -o, every section carrying a filename
+// attribute is written as a plain binary in the current directory (naming the file IS the request to
+// save; --inf adds a .inf sidecar carrying its addresses);
 // with -o <image.ssd>, the same sections become a DFS disc image instead, in the order they were collected,
 // with --title / --opt / --cycle supplying the disc-level metadata no section can know.
 int main(int argc, char **argv)
@@ -228,9 +229,9 @@ int main(int argc, char **argv)
         }
         else {
             // An empty disc is still a valid disc - a bare catalogue - but it is more likely a forgotten
-            // save attribute, so say so.
+            // filename attribute, so say so.
             if (sr.spec.entries.num == 0) {
-                fprintf(stderr, "baron: warning: no sections marked save = TRUE; writing an empty disc image\n");
+                fprintf(stderr, "baron: warning: no section carries a filename attribute; writing an empty disc image\n");
             }
             disc_ssd_result d = disc_ssd_make(&sr.spec, &cli);
             if (d.error.len != 0) {

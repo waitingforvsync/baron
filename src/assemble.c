@@ -190,14 +190,14 @@ void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
 }
 
 void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
-                       uint32_t pc, bool margin)
+                       uint32_t pc, verbose_text_kind kind)
 {
     if (!verbose_on(flags)) {
         return;
     }
-    if (!margin) {
+    if (kind == verbose_text_address) {
         // An address but no bytes: the line marks where something lands (a macro expansion, an
-        // included file, a section boundary) - the bytes belong to the statements that follow.
+        // included file) - the bytes belong to the statements that follow.
         rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
         rc_mstr_append_hex16(&b->channels[0], (uint16_t) pc, b->per_pass);
         rc_mstr_append_n(&b->channels[0], ' ', 2 + verbose_byte_field, b->per_pass);
@@ -648,9 +648,10 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         return sep;
     }
 
-    // The header line: the child's pc (its org attribute already applied above), no bytes.
+    // The header line, at the margin like a label: a section frames what follows rather than landing
+    // anywhere itself (its statements carry the addresses).
     if (child != RC_INDEX_NONE) {
-        verbose_text_line(b, flags, stmt, pos, sections_pc(&b->sections, child), false);
+        verbose_text_line(b, flags, stmt, pos, 0, verbose_text_margin);
     }
 
     // A dead branch has no child section: the body parses (for its extent) in the parent section, emitting
@@ -669,9 +670,9 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
     if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
         if (child != RC_INDEX_NONE) {
-            // The ENDSECTION line carries the section's closing pc, and a blank line sets sections apart.
-            // Note the start cursor is built here: `stmt` is the SECTION statement, not this closer.
-            verbose_text_line(b, flags, cursor_at(at, body.next), cl.next, sections_pc(&b->sections, child), false);
+            // The ENDSECTION line at the margin too, and a blank line sets sections apart. Note the start
+            // cursor is built here: `stmt` is the SECTION statement, not this closer.
+            verbose_text_line(b, flags, cursor_at(at, body.next), cl.next, 0, verbose_text_margin);
             if (verbose_on(flags)) {
                 rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
             }
@@ -767,7 +768,7 @@ static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t 
 // binding it owns, like a dead label.
 static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
 {
-    (void) stmt;      // declarations emit nothing, so they take no line in the listing
+    (void) stmt;      // the listing line is built from the allocated symbol, not the source echo
     (void) section;   // ZPAUTO binds a symbol; the section it sits in is recorded later, at the instruction site
     (void) scratch;
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -817,6 +818,21 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
                     // across every instantiation, but each runs in its own child scope, so each instance becomes
                     // a distinct variable here - exactly as two sibling blocks declaring the same name would.
                     zeropage_add_var(&b->zeropage, name, scope, width, def);
+                }
+            }
+            else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
+                // ...and instead lists the assignment the declaration BECAME: the symbol now holds the
+                // allocated byte, so `zpauto1 tmp` reads back as `tmp = &70 [auto]` - echoing the source
+                // would only show a name with no address, and the address is the interesting part. The
+                // binding must still be OURS, scope-locally: the allocator UNDEFINES an unused variable,
+                // and without this check the lookup would walk up and print some outer namesake instead.
+                value v = scopes_get_symbol(&b->scopes, scope, name);
+                if (v.type == value_type_numeric) {
+                    rc_mstr *out = &b->channels[0];
+                    rc_mstr_append(out, name, b->per_pass);
+                    rc_mstr_append(out, RC_STR(" = &"), b->per_pass);
+                    rc_mstr_append_hex8(out, (uint8_t) v.numeric, b->per_pass);
+                    rc_mstr_append(out, RC_STR(" [auto]\n"), b->per_pass);
                 }
             }
         }
@@ -1257,23 +1273,26 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
     }
 
-    verbose_text_line(b, flags, stmt, nm.next, 0, true);   // ".name" at the margin (never its scope's braces)
+    verbose_text_line(b, flags, stmt, nm.next, 0, verbose_text_margin);   // ".name" at the margin (never its scope's braces)
 
     // What follows decides the label's shape. A '{' - optionally one separator away, so it may sit
     // on the next line - makes the label name a scope. Anything else is not the label's to parse: we
     // drop back to the parent loop, which takes the next token as its own statement (or, on a '}',
     // closes the block). The label never owns the statement that follows it.
     lexer_result nb = lexer_next(src, r.next, statement_tokens(b));
-    
+    uint32_t brace_start = r.next;
+
     if (nb.token.type == lexeme_type_terminator) {
         lexer_result after = lexer_next(src, nb.next, statement_tokens(b));
         if (!is_open_brace(after.token)) {
             return r;                          // stand-alone label - leave the terminator for the loop
         }
-        nb = after;                            // .label <separator> { ... } still names the scope
+        brace_start = nb.next;                 // .label <separator> { ... } still names the scope
+        nb = after;
     }
 
     if (is_open_brace(nb.token)) {
+        verbose_text_line(b, flags, cursor_at(at, brace_start), nb.next, 0, verbose_text_margin);
         uint32_t child = scopes_get_or_make_child(&b->scopes, scope, name);
         return fold(r, parse_scope(b, cursor_at(at, nb.next), child, section, flags, scratch));
     }
@@ -1331,13 +1350,13 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
         // position, so the guard is a no-op here, but we keep it uniform with the named-label / assignment cases.
         r.changed = scopes_remove_symbol(&b->scopes, scope, key.view);
     }
-    verbose_text_line(b, flags, stmt, at.pos, 0, true);   // the ".@" token is the whole statement
+    verbose_text_line(b, flags, stmt, at.pos, 0, verbose_text_margin);   // the ".@" token is the whole statement
     return r;
 }
 
 static parse_result handle_open_brace(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    (void) stmt;
+    verbose_text_line(b, flags, stmt, at.pos, 0, verbose_text_margin);   // '{' at the margin, like a label
     // The just-passed pos gives the anonymous scope a stable per-pass identity, so re-walking it
     // on a later pass keeps the same bindings.
     char storage[64];
@@ -1477,7 +1496,6 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
 // emits nothing.
 static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_str name, rc_arena scratch)
 {
-    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     lexer_result eq = lexer_next(src, at.pos, assign_tokens);
@@ -1527,6 +1545,10 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         // branch - IF TRUE:x=2:ELSE:x=3:ENDIF - or an outer binding of the same name is not clobbered.
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
     }
+
+    // An assignment binds a symbol and emits nothing, so it echoes at the margin like a label - the
+    // reader can follow the symbols without mistaking them for code.
+    verbose_text_line(b, flags, stmt, e.next, 0, verbose_text_margin);
 
     return fold(r, require_separator(b, cursor_at(at, e.next)));
 }
@@ -1663,7 +1685,7 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
                 }
                 else {
                     // The INCLUDE line itself: address, no bytes - the spliced file's lines follow.
-                    verbose_text_line(b, flags, stmt, e.next, sections_pc(&b->sections, section), false);
+                    verbose_text_line(b, flags, stmt, e.next, sections_pc(&b->sections, section), verbose_text_address);
                     uint32_t errors_before = baron_error_count(b);
                     b->include_depth++;
                     pulled = parse_file(b, (cursor) {.source = inc_source, .pos = 0}, scope, section, flags, scratch);
@@ -2079,7 +2101,7 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
     }
 
     // The invocation itself: address, no bytes - the expansion's own lines follow with the bytes.
-    verbose_text_line(b, flags, stmt, args_end, sections_pc(&b->sections, section), false);
+    verbose_text_line(b, flags, stmt, args_end, sections_pc(&b->sections, section), verbose_text_address);
 
     // Expand the body in the child scope. Its errors point at the definition (parsed in place); if it raised
     // any, drop an "expanded from here" breadcrumb at the call site - the handle_include idiom.
@@ -2191,6 +2213,7 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t se
 
     if (lr.token.type == lexeme_type_closer) {
         if (lr.token.closer.id == closer_brace) {   // the '}' we were waiting for
+            verbose_text_line(b, flags, cursor_at(at, r.next), lr.next, 0, verbose_text_margin);
             r.next = lr.next;
             return r;
         }
@@ -2357,7 +2380,26 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
     // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
     cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), &work, scratch);
-    liveness lv = liveness_analyze(g, insns, nv, 0, &work, scratch);
+    liveness lv = liveness_analyze(g, insns, zeropage_vars(&b->zeropage), 0, &work, scratch);
+
+    // A variable no instruction touches gets a WARNING, no address, and no definition (the rewrite below
+    // removes its binding): a declaration costing a byte of the pool for nothing is more likely a leftover
+    // than intentional. One warning per declaration site - a macro / FOR body's instantiations share one
+    // def cursor, so an unused declaration inside a 2000-iteration loop speaks once, not 2000 times.
+    for (uint32_t v = 0; v < nv; v++) {
+        if (liveness_class_of(&lv, v) != vreg_class_unused) {
+            continue;
+        }
+        zp_var var = zeropage_var_get(&b->zeropage, v);
+        bool already = false;
+        for (uint32_t u = 0; u < v && !already; u++) {
+            already = liveness_class_of(&lv, u) == vreg_class_unused
+                   && cursor_is_equal(zeropage_var_get(&b->zeropage, u).def, var.def);
+        }
+        if (!already) {
+            baron_warning(b, error_type_zpauto_unused, var.def, severity_warning);
+        }
+    }
 
     // Guard 1: a computed / indirect jump (unknown_succ) leaves for code we cannot model. With any variable in
     // play we cannot prove it is not clobbered there, so refuse and ask for an annotation.
@@ -2417,8 +2459,18 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 }
             }
             if (n.vreg != RC_INDEX_NONE) {
-                if (n.rw & vref_write) { rc_bitset_clear(&live, n.vreg); }
-                if (n.rw & vref_read)  { rc_bitset_set(&live, n.vreg); }
+                // A write ends the variable's range only when it covers the whole variable on its own
+                // (zp_insn_write_kills): a partial write - the LSB store of a pointer - preserves the
+                // bytes it does not touch, so the old value stays live through it. This sweep runs at
+                // variable granularity, so a store PAIR that fully rewrites a pointer conservatively
+                // keeps it live too - a too-live set only adds interference edges, never misses any.
+                if (zp_insn_write_kills(n, zeropage_var_get(&b->zeropage, n.vreg).width)) {
+                    rc_bitset_clear(&live, n.vreg);
+                }
+                else if (n.rw & vref_write) {
+                    rc_bitset_set(&live, n.vreg);
+                }
+                if (n.rw & vref_read) { rc_bitset_set(&live, n.vreg); }
             }
         }
     }
@@ -2427,8 +2479,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         zp_coloring col = zp_color(&lv, zeropage_vars(&b->zeropage), zeropage_reserved(&b->zeropage),
                                    &work, scratch);
         if (col.any_spilled) {
+            // An unplaced USED variable is a spill; an unused one was deliberately skipped (warned above).
             for (uint32_t v = 0; v < nv; v++) {
-                if (col.base[v] == RC_INDEX_NONE) {
+                if (col.base[v] == RC_INDEX_NONE && liveness_class_of(&lv, v) != vreg_class_unused) {
                     baron_error(b, error_type_zeropage_full, zeropage_var_get(&b->zeropage, v).def);
                 }
             }
@@ -2442,11 +2495,19 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     sections_patch_add_u8(&b->sections, n.section, n.operand_offset, (uint8_t) col.base[n.vreg]);
                 }
             }
-            // Rewrite each variable's symbol from the placeholder to its real zero-page address.
+            // Rewrite each variable's symbol from the placeholder to its real zero-page address - except an
+            // unused one, whose binding is REMOVED: it has no address to give, so leaving the placeholder
+            // would quietly resolve it to 0. Gone from the symbol table (and so from the -v listing's
+            // `var = &xx [auto]` lines), it is exactly as if the declaration were not there.
             for (uint32_t v = 0; v < nv; v++) {
                 zp_var var = zeropage_var_get(&b->zeropage, v);
-                scopes_set_symbol(&b->scopes, var.scope, var.name,
-                                  value_make_numeric((double) col.base[v]), var.def);
+                if (col.base[v] == RC_INDEX_NONE) {
+                    scopes_remove_symbol(&b->scopes, var.scope, var.name);
+                }
+                else {
+                    scopes_set_symbol(&b->scopes, var.scope, var.name,
+                                      value_make_numeric((double) col.base[v]), var.def);
+                }
             }
         }
     }
@@ -2881,21 +2942,24 @@ RC_TEST_STEP(assemble, zpreserve_errors, fix)
 RC_TEST_STEP(assemble, zpauto_declares_scoped_var, fix)
 {
     // ZPAUTO1/ZPAUTO2 bind scoped symbols; after convergence the allocator gives each a real zero-page byte.
-    // Neither variable is ever referenced, so there is no liveness to prove sharing safe - each keeps its own
-    // byte. FFD places the 2-byte `ptr` first (&70-&71), then the 1-byte `foo` at the next free byte, &72.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : ZPAUTO2 ptr");
+    // `foo` is held live across `ptr`'s whole range, so they interfere: FFD places the 2-byte `ptr` first
+    // (&70-&71), then the 1-byte `foo` at the next free byte, &72. (An UNUSED declaration gets no byte and
+    // no definition at all - see zpauto_unused_is_warned_and_undefined.)
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : ZPAUTO2 ptr\n"
+                          "STA foo : STA ptr : LDA #&40 : STA ptr+1 : LDA (ptr),Y : ORA foo : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("ptr")), value_make_numeric(0x70)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("foo")), value_make_numeric(0x72)));
 
     // A comma-list declares several at once.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 p, q, r") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 p, q, r\n"
+                      "STA p : STA q : STA r : LDA p : LDA q : LDA r : RTS") != 0);
     RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("p"))));
     RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("r"))));
 
     // Declared inside a named routine, a var is reachable from outside as routine.name (a dotted path).
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : .routine { ZPAUTO1 v : RTS }") != 0);
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : .routine { ZPAUTO1 v : STA v : LDA v : RTS }") != 0);
     RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("routine.v"))));
 }
 
@@ -3309,6 +3373,67 @@ RC_TEST_STEP(assemble, zpauto_canjump_bounds_computed_jump, fix)
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
 }
 
+RC_TEST_STEP(assemble, zpauto_partial_write_tracks_bytes, fix)
+{
+    // The demo.6502 bug distilled: ptr's MSB is set once up front; the loop rewrites only the LSB before
+    // each deref. That store redefines one byte - the MSB flows through it - so ptr must stay live around
+    // the loop and the loop temp may not overlap it. (Before per-byte liveness the LSB store read as a
+    // full kill, tmp landed on ptr's bytes, and the MSB was clobbered at run time.)
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 tmp\n"
+                          "LDA #&39 : STA ptr+1\n"
+                          ".loop\n"
+                          "LDA #0 : STA ptr\n"
+                          "LDA (ptr),Y : STA tmp : LDA tmp\n"
+                          "DEX : BNE loop\n"
+                          "RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "ptr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "tmp"), ==, 0x72);   // forced off BOTH of ptr's bytes
+
+    // The flip side: partial writes accumulate across the width, so a pointer FULLY rewritten - both
+    // bytes, one store each - genuinely dies at the rewrite, and a temp that expires beforehand still
+    // shares its bytes.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 tmp\n"
+                      "STA tmp : LDA tmp\n"
+                      "STA ptr : LDA #&39 : STA ptr+1\n"
+                      "LDA (ptr),Y : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "ptr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "tmp"), ==, 0x70);   // dead before the rewrite begins - reuse is safe
+}
+
+RC_TEST_STEP(assemble, zpauto_unused_is_warned_and_undefined, fix)
+{
+    // A ZPAUTO no instruction touches is warned (severity_warning - shown by default), given NO address,
+    // and its binding REMOVED - as if the declaration were not there. `gap` sits between two used vars:
+    // with it skipped, y packs at &71 (previously gap pinned &71 to itself and pushed y to &72).
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 x, gap, y\n"
+                          "STA x : STA y : LDA x : LDA y : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // a warning, not a refusal
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unused));
+    RC_CHECK(zp_addr(&fix->r, "x"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "y"), ==, 0x71);                // gap took nothing
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("gap"))));   // and is not defined
+
+    // A fully used trio raises no such warning.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 x, y\n"
+                      "STA x : STA y : LDA x : LDA y : RTS") != 0);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unused));
+
+    // An unused declaration inside a FOR body is one warning, not one per iteration (the instantiations
+    // share a def cursor).
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : FOR i = 1..8 : ZPAUTO1 spare : NEXT : RTS") != 0);
+    uint32_t warnings = 0;
+    for (uint32_t i = 0; i < fix->r.diagnostics.num; i++) {
+        if (rc_view_diagnostic_get(fix->r.diagnostics, i).code == error_type_zpauto_unused) {
+            warnings++;
+        }
+    }
+    RC_CHECK(warnings, ==, 1u);
+}
+
 RC_TEST_STEP(assemble, zpauto_external_calls_and_jumps, fix)
 {
     // A call or jump to a CONSTANT destination that matches nothing we assembled leaves the program - an OS
@@ -3446,7 +3571,7 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
 
     cfg g = cfg_build(zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage), zeropage_labels(&b.zeropage),
                       &arena, scratch);
-    liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_var_count(&b.zeropage), 0,
+    liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_vars(&b.zeropage), 0,
                                    &arena, scratch);
 
     // Classification: in1 is read before written (input), tmp is born and consumed inside (temp), out1 is
@@ -3653,14 +3778,17 @@ RC_TEST_STEP(assemble, listing_is_opt_in, fix)
 RC_TEST_STEP(assemble, listing_full_shape, fix)
 {
     fix->desc.verbose = true;   // the listing is opt-in
-    // The whole listing format in one program: section framing (address, no bytes, blank line after the
+    // The whole listing format in one program: section framing at the margin (blank line after the
     // close), labels at the margin, instructions and data with address + hex + verbatim source, EQUS
-    // truncated after four bytes - and the ZPAUTO crown jewel: `sta var` shows the ALLOCATED byte (&70),
-    // not the placeholder, because the listing pass runs after allocation has rewritten the symbols.
+    // truncated after four bytes, assignments and ZPAUTO allocations echoed at the margin -
+    // and the ZPAUTO crown jewels: the declaration lists as the assignment it became (`var = &70 [auto]`)
+    // and `sta var` shows the ALLOCATED byte (&70), not the placeholder, because the listing pass runs
+    // after allocation has rewritten the symbols.
     RC_CHECK_TRUE(ASM("section main, org=&900\nzpreserve &70..&7F\nzpauto1 var\n.label\nlda #&12\n"
                       "sta var\n.inner\nldx #1\nlda var\nrts\nequs \"ABCDEFGH\"\nequb 0\nendsection\nx = 5") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("  0900                  section main, org=&900\n"
+             RC_STR("section main, org=&900\n"
+                    "var = &70 [auto]\n"
                     ".label\n"
                     "  0900  A9 12           lda #&12\n"
                     "  0902  85 70           sta var\n"
@@ -3670,8 +3798,9 @@ RC_TEST_STEP(assemble, listing_full_shape, fix)
                     "  0908  60              rts\n"
                     "  0909  41 42 43 44...  equs \"ABCDEFGH\"\n"
                     "  0911  00              equb 0\n"
-                    "  0912                  endsection\n"
-                    "\n"));
+                    "endsection\n"
+                    "\n"
+                    "x = 5\n"));
 }
 
 RC_TEST_STEP(assemble, listing_macro_expansion, fix)
@@ -3744,6 +3873,32 @@ RC_TEST_STEP(assemble, listing_skip_and_multiline, fix)
 
     RC_CHECK_TRUE(ASM("equb {1,\n2}") != 0);
     RC_CHECK(VERB(), ==, RC_STR("  0000  01 02           equb {1,...\n"));
+}
+
+RC_TEST_STEP(assemble, listing_assignments_and_braces, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // Assignments echo verbatim at the margin (they emit nothing and land nowhere); braces echo at the
+    // margin too, so the scope structure survives into the listing, whether the '{' shares the label's
+    // line or not; and a ZPAUTO declaration lists as the assignment it became: `tmp = &70 [auto]`.
+    RC_CHECK_TRUE(ASM("zpreserve &70..&7F\nbase = &12\n.sub {\nzpauto1 tmp\nsta tmp\nlda #base\nrts\n}") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("base = &12\n"
+                    ".sub\n"
+                    "{\n"
+                    "tmp = &70 [auto]\n"
+                    "  0000  85 70           sta tmp\n"
+                    "  0002  A9 12           lda #base\n"
+                    "  0004  60              rts\n"
+                    "}\n"));
+
+    // An anonymous scope's braces list the same way, and a dead branch's do not list at all (the gate is
+    // listing && active, same as every other line).
+    RC_CHECK_TRUE(ASM("{\nnop\n}\nif false\n{\nw = 1\n}\nendif") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("{\n"
+                    "  0000  EA              nop\n"
+                    "}\n"));
 }
 
 RC_TEST_STEP(assemble, print_to_channel_zero, fix)

@@ -66,6 +66,7 @@ typedef enum error_type {
     error_type_zpauto_computed_flow,  // ZPAUTO active past a computed/indirect jump the analysis cannot follow
     error_type_zpauto_register_name,  // a ZPAUTO variable named 'A' - ambiguous with accumulator addressing
     error_type_zpauto_indexed_access, // a ZPAUTO reached by indexed / indexed-indirect addressing (var,X etc.) - opt-in warning, user owns the index bounds
+    error_type_zpauto_unused,         // a ZPAUTO no instruction touches - warned, given no address, and left undefined
     error_type_zpauto_narrow_pointer, // a 1-byte ZPAUTO1 dereferenced as a pointer ((var),Y / (var)) - needs ZPAUTO2
     error_type_zpauto_out_of_bounds,  // a var+n access reaches past the ZPAUTO variable's declared width
     error_type_zpauto_bad_width,      // ZPAUTO <count> with a count outside 1..256
