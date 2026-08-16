@@ -12,7 +12,7 @@ baron baron_make(baron_desc *a)
 
     scopes_init(&b.scopes, &a->permanent);
     scopes_make_root(&b.scopes);              // the root is scope index 0
-    sections_init(&b.sections, &a->per_pass);   // the default section is (re)made per pass by sections_reset
+    sections_init(&b.sections, &a->per_pass, &a->permanent);   // default section (re)made per pass; permanent backs the cross-pass splice sizes
     zeropage_init(&b.zeropage, &a->permanent);   // empty + dormant; run_pass clears it, ZPRESERVE fills it
     source_files_init(&b.source_files, &a->permanent);
     macros_init(&b.macros, &a->per_pass);         // run_pass reseeds its store + token table each pass

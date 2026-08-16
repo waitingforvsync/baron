@@ -159,7 +159,7 @@ RC_TEST(output, spec_from_sections)
 {
     rc_arena arena = rc_arena_make_default();
     sections sec;
-    sections_init(&sec, &arena);
+    sections_init(&sec, &arena, &arena);
     sections_reset(&sec);
 
     // "main": saved (a filename names the output), with an org attribute and its own exec. Its load
@@ -214,7 +214,7 @@ RC_TEST(output, spec_rejects_bad_attributes)
 {
     rc_arena arena = rc_arena_make_default();
     sections sec;
-    sections_init(&sec, &arena);
+    sections_init(&sec, &arena, &arena);
     sections_reset(&sec);
 
     uint32_t a = sections_make(&sec, RC_STR("code"));

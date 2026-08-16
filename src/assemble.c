@@ -44,6 +44,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
 static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch);
 static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -329,6 +330,7 @@ static const token statement_token_entries[] = {
     {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
     {RC_STR("incbin"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incbin}}},
+    {RC_STR("incsection"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incsection}}},
     {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
     {RC_STR("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
     {RC_STR("print"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_print}}},
@@ -1875,6 +1877,32 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
     return fold(pulled, require_separator(b, cursor_at(at, e.next)));
 }
 
+// INCSECTION <name> - splice the assembled bytes of the named section here: INCBIN, but sourced from a
+// section's code buffer. Only SPACE is reserved during the passes (the source's best-known size, so the
+// layout settles whatever order the sections appear in); the bytes themselves land in one final,
+// dependency-ordered fixup step AFTER the zero-page allocator has patched them (splices_resolve).
+// Consequences: the section may be defined LATER in the source; a missing one is judged only on the final
+// settled state; a circular arrangement is refused the first pass it is seen; and the -v listing shows an
+// address-only line (the bytes belong to the fixup, not to this statement). The copy is literal - no
+// relocation - which is the point: the bytes are meant to run at the SOURCE section's addresses once the
+// program has moved them there.
+static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) scope;
+    (void) scratch;
+    rc_str src = source_files_text(&b->source_files, at.source);
+    lexer_result nm = lexer_next(src, at.pos, statement_tokens(b));
+    if (nm.token.type != lexeme_type_identifier) {
+        return syntax_error(b, error_type_expected_section_name, cursor_at(at, at.pos));
+    }
+    uint32_t pc0 = sections_pc(&b->sections, section);
+    if (flags.active) {
+        sections_splice(&b->sections, section, nm.token.identifier.name, cursor_at(at, at.pos));
+    }
+    verbose_text_line(b, flags, stmt, nm.next, pc0, verbose_text_address);
+    return require_separator(b, cursor_at(at, nm.next));
+}
+
 
 // ---- MACRO ----
 
@@ -2341,6 +2369,74 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t sec
 
 // ---- the multi-pass driver ----
 
+// The INCSECTION dependency walk, shared by the per-pass cycle check and the final fixup. Splices release
+// in "everything spliced INTO my source has landed first" order - which is exactly the order the copies
+// must run in, so a chain (A inserts B inserts C) carries C's bytes through B into A - and a splice that
+// never releases sits on (or behind) a dependency cycle. With `apply` set this is the real fixup: an
+// unknown source is an error (every IF arm has settled by now, so absence is final) and each released
+// splice copies its source's bytes over the span it reserved. Without it, the walk only proves
+// acyclicity: an unknown source may yet appear on a later pass, so it blocks nothing and errors nothing.
+// Returns false with diagnostics recorded when anything refused.
+static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
+{
+    rc_view_splice all = sections_splices(&b->sections);
+    if (all.num == 0) {
+        return true;
+    }
+
+    uint32_t *src  = rc_arena_alloc_type(&scratch, uint32_t, all.num);
+    bool     *done = rc_arena_alloc_zero_type(&scratch, bool, all.num);
+    uint32_t remaining = all.num;
+    bool ok = true;
+    for (uint32_t i = 0; i < all.num; i++) {
+        splice sp = rc_view_splice_get(all, i);
+        src[i] = sections_find(&b->sections, sp.src_name);
+        if (src[i] == RC_INDEX_NONE) {
+            if (apply) {
+                baron_error_payload(b, error_type_unknown_section, sp.at, sp.src_name);
+                ok = false;
+            }
+            done[i] = true;   // absent: it blocks nothing (and cannot sit on a cycle)
+            remaining--;
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    while (remaining > 0) {
+        bool progress = false;
+        for (uint32_t i = 0; i < all.num; i++) {
+            if (done[i]) {
+                continue;
+            }
+            bool ready = true;   // ready iff nothing unapplied still splices INTO our source
+            for (uint32_t j = 0; j < all.num && ready; j++) {
+                ready = done[j] || rc_view_splice_get(all, j).dst != src[i];
+            }
+            if (ready) {
+                if (apply) {
+                    splice sp = rc_view_splice_get(all, i);
+                    sections_copy_in(&b->sections, sp.dst, sp.dst_offset, src[i]);
+                }
+                done[i] = true;
+                remaining--;
+                progress = true;
+            }
+        }
+        if (!progress) {
+            for (uint32_t i = 0; i < all.num; i++) {
+                if (!done[i]) {
+                    splice sp = rc_view_splice_get(all, i);
+                    baron_error_payload(b, error_type_circular_incsection, sp.at, sp.src_name);
+                }
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_arena scratch)
 {
     // The per-pass arena backs sections, macros and functions - a fresh projection of the source each pass.
@@ -2374,7 +2470,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 
     const uint32_t scope   = 0;
     const uint32_t section = sections_default;   // each pass starts in the default section (index 0)
-    return parse_file(
+    parse_result r = parse_file(
         b,
         (cursor) {.source = source, .pos = 0},
         scope,
@@ -2382,6 +2478,19 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
         flags,
         scratch
     );
+
+    // INCSECTION bookkeeping. A reservation that missed its source's settled size reshapes the layout,
+    // so it forces another pass; a dependency cycle can never settle, so it fails RIGHT NOW (on the first
+    // pass that sees it, not after the pass cap); and every named section's size rolls into the
+    // cross-pass map, ready for next pass's reservations.
+    if (!r.fatal) {
+        r.changed |= sections_splices_changed(&b->sections);
+        if (!splices_resolve(b, false, scratch)) {
+            r.fatal = true;
+        }
+        sections_note_sizes(&b->sections);
+    }
+    return r;
 }
 
 // Post-convergence zero-page allocation. Layout has settled with every ZPAUTO reference sized as a
@@ -2658,6 +2767,13 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
                 if (lst.fatal || baron_has_errors(b)) {
                     return assemble_failed(b);
                 }
+            }
+            // The INCSECTION fixup, absolutely last: after the zero-page patches (so a spliced copy carries
+            // the PATCHED bytes) and after the listing pass (whose rebuilt sections are the ones the result
+            // snapshots). splices_resolve copies in dependency order; an unknown source is judged - and
+            // refused - only here, once every IF arm has settled.
+            if (!splices_resolve(b, true, scratch)) {
+                return assemble_failed(b);
             }
             return pass + 1;
         }
@@ -3016,6 +3132,155 @@ RC_TEST_STEP(assemble, section_name_errors, fix)
     RC_CHECK_TRUE(ERR("SECTION 5 : ENDSECTION") == error_type_expected_section_name);   // a number is not a name
     RC_CHECK_TRUE(ERR("SECTION a : LDA #0") == error_type_unclosed_section);   // no ENDSECTION
     RC_CHECK_TRUE(ERR("ENDSECTION") == error_type_unexpected_endsection);   // no SECTION to close
+}
+
+// The result's section named `name` ({0} if absent) - the INCSECTION tests read spliced buffers via it.
+static section result_section(const baron_result *r, rc_str name)
+{
+    for (uint32_t i = 0; i < r->sections.num; i++) {
+        section s = rc_view_section_get(r->sections, i);
+        if (s.name.len != 0 && rc_str_is_equal(s.name, name)) {
+            return s;
+        }
+    }
+    return (section) {0};
+}
+
+// Do the named section's bytes equal `expect`? (The INCSECTION twin of code_is, which reads the default.)
+static bool section_code_is(const baron_result *r, rc_str name, const uint8_t *expect, uint32_t num)
+{
+    section s = result_section(r, name);
+    if (s.code.num != num) {
+        return false;
+    }
+    for (uint32_t i = 0; i < num; i++) {
+        if (rc_array_bytes_get(&s.code, i) != expect[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+RC_TEST_STEP(assemble, incsection_splices_bytes, fix)
+{
+    // The relocation shape: `load` carries a stub, then the assembled bytes of `code` (spliced in place of
+    // the reserved span by the final fixup), then a trailer. Labels around the splice measure its length -
+    // the count the relocation stub needs.
+    uint32_t passes = ASM("SECTION code, org=&1100\nLDA #&2A : RTS\nENDSECTION\n"
+                          "SECTION load, org=&3000\nNOP\n.before\nINCSECTION code\n.after\nEQUB &FF\nENDSECTION\n"
+                          "size = after - before");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xEA, 0xA9, 0x2A, 0x60, 0xFF}, 5));
+    RC_CHECK(result_section(&fix->r, RC_STR("load")).pc, ==, 0x3005u);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("size")), value_make_numeric(3)));
+
+    // Splicing the same section twice is two copies.
+    RC_CHECK_TRUE(ASM("SECTION a, org=0\nEQUB 1, 2\nENDSECTION\n"
+                      "SECTION b, org=&2000\nINCSECTION a\nINCSECTION a\nENDSECTION") != 0);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("b"), (uint8_t[]) {1, 2, 1, 2}, 4));
+}
+
+RC_TEST_STEP(assemble, incsection_forward_reference, fix)
+{
+    // The source section may be defined LATER: the first pass reserves nothing (its size is unknown), the
+    // settle check demands another, and the reservation then tracks the real size until the layout holds
+    // still. The fixup fills the span at the very end regardless of order.
+    uint32_t passes = ASM("SECTION load, org=&3000\nNOP\nINCSECTION code\nEQUB &FF\nENDSECTION\n"
+                          "SECTION code, org=&1100\nLDA #&2A : RTS\nENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(passes >= 3u);   // the missed reservation forced at least one extra pass
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xEA, 0xA9, 0x2A, 0x60, 0xFF}, 5));
+}
+
+RC_TEST_STEP(assemble, incsection_errors, fix)
+{
+    // A source that never appears is judged once everything has settled (an IF arm could still have
+    // produced it), and named in the diagnostic.
+    RC_CHECK_TRUE(ERR("SECTION a, org=0 : INCSECTION nosuch : ENDSECTION") == error_type_unknown_section);
+    RC_CHECK(diag_payload(&fix->r, error_type_unknown_section), ==, RC_STR("nosuch"));
+
+    // A cycle can never settle, so it is refused outright: self-insertion on the very first pass...
+    RC_CHECK_TRUE(ERR("SECTION a, org=0 : NOP : INCSECTION a : ENDSECTION") == error_type_circular_incsection);
+    RC_CHECK(diag_payload(&fix->r, error_type_circular_incsection), ==, RC_STR("a"));
+
+    // ...and a mutual pair at the latest by the fixup step.
+    RC_CHECK_TRUE(ERR("SECTION a, org=0 : INCSECTION b : ENDSECTION\n"
+                      "SECTION b, org=&100 : INCSECTION a : ENDSECTION") == error_type_circular_incsection);
+
+    // A missing / non-identifier name is the SECTION family's usual complaint.
+    RC_CHECK_TRUE(ERR("INCSECTION") == error_type_expected_section_name);
+    RC_CHECK_TRUE(ERR("INCSECTION 5") == error_type_expected_section_name);
+}
+
+RC_TEST_STEP(assemble, incsection_converges, fix)
+{
+    // A source whose size shifts while the assembly settles (LDA addr sizes optimistically zero-page, then
+    // widens to absolute once addr binds): the reservation tracks it, and labels after the splice land on
+    // the settled layout.
+    uint32_t passes = ASM("SECTION load, org=&3000\nINCSECTION code\n.endlab\nENDSECTION\n"
+                          "SECTION code, org=&1100\nLDA addr\nENDSECTION\n"
+                          "addr = &1234");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xAD, 0x34, 0x12}, 3));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("endlab")), value_make_numeric(0x3003)));
+}
+
+RC_TEST_STEP(assemble, incsection_carries_zpauto_patches, fix)
+{
+    // The reason the fixup runs ABSOLUTELY last: the zero-page allocator patches operand bytes after the
+    // final pass, in the section the instructions emitted into. The spliced copy must carry those PATCHED
+    // bytes - the allocated &70, not the placeholder 0.
+#define ZP_SPLICE_PROG "ZPRESERVE &70..&7F\n" \
+                       "SECTION load, org=&3000\nINCSECTION code\nENDSECTION\n" \
+                       "SECTION code, org=&1100\nZPAUTO1 v\nSTA v : LDA v : RTS\nENDSECTION"
+    RC_CHECK_TRUE(ASM(ZP_SPLICE_PROG) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
+
+    // The same through the -v listing path (the listing pass rebuilds the sections; the fixup runs after).
+    fix->desc.verbose = true;
+    RC_CHECK_TRUE(ASM(ZP_SPLICE_PROG) != 0);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
+    fix->desc.verbose = false;
+#undef ZP_SPLICE_PROG
+}
+
+RC_TEST_STEP(assemble, incsection_chains, fix)
+{
+    // A chain defined most-dependent FIRST (a needs b needs c, both forward): the dependency-ordered fixup
+    // copies bottom-up, so c's ZP-patched bytes arrive in a THROUGH b.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+                          "SECTION a, org=0\nEQUB 1\nINCSECTION b\nENDSECTION\n"
+                          "SECTION b, org=&100\nEQUB 2\nINCSECTION c\nENDSECTION\n"
+                          "SECTION c, org=&200\nZPAUTO1 w\nSTA w : LDA w : RTS\nENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("c"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("b"), (uint8_t[]) {2, 0x85, 0x70, 0xA5, 0x70, 0x60}, 6));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("a"), (uint8_t[]) {1, 2, 0x85, 0x70, 0xA5, 0x70, 0x60}, 7));
+}
+
+RC_TEST_STEP(assemble, incsection_listing_line, fix)
+{
+    fix->desc.verbose = true;
+    // INCSECTION lists as an address-only line: only space is reserved while the passes run - the bytes
+    // belong to the post-assembly fixup - so there is no byte dump to show, like an INCLUDE or macro line.
+    RC_CHECK_TRUE(ASM("SECTION code, org=&1100\nLDA #&12\nENDSECTION\n"
+                      "SECTION load, org=&3000\nINCSECTION code\nENDSECTION") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("SECTION code, org=&1100\n"
+                    "  1100  A9 12           LDA #&12\n"
+                    "ENDSECTION\n"
+                    "\n"
+                    "SECTION load, org=&3000\n"
+                    "  3000                  INCSECTION code\n"
+                    "ENDSECTION\n"
+                    "\n"));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xA9, 0x12}, 2));
+    fix->desc.verbose = false;
 }
 
 RC_TEST_STEP(assemble, zpreserve_directive, fix)

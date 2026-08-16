@@ -75,6 +75,8 @@ typedef enum error_type {
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding
     error_type_duplicate_section,     // two SECTION blocks share a name (names are unique; no concatenation)
+    error_type_unknown_section,       // INCSECTION names a section that never appeared
+    error_type_circular_incsection,   // INCSECTION dependencies form a cycle (self-insertion included)
     error_type_not_iterable,          // a FOR sequence that is neither a list nor a range
     error_type_expected_filename,     // an INCLUDE / INCBIN operand did not evaluate to a string
     error_type_include_too_deep,      // INCLUDE recursion hit the depth cap - a cyclic include, most likely
