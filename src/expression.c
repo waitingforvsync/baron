@@ -1138,7 +1138,7 @@ static value fn_defined(rc_view_value args, rc_arena *arena)
     }
 
     value v = rc_view_value_get(args, 0);
-    bool unresolved = value_is_error(v) && v.error == error_type_unknown_symbol;
+    bool unresolved = value_is_error(v) && v.error.code == error_type_unknown_symbol;
     return value_make_numeric(unresolved ? 0.0 : 1.0);
 }
 
@@ -1714,9 +1714,15 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
 
         case lexeme_type_identifier: {
             value v = scopes_get_symbol(p->env->scopes, p->env->scope_index, lex.identifier.name);
-            // Not found is not a parse error: it becomes an error value that
-            // propagates, so a forward reference can resolve on a later pass.
-            return ok(value_is_none(v) ? value_make_error(error_type_unknown_symbol) : v, lr.next);
+            // Not found is not a parse error: it becomes an error value that propagates, so a forward
+            // reference can resolve on a later pass. This is the one place that still KNOWS the name, so
+            // it rides along as the error's detail - "Undefined symbol: 'x'" gets its x from here.
+            // (scopes_get_symbol itself yields a detail-less unknown for a dotted path that goes astray;
+            // stamp the name on that too.)
+            if (value_is_none(v) || (value_is_error(v) && v.error.code == error_type_unknown_symbol)) {
+                v = value_make_error_detail(error_type_unknown_symbol, lex.identifier.name);
+            }
+            return ok(v, lr.next);
         }
 
         case lexeme_type_constant:
@@ -1986,7 +1992,7 @@ RC_TEST_STEP(expression, constants, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("2*PI"), value_make_numeric(2.0 * 3.14159265358979323846)));
     // A longer identifier still wins: PICKLE is a symbol (here unbound), not PI followed by CKLE.
     value pickle = VAL("PICKLE");
-    RC_CHECK_TRUE(value_is_error(pickle) && pickle.error == error_type_unknown_symbol);
+    RC_CHECK_TRUE(value_is_error(pickle) && pickle.error.code == error_type_unknown_symbol);
     // The PC constant reads env->pc (0 in this fixture); P% is its BBC Micro alias. Multiply still works,
     // because '*' as an operator is lexed from the odd table.
     RC_CHECK_TRUE(value_is_equal(VAL("*"),   value_make_numeric(0.0)));
@@ -2382,7 +2388,7 @@ RC_TEST_STEP(expression, ranges_errors, fix)
 
     // Enumerating a huge range (here by subscripting it) is capped at VALUE_LIST_MAX_LENGTH.
     RC_CHECK_TRUE(value_is_equal(VAL("(0..65535)[0]"), value_make_numeric(0)));   // exactly the cap is fine
-    RC_CHECK_TRUE(VAL("(0..65536)[0]").error == error_type_list_too_big);        // one past it
+    RC_CHECK_TRUE(VAL("(0..65536)[0]").error.code == error_type_list_too_big);        // one past it
 }
 
 RC_TEST_STEP(expression, subscript, fix)

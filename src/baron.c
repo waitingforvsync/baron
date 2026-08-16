@@ -29,18 +29,38 @@ baron baron_make(baron_desc *a)
     return b;
 }
 
-void baron_error(baron *b, error_type code, cursor at)
+// The payload is COPIED into the permanent arena (where the diagnostics themselves live), so a caller may
+// hand in a view into scratch, per_pass or source text without a thought for lifetime - diagnostics are
+// rare, and the copy buys away a whole class of dangling views.
+static rc_str payload_copy(baron *b, rc_str payload)
+{
+    return payload.len == 0 ? (rc_str) {0} : rc_mstr_from_str(payload, 0, b->permanent).view;
+}
+
+void baron_error_payload(baron *b, error_type code, cursor at, rc_str payload)
 {
     RC_ASSERT(b != NULL);
     rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = severity_error}, b->permanent);
+        (diagnostic) {.code = code, .at = at, .severity = severity_error, .payload = payload_copy(b, payload)},
+        b->permanent);
+}
+
+void baron_warning_payload(baron *b, error_type code, cursor at, uint8_t severity, rc_str payload)
+{
+    RC_ASSERT(b != NULL && severity != severity_error);   // a warning is a positive level; 0 would fail the assemble
+    rc_array_diagnostic_push(&b->diagnostics,
+        (diagnostic) {.code = code, .at = at, .severity = severity, .payload = payload_copy(b, payload)},
+        b->permanent);
+}
+
+void baron_error(baron *b, error_type code, cursor at)
+{
+    baron_error_payload(b, code, at, (rc_str) {0});
 }
 
 void baron_warning(baron *b, error_type code, cursor at, uint8_t severity)
 {
-    RC_ASSERT(b != NULL && severity != severity_error);   // a warning is a positive level; 0 would fail the assemble
-    rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = severity}, b->permanent);
+    baron_warning_payload(b, code, at, severity, (rc_str) {0});
 }
 
 uint32_t baron_error_count(const baron *b)

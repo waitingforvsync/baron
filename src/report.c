@@ -58,7 +58,7 @@ static void append_diagnostic(rc_mstr *out, diagnostic d, rc_view_source_file so
     rc_mstr_append(out, RC_STR(": "), arena);
     rc_mstr_append(out, severity_label(d), arena);
     rc_mstr_append(out, RC_STR(": "), arena);
-    rc_mstr_append(out, error_type_name(d.code), arena);
+    error_append_message(out, d.code, d.payload, arena);   // the payload lands on the template's '%'
     rc_mstr_append_char(out, '\n', arena);
 }
 
@@ -149,7 +149,7 @@ RC_TEST_STEP(report, renders_error_with_location, fix)
     // An undefined symbol on the second line: the rendered line must carry the source name and 1-based
     // line/col of the offending operand.
     RC_CHECK(ASM("t", "nop\nx = zork"), ==, 0u);
-    RC_CHECK(RENDER(severity_warning), ==, RC_STR("t:2:4: error: Undefined symbol\n"));
+    RC_CHECK(RENDER(severity_warning), ==, RC_STR("t:2:4: error: Undefined symbol: 'zork'\n"));
 }
 
 RC_TEST_STEP(report, warning_shown_and_filtered_by_threshold, fix)
@@ -158,7 +158,7 @@ RC_TEST_STEP(report, warning_shown_and_filtered_by_threshold, fix)
     // when only errors are asked for - and never a failure (the assemble still passes).
     RC_CHECK_TRUE(ASM("t", "jmp (&12FF)") != 0);
     RC_CHECK(RENDER(severity_warning), ==,
-             RC_STR("t:1:4: warning: Indirect JMP vector straddles a page boundary (6502 hardware bug)\n"));
+             RC_STR("t:1:4: warning: Indirect JMP vector straddles a page boundary (6502 bug)\n"));
     RC_CHECK(RENDER(severity_error).len, ==, 0u);
 }
 
@@ -168,8 +168,20 @@ RC_TEST_STEP(report, duplicate_renders_original_definition_note, fix)
     // original - the note keeps the FIRST binding's location.
     RC_CHECK(ASM("t", ".here\n.here"), ==, 0u);
     RC_CHECK(RENDER(severity_warning), ==,
-             RC_STR("t:2:2: error: Symbol is already defined in this scope\n"
-                    "t:1:2: note: Originally defined here\n"));
+             RC_STR("t:2:2: error: Duplicate symbol: 'here'\n"
+                    "t:1:2: note: First defined here: 'here'\n"));
+}
+
+RC_TEST_STEP(report, payloads_render_into_messages, fix)
+{
+    // An ERROR statement's text passes through the bare "%" template whole - a '%' inside it is inert
+    // (only the template is scanned for the substitution point) - and a branch out of range names its
+    // distance.
+    RC_CHECK(ASM("t", "error \"50% of \", 12, \" units\""), ==, 0u);
+    RC_CHECK(RENDER(severity_warning), ==, RC_STR("t:1:1: error: 50% of 12 units\n"));
+
+    RC_CHECK(ASM("t", "beq far\nskip 200\n.far rts"), ==, 0u);
+    RC_CHECK(RENDER(severity_warning), ==, RC_STR("t:1:4: error: Branch out of range: +200 bytes\n"));
 }
 
 RC_TEST_STEP(report, unreadable_file_renders_from_origin, fix)

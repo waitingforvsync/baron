@@ -59,8 +59,13 @@ baron baron_make(baron_desc *a);
 // records a harmless warning at a positive `severity` level. baron_has_errors reports whether any
 // error-severity diagnostic is present - the pass driver fails the assemble exactly when it is, so
 // warnings alone leave it succeeding (and stay in the list for the caller to read / filter by level).
+// The _payload variants attach a string the renderer substitutes for '%' in the message (a symbol name,
+// a branch distance, an ERROR statement's text); it is COPIED into the permanent arena, so any backing
+// will do. The plain forms record no payload.
 void baron_error(baron *b, error_type code, cursor at);
 void baron_warning(baron *b, error_type code, cursor at, uint8_t severity);
+void baron_error_payload(baron *b, error_type code, cursor at, rc_str payload);
+void baron_warning_payload(baron *b, error_type code, cursor at, uint8_t severity, rc_str payload);
 
 // The count of error-severity (level 0) diagnostics recorded so far. baron_has_errors is just this being
 // non-zero; INCLUDE also uses it to tell whether an included file added any errors of its own.

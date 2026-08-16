@@ -21,7 +21,12 @@ value value_make_string(rc_str s)
 
 value value_make_error(error_type e)
 {
-    return (value) {.type = value_type_error, .error = e};
+    return (value) {.type = value_type_error, .error = {.code = e}};
+}
+
+value value_make_error_detail(error_type e, rc_str detail)
+{
+    return (value) {.type = value_type_error, .error = {.code = e, .detail = detail}};
 }
 
 value value_make_range(value_range r)
@@ -218,7 +223,7 @@ bool value_is_equal(value a, value b)
         case value_type_string:
             return rc_str_is_equal(a.string, b.string);
         case value_type_error:
-            return a.error == b.error;
+            return a.error.code == b.error.code;   // detail is descriptive, not identity
         case value_type_range:
             return a.range.start == b.range.start
                 && a.range.end == b.range.end
@@ -259,7 +264,7 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
             return;
         case value_type_error:
             rc_mstr_append(out, RC_STR("<error: "), arena);
-            rc_mstr_append(out, error_type_name(v.error), arena);
+            error_append_message(out, v.error.code, v.error.detail, arena);
             rc_mstr_append_char(out, '>', arena);
             return;
         case value_type_range:
@@ -381,7 +386,7 @@ RC_TEST(value, formatting)
 
     out = rc_mstr_make(16, &arena);
     value_format(&out, value_make_error(error_type_type_mismatch), &arena);
-    RC_CHECK(out.view, ==, RC_STR("<error: Operands have incompatible types>"));
+    RC_CHECK(out.view, ==, RC_STR("<error: Incompatible types>"));
 
     // Stepped, fully-bounded range.
     out = rc_mstr_make(16, &arena);

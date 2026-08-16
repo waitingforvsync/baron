@@ -32,15 +32,18 @@ enum {
 // Channel 0 is the default (no #n), and is also where the -v listing goes.
 enum { baron_num_channels = 10 };
 
-// A single diagnostic: a code, where it happened, and its severity level. Diagnostics accumulate into a
-// flat array (in `baron`) rather than aborting at the first - the location's `cursor` names both the
-// source and the offset, and a further entry can point at a related site (an INCLUDE / macro "included
-// from" frame, or the original definition behind a duplicate), so the array reads as a stack trace with
-// no per-error metadata. The code lives in `error_type`, the whole diagnostic vocabulary.
+// A single diagnostic: a code, where it happened, its severity level, and an optional payload string.
+// Diagnostics accumulate into a flat array (in `baron`) rather than aborting at the first - the location's
+// `cursor` names both the source and the offset, and a further entry can point at a related site (an
+// INCLUDE / macro "included from" frame, or the original definition behind a duplicate), so the array
+// reads as a stack trace with no per-error metadata. The code lives in `error_type`, the whole diagnostic
+// vocabulary; the renderer substitutes `payload` for the '%' in the code's message template (a symbol
+// name, a branch distance, an ERROR statement's text - {0} when the message stands alone).
 typedef struct diagnostic {
     error_type code;
     cursor     at;
     uint8_t    severity;   // 0 = error; higher = warning level (see severity_* above)
+    rc_str     payload;    // permanent-backed (the recording helper copies), or {0} for none
 } diagnostic;
 
 #define RC_ARRAY_TYPE diagnostic

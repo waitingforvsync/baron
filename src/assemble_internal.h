@@ -45,13 +45,17 @@ typedef struct parse_result {
 
 // Record a fatal (syntax) error into b->diagnostics and yield the unwinding result: the token stream
 // is broken, so the pass aborts. Checked on every pass (even in a dead branch), since syntax is.
+// The _payload variant attaches the '%'-substituted string (see semantic_error_payload below).
 parse_result syntax_error(baron *b, error_type code, cursor at);
+parse_result syntax_error_payload(baron *b, error_type code, cursor at, rc_str payload);
 
 // Record a recoverable (semantic) error into b->diagnostics - but ONLY on the settling pass and only
 // when the branch is live (flags.final && flags.active), so convergence passes stay quiet and a dead
 // branch raises nothing. The caller carries on with a best-effort emission; the error rides in the
-// diagnostics array and fails the assemble at the end.
+// diagnostics array and fails the assemble at the end. The _payload variant attaches the string the
+// renderer substitutes for '%' in the message (copied to permanent by the recorder - any backing).
 void semantic_error(baron *b, parse_flags flags, error_type code, cursor at);
+void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor at, rc_str payload);
 
 // Record a warning into b->diagnostics at a positive `severity` level, gated exactly like semantic_error
 // (settling pass, live branch). Unlike an error it does not fail the assemble - it just rides along for
@@ -68,10 +72,11 @@ typedef enum int_argument_type {
 } int_argument_type;
 
 typedef struct int_argument {
-    int64_t           value;      // valid when type == int_argument_type_known
+    int64_t           value;        // valid when type == int_argument_type_known
     int_argument_type type;
-    error_type        error;      // set when type == int_argument_type_error
+    error_type        error;        // set when type == int_argument_type_error
     uint32_t          error_at;
+    rc_str            error_detail; // the error's payload (e.g. the undefined symbol's name), or {0}
 } int_argument;
 
 // Reduce an evaluated expression value to an integer argument (pure: inputs in, result out). A plain

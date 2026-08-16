@@ -1,7 +1,8 @@
 #ifndef BARON_ERROR_H_
 #define BARON_ERROR_H_
 
-#include "richc/str.h"   // rc_str
+#include "richc/mstr.h"   // rc_mstr (error_append_message's output)
+#include "richc/str.h"    // rc_str
 
 
 // The single diagnostic vocabulary, shared by every layer. The expression evaluator emits the
@@ -99,6 +100,9 @@ typedef enum error_type {
     error_type_list_too_big,          // a list grew past VALUE_LIST_MAX_LENGTH
     error_type_not_implemented,
 
+    // The ERROR statement: the user's own message, carried whole in the diagnostic's payload.
+    error_type_user_error,
+
     // Driver.
     error_type_no_convergence,
     error_type_source_load,           // a source file could not be read
@@ -107,9 +111,16 @@ typedef enum error_type {
     error_type_jmp_indirect_page_cross,   // JMP (&xxFF): the NMOS vector-fetch page-wrap bug
 } error_type;
 
-// The human-readable message for a code (a short sentence, not the enumerator tail) - what a rendered
-// diagnostic prints after its location.
+// The terse human-readable message template for a code (not the enumerator tail) - what a rendered
+// diagnostic prints after its location. A '%' in the template marks where a diagnostic's payload (a
+// symbol name, a branch distance, an ERROR statement's text) belongs.
 rc_str error_type_name(error_type e);
+
+// Append the code's message to `out` with `payload` substituted for the template's first '%' (an empty
+// payload substitutes nothing). Only the template is scanned, so a payload containing '%' is inert; a
+// payload with no '%' to land in is dropped. The one message renderer, shared by the diagnostic report
+// and value_format.
+void error_append_message(rc_mstr *out, error_type e, rc_str payload, rc_arena *arena);
 
 
 #endif // ifndef BARON_ERROR_H_

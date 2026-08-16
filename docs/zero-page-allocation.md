@@ -387,7 +387,7 @@ back after the child returns, so each level genuinely needs its own byte - unbou
     RTS
 }
 ```
-> A ZPAUTO variable is freshly assigned and then held live across a recursive call ...
+> ZPAUTO variable freshly written and held live across recursion
 
 The neighbouring shape *is* allowed, because it is not per-level: seed the counter **outside** the recursion
 and only ever read-modify it inside, and it is a single running quantity that shares one byte quite happily.
@@ -417,7 +417,7 @@ lands - add a `CANJUMP` naming its targets and it is fine again:
     JMP (vector)        ; an indirect jump - to where? Baron cannot tell...
     ; CANJUMP arm_a, arm_b   ; ...so tell it, and the refusal lifts
 ```
-> A computed or indirect jump reaches unknown code ...
+> Computed jump reaches unknown code (annotate with CANJUMP)
 
 (`vector` here is a cell of your own. A jump through a *constant* OS vector - `JMP (&FFFC)` - is not refused:
 that cell lies outside the program, so control is leaving for external code, as clean an exit as an `RTS`.)
@@ -427,7 +427,7 @@ that cell lies outside the program, so control is leaving for external code, as 
 ```
     ZPAUTO1 a           ; ASL a would read as ASL A and lose the variable
 ```
-> A ZPAUTO variable cannot be named 'A' ...
+> ZPAUTO variable cannot be named 'A'
 
 **Over-subscribing the pool is refused** as a spill - more variables live at once than you reserved bytes:
 
@@ -436,7 +436,7 @@ ZPRESERVE &70                       ; one byte
     ZPAUTO1 p, q
     STA p : STA q : LDA p : LDA q   ; p and q are both live - two into one won't go
 ```
-> No free zero-page byte left ...
+> No free zero-page byte for ZPAUTO variable: '...'
 
 **Indexed access is warned, not refused** - it is how you walk a table. `table,X` reads the byte at
 `table + X`; as long as `X` stays inside the declared width it lands on `table`'s own reserved bytes, so
@@ -448,7 +448,7 @@ in range:
     LDX #4
     LDA table,X         ; reads table+4 - fine while X < 8; your job to keep it there
 ```
-> This ZPAUTO variable is reached by an indexed / indexed-indirect mode ...
+> Unchecked indexed access into ZPAUTO variable: '...'
 
 The same goes for `var,Y` and the indexed-indirect `(var,X)`. The *constant base* is still checked (`table+8,X`
 on an 8-byte table is a hard error - the base is off the end already); only the run-time index is trusted to
@@ -501,15 +501,15 @@ If you run out of bytes, Baron tells you which variable it could not place - usu
 
 | Message                                     | What happened                                                                 |
 |---------------------------------------------|-------------------------------------------------------------------------------|
-| ZPAUTO needs a ZPRESERVE block before it    | You declared a variable with no pool reserved. Add a `ZPRESERVE` first.        |
-| No free zero-page byte left ...             | A spill: more variables are live at once than you reserved bytes for.          |
-| ... live across a JSR whose callee footprint cannot be determined | A variable is live across a call whose callee reaches computed flow. Annotate it with `CANCALL`. (A call to a constant address outside the program is an external OS call - empty footprint, never this error.) |
-| ... freshly assigned then held across a recursive call | A per-level value in a call cycle. One static byte cannot hold a distinct value per level (a value only read or accumulated across the recursion is fine). |
-| A computed or indirect jump reaches unknown code | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
-| A ZPAUTO variable cannot be named 'A'       | The accumulator clash. Rename it.                                              |
-| An indirect addressing mode dereferences a 2-byte pointer   | A one-byte `ZPAUTO1` used as a pointer (`(var),Y` / `(var)`). Declare it `ZPAUTO2`. |
-| This access reaches past the end of its ZPAUTO variable     | A `var+n` (or pointer) offset outside the declared width. Widen the variable or fix the offset. |
-| A ZPAUTO count must be between 1 and 256                     | `ZPAUTO <count>` with a count of 0, negative, or above 256. |
+| ZPAUTO needs a prior ZPRESERVE              | You declared a variable with no pool reserved. Add a `ZPRESERVE` first.        |
+| No free zero-page byte for ZPAUTO variable: '...' | A spill: more variables are live at once than you reserved bytes for.    |
+| ZPAUTO variable live across an unanalysable JSR | A variable is live across a call whose callee reaches computed flow. Annotate it with `CANCALL`. (A call to a constant address outside the program is an external OS call - empty footprint, never this error.) |
+| ZPAUTO variable freshly written and held live across recursion | A per-level value in a call cycle. One static byte cannot hold a distinct value per level (a value only read or accumulated across the recursion is fine). |
+| Computed jump reaches unknown code          | A jump table or indirect `JMP` the analysis cannot follow. Annotate it with `CANJUMP`, or restructure. |
+| ZPAUTO variable cannot be named 'A'         | The accumulator clash. Rename it.                                              |
+| ZPAUTO1 dereferenced as a pointer           | A one-byte `ZPAUTO1` used as a pointer (`(var),Y` / `(var)`). Declare it `ZPAUTO2`. |
+| Access past the end of ZPAUTO variable      | A `var+n` (or pointer) offset outside the declared width. Widen the variable or fix the offset. |
+| ZPAUTO count must be 1 to 256               | `ZPAUTO <count>` with a count of 0, negative, or above 256. |
 
 Every one of these is a refusal - Baron will not emit code it cannot vouch for. Fix it, annotate it, or fall
 back to a hand-placed address, and you are on solid ground again.
@@ -518,5 +518,5 @@ Two are **warnings** rather than errors:
 
 | Message                                     | Level | What happened                                                                 |
 |---------------------------------------------|-------|-------------------------------------------------------------------------------|
-| This ZPAUTO variable is never used          | default | No instruction touches the variable, so it gets **no address and no definition** - it costs the pool nothing, and referencing it is an error, exactly as if the declaration were not there. Remove the declaration (or use the variable). |
-| This ZPAUTO variable is reached by an indexed / indexed-indirect mode | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) into a variable. Allowed - it is how you walk a table - but the run-time index is yours to keep within the declared width. Reported only when you raise the warning level. |
+| Unused ZPAUTO variable: '...'               | default | No instruction touches the variable, so it gets **no address and no definition** - it costs the pool nothing, and referencing it is an error, exactly as if the declaration were not there. Remove the declaration (or use the variable). |
+| Unchecked indexed access into ZPAUTO variable: '...' | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) into a variable. Allowed - it is how you walk a table - but the run-time index is yours to keep within the declared width. Reported only when you raise the warning level. |

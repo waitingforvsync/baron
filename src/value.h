@@ -57,6 +57,14 @@ typedef struct value_range {
 } value_range;
 
 
+// An evaluation error riding in a value: the code, plus an optional detail string the diagnostic
+// machinery can surface (today: the symbol NAME behind an unknown_symbol, so "Undefined symbol: 'x'"
+// can say which - the evaluator is the only place that still knows it). {0} detail when there is none.
+typedef struct value_error {
+    error_type code;
+    rc_str     detail;
+} value_error;
+
 struct value {
     value_type type;
     union {
@@ -64,7 +72,7 @@ struct value {
         rc_str      string;             // view into source or arena; concat allocates
         value_list  list;               // rc_view_value: const value *, num
         value_range range;
-        error_type  error;
+        value_error error;
     };
 };
 
@@ -80,6 +88,7 @@ value value_make_none(void);
 value value_make_numeric(double n);
 value value_make_string(rc_str s);
 value value_make_error(error_type e);
+value value_make_error_detail(error_type e, rc_str detail);   // + a payload string (e.g. the symbol name)
 value value_make_range(value_range r);
 value value_make_list(rc_view_value items);    // wraps the view; does not copy
 

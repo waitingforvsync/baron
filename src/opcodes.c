@@ -725,7 +725,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     // A value that can never be an address is recoverable: record it and emit a best-effort 0 operand,
     // so the instruction keeps its size and the layout still settles.
     if (arg.type == int_argument_type_error) {
-        semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));
+        semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
     }
 
     uint16_t cell = opcode_def(m, mode);
@@ -750,7 +750,16 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
                 // From the address after the instruction (the offset byte we are about to emit).
                 int64_t delta = arg.value - (int64_t)(sections_pc(&b->sections, section) + 1);
                 if (delta < -128 || delta > 127) {
-                    semantic_error(b, flags, error_type_branch_out_of_range, cursor_at(at, start));
+                    // The message reports the distance the branch would need ("% bytes"); a small stack
+                    // buffer holds the digits and the recorder copies it into the diagnostic's arena.
+                    char storage[24];
+                    rc_mstr dist = {.data = storage, .len = 0, .cap = sizeof storage};
+                    if (delta >= 0) {
+                        rc_mstr_append_char(&dist, '+', NULL);
+                    }
+                    rc_mstr_append_i64(&dist, delta, NULL);
+                    semantic_error_payload(b, flags, error_type_branch_out_of_range, cursor_at(at, start),
+                                           dist.view);
                 }
                 off = (uint8_t)(int8_t)delta;   // best-effort: the low byte of the (out-of-range) delta
             }

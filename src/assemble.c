@@ -49,6 +49,7 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
 static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_reserved_constant(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -66,12 +67,13 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
         };
     }
 
-    if (value_is_error(v) && v.error == error_type_unknown_symbol) {
+    if (value_is_error(v) && v.error.code == error_type_unknown_symbol) {
         if (final_pass) {
             return (int_argument) {
                 .type = int_argument_type_error,
                 .error = error_type_undefined_symbol,
-                .error_at = at
+                .error_at = at,
+                .error_detail = v.error.detail   // the symbol's name rides along into the diagnostic
             };
         }
         return (int_argument) { .type = int_argument_type_unresolved };   // a forward reference; settles later
@@ -81,8 +83,9 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
     // one error_type space); a non-error non-number (a string, a list) is simply not an address.
     return (int_argument) {
         .type = int_argument_type_error,
-        .error = value_is_error(v) ? v.error : error_type_operand_not_numeric,
-        .error_at = at
+        .error = value_is_error(v) ? v.error.code : error_type_operand_not_numeric,
+        .error_at = at,
+        .error_detail = value_is_error(v) ? v.error.detail : (rc_str) {0}
     };
 }
 
@@ -90,17 +93,27 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
 // The two ways a parse reports an error - both record straight into b->diagnostics, so the code and
 // location never travel in the parse_result. syntax_error unwinds (the stream is broken); semantic_error
 // carries on (only recording on the settling pass of a live branch). Shared with opcodes.c.
+parse_result syntax_error_payload(baron *b, error_type code, cursor at, rc_str payload)
+{
+    baron_error_payload(b, code, at, payload);
+    return (parse_result) {.next = at.pos, .fatal = true};
+}
+
 parse_result syntax_error(baron *b, error_type code, cursor at)
 {
-    baron_error(b, code, at);
-    return (parse_result) {.next = at.pos, .fatal = true};
+    return syntax_error_payload(b, code, at, (rc_str) {0});
+}
+
+void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor at, rc_str payload)
+{
+    if (flags.final && flags.active) {
+        baron_error_payload(b, code, at, payload);
+    }
 }
 
 void semantic_error(baron *b, parse_flags flags, error_type code, cursor at)
 {
-    if (flags.final && flags.active) {
-        baron_error(b, code, at);
-    }
+    semantic_error_payload(b, flags, code, at, (rc_str) {0});
 }
 
 void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity)
@@ -319,6 +332,7 @@ static const token statement_token_entries[] = {
     {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
     {RC_STR("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
     {RC_STR("print"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_print}}},
+    {RC_STR("error"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_error}}},
     // The pure expression constants are reserved at statement start too, so `pi = 5` is rejected rather than
     // quietly binding a shadowed symbol. Three near-identical rows, but it is only three tokens.
     {RC_STR("true"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
@@ -455,7 +469,7 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
                 unresolved = true;   // an unknown count emits nothing; forces another pass
                 break;
             case int_argument_type_error:
-                semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));   // skip nothing
+                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);   // skip nothing
                 break;
         }
     }
@@ -497,7 +511,7 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
                 unresolved = true;   // an unknown target emits nothing; forces another pass
                 break;
             case int_argument_type_error:
-                semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));   // skip nothing
+                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);   // skip nothing
                 break;
         }
     }
@@ -541,7 +555,7 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
                 unresolved = true;   // an unknown alignment emits nothing; forces another pass
                 break;
             case int_argument_type_error:
-                semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));   // pad nothing
+                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);   // pad nothing
                 break;
         }
     }
@@ -581,7 +595,8 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     if (flags.active) {
         child = sections_make(&b->sections, nm.token.identifier.name);
         if (child == RC_INDEX_NONE) {
-            return syntax_error(b, error_type_duplicate_section, cursor_at(at, at.pos));   // names are unique
+            return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos),
+                                        nm.token.identifier.name);   // names are unique
         }
         // Inherit the parent's whole attribute bag - `org` included. org is now just an inherited attribute:
         // a child with no `org` of its own starts at the parent's org (its BASE address), not wherever the
@@ -633,7 +648,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                         unresolved = true;   // a forward-referenced org owes another pass; cursor stays for now
                         break;
                     case int_argument_type_error:
-                        semantic_error(b, flags, arg.error, cursor_at(at, eq.next));
+                        semantic_error_payload(b, flags, arg.error, cursor_at(at, eq.next), arg.error_detail);
                         break;
                 }
             }
@@ -708,7 +723,7 @@ static parse_result zpreserve_add(baron *b, value v, parse_flags flags, cursor a
     // A numeric, a forward reference, or an error (a string / list leaf lands here as operand_not_numeric).
     int_argument arg = int_argument_make(v, flags.final, at.pos);
     if (arg.type == int_argument_type_error) {
-        semantic_error(b, flags, arg.error, at);
+        semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
         return (parse_result) {0};
     }
     if (arg.type == int_argument_type_unresolved) {
@@ -807,10 +822,10 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
                     value_make_numeric((double) zeropage_var_placeholder), def);
 
                 if (st == symbol_status_duplicate) {
-                    semantic_error(b, flags, error_type_duplicate_symbol, def);
+                    semantic_error_payload(b, flags, error_type_duplicate_symbol, def, name);
                     cursor original = scopes_symbol_def(&b->scopes, scope, name);
                     if (!cursor_is_none(original)) {
-                        semantic_error(b, flags, error_type_original_definition, original);
+                        semantic_error_payload(b, flags, error_type_original_definition, original, name);
                     }
                 }
                 else if (flags.final) {
@@ -886,7 +901,7 @@ static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t s
         unresolved = true;
     }
     else if (arg.type == int_argument_type_error) {
-        semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));
+        semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
     }
     else if (arg.value < 1 || arg.value > (int64_t) zeropage_size) {
         semantic_error(b, flags, error_type_zpauto_bad_width, cursor_at(at, at.pos));
@@ -967,7 +982,7 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
                     unresolved = true;   // a forward target: settle it next pass
                     break;
                 case int_argument_type_error:
-                    semantic_error(b, flags, arg.error, cursor_at(at, arg.error_at));
+                    semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
                     break;
             }
         }
@@ -1045,7 +1060,7 @@ static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags f
     // A numeric, a forward reference, or some other error value - one `width`-byte unit either way.
     int_argument arg = int_argument_make(v, flags.final, at.pos);
     if (arg.type == int_argument_type_error) {
-        semantic_error(b, flags, arg.error, at);
+        semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
         emit_le(b, section, 0, width);   // best-effort placeholder; keeps the size stable
         return (parse_result) {0};
     }
@@ -1186,15 +1201,15 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
         }
 
         if (value_is_error(e.value)) {
-            if (e.value.error == error_type_unknown_symbol && !flags.final) {
+            if (e.value.error.code == error_type_unknown_symbol && !flags.final) {
                 unresolved = true;   // a forward reference; it prints once everything settles
             }
             else {
                 // The undefined-on-final promotion, matching int_argument_make; any other error value
                 // carries its own cause through. semantic_error self-gates on the settling pass.
-                error_type code = e.value.error == error_type_unknown_symbol
-                                ? error_type_undefined_symbol : e.value.error;
-                semantic_error(b, flags, code, cursor_at(at, pos));
+                error_type code = e.value.error.code == error_type_unknown_symbol
+                                ? error_type_undefined_symbol : e.value.error.code;
+                semantic_error_payload(b, flags, code, cursor_at(at, pos), e.value.error.detail);
             }
         }
         else if (print_on(b, flags)) {
@@ -1209,6 +1224,75 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
 
         if (print_on(b, flags)) {
             rc_mstr_append_char(&b->channels[channel], '\n', b->per_pass);
+        }
+        parse_result r = require_separator(b, cursor_at(at, e.next));
+        r.unresolved = unresolved;
+        return r;
+    }
+}
+
+// ERROR [value[, value...]] - the user's own diagnostic: the values are formatted exactly as PRINT would
+// show them (strings raw, everything else in value_format's shape, concatenated with no separator) and
+// recorded as a RECOVERABLE error at the statement. Recoverable because the statement is syntactically
+// fine: parsing carries on, so further errors still accumulate, and the recorded severity_error fails
+// the assemble at the end like any other. The message renders whole through error_type_user_error's bare
+// "%" template, so a '%' inside it is inert. A forward reference in a value defers (unresolved) and
+// settles like PRINT's; still unknown on the final pass it is the usual undefined symbol and the ERROR
+// itself stays silent (its message could not be formed). A dead branch records nothing.
+static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+
+    // A bare ERROR still fires - there just is nothing to say beyond the location.
+    lexer_result peek = lexer_next(src, pos, statement_tokens(b));
+    if (peek.token.type == lexeme_type_terminator ||
+        (peek.token.type == lexeme_type_closer && peek.token.closer.id == closer_brace)) {
+        semantic_error(b, flags, error_type_user_error, stmt);
+        return require_separator(b, cursor_at(at, pos));
+    }
+
+    // The message is only materialised on the pass that will record it (semantic_error's gate); the other
+    // passes still evaluate every value, to defer on a forward reference.
+    bool record = flags.final && flags.active;
+    bool broken = false;   // a value errored: the undefined/original cause is recorded instead
+    bool unresolved = false;
+    rc_mstr msg = {0};
+
+    while (true) {
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        if (e.error != expr_error_none) {
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+        }
+
+        if (value_is_error(e.value)) {
+            broken = true;
+            if (e.value.error.code == error_type_unknown_symbol && !flags.final) {
+                unresolved = true;   // a forward reference; the message forms once everything settles
+            }
+            else {
+                error_type code = e.value.error.code == error_type_unknown_symbol
+                                ? error_type_undefined_symbol : e.value.error.code;
+                semantic_error_payload(b, flags, code, cursor_at(at, pos), e.value.error.detail);
+            }
+        }
+        else if (record) {
+            if (value_is_string(e.value)) {
+                rc_mstr_append(&msg, e.value.string, &scratch);
+            }
+            else {
+                value_format(&msg, e.value, &scratch);
+            }
+        }
+
+        lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;   // another value follows
+        }
+
+        if (record && !broken) {
+            semantic_error_payload(b, flags, error_type_user_error, stmt, msg.view);
         }
         parse_result r = require_separator(b, cursor_at(at, e.next));
         r.unresolved = unresolved;
@@ -1252,10 +1336,10 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         );
 
         if (st == symbol_status_duplicate) {
-            semantic_error(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos));
+            semantic_error_payload(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos), name);
             cursor original = scopes_symbol_def(&b->scopes, scope, name);
             if (!cursor_is_none(original)) {
-                semantic_error(b, flags, error_type_original_definition, original);   // point at the first binding
+                semantic_error_payload(b, flags, error_type_original_definition, original, name);   // point at the first binding
             }
         }
         r.changed = (st == symbol_status_changed);
@@ -1404,7 +1488,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
                 acc.unresolved = true;   // undecidable yet; owe another pass
                 break;
             case int_argument_type_error:
-                semantic_error(b, flags, cond.error, cursor_at(at, cond.error_at));   // neither branch runs
+                semantic_error_payload(b, flags, cond.error, cursor_at(at, cond.error_at), cond.error_detail);   // neither branch runs
                 break;
         }
     }
@@ -1521,20 +1605,22 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         symbol_status st = scopes_set_symbol(&b->scopes, scope, name, e.value, at);
 
         if (st == symbol_status_duplicate) {
-            semantic_error(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos));
+            semantic_error_payload(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos), name);
             cursor original = scopes_symbol_def(&b->scopes, scope, name);
             if (!cursor_is_none(original)) {
-                semantic_error(b, flags, error_type_original_definition, original);   // point at the first binding
+                semantic_error_payload(b, flags, error_type_original_definition, original, name);   // point at the first binding
             }
         }
         else {
             if (value_is_error(e.value)) {
-                if (e.value.error == error_type_unknown_symbol) {
-                    semantic_error(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next));
+                if (e.value.error.code == error_type_unknown_symbol) {
+                    semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
+                                           e.value.error.detail);
                     if (!flags.final) r.unresolved = true;   // a forward reference in the value; settles on a later pass
                 }
                 else {
-                    semantic_error(b, flags, e.value.error, cursor_at(at, eq.next));   // e.g. x = 1/0
+                    semantic_error_payload(b, flags, e.value.error.code, cursor_at(at, eq.next),
+                                           e.value.error.detail);   // e.g. x = 1/0
                 }
             }
             r.changed = (st == symbol_status_changed);
@@ -1601,12 +1687,14 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
     if (flags.active) {
         value seq = e.value;
         if (value_is_error(seq)) {
-            if (seq.error == error_type_unknown_symbol) {
-                semantic_error(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next));
+            if (seq.error.code == error_type_unknown_symbol) {
+                semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
+                                       seq.error.detail);
                 if (!flags.final) unresolved = true;   // the count is not known yet; defer and try again next pass
             }
             else {
-                semantic_error(b, flags, seq.error, cursor_at(at, eq.next));   // e.g. the sequence expression divided by zero
+                semantic_error_payload(b, flags, seq.error.code, cursor_at(at, eq.next),
+                                       seq.error.detail);   // e.g. the sequence expression divided by zero
             }
         }
         else {
@@ -1701,13 +1789,14 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
                 }
             }
         }
-        else if (value_is_error(e.value) && e.value.error == error_type_unknown_symbol) {
+        else if (value_is_error(e.value) && e.value.error.code == error_type_unknown_symbol) {
             // A forward-referenced filename: defer, exactly like a forward address. We pull in nothing this
             // pass; once the name binds on a later pass the string resolves and the file loads. Still unknown
             // on the final pass means it never will be (a name defined only inside the file it would name), so
             // we call it out then.
             if (flags.final) {
-                semantic_error(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos));
+                semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
+                                       e.value.error.detail);
             }
             else {
                 pulled.unresolved = true;
@@ -1766,11 +1855,12 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
                 sections_skip(&b->sections, section, sz.size);
             }
         }
-        else if (value_is_error(e.value) && e.value.error == error_type_unknown_symbol) {
+        else if (value_is_error(e.value) && e.value.error.code == error_type_unknown_symbol) {
             // A forward-referenced filename: defer, like INCLUDE. Still unknown on the final pass means it never
             // binds (a name defined only where it cannot be seen in time), so we call it out then.
             if (flags.final) {
-                semantic_error(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos));
+                semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
+                                       e.value.error.detail);
             }
             else {
                 pulled.unresolved = true;
@@ -2354,7 +2444,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             continue;
         }
         if (n.var_indexed) {
-            baron_warning(b, error_type_zpauto_indexed_access, n.at, severity_optional);
+            baron_warning_payload(b, error_type_zpauto_indexed_access, n.at, severity_optional,
+                                  zeropage_var_get(&b->zeropage, n.vreg).name);
         }
         if (n.var_offset != RC_INDEX_NONE) {
             uint32_t width  = zeropage_var_get(&b->zeropage, n.vreg).width;
@@ -2397,7 +2488,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                    && cursor_is_equal(zeropage_var_get(&b->zeropage, u).def, var.def);
         }
         if (!already) {
-            baron_warning(b, error_type_zpauto_unused, var.def, severity_warning);
+            baron_warning_payload(b, error_type_zpauto_unused, var.def, severity_warning, var.name);
         }
     }
 
@@ -2482,7 +2573,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             // An unplaced USED variable is a spill; an unused one was deliberately skipped (warned above).
             for (uint32_t v = 0; v < nv; v++) {
                 if (col.base[v] == RC_INDEX_NONE && liveness_class_of(&lv, v) != vreg_class_unused) {
-                    baron_error(b, error_type_zeropage_full, zeropage_var_get(&b->zeropage, v).def);
+                    zp_var var = zeropage_var_get(&b->zeropage, v);
+                    baron_error_payload(b, error_type_zeropage_full, var.def, var.name);
                 }
             }
         }
@@ -2733,6 +2825,18 @@ static bool has_diag(const baron_result *r, error_type code)
         }
     }
     return false;
+}
+
+// The payload of the first diagnostic carrying `code` ({0} when none does).
+static rc_str diag_payload(const baron_result *r, error_type code)
+{
+    for (uint32_t i = 0; i < r->diagnostics.num; i++) {
+        diagnostic d = rc_view_diagnostic_get(r->diagnostics, i);
+        if (d.code == code) {
+            return d.payload;
+        }
+    }
+    return (rc_str) {0};
 }
 
 RC_TEST_STEP(assemble, addressing_modes, fix)
@@ -3899,6 +4003,58 @@ RC_TEST_STEP(assemble, listing_assignments_and_braces, fix)
              RC_STR("{\n"
                     "  0000  EA              nop\n"
                     "}\n"));
+}
+
+RC_TEST_STEP(assemble, error_statement, fix)
+{
+    // ERROR records the user's message as a RECOVERABLE error: the assemble fails, but parsing carries on
+    // so later errors still accumulate. The message is PRINT-formatted (strings raw, numbers in
+    // value_format's shape, concatenated) and rides in the diagnostic's payload.
+    RC_CHECK(ASM("LDA #1\nERROR \"bad config: \", 42\nLDA nosuch"), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_user_error);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("bad config: 42"));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_undefined_symbol));   // the statement after still parsed
+
+    // A forward reference in the message defers like PRINT's and formats once settled.
+    RC_CHECK(ASM("ERROR \"at \", target\nSKIP 5\n.target"), ==, 0u);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("at 5"));
+
+    // A dead branch records nothing; a bare ERROR fires with an empty message.
+    RC_CHECK_TRUE(ASM("IF FALSE\nERROR \"no\"\nENDIF\nRTS") != 0);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_user_error));
+    RC_CHECK(ASM("ERROR"), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_user_error);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error).len, ==, 0u);
+
+    // A message symbol still unknown on the final pass is the usual undefined-symbol error (naming the
+    // symbol); the ERROR itself stays silent, since its message could never be formed.
+    RC_CHECK_TRUE(ERR("ERROR nosuch") == error_type_undefined_symbol);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_user_error));
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("nosuch"));
+}
+
+RC_TEST_STEP(assemble, diagnostics_carry_payloads, fix)
+{
+    // The payload plumbing end to end: an undefined symbol names itself (through the evaluator's error
+    // detail), a duplicate names the symbol on both the error and its companion note, and a branch out of
+    // range reports the distance it would need.
+    RC_CHECK_TRUE(ERR("LDA zork+1") == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("zork"));
+
+    RC_CHECK_TRUE(ERR(".here\n.here") == error_type_duplicate_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_duplicate_symbol), ==, RC_STR("here"));
+    RC_CHECK(diag_payload(&fix->r, error_type_original_definition), ==, RC_STR("here"));
+
+    // BEQ at pc 0: the delta is measured from the address after the operand byte (2), so the target at
+    // 202 is +200 - and the payload says so. A backward branch reports a negative distance.
+    RC_CHECK_TRUE(ERR("BEQ far : SKIP 200 : .far RTS") == error_type_branch_out_of_range);
+    RC_CHECK(diag_payload(&fix->r, error_type_branch_out_of_range), ==, RC_STR("+200"));
+    RC_CHECK_TRUE(ERR(".back : SKIP 200 : BNE back") == error_type_branch_out_of_range);
+    RC_CHECK(diag_payload(&fix->r, error_type_branch_out_of_range), ==, RC_STR("-202"));
+
+    // The unused-ZPAUTO warning names the variable.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 spare : RTS") != 0);
+    RC_CHECK(diag_payload(&fix->r, error_type_zpauto_unused), ==, RC_STR("spare"));
 }
 
 RC_TEST_STEP(assemble, print_to_channel_zero, fix)
