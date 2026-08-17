@@ -9,7 +9,7 @@
 // A section attribute: one `key = expr` pair off the SECTION line, resolved to a value at assembly time.
 // `key` is a view into the source text (permanent), so it outlives the per-pass section. `v` is copied into
 // the section manager's arena (see sections_add_attribute), so its string / list backing is durable too. The
-// assembler acts on the keys it owns (`org` sets the address, `cpu` the instruction set); the rest simply
+// assembler acts on the keys it owns (`org` sets the address, `cmos` the instruction set); the rest simply
 // ride here for the output utility to read out of the result. `at` points the diagnostic at this pair.
 typedef struct attribute {
     rc_str key;
@@ -31,6 +31,7 @@ typedef struct attribute {
 typedef struct section {
     rc_str              name;
     uint32_t            pc;
+    bool                cmos;        // the consumed `cmos` attribute: 65C02 encodings allowed here
     rc_array_bytes      code;
     rc_array_attribute  attributes;
 } section;
@@ -115,6 +116,8 @@ rc_view_attribute sections_attributes(const sections *sec, uint32_t id);
 
 // Per-section mutation (manager + index, as per scopes).
 void sections_org(sections *sec, uint32_t id, uint32_t addr);     // set pc; does not move code
+void sections_set_cmos(sections *sec, uint32_t id, bool cmos);    // the consumed `cmos` attribute
+bool sections_cmos(const sections *sec, uint32_t id);             // are 65C02 encodings allowed here?
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b);     // append a byte, pc += 1
 void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);   // little-endian word, pc += 2
 void sections_skip(sections *sec, uint32_t id, uint32_t count);   // append `count` zero bytes, pc += count

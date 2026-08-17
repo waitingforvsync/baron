@@ -83,8 +83,9 @@ to the end of the line.
 | `INCSECTION name` | Splice the named section's assembled bytes at the current address (a literal copy - no relocation). The source may be defined anywhere. |
 
 Attributes Baron acts on: `org` (assembly address; default: inherited, else 0), `filename` (the request to
-save; `filename = ""` cancels an inherited one), `load` (default `org`), `exec` (default `load`). Other
-keys are carried through untouched; `cpu` is reserved.
+save; `filename = ""` cancels an inherited one), `load` (default `org`), `exec` (default `load`), and
+`cmos` (truthy enables the 65C02 instruction set for this section - see the note under Reserved names).
+Other keys are carried through untouched.
 
 A filename destined for a disc image follows DFS rules: an optional single-character directory prefix
 (`"D.NAME"`; default `$`), then a name of up to 7 characters.
@@ -109,8 +110,9 @@ The full story - liveness, footprints, sections, every error - is in
 `TRUE`, `FALSE` and `PI` are reserved outright - they cannot be labels or symbols. Instruction mnemonics,
 directive keywords and (already-defined) macro names win over identifiers at the start of a statement, so
 a label or symbol spelled like one will not parse; pick another name. All the NMOS 6502 mnemonics are
-recognised, plus the 65C02 extras (`BRA`, `STZ`, `PHX`, ...) - though the assembly target is plain NMOS
-for now, so a CMOS-only encoding is refused.
+recognised, plus the 65C02 extras (`BRA`, `STZ`, `PHX`, ...) - usable inside a section carrying
+`cmos = TRUE`; elsewhere the target is plain NMOS and a CMOS-only encoding is refused with its own
+message.
 
 ## Expression reference ##
 

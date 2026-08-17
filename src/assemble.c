@@ -631,11 +631,13 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos),
                                         nm.token.identifier.name);   // names are unique
         }
-        // Inherit the parent's whole attribute bag - `org` included. org is now just an inherited attribute:
-        // a child with no `org` of its own starts at the parent's org (its BASE address), not wherever the
-        // parent has emitted to. An explicit `org` below overrides. A section's emission never moves its
-        // parent's cursor - the two are separate address spaces.
-        uint32_t parent_org = 0;
+        // Inherit the parent's whole attribute bag - the consumed keys included. org is just an inherited
+        // attribute: a child with no `org` of its own starts at the parent's org (its BASE address), not
+        // wherever the parent has emitted to; `cmos` likewise carries the parent's instruction set down.
+        // Explicit attributes below override. A section's emission never moves its parent's cursor - the
+        // two are separate address spaces.
+        uint32_t parent_org  = 0;
+        bool     parent_cmos = false;
         rc_view_attribute inherited = sections_attributes(&b->sections, section);
         for (uint32_t i = 0; i < inherited.num; i++) {
             attribute a = rc_view_attribute_get(inherited, i);
@@ -643,8 +645,12 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             if (rc_str_is_equal_insensitive(a.key, RC_STR("org")) && value_is_numeric(a.v)) {
                 parent_org = (uint32_t) ((int64_t) a.v.numeric & 0xFFFF);
             }
+            else if (rc_str_is_equal_insensitive(a.key, RC_STR("cmos")) && value_is_numeric(a.v)) {
+                parent_cmos = a.v.numeric != 0;
+            }
         }
         sections_org(&b->sections, child, parent_org);
+        sections_set_cmos(&b->sections, child, parent_cmos);
     }
 
     // The attribute list: `, key = expr` pairs to the end of the SECTION line. Parsed structurally even in a
@@ -671,14 +677,21 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 
         if (child != RC_INDEX_NONE) {
             sections_add_attribute(&b->sections, child, key.token.identifier.name, e.value, cursor_at(at, comma.next));
-            if (rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"))) {
+            bool is_org  = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"));
+            bool is_cmos = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("cmos"));
+            if (is_org || is_cmos) {
                 int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, eq.next), eq.next);
                 switch (arg.type) {
                     case int_argument_type_known:
-                        sections_org(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
+                        if (is_org) {
+                            sections_org(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
+                        }
+                        else {
+                            sections_set_cmos(&b->sections, child, arg.value != 0);
+                        }
                         break;
                     case int_argument_type_unresolved:
-                        unresolved = true;   // a forward-referenced org owes another pass; cursor stays for now
+                        unresolved = true;   // a forward-referenced org/cmos owes another pass
                         break;
                     case int_argument_type_error:
                         semantic_error_payload(b, flags, arg.error, cursor_at(at, eq.next), arg.error_detail);
@@ -3224,6 +3237,7 @@ RC_TEST_STEP(assemble, section_name_errors, fix)
     RC_CHECK_TRUE(ERR("ENDSECTION") == error_type_unexpected_endsection);   // no SECTION to close
 }
 
+
 // The result's section named `name` ({0} if absent) - the INCSECTION tests read spliced buffers via it.
 static section result_section(const baron_result *r, rc_str name)
 {
@@ -3747,6 +3761,104 @@ RC_TEST_STEP(assemble, zpauto_jmp_via_variable_vector, fix)
     // A one-byte variable cannot hold a two-byte vector - the pointer-width check applies here too.
     RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 vec : STA vec : JMP (vec) : CANJUMP h\n"
                       ".h RTS") == error_type_zpauto_narrow_pointer);
+}
+
+RC_TEST_STEP(assemble, cmos_section_enables, fix)
+{
+    // cmos = TRUE opens the whole 65C02 set for the section: new mnemonics, and the CMOS-only modes on
+    // NMOS mnemonics - (zp) indirect, BIT #imm, INC/DEC A, and the indexed dispatch JMP (abs,X).
+    uint32_t passes = ASM("SECTION C, cmos = TRUE\n"
+                          "PHX : PLY : INA\n"
+                          "STZ &70\n"
+                          "TRB &70\n"
+                          "BRA over\n"
+                          ".over\n"
+                          "LDA (&70)\n"
+                          "BIT #1\n"
+                          ".tbl EQUW over\n"
+                          "JMP (tbl,X)\n"
+                          "ENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("C"),
+        (uint8_t[]) {0xDA, 0x7A, 0x1A,                 // PHX : PLY : INA
+                     0x64, 0x70,                       // STZ &70
+                     0x14, 0x70,                       // TRB &70
+                     0x80, 0x00,                       // BRA over (a jump in the CFG: no fall-through edge)
+                     0xB2, 0x70,                       // LDA (&70) - the CMOS zero-page indirect
+                     0x89, 0x01,                       // BIT #1
+                     0x09, 0x00,                       // .tbl EQUW over
+                     0x7C, 0x0D, 0x00},                // JMP (tbl,X) - indexed dispatch
+        18));
+}
+
+RC_TEST_STEP(assemble, cmos_refused_outside, fix)
+{
+    // Without the attribute (the default section included) every CMOS encoding refuses with its own
+    // message - the encoding exists, one attribute away, which is worth saying.
+    RC_CHECK_TRUE(ERR("PHX") == error_type_needs_cmos);
+    RC_CHECK_TRUE(ERR("STZ &70") == error_type_needs_cmos);
+    RC_CHECK_TRUE(ERR("LDA (&70)") == error_type_needs_cmos);
+    RC_CHECK_TRUE(ERR("SECTION S : BRA out : .out ENDSECTION") == error_type_needs_cmos);
+
+    // A genuinely impossible shape is still the plain bad-mode error, cmos or not.
+    RC_CHECK_TRUE(ERR("LDX (&70)") == error_type_bad_addressing_mode);
+    RC_CHECK_TRUE(ERR("SECTION C, cmos = TRUE : LDX (&70) : ENDSECTION") == error_type_bad_addressing_mode);
+}
+
+RC_TEST_STEP(assemble, cmos_inherits_and_overrides, fix)
+{
+    // Nested sections inherit the flag like any attribute; an explicit cmos = FALSE opts back out; a
+    // sibling section is untouched by either.
+    uint32_t passes = ASM("SECTION outer, cmos = TRUE\n"
+                          "SECTION inner : PHX : ENDSECTION\n"
+                          "ENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    RC_CHECK_TRUE(ERR("SECTION outer, cmos = TRUE\n"
+                      "SECTION inner, cmos = FALSE : PHX : ENDSECTION\n"
+                      "ENDSECTION") == error_type_needs_cmos);
+
+    RC_CHECK_TRUE(ERR("SECTION a, cmos = TRUE : PHX : ENDSECTION\n"
+                      "SECTION b : PHX : ENDSECTION") == error_type_needs_cmos);
+}
+
+RC_TEST_STEP(assemble, cmos_forward_reference_converges, fix)
+{
+    // The flag is an ordinary attribute expression: a forward-referenced value owes a pass and settles.
+    uint32_t passes = ASM("SECTION C, cmos = flag : PHX : ENDSECTION\n"
+                          "flag = TRUE");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("C"), (uint8_t[]) {0xDA}, 1));
+}
+
+RC_TEST_STEP(assemble, cmos_zpauto_interplay, fix)
+{
+    // The zero-page analyses already model the CMOS shapes; with the gate open they take part:
+    // STZ is a write-only def, so it KILLS - w's old value ends at the STZ and v can share its byte.
+    uint32_t passes = ASM("SECTION C, cmos = TRUE\n"
+                          "ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+                          "STA w : LDA w\n"
+                          "STZ w\n"
+                          "STA v : LDA v : RTS\n"
+                          "ENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);
+
+    // The (zp) indirect dereferences a pointer pair: fine on a ZPAUTO2, the usual refusal on a ZPAUTO1.
+    RC_CHECK_TRUE(ASM("SECTION C, cmos = TRUE\n"
+                      "ZPRESERVE &70..&7F : ZPAUTO2 p\n"
+                      "STA p : STA p+1 : LDA (p) : RTS\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ERR("SECTION C, cmos = TRUE\n"
+                      "ZPRESERVE &70..&7F : ZPAUTO1 q\n"
+                      "STA q : LDA (q) : RTS\n"
+                      "ENDSECTION") == error_type_zpauto_narrow_pointer);
 }
 
 RC_TEST_STEP(assemble, zpauto_conditional_result_is_preserved, fix)

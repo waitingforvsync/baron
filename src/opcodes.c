@@ -296,7 +296,9 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
         [addr_mode_imp] = 0x98,
     },
     [mnemonic_bra] = {
-        [addr_mode_rel] = 0x80 | cmos | op_branch,
+        // Classed as a JUMP despite the rel encoding: BRA is unconditional, so the CFG must wire no
+        // fall-through edge (a branch gets one, and a phantom edge would over-extend live ranges).
+        [addr_mode_rel] = 0x80 | cmos | op_jump,
     },
     [mnemonic_dea] = {
         [addr_mode_imp] = 0x3A | cmos,
@@ -656,7 +658,9 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
             if (cp.token.type != lexeme_type_close_paren) {
                 return syntax_error(b, error_type_expected_close_paren, cursor_at(at, reg.next));
             }
-            mode = addr_mode_indx;
+            // "(expr,X)" is indexed-indirect for the ALU ops, but the indexed DISPATCH for JMP -
+            // the same availability choice "(expr)" makes between ind16 and the CMOS zp indirect.
+            mode = (opcode_def(m, addr_mode_ind16x) != 0) ? addr_mode_ind16x : addr_mode_indx;
             after = cp.next;
         }
         else if (a.token.type == lexeme_type_close_paren) {
@@ -734,9 +738,13 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     }
 
     uint16_t cell = opcode_def(m, mode);
-    if (cell == 0 || (cell & cmos) != 0) {            // NMOS target: a CMOS-only encoding is unavailable
-        // No encoding for this operand shape: record it and emit nothing (a stable zero-byte best effort).
-        semantic_error(b, flags, error_type_bad_addressing_mode, cursor_at(at, start));
+    if (cell == 0 || ((cell & cmos) != 0 && !sections_cmos(&b->sections, section))) {
+        // No encoding for this operand shape - or a 65C02-only one in a section that has not opted in
+        // (the distinction earns its own message: the encoding EXISTS, one attribute away). Record it
+        // and emit nothing (a stable zero-byte best effort).
+        semantic_error(b, flags,
+                       cell != 0 ? error_type_needs_cmos : error_type_bad_addressing_mode,
+                       cursor_at(at, start));
         return require_separator(b, cursor_at(at, after));
     }
 

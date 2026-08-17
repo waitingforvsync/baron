@@ -54,6 +54,7 @@ typedef enum error_type {
 
     // Semantic: the statement parses, but its meaning is wrong.
     error_type_bad_addressing_mode,   // the mnemonic has no encoding for that operand shape
+    error_type_needs_cmos,            // the encoding exists, but only on the 65C02: set cmos=TRUE on the section
     error_type_operand_not_numeric,   // an operand evaluated to a string / list where a number was needed
     error_type_value_out_of_range,
     error_type_branch_out_of_range,

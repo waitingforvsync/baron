@@ -110,6 +110,18 @@ void sections_org(sections *sec, uint32_t id, uint32_t addr)
     RC_AT(sec->nodes, id).pc = addr;   // only the effective address moves; code still appends at code.num
 }
 
+void sections_set_cmos(sections *sec, uint32_t id, bool cmos)
+{
+    RC_ASSERT(sec != NULL);
+    RC_AT(sec->nodes, id).cmos = cmos;
+}
+
+bool sections_cmos(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+    return RC_AT(sec->nodes, id).cmos;
+}
+
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
 {
     RC_ASSERT(sec != NULL);
@@ -287,6 +299,7 @@ section section_make_copy(section s, rc_arena *arena)
     section copy = {
         .name = str_make_copy(s.name, arena),
         .pc   = s.pc,
+        .cmos = s.cmos,
         .code = rc_array_bytes_make_copy(s.code.view, 0, arena),
     };
     if (s.attributes.num != 0) {

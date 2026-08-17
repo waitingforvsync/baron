@@ -51,9 +51,8 @@ its keep:
 - **One file, one assembly.** Each source file on the command line assembles in a fresh world; symbols
   never leak between them.
 
-A few BeebAsm conveniences have no Baron equivalent yet: `PUTBASIC`/`PUTTEXT`/`PUTFILE`, `MAPCHAR`,
-`COPYBLOCK`, and 65C02 support (the mnemonics are recognised, but the target is plain NMOS 6502 for now -
-a `cpu` section attribute is reserved for the day it isn't). `ASSERT` is spelled with the tools you have:
+A few BeebAsm conveniences have no Baron equivalent yet: `PUTBASIC`/`PUTTEXT`/`PUTFILE`, `MAPCHAR` and
+`COPYBLOCK`. `ASSERT` is spelled with the tools you have:
 `IF weird : ERROR "oh frak" : ENDIF`.
 
 ## A first program ##
@@ -190,6 +189,10 @@ ENDSECTION
 - Sections **nest**, and a child inherits its parent's attributes - handy for one outer section holding
   the file attributes and inner ones organising the code. A nested `filename = ""` opts back out of an
   inherited filename.
+- `cmos = TRUE` enables the 65C02 instruction set for the section (and, by inheritance, its children;
+  `cmos = FALSE` opts a child back out): `PHX`, `STZ`, `BRA`, `LDA (zp)` and friends. Everywhere else is
+  plain NMOS 6502, and a CMOS instruction there says so: `CMOS-only instruction (needs cmos=TRUE on the
+  section)`.
 - Section names are their own namespace (they never collide with your symbols) and must be unique.
 - Two sections may sit at the *same* address - sideways banks, swap-in overlays - without complaint;
   each keeps its own program counter.

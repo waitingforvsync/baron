@@ -44,6 +44,7 @@ rc_str error_type_name(error_type e)
         case error_type_unclosed_function:       return RC_STR("Unclosed FUNCTION");
         case error_type_bad_print_channel:       return RC_STR("Bad PRINT channel (expected #0-#9 and a comma)");
         case error_type_bad_addressing_mode:     return RC_STR("No such addressing mode");
+        case error_type_needs_cmos:              return RC_STR("CMOS-only instruction (needs cmos=TRUE on the section)");
         case error_type_operand_not_numeric:     return RC_STR("Operand is not a number");
         case error_type_value_out_of_range:      return RC_STR("Value out of range");
         case error_type_branch_out_of_range:     return RC_STR("Branch out of range: % bytes");
