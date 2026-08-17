@@ -2493,6 +2493,22 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     return r;
 }
 
+// Does this call definitely rewrite variable `v` whichever arm it takes? True only when every arm is an
+// in-program routine whose must-write set covers the whole variable - an external arm returns having
+// written nothing, and an untrackable one could do anything, so both forfeit the kill.
+static bool call_rewrites(const liveness *lv, call_targets ct, uint32_t v)
+{
+    if (ct.unknown || ct.external || ct.blocks.view.num == 0) {
+        return false;
+    }
+    for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
+        if (!rc_bitset_is_set(&lv->must_write[rc_array_u32_get(&ct.blocks, c)], v)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Post-convergence zero-page allocation. Layout has settled with every ZPAUTO reference sized as a
 // placeholder zero-page access, so assigning a real byte and patching the operand cannot perturb size. The
 // governing rule is CERTAINTY: this only patches a program it can prove correct, and turns anything it cannot
@@ -2630,40 +2646,54 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
         for (uint32_t k = blk.num_insns; k-- > 0; ) {
             zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + k);
-            if (n.flow == zp_flow_call && rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
-                // What this call reaches - CANCALL overrides an untrackable literal target with a declared set.
-                footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, scratch);
-                if (fp.unknown_call) {
-                    baron_error(b, error_type_zpauto_across_call, n.at);
-                    refused = true;
-                }
-                else if (fp.recursive && rc_bitset_intersects(&live, &fp.killed)) {
-                    // Recursion is fatal only for a value the cycle FRESHLY writes (a write-only def) and carries
-                    // live across itself: each level would want its own byte. A value merely read or accumulated
-                    // (DEC/INC) across the recursion shares one byte safely, so it falls through to interference.
-                    baron_error(b, error_type_zpauto_recursion, n.at);
-                    refused = true;
-                }
-                else {
-                    // Every var live across this call interferes with every vreg the callee touches.
-                    for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
-                         c = rc_bitset_get_next_set(&live, c + 1)) {
-                        for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
-                             t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
-                            if (c != t) {
-                                rc_bitset_set(&lv.interfere[c], t);
-                                rc_bitset_set(&lv.interfere[t], c);
+            if (n.flow == zp_flow_call) {
+                call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
+                if (rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
+                    // What this call reaches - CANCALL overrides an untrackable literal target with a declared set.
+                    footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, scratch);
+                    if (fp.unknown_call) {
+                        baron_error(b, error_type_zpauto_across_call, n.at);
+                        refused = true;
+                    }
+                    else if (fp.recursive && rc_bitset_intersects(&live, &fp.killed)) {
+                        // Recursion is fatal only for a value the cycle FRESHLY writes (a write-only def) and
+                        // carries live across itself: each level would want its own byte. A value merely read or
+                        // accumulated (DEC/INC) across the recursion shares one byte safely, so it falls through
+                        // to interference. Judged on the UNREDUCED live set, deliberately: reading a value back
+                        // after a recursive call that rewrites it IS the per-level pattern, however definite the
+                        // cycle's write - the must-write kill below must not hide it.
+                        baron_error(b, error_type_zpauto_recursion, n.at);
+                        refused = true;
+                    }
+                    else {
+                        // Every var live across this call interferes with every vreg the callee touches - except
+                        // one the call definitely REWRITES: its post-call value is born inside the callee (where
+                        // ordinary liveness already fences it), not carried across, so fencing it off the
+                        // callee's whole workspace would forbid exactly the reuse must-write proves safe.
+                        for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
+                             c = rc_bitset_get_next_set(&live, c + 1)) {
+                            if (call_rewrites(&lv, ct, c)) {
+                                continue;
+                            }
+                            for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
+                                 t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
+                                if (c != t) {
+                                    rc_bitset_set(&lv.interfere[c], t);
+                                    rc_bitset_set(&lv.interfere[t], c);
+                                }
                             }
                         }
                     }
                 }
-            }
-            if (n.flow == zp_flow_call) {
-                // Before the call (we walk backward), its callees' inputs are live: the arguments the call
-                // consumes. Injected AFTER the live-across checks above, so an input is not "live across"
-                // its own call - only across any EARLIER call it must survive. This mirrors the dataflow's
-                // call-input injection, at this sweep's variable granularity.
-                call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
+                // Step backward over the call, mirroring the dataflow's transfer at this sweep's variable
+                // granularity: the callees' definite writes end the pre-call values, and their inputs are the
+                // arguments the call consumes - live from here back to their stores, so an argument counts as
+                // live across any EARLIER call it must survive (but never across its own).
+                for (uint32_t v = 0; v < nv; v++) {
+                    if (call_rewrites(&lv, ct, v)) {
+                        rc_bitset_clear(&live, v);
+                    }
+                }
                 for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
                     uint32_t e = rc_array_u32_get(&ct.blocks, c);
                     for (uint32_t v = 0; v < nv; v++) {
@@ -3466,7 +3496,8 @@ RC_TEST_STEP(assemble, zpauto_dotted_interface_variables, fix)
     // A routine's inputs and outputs declared in ITS scope, reached by the caller via the dotted path: the
     // operands attribute (and so are patched - the byte compare is the proof), the argument written before
     // the call is held live TO the call (a call consumes its callees' inputs), so the unrelated temp `t`
-    // cannot be coloured over it, and the result is protected across the call by the footprint edges.
+    // cannot be coloured over it. The result, which sub definitely writes on every path, is KILLED at the
+    // call (must-write): its range starts inside sub, after both t and wid are dead, so it reuses t's byte.
     uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 t\n"
                           "LDA #3 : STA sub.wid\n"
                           "LDA #9 : STA t\n"
@@ -3479,15 +3510,15 @@ RC_TEST_STEP(assemble, zpauto_dotted_interface_variables, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "t"),       ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "sub.wid"), ==, 0x71);   // NOT t's byte: the argument survives to the JSR
-    RC_CHECK(zp_addr(&fix->r, "sub.res"), ==, 0x72);   // live across the call, clear of the callee
+    RC_CHECK(zp_addr(&fix->r, "sub.res"), ==, 0x70);   // born inside sub once t and wid are dead: reuses &70
     RC_CHECK_TRUE(code_is(&fix->r, passes,
         (uint8_t[]) {0xA9, 0x03, 0x85, 0x71,           // LDA #3 : STA sub.wid  - dotted operand PATCHED
                      0xA9, 0x09, 0x85, 0x70,           // LDA #9 : STA t
                      0xA5, 0x70,                       // LDA t
                      0x20, 0x10, 0x00,                 // JSR sub
-                     0xA5, 0x72,                       // LDA sub.res           - dotted operand PATCHED
+                     0xA5, 0x70,                       // LDA sub.res           - dotted operand PATCHED
                      0x60,
-                     0xA5, 0x71, 0x85, 0x72, 0x60},    // .sub: LDA wid : STA res : RTS
+                     0xA5, 0x71, 0x85, 0x70, 0x60},    // .sub: LDA wid : STA res : RTS
         21));
 }
 
@@ -3508,10 +3539,12 @@ RC_TEST_STEP(assemble, zpauto_argument_survives_intermediate_call, fix)
 
 RC_TEST_STEP(assemble, zpauto_dotted_pipeline_reuses_input_bytes, fix)
 {
-    // The reuse side of the same coin: two stages fed through their scoped interface variables. Each
-    // stage's input dies inside its stage, so the two xins share one byte - holding an argument live to
-    // its call must not pin it beyond the call.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+    // The reuse side of the same coin: two stages fed through their scoped interface variables, and the
+    // whole relay runs in ONE byte. Each argument dies at its read inside its stage; each result - which
+    // its stage definitely writes, so the call KILLS the pre-call value (must-write) - is born there and
+    // dies at the caller's read, just as the next argument is stored. Four variables, one byte, and a
+    // one-byte pool proves no interference exists anywhere.
+    uint32_t passes = ASM("ZPRESERVE &70\n"
                           ".stage1 { ZPAUTO1 xin, res : LDA xin : ASL A : STA res : RTS }\n"
                           ".stage2 { ZPAUTO1 xin, res : LDA xin : CLC : ADC #7 : STA res : RTS }\n"
                           "LDA #5 : STA stage1.xin\n"
@@ -3523,9 +3556,43 @@ RC_TEST_STEP(assemble, zpauto_dotted_pipeline_reuses_input_bytes, fix)
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "stage1.xin"), ==, 0x70);
-    RC_CHECK(zp_addr(&fix->r, "stage2.xin"), ==, 0x70);   // stage1's argument byte, reused
-    RC_CHECK(zp_addr(&fix->r, "stage1.res"), ==, 0x71);
-    RC_CHECK(zp_addr(&fix->r, "stage2.res"), ==, 0x72);
+    RC_CHECK(zp_addr(&fix->r, "stage2.xin"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "stage1.res"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "stage2.res"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpauto_result_survives_producer_tail, fix)
+{
+    // The return edge: sub's RTS sees what is live after each call to sub, so res - whose only reads are
+    // in the caller - stays live from its store to the RTS, and the LATER write to t inside sub cannot
+    // land on its byte. (Without the edge, res looks dead the moment it is stored, its reads being
+    // invisible from inside sub, and t's store would clobber the result before the caller reads it.)
+    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+                          "JSR sub\n"
+                          "LDA sub.res\n"
+                          "RTS\n"
+                          ".sub { ZPAUTO1 res, t : LDA #1 : STA res : LDA #2 : STA t : LDA t : RTS }");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "sub.res"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "sub.t"),   ==, 0x71);   // written after res, which is still en route out
+}
+
+RC_TEST_STEP(assemble, zpauto_conditional_result_is_preserved, fix)
+{
+    // The must-write kill needs EVERY path to write: here the store is skipped when the sum is zero, so the
+    // caller's read may see the byte's pre-call value - res is genuinely live across its own call and is
+    // kept clear of the routine's workspace (no sharing with xin), unlike the unconditional store above.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+                          ".offset { ZPAUTO1 xin, res : LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS }\n"
+                          "LDA #5 : STA offset.xin\n"
+                          "JSR offset\n"
+                          "LDA offset.res\n"
+                          "RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "offset.xin"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "offset.res"), ==, 0x71);   // conditionally written: preserved, not reborn
 }
 
 RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)

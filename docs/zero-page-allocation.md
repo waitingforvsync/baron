@@ -1,10 +1,9 @@
 # Zero page allocation #
 
-Zero page is the 6502's most precious real estate. Instructions that reach it are a byte shorter and a
-cycle faster, and the indirect addressing modes (`(ptr),Y` and friends) live there and nowhere else. On a
-machine like the Beeb, where the OS and BASIC have already staked a claim on most of it, hand-managing
-which routine borrows which byte is exactly the sort of fiddly bookkeeping we would rather a tool did
-for us.
+Zero page is a valuable and limited resource. Instructions that reach it are a byte shorter and a
+cycle faster, and the indirect addressing modes (`(ptr),Y` and friends) live there and nowhere else. In a
+complicated program, hand-managing which routine borrows which byte is exactly the sort of fiddly
+bookkeeping we would rather a tool did for us.
 
 So Baron does it. You hand over a pool of zero-page bytes, declare named variables, and Baron works out
 where each one lives - packing several onto the same byte when their lifetimes never overlap, and
@@ -73,7 +72,7 @@ ZPAUTO WIDTH*2, buf              ; the count is any constant expression, 1 to 25
 A variable is a normal scoped symbol: declared inside a named block, it is reachable from outside as
 `block.var`, exactly like a label - which is how a routine publishes its inputs and outputs (see
 [Subroutine inputs and outputs](#subroutine-inputs-and-outputs)). A `ZPAUTO2`'s low byte is `name` and
-its high byte `name+1`, so the usual pointer dance just works:
+its high byte `name+1`, so things like this just work:
 
 ```
 ZPAUTO2 ptr
@@ -96,9 +95,10 @@ The promises, briefly - each proved from your actual code, not guessed:
   `JMP` into another scope, put three routines in one brace pair or one routine across three. Scopes are
   about *naming*; the analysis follows the branches.
 - **Calls are safe.** A variable held live across a `JSR` is kept clear of every byte the callee (and
-  everything *it* calls) touches. A variable already dead at the call is free to reuse them. And a call
-  *consumes its arguments*: a value stored into a callee's input variable is held live up to the `JSR`,
-  so nothing can be allocated over it in between.
+  everything *it* calls) touches. A variable already dead at the call is free to reuse them. A call
+  *consumes its arguments* - a value stored into a callee's input variable is held live up to the `JSR` -
+  and *delivers its results*: one the callee provably writes on every path is reborn at the call, its
+  pre-call byte free for reuse. See [Subroutine inputs and outputs](#subroutine-inputs-and-outputs).
 - **OS calls are free.** `JSR &FFEE` - or `JSR oswrch` with `oswrch = &FFEE` - targets code outside the
   program, which cannot touch your pool, so nothing special is needed. Same for a tail `JMP &FFEE` or a
   jump through a constant OS vector like `JMP (&FFFC)`.
@@ -116,7 +116,7 @@ Declare a routine's inputs and outputs as variables in *its own* scope, and let 
 dotted path - the natural calling convention for anything a register or two cannot carry:
 
 ```
-ZPRESERVE &70..&72          ; three bytes for the lot
+ZPRESERVE &70..&8F          ; In reality only uses ONE byte for the lot
 
 .scale                      ; scale.xin * 2 -> scale.res
 {
@@ -143,37 +143,37 @@ ZPRESERVE &70..&72          ; three bytes for the lot
     RTS
 ```
 
-Four variables, three bytes - the `-v` listing shows who got what:
-
-```
-.scale
-{
-xin = &70 [auto]
-res = &71 [auto]
-...
-.offset
-{
-xin = &70 [auto]
-res = &72 [auto]
-```
-
-Both `xin`s share one byte: each stage's argument is dead by the time the other stage's is stored, so the
-byte simply passes between them. That is the overlap you want from a calling convention, and the safety
-that comes with it:
+Four variables, and the whole relay runs in a **single byte** - the `-v` listing shows every one of them
+landing on `&70`. The value simply flows through it: argument in, doubled in place, relayed, seven added,
+result out. That is the packing a calling convention should get, and it rests on three guarantees:
 
 - **An argument survives to its call.** A store into `scale.xin` is held live until the `JSR scale` that
-  consumes it - nothing else can be allocated over it in between, however much code sits there, and an
+  consumes it - nothing can be allocated over it in between, however much code sits there, and an
   argument stored before *two* calls is kept clear of the first callee's workspace too.
-- **A result survives to its read.** `scale.res` is live from the store inside `scale` until the caller
-  reads it, so it is kept clear of everything its producer touches - which is also why a result never
-  shares a byte with its own routine's locals.
-- **Nothing is pinned longer than needed.** The argument's byte is free again the moment the callee has
-  read it; the result's the moment the caller has. Feed results onward promptly (as `.start` does) and
-  the bytes circulate.
+- **A result survives to its read.** From its store inside the routine to the caller's read, a result is
+  protected the whole way - including from its own routine's *later* code: a temp trashed on the way to
+  the `RTS` will not land on it.
+- **A delivered result is born at its call.** Baron proves `offset` writes `res` on every path before
+  returning, so the caller's read can only ever see the callee's value - the byte's pre-call contents are
+  dead, and the call is where the result's life begins. That is what lets `offset.res` take the very byte
+  `scale.res` just vacated, instead of being held clear of every earlier call "just in case".
 
-And when two routines can never be active together - two arms of a dispatch, say - even their interface
-variables overlap: Baron sees no path on which both are live, so the arms reuse each other's bytes
-wholesale.
+The proof in that last one is genuine, not assumed - change `offset` so the store is *conditional* and
+watch the allocation change with it:
+
+```
+.offset                     ; offset.xin + 7 -> offset.res, left alone when the sum is zero
+{
+    ZPAUTO1 xin
+    ZPAUTO1 res
+    LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS
+}
+```
+
+Now the caller's read may see the byte as it was *before* the call, so `res` must genuinely be preserved
+across the subroutine - and Baron allocates accordingly: everything else still shares `&70`, while this
+`res` alone is kept clear of the whole journey on `&71` (the pool needs two bytes). Nothing was declared;
+the routine's own instructions are the specification.
 
 ## Annotations ##
 

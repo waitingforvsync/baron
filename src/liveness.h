@@ -29,6 +29,10 @@ typedef struct liveness {
     rc_bitset  *live_in;      // [num_blocks]
     rc_bitset  *live_out;     // [num_blocks]
     rc_bitset  *interfere;    // [num_vars]: interfere[a] has bit b set iff vregs a and b overlap (symmetric)
+    rc_bitset  *must_write;   // [num_blocks] var-level: for a call-target entry block, the variables the
+                              // routine entered there definitely rewrites IN FULL on every returning path
+                              // (empty for non-entry blocks). A call to it KILLS these - the caller's
+                              // pre-call values are dead, so a result's range starts at its call
     vreg_class *classes;      // [num_vars]
 } liveness;
 

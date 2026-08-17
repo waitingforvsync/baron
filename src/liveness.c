@@ -71,6 +71,50 @@ static void add_edge(rc_bitset *interfere, uint32_t a, uint32_t b)
     }
 }
 
+// Does this block hand control back to the caller of the routine containing it? True for an RTS/RTI - and
+// for a transfer OUT of the program, because the external routine's own RTS returns to OUR caller (the
+// tail-call idiom); that includes an external CANJUMP arm of a dispatch, which the CFG wires no edge for.
+static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, basic_block blk)
+{
+    if (blk.num_insns == 0) {
+        return false;
+    }
+    zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
+    if (last.flow == zp_flow_return) {
+        return true;
+    }
+    if ((last.flow == zp_flow_jump || last.flow == zp_flow_branch)
+        && cfg_target_block(g, last) == RC_INDEX_NONE) {
+        if (cfg_target_is_external(g, last)) {
+            return true;
+        }
+        for (uint32_t j = 0; j < cflows.num; j++) {
+            zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
+            if (cf.kind == zp_cflow_canjump && cf.site == last.pc
+                && cfg_block_at(g, last.section, cf.target) == RC_INDEX_NONE) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// The bytes a call definitely writes whichever arm it takes: the intersection of its callees' current
+// must-write sets (mwb, indexed by entry block). Empty when any arm is external (it returns having written
+// nothing of ours) or untrackable. A fresh set in `arena` each call - the sets are tiny and short-lived.
+static rc_bitset call_kill_bytes(call_targets ct, const rc_bitset *mwb, uint32_t nbytes, rc_arena *arena)
+{
+    rc_bitset out = {0};
+    rc_bitset_resize(&out, nbytes, arena);
+    if (!ct.unknown && !ct.external && ct.blocks.view.num != 0) {
+        rc_bitset_copy(&out, &mwb[rc_array_u32_get(&ct.blocks, 0)]);
+        for (uint32_t a = 1; a < ct.blocks.view.num; a++) {
+            rc_bitset_intersection(&out, &mwb[rc_array_u32_get(&ct.blocks, a)]);
+        }
+    }
+    return out;
+}
+
 liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_var vars,
                           uint32_t entry_block, rc_arena *arena, rc_arena scratch)
 {
@@ -82,6 +126,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         .live_in    = make_rows(nb, num_vars, arena),
         .live_out   = make_rows(nb, num_vars, arena),
         .interfere  = make_rows(num_vars, num_vars, arena),
+        .must_write = make_rows(nb, num_vars, arena),
         .classes    = num_vars ? rc_arena_alloc_zero_type(arena, vreg_class, num_vars) : NULL,
     };
     if (nb == 0 || num_vars == 0) {
@@ -105,16 +150,17 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
 
     // Each call site's callee entry blocks, resolved once (CANCALL overrides included). A call is treated
     // as a USE of its callee's live-in set - the callee's inputs - which is what gives an argument stored
-    // by the caller a live range reaching the JSR, so nothing can be coloured over it in between. The
-    // callee's live-in is itself a fixpoint variable, so the injection happens inside the dataflow loop
-    // and propagates transitively through call chains. The two arms that resolve to no blocks inject
-    // nothing: an external callee touches none of our bytes, and a computed unannotated call is already
-    // the user's responsibility (CANCALL declares the targets whose inputs then count).
-    rc_array_u32 *callees = rc_arena_alloc_zero_type(&scratch, rc_array_u32, insns.num);
+    // by the caller a live range reaching the JSR, so nothing can be coloured over it in between; and as a
+    // KILL of the bytes its callees definitely write (the must-write sets below) - the caller's read after
+    // the call receives the callee's value, so the pre-call byte is dead and a delivered result's range
+    // starts at its call, not at the top of the caller. The arms that resolve to no blocks inject and kill
+    // nothing: an external callee touches none of our bytes, and a computed unannotated call is the user's
+    // responsibility (CANCALL declares the targets whose inputs and writes then count).
+    call_targets *calls = rc_arena_alloc_zero_type(&scratch, call_targets, insns.num);
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.flow == zp_flow_call) {
-            callees[i] = cfg_call_targets(g, cflows, n, &scratch).blocks;
+            calls[i] = cfg_call_targets(g, cflows, n, &scratch);
         }
     }
 
@@ -124,6 +170,223 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     rc_bitset_resize(&full, nbytes, &scratch);
     for (uint32_t i = 0; i < nbytes; i++) {
         rc_bitset_set(&full, i);
+    }
+
+    // ---- must-write (definite assignment) ----
+    // For every routine entered by a call, the bytes written on EVERY path from its entry to a return: a
+    // forward "must" analysis (meet = intersection, non-entry blocks start at FULL and only shrink), run
+    // per entry over the blocks reachable from it, inside an outer fixpoint so a call inside a routine
+    // contributes its own callees' (still-shrinking) sets - recursion converges downward from FULL. A
+    // routine with no returning path vacuously must-writes everything (its caller's post-call code never
+    // runs); an unknown-succ block anywhere in the extent forfeits the lot (Guard 1 refuses such programs
+    // anyway). Sound in one direction only: an under-approximation just kills less.
+    bool *is_entry = rc_arena_alloc_zero_type(&scratch, bool, nb);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        for (uint32_t c = 0; c < calls[i].blocks.view.num; c++) {
+            is_entry[rc_array_u32_get(&calls[i].blocks, c)] = true;
+        }
+    }
+
+    // Predecessor lists, once, for the forward meets.
+    uint32_t *pred_count = rc_arena_alloc_zero_type(&scratch, uint32_t, nb);
+    uint32_t *pred_first = rc_arena_alloc_type(&scratch, uint32_t, nb);
+    uint32_t  npreds     = 0;
+    for (uint32_t b = 0; b < nb; b++) {
+        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            pred_count[cfg_succ(g, blk, s)]++;
+        }
+        npreds += blk.succ_count;
+    }
+    for (uint32_t b = 0; b < nb; b++) {
+        pred_first[b] = (b == 0) ? 0 : pred_first[b - 1] + pred_count[b - 1];
+        pred_count[b] = 0;   // reused as the fill cursor
+    }
+    uint32_t *preds = npreds ? rc_arena_alloc_type(&scratch, uint32_t, npreds) : NULL;
+    for (uint32_t b = 0; b < nb; b++) {
+        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            uint32_t t = cfg_succ(g, blk, s);
+            preds[pred_first[t] + pred_count[t]++] = b;
+        }
+    }
+
+    // mwb[e] = the byte set routine e definitely writes, for entry blocks (others unused). Start FULL.
+    rc_bitset *mwb = make_rows(nb, nbytes, &scratch);
+    for (uint32_t e = 0; e < nb; e++) {
+        if (is_entry[e]) {
+            rc_bitset_copy(&mwb[e], &full);
+        }
+    }
+    rc_bitset *mwin  = make_rows(nb, nbytes, &scratch);   // per-entry working rows, re-seeded each visit
+    rc_bitset *mwout = make_rows(nb, nbytes, &scratch);
+    rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
+    rc_bitset  mrow  = {0}; rc_bitset_resize(&mrow, nbytes, &scratch);
+    bool      *in_ext = rc_arena_alloc_type(&scratch, bool, nb);   // extent of the entry under analysis
+    uint32_t  *stack  = rc_arena_alloc_type(&scratch, uint32_t, nb);
+
+    bool mw_changed = true;
+    while (mw_changed) {
+        mw_changed = false;
+        for (uint32_t e = 0; e < nb; e++) {
+            if (!is_entry[e]) {
+                continue;
+            }
+            // The routine's extent: blocks reachable from e through intraprocedural edges.
+            for (uint32_t b = 0; b < nb; b++) { in_ext[b] = false; }
+            uint32_t sp = 0;
+            stack[sp++] = e;
+            in_ext[e] = true;
+            bool tainted = false;
+            while (sp > 0) {
+                basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
+                tainted = tainted || blk.unknown_succ;
+                for (uint32_t s = 0; s < blk.succ_count; s++) {
+                    uint32_t t = cfg_succ(g, blk, s);
+                    if (!in_ext[t]) { in_ext[t] = true; stack[sp++] = t; }
+                }
+            }
+
+            rc_bitset_reset(&acc);   // accumulates the intersection over returning exits
+            bool any_return = false;
+            if (!tainted) {
+                // Forward must fixpoint over the extent: in = meet of in-extent preds' outs ({} at the
+                // entry), out = in + every definite write in the block (a straight line accumulates
+                // unconditionally, so order within the block is irrelevant).
+                for (uint32_t b = 0; b < nb; b++) {
+                    if (in_ext[b]) {
+                        rc_bitset_copy(&mwin[b], &full);
+                        rc_bitset_copy(&mwout[b], &full);
+                    }
+                }
+                bool pass = true;
+                while (pass) {
+                    pass = false;
+                    for (uint32_t b = 0; b < nb; b++) {
+                        if (!in_ext[b]) {
+                            continue;
+                        }
+                        if (b == e) {
+                            rc_bitset_reset(&mrow);   // the routine starts here having written nothing
+                        }
+                        else {
+                            rc_bitset_copy(&mrow, &full);
+                            for (uint32_t p = 0; p < pred_count[b]; p++) {
+                                uint32_t pb = preds[pred_first[b] + p];
+                                if (in_ext[pb]) {
+                                    rc_bitset_intersection(&mrow, &mwout[pb]);
+                                }
+                            }
+                        }
+                        if (!rc_bitset_is_equal(&mrow, &mwin[b])) {
+                            rc_bitset_copy(&mwin[b], &mrow);
+                            pass = true;
+                        }
+                        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                        for (uint32_t k = 0; k < blk.num_insns; k++) {
+                            uint32_t ni = blk.first_insn + k;
+                            zp_insn  n  = rc_view_zp_insn_get(insns, ni);
+                            if (n.flow == zp_flow_call) {
+                                rc_bitset ck = call_kill_bytes(calls[ni], mwb, nbytes, &scratch);
+                                rc_bitset_union(&mrow, &ck);
+                            }
+                            if (n.vreg == RC_INDEX_NONE) {
+                                continue;
+                            }
+                            touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                            for (uint32_t i = 0; i < w.write_count; i++) {
+                                rc_bitset_set(&mrow, base[n.vreg] + w.write_first + i);
+                            }
+                        }
+                        if (!rc_bitset_is_equal(&mrow, &mwout[b])) {
+                            rc_bitset_copy(&mwout[b], &mrow);
+                            pass = true;
+                        }
+                    }
+                }
+                for (uint32_t b = 0; b < nb; b++) {
+                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                    if (!in_ext[b] || !block_returns(g, insns, cflows, blk)) {
+                        continue;
+                    }
+                    // A returning exit carries whatever the routine wrote before handing back.
+                    if (!any_return) {
+                        rc_bitset_copy(&acc, &mwout[b]);
+                        any_return = true;
+                    }
+                    else {
+                        rc_bitset_intersection(&acc, &mwout[b]);
+                    }
+                }
+            }
+            if (!tainted && !any_return) {
+                rc_bitset_copy(&acc, &full);   // never returns: vacuously writes everything
+            }
+            if (!rc_bitset_is_equal(&acc, &mwb[e])) {
+                rc_bitset_copy(&mwb[e], &acc);
+                mw_changed = true;
+            }
+        }
+    }
+
+    // Freeze each call's byte-level kill set, and project the var-level must-write rows for the finalize
+    // sweep (a variable is killed only when EVERY one of its bytes is definitely written).
+    rc_bitset *ckills = rc_arena_alloc_zero_type(&scratch, rc_bitset, insns.num);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        if (rc_view_zp_insn_get(insns, i).flow == zp_flow_call) {
+            ckills[i] = call_kill_bytes(calls[i], mwb, nbytes, &scratch);
+        }
+    }
+
+    // ---- return edges ----
+    // The dual of the call-input injection: a routine's RETURNING exits see everything live AFTER each of
+    // its call sites, so a value written for the caller - an escaping result - stays live from its store
+    // to the RTS, and the routine's own later writes (or a sibling local) cannot land on its byte. Without
+    // this, the must-write kill would leave an escaping value dead the moment its producer stores it (its
+    // only reads are in the caller, which intraprocedural liveness cannot see). ret_from[b] lists the call
+    // sites whose callees' extents contain returning block b; after[i] snapshots the live set just after
+    // call i, maintained inside the fixpoint below.
+    rc_array_u32 *ret_from = rc_arena_alloc_zero_type(&scratch, rc_array_u32, nb);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        for (uint32_t c = 0; c < calls[i].blocks.view.num; c++) {
+            for (uint32_t b = 0; b < nb; b++) { in_ext[b] = false; }
+            uint32_t sp = 0;
+            stack[sp++] = rc_array_u32_get(&calls[i].blocks, c);
+            in_ext[stack[0]] = true;
+            while (sp > 0) {
+                basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
+                for (uint32_t s = 0; s < blk.succ_count; s++) {
+                    uint32_t t = cfg_succ(g, blk, s);
+                    if (!in_ext[t]) { in_ext[t] = true; stack[sp++] = t; }
+                }
+            }
+            for (uint32_t b = 0; b < nb; b++) {
+                if (in_ext[b] && block_returns(g, insns, cflows, rc_array_basic_block_get(&g.blocks, b))) {
+                    rc_array_u32_push(&ret_from[b], i, &scratch);
+                }
+            }
+        }
+    }
+    rc_bitset *after = rc_arena_alloc_zero_type(&scratch, rc_bitset, insns.num);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        if (rc_view_zp_insn_get(insns, i).flow == zp_flow_call) {
+            rc_bitset_resize(&after[i], nbytes, &scratch);
+        }
+    }
+    for (uint32_t e = 0; e < nb; e++) {
+        if (!is_entry[e]) {
+            continue;
+        }
+        for (uint32_t v = 0; v < num_vars; v++) {
+            uint16_t width = rc_view_zp_var_get(vars, v).width;
+            bool     all   = true;
+            for (uint32_t i = 0; i < width && all; i++) {
+                all = rc_bitset_is_set(&mwb[e], base[v] + i);
+            }
+            if (all) {
+                rc_bitset_set(&lv.must_write[e], v);
+            }
+        }
     }
 
     // Backward fixpoint over the byte sets. Round-robin in reverse block order (a backward analysis
@@ -148,12 +411,31 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             if (block.unknown_succ) {
                 rc_bitset_union(&new_out, &full);
             }
+            for (uint32_t r = 0; r < ret_from[bi].view.num; r++) {
+                // A returning block hands control back to each caller: what is live after those calls is
+                // live here - the return edge that keeps an escaping result alive inside its producer.
+                rc_bitset_union(&new_out, &after[rc_array_u32_get(&ret_from[bi], r)]);
+            }
             rc_bitset_copy(&new_in, &new_out);
             for (uint32_t k = block.num_insns; k-- > 0; ) {
                 uint32_t ni = block.first_insn + k;
                 zp_insn  n  = rc_view_zp_insn_get(insns, ni);
-                for (uint32_t c = 0; c < callees[ni].view.num; c++) {
-                    rc_bitset_union(&new_in, &bin[rc_array_u32_get(&callees[ni], c)]);
+                if (n.flow == zp_flow_call) {
+                    // Snapshot the live-after set for the return edges, then apply the call's transfer:
+                    // the callee's definite writes end the pre-call values; its inputs are consumed here.
+                    // A grown snapshot forces another sweep - a return block earlier in THIS sweep read
+                    // the stale one, and only the changed flag brings it back for the bigger set.
+                    if (!rc_bitset_is_equal(&after[ni], &new_in)) {
+                        rc_bitset_copy(&after[ni], &new_in);
+                        changed = true;
+                    }
+                    for (uint32_t i = rc_bitset_get_first_set(&ckills[ni]); i != RC_INDEX_NONE;
+                         i = rc_bitset_get_next_set(&ckills[ni], i + 1)) {
+                        rc_bitset_clear(&new_in, i);
+                    }
+                    for (uint32_t c = 0; c < calls[ni].blocks.view.num; c++) {
+                        rc_bitset_union(&new_in, &bin[rc_array_u32_get(&calls[ni].blocks, c)]);
+                    }
                 }
                 if (n.vreg == RC_INDEX_NONE) {
                     continue;
@@ -201,10 +483,18 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         for (uint32_t k = block.num_insns; k-- > 0; ) {
             uint32_t ni = block.first_insn + k;
             zp_insn  n  = rc_view_zp_insn_get(insns, ni);
-            // A call consumes its callees' inputs, so they are live from here back to their stores - the
-            // range that lets an argument's bytes register overlap with anything written in between.
-            for (uint32_t c = 0; c < callees[ni].view.num; c++) {
-                rc_bitset_union(&live, &bin[rc_array_u32_get(&callees[ni], c)]);
+            if (n.flow == zp_flow_call) {
+                // Same transfer as the dataflow: the callee's definite writes end the old values (a
+                // delivered result's range starts here, not at the top of the caller), and its inputs are
+                // consumed - live from here back to their stores, the range that lets an argument's bytes
+                // register overlap with anything written in between.
+                for (uint32_t i = rc_bitset_get_first_set(&ckills[ni]); i != RC_INDEX_NONE;
+                     i = rc_bitset_get_next_set(&ckills[ni], i + 1)) {
+                    rc_bitset_clear(&live, i);
+                }
+                for (uint32_t c = 0; c < calls[ni].blocks.view.num; c++) {
+                    rc_bitset_union(&live, &bin[rc_array_u32_get(&calls[ni].blocks, c)]);
+                }
             }
             if (n.vreg == RC_INDEX_NONE) {
                 continue;

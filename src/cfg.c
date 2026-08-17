@@ -144,7 +144,7 @@ uint32_t cfg_succ(cfg g, basic_block b, uint32_t i)
 
 call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_arena *arena)
 {
-    call_targets t = {.blocks = rc_array_u32_make(4, arena), .unknown = false};
+    call_targets t = {.blocks = rc_array_u32_make(4, arena), .unknown = false, .external = false};
 
     bool annotated = false;
     for (uint32_t j = 0; j < cflows.num; j++) {
@@ -157,6 +157,9 @@ call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_aren
             if (tb != RC_INDEX_NONE) {
                 rc_array_u32_push(&t.blocks, tb, arena);
             }
+            else {
+                t.external = true;
+            }
         }
     }
     if (!annotated) {
@@ -164,7 +167,10 @@ call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_aren
         if (tb != RC_INDEX_NONE) {
             rc_array_u32_push(&t.blocks, tb, arena);
         }
-        else if (!cfg_target_is_external(g, n)) {
+        else if (cfg_target_is_external(g, n)) {
+            t.external = true;
+        }
+        else {
             t.unknown = true;   // a computed call we cannot follow
         }
     }

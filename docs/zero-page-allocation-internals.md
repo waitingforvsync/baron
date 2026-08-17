@@ -113,24 +113,38 @@ be allocated over a pointer's once-written MSB.)
 1. Each instruction's touch maps to read/write windows (`insn_window`): a read consumes the addressed byte
    (two for a pointer deref, the whole variable for indexed / unknown offsets); a write provably redefines
    only a direct store's one byte.
-2. The round-robin fixpoint: `live_out = union of successors' live_in` (plus *all* bytes under the
-   `unknown_succ` taint), then `live_in` comes from walking the block's instructions backward - a write
-   removes its provable bytes, a read adds its bytes, and **a call adds its callees' live-in**. That last
-   rule is the interprocedural half of the argument story: a call *consumes its inputs*, so a value the
-   caller stored into a callee's variable stays live from the store to the `JSR` - nothing can be coloured
-   over it in between - and the effect chains transitively through nested calls, since a callee's own
-   live-in includes whatever *its* calls inject. Call targets resolve once through `cfg_call_targets`
-   (the shared policy: CANCALL overrides, label resolution, external arms contributing nothing; a computed
-   unannotated call injects nothing - annotation territory, as ever). The set algebra is richc's
+2. **Must-write (definite assignment).** Before the liveness fixpoint, a forward "must" analysis computes,
+   for every routine entered by a call, the bytes it writes on *every* path to a returning exit (meet =
+   intersection, seeded FULL and shrinking; per entry over the blocks reachable from it, inside an outer
+   fixpoint so nested and recursive calls converge). A returning exit is an RTS/RTI *or* a transfer out of
+   the program - the external routine's own RTS returns to our caller, the tail-call idiom - including an
+   external `CANJUMP` arm; a routine with no returning path vacuously must-writes everything. A call's kill
+   set is the intersection over its arms (`call_kill_bytes`), so any external or untrackable arm empties it.
+3. The round-robin fixpoint: `live_out = union of successors' live_in` (plus *all* bytes under the
+   `unknown_succ` taint, plus the **return edges** below), then `live_in` comes from walking the block's
+   instructions backward - a write removes its provable bytes, a read adds its bytes, and a call applies
+   its transfer: **it kills its must-write set and adds its callees' live-in**. The two halves are dual: a
+   call *consumes its inputs* (an argument stored by the caller stays live from the store to the `JSR` -
+   nothing can be coloured over it in between) and *delivers its results* (a byte every arm definitely
+   rewrites is dead before the call, so a delivered result's range starts at its call rather than pinning
+   the whole caller). Both chain transitively through nested calls. Call targets resolve once through
+   `cfg_call_targets` (the shared policy: CANCALL overrides, label resolution, external arms; a computed
+   unannotated call injects and kills nothing - annotation territory, as ever). The set algebra is richc's
    `rc_bitset`.
-3. Interference: sweep each block backward (calls injecting their callees' live-in here too); at any write
-   the variable is pinned to its bytes and interferes with the owner of every other live byte. Two vregs
+4. **Return edges.** The must-write kill makes the reverse direction load-bearing: an escaping result's
+   only reads are in the caller, so without help it would go dead the moment its producer stores it - and
+   the producer's own *later* writes could land on it. So every returning block's live-out also unions the
+   live-*after* set of each call site that reaches its routine (`ret_from` / `after`, maintained inside the
+   fixpoint), keeping an escaping value live from its store to the RTS.
+5. Interference: sweep each block backward with the same per-instruction transfer; at any write the
+   variable is pinned to its bytes and interferes with the owner of every other live byte. Two vregs
    interfere iff some pair of their bytes' ranges overlap. All the "output reuses the dead input's byte"
    legality falls out of these overlaps - no special cases.
-4. Variables live-in at the entry block are the routine's inputs and pairwise interfere (read-only inputs
+6. Variables live-in at the entry block are the routine's inputs and pairwise interfere (read-only inputs
    coexist at entry even if no instruction sees them simultaneously live).
-5. Each vreg is classified `input` / `output` / `temp` / `unused` for the diagnostics and the unused-variable
-   handling.
+7. Each vreg is classified `input` / `output` / `temp` / `unused` for the diagnostics and the unused-variable
+   handling. The var-level projection of the must-write sets (a variable is killed only when *all* its
+   bytes are) is exported as `liveness.must_write` for the finalize sweep.
 
 The public results (interference rows, live-in/out, classes) are projected back to variable level - a
 variable is live iff any of its bytes is - because the allocator places whole variables.
@@ -156,11 +170,13 @@ byte-accurate dataflow, but a too-live set only ever *adds* edges, so it stays s
   only if a live-across variable is in the cycle's `killed` set (`zpauto_recursion` - a *freshly written*
   per-level value cannot ride one static byte, while a merely-read or `DEC`/`INC`-accumulated one can; the
   test is `live intersects killed`, keyed purely off the rw flags, so it handles direct and mutual recursion
-  alike); otherwise every live-across variable gains an interference edge to every vreg in `touched`, which
-  is what forces it off the callee's bytes. The sweep then injects the callees' live-in (mirroring the
-  dataflow's call-input rule) - *after* the checks, deliberately, so an argument is never "live across" the
-  call that consumes it (no spurious edges against its own callee's workspace), yet counts as live across
-  any *earlier* call it must survive.
+  alike; judged on the live set *before* the must-write reduction, deliberately - reading a value back
+  after a recursive call that rewrites it IS the per-level pattern, however definite the write); otherwise
+  every live-across variable gains an interference edge to every vreg in `touched` - except one the call
+  definitely rewrites (`call_rewrites` over `liveness.must_write`), whose post-call value is born inside
+  the callee, not carried across. The sweep then applies the call's transfer (must-write kills, then the
+  callees' live-in) - after the checks, so an argument is never "live across" the call that consumes it,
+  yet counts as live across any *earlier* call it must survive.
 
 ## Colouring, patching, rewriting ##
 
@@ -186,7 +202,7 @@ symbols, reproducing the same bytes the patches produced.
 | `zp_cflow` | zeropage.h | one annotation at a site |
 | `zp_label` | zeropage.h | label identity `(scope, def)` -> physical `(section, pc)` |
 | `basic_block` / `cfg` | cfg.h | `(section, pc)`-keyed blocks, successor slices, `unknown_succ` |
-| `liveness` | liveness.h | live-in/out, interference rows, per-vreg class (byte-accurate inside) |
+| `liveness` | liveness.h | live-in/out, interference rows, per-entry must-write sets, per-vreg class (byte-accurate inside) |
 | `footprint` | footprint.h | `touched` + `killed`, `unknown_call`, `recursive` |
 | `zp_coloring` | zpalloc.h | per-vreg base (or `RC_INDEX_NONE`), `any_spilled` |
 

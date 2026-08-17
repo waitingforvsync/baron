@@ -87,6 +87,9 @@ uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 typedef struct call_targets {
     rc_array_u32 blocks;    // in-program callee entry block indices
     bool         unknown;   // an untrackable (computed, unannotated) arm
+    bool         external;  // an arm that leaves the program (JSR &FFEE, or an external CANCALL target):
+                            // it returns having touched nothing, so a must-write intersection over the
+                            // call's arms is empty - the call kills nothing when this is set
 } call_targets;
 
 call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_arena *arena);
