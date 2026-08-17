@@ -79,5 +79,17 @@ bool cfg_target_is_external(cfg g, zp_insn n);
 // The i-th successor block index of `b` (i < b.succ_count). Reads the shared successor pool.
 uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 
+// The callee entry blocks a call site can reach. A CANCALL annotation at the site overrides the literal
+// target with the declared set (a declared address with no block is an external arm, contributing nothing);
+// otherwise the literal target resolves through cfg_target_block. `unknown` flags the one shape we cannot
+// enumerate: a computed, unannotated call. This is the single call-target policy, shared by the footprint
+// walk and the callee-input liveness injection.
+typedef struct call_targets {
+    rc_array_u32 blocks;    // in-program callee entry block indices
+    bool         unknown;   // an untrackable (computed, unannotated) arm
+} call_targets;
+
+call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_arena *arena);
+
 
 #endif // ifndef BARON_CFG_H_

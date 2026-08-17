@@ -150,24 +150,6 @@ cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
                : rc_trie_symbol_value_get(&s->symbol_pool, found).def;
 }
 
-symbol_ref scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
-{
-    RC_ASSERT(s != NULL);
-    if (!is_leaf_name(name)) {
-        return (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};   // a dotted operand is not a single variable (yet)
-    }
-    // Same parent-walk as a bare-name value lookup, but we return the binding's def (its identity) plus the
-    // scope it was found in - the two together are what uniquely identify a variable across instantiations.
-    for (uint32_t i = scope_index; i != RC_INDEX_NONE; i = RC_AT(s->nodes, i).parent) {
-        rc_trie_symbol syms  = RC_AT(s->nodes, i).symbols;
-        uint32_t       found = rc_trie_symbol_find(syms, &s->symbol_pool, name);
-        if (found != RC_INDEX_NONE) {
-            return (symbol_ref) {.def = rc_trie_symbol_value_get(&s->symbol_pool, found).def, .scope = i};
-        }
-    }
-    return (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};
-}
-
 scopes_view scopes_view_make(const scopes *s)
 {
     RC_ASSERT(s != NULL);
@@ -178,12 +160,19 @@ scopes_view scopes_view_make(const scopes *s)
     };
 }
 
+// Where the lookup core found a binding: the scope it lives in and its index in the symbol pool
+// (both RC_INDEX_NONE when nothing matched). Enough to read the value or the def off one find.
+typedef struct symbol_loc {
+    uint32_t scope;
+    uint32_t index;
+} symbol_loc;
+
 // The shared lookup core, over a read-only view. From scope_index: a bare name walks up the parent chain
 // (nearest enclosing definition wins); a dotted path finds its head the same way, then descends the rest
-// strictly through the child maps and reads the final name in the leaf scope alone. value_make_none() if
-// nothing matches.
-static value view_get_from(scopes_view v, uint32_t scope_index, rc_str full_path)
+// strictly through the child maps and reads the final name in the leaf scope alone.
+static symbol_loc view_find_from(scopes_view v, uint32_t scope_index, rc_str full_path)
 {
+    symbol_loc  none  = {.scope = RC_INDEX_NONE, .index = RC_INDEX_NONE};
     rc_str      dot   = RC_STR(".");
     rc_str_pair split = rc_str_first_split(full_path, dot);
 
@@ -193,10 +182,10 @@ static value view_get_from(scopes_view v, uint32_t scope_index, rc_str full_path
             rc_trie_symbol syms  = rc_view_scope_node_get(v.nodes, i).symbols;
             uint32_t       found = rc_trie_symbol_find(syms, &v.symbol_pool, full_path);
             if (found != RC_INDEX_NONE) {
-                return rc_trie_symbol_value_get(&v.symbol_pool, found).v;
+                return (symbol_loc) {.scope = i, .index = found};
             }
         }
-        return value_make_none();
+        return none;
     }
 
     // Dotted path: find the head the same way (walk up the parents), then descend
@@ -212,7 +201,7 @@ static value view_get_from(scopes_view v, uint32_t scope_index, rc_str full_path
         }
     }
     if (cur == RC_INDEX_NONE) {
-        return value_make_none();
+        return none;
     }
 
     rc_str rest = split.second;
@@ -222,17 +211,38 @@ static value view_get_from(scopes_view v, uint32_t scope_index, rc_str full_path
             // Last component: the symbol name, looked up in the leaf scope alone.
             rc_trie_symbol syms  = rc_view_scope_node_get(v.nodes, cur).symbols;
             uint32_t       found = rc_trie_symbol_find(syms, &v.symbol_pool, rest);
-            return found == RC_INDEX_NONE ? value_make_none() : rc_trie_symbol_value_get(&v.symbol_pool, found).v;
+            return found == RC_INDEX_NONE ? none : (symbol_loc) {.scope = cur, .index = found};
         }
         // Intermediate component: step down into the named child scope.
         rc_trie_child kids  = rc_view_scope_node_get(v.nodes, cur).children;
         uint32_t      found = rc_trie_child_find(kids, &v.child_pool, split.first);
         if (found == RC_INDEX_NONE) {
-            return value_make_none();
+            return none;
         }
         cur  = rc_trie_child_value_get(&v.child_pool, found);
         rest = split.second;
     }
+}
+
+// The value at a lookup's result, or value_make_none() when nothing matched.
+static value view_get_from(scopes_view v, uint32_t scope_index, rc_str full_path)
+{
+    symbol_loc loc = view_find_from(v, scope_index, full_path);
+    return loc.index == RC_INDEX_NONE ? value_make_none() : rc_trie_symbol_value_get(&v.symbol_pool, loc.index).v;
+}
+
+symbol_ref scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
+{
+    RC_ASSERT(s != NULL);
+    // The same walk as a value lookup - bare names shadow up the parent chain, dotted paths descend the
+    // child scopes - but we return the binding's def (its identity) plus the scope it was found in: the
+    // two together uniquely identify a variable across instantiations.
+    scopes_view v   = scopes_view_make(s);
+    symbol_loc  loc = view_find_from(v, scope_index, name);
+    if (loc.index == RC_INDEX_NONE) {
+        return (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};
+    }
+    return (symbol_ref) {.def = rc_trie_symbol_value_get(&v.symbol_pool, loc.index).def, .scope = loc.scope};
 }
 
 // Look a symbol up during assembly, starting from scope_index (with parent-walk shadowing).
@@ -509,6 +519,30 @@ RC_TEST_STEP(scopes, qualified_head_walks_up, fix)
     scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), value_make_numeric(42.0), (cursor){0, 40});
 
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, other, RC_STR("routine.core")), value_make_numeric(42.0)));
+}
+
+RC_TEST_STEP(scopes, resolve_def_follows_dotted_paths, fix)
+{
+    // The identity lookup obeys the same rules as the value lookup: a bare name shadows up the parents,
+    // a dotted path descends the child scopes - and it reports the LEAF scope as the declaring one, which
+    // is what makes a cross-scope ZPAUTO operand resolve to the exact variable instance.
+    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
+    uint32_t other   = scopes_make_child(&fix->scopes, fix->root, RC_STR("other"));
+
+    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), value_make_numeric(0x70), (cursor){0, 30});
+
+    symbol_ref ref = scopes_resolve_symbol_def(&fix->scopes, other, RC_STR("routine.core"));
+    RC_CHECK_TRUE(cursor_is_equal(ref.def, (cursor){0, 30}));
+    RC_CHECK(ref.scope, ==, routine);
+
+    // The dotted and bare routes land on the SAME identity.
+    symbol_ref bare = scopes_resolve_symbol_def(&fix->scopes, routine, RC_STR("core"));
+    RC_CHECK_TRUE(cursor_is_equal(bare.def, ref.def));
+    RC_CHECK(bare.scope, ==, ref.scope);
+
+    // Unknown leaf and unknown head both come up empty.
+    RC_CHECK_TRUE(cursor_is_none(scopes_resolve_symbol_def(&fix->scopes, other, RC_STR("routine.missing")).def));
+    RC_CHECK_TRUE(cursor_is_none(scopes_resolve_symbol_def(&fix->scopes, other, RC_STR("ghost.core")).def));
 }
 
 RC_TEST_STEP(scopes, nested_path_and_shadowing, fix)

@@ -71,8 +71,8 @@ static void add_edge(rc_bitset *interfere, uint32_t a, uint32_t b)
     }
 }
 
-liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_var vars, uint32_t entry_block,
-                          rc_arena *arena, rc_arena scratch)
+liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_var vars,
+                          uint32_t entry_block, rc_arena *arena, rc_arena scratch)
 {
     uint32_t num_vars = vars.num;
     uint32_t nb = g.blocks.num;
@@ -103,28 +103,18 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_var vars, uin
         }
     }
 
-    // Per-block use/kill, computed once, over BYTES. use[b] = bytes whose old value flows in (read before
-    // being rewritten in the block); kill[b] = bytes provably rewritten anywhere in it. Building kill[b]
-    // forward doubles as the "rewritten yet" test for use[b].
-    rc_bitset *use  = make_rows(nb, nbytes, &scratch);
-    rc_bitset *kill = make_rows(nb, nbytes, &scratch);
-    for (uint32_t b = 0; b < nb; b++) {
-        basic_block block = rc_array_basic_block_get(&g.blocks, b);
-        for (uint32_t k = 0; k < block.num_insns; k++) {
-            zp_insn n = rc_view_zp_insn_get(insns, block.first_insn + k);
-            if (n.vreg == RC_INDEX_NONE) {
-                continue;
-            }
-            touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
-            for (uint32_t i = 0; i < w.read_count; i++) {
-                uint32_t byte = base[n.vreg] + w.read_first + i;
-                if (!rc_bitset_is_set(&kill[b], byte)) {
-                    rc_bitset_set(&use[b], byte);
-                }
-            }
-            for (uint32_t i = 0; i < w.write_count; i++) {
-                rc_bitset_set(&kill[b], base[n.vreg] + w.write_first + i);
-            }
+    // Each call site's callee entry blocks, resolved once (CANCALL overrides included). A call is treated
+    // as a USE of its callee's live-in set - the callee's inputs - which is what gives an argument stored
+    // by the caller a live range reaching the JSR, so nothing can be coloured over it in between. The
+    // callee's live-in is itself a fixpoint variable, so the injection happens inside the dataflow loop
+    // and propagates transitively through call chains. The two arms that resolve to no blocks inject
+    // nothing: an external callee touches none of our bytes, and a computed unannotated call is already
+    // the user's responsibility (CANCALL declares the targets whose inputs then count).
+    rc_array_u32 *callees = rc_arena_alloc_zero_type(&scratch, rc_array_u32, insns.num);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        zp_insn n = rc_view_zp_insn_get(insns, i);
+        if (n.flow == zp_flow_call) {
+            callees[i] = cfg_call_targets(g, cflows, n, &scratch).blocks;
         }
     }
 
@@ -138,7 +128,10 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_var vars, uin
 
     // Backward fixpoint over the byte sets. Round-robin in reverse block order (a backward analysis
     // converges fastest walking predecessors last); tiny CFGs, so no worklist. live_out = union of
-    // successors' live_in (+ full if the block's exit is unknown); live_in = use union (live_out minus kill).
+    // successors' live_in (+ full if the block's exit is unknown); live_in comes from walking the block's
+    // instructions backward - a call adds its callees' live-in, a write removes its provable bytes, a read
+    // adds its bytes. (The walk replaces the use/kill set equations: a call's effect depends on another
+    // block's evolving live-in, which a precomputed use set cannot express.)
     rc_bitset *bin  = make_rows(nb, nbytes, &scratch);
     rc_bitset *bout = make_rows(nb, nbytes, &scratch);
     rc_bitset new_out = {0}; rc_bitset_resize(&new_out, nbytes, &scratch);
@@ -156,11 +149,23 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_var vars, uin
                 rc_bitset_union(&new_out, &full);
             }
             rc_bitset_copy(&new_in, &new_out);
-            for (uint32_t v = rc_bitset_get_first_set(&kill[bi]); v != RC_INDEX_NONE;
-                 v = rc_bitset_get_next_set(&kill[bi], v + 1)) {
-                rc_bitset_clear(&new_in, v);
+            for (uint32_t k = block.num_insns; k-- > 0; ) {
+                uint32_t ni = block.first_insn + k;
+                zp_insn  n  = rc_view_zp_insn_get(insns, ni);
+                for (uint32_t c = 0; c < callees[ni].view.num; c++) {
+                    rc_bitset_union(&new_in, &bin[rc_array_u32_get(&callees[ni], c)]);
+                }
+                if (n.vreg == RC_INDEX_NONE) {
+                    continue;
+                }
+                touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                for (uint32_t i = 0; i < w.write_count; i++) {
+                    rc_bitset_clear(&new_in, base[n.vreg] + w.write_first + i);
+                }
+                for (uint32_t i = 0; i < w.read_count; i++) {
+                    rc_bitset_set(&new_in, base[n.vreg] + w.read_first + i);
+                }
             }
-            rc_bitset_union(&new_in, &use[bi]);
             if (!rc_bitset_is_equal(&new_out, &bout[bi]) || !rc_bitset_is_equal(&new_in, &bin[bi])) {
                 changed = true;
                 rc_bitset_copy(&bout[bi], &new_out);
@@ -194,7 +199,13 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_var vars, uin
         basic_block block = rc_array_basic_block_get(&g.blocks, b);
         rc_bitset_copy(&live, &bout[b]);
         for (uint32_t k = block.num_insns; k-- > 0; ) {
-            zp_insn n = rc_view_zp_insn_get(insns, block.first_insn + k);
+            uint32_t ni = block.first_insn + k;
+            zp_insn  n  = rc_view_zp_insn_get(insns, ni);
+            // A call consumes its callees' inputs, so they are live from here back to their stores - the
+            // range that lets an argument's bytes register overlap with anything written in between.
+            for (uint32_t c = 0; c < callees[ni].view.num; c++) {
+                rc_bitset_union(&live, &bin[rc_array_u32_get(&callees[ni], c)]);
+            }
             if (n.vreg == RC_INDEX_NONE) {
                 continue;
             }
@@ -332,7 +343,7 @@ RC_TEST(liveness, mul_interference)
     rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
     rc_array_zp_insn insns = build_mul(&arena);
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
-    liveness lv = liveness_analyze(g, insns.view, width1_vars(3, &arena), 0, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(3, &arena), 0, &arena, scratch);
 
     // in1 overlaps tmp (both live at n3..n4) -> they interfere. But in1 dies before out1 is born, and tmp
     // dies before out1 is born, so out1 reuses their bytes - no interference. This IS the reuse fact.
@@ -350,7 +361,7 @@ RC_TEST(liveness, mul_classification)
     rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
     rc_array_zp_insn insns = build_mul(&arena);
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
-    liveness lv = liveness_analyze(g, insns.view, width1_vars(3, &arena), 0, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(3, &arena), 0, &arena, scratch);
 
     RC_CHECK_TRUE(liveness_class_of(&lv, 0) == vreg_class_input);    // in1 read before written
     RC_CHECK_TRUE(liveness_class_of(&lv, 1) == vreg_class_temp);     // tmp born and consumed inside
@@ -379,7 +390,7 @@ RC_TEST(liveness, disjoint_locals_reuse_a_byte)
     (void) pc;
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
-    liveness lv = liveness_analyze(g, insns.view, width1_vars(2, &arena), 0, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(2, &arena), 0, &arena, scratch);
     RC_CHECK_FALSE(liveness_interferes(&lv, 0, 1));
 
     rc_arena_deinit(&scratch);
@@ -406,7 +417,7 @@ RC_TEST(liveness, loop_carries_value_across_back_edge)
     (void) pc;
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
-    liveness lv = liveness_analyze(g, insns.view, width1_vars(2, &arena), 0, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(2, &arena), 0, &arena, scratch);
     RC_CHECK_TRUE(liveness_is_live_in(&lv, 0, 0));    // v0 live around the loop
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 0));   // and still live out (back-edge carries it)
 
@@ -462,7 +473,7 @@ RC_TEST(liveness, partial_write_keeps_a_pointer_live)
     (void) pc;
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
-    liveness lv = liveness_analyze(g, insns.view, pointer_and_temp(&arena), 0, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, pointer_and_temp(&arena), 0, &arena, scratch);
     RC_CHECK_TRUE(liveness_interferes(&lv, 0, 1));                     // the MSB rides through STA p
     RC_CHECK_TRUE(liveness_is_live_in(&lv, cfg_block_at(g, 0, 0x2002), 0));   // p live around the loop
 
@@ -492,7 +503,7 @@ RC_TEST(liveness, full_byte_rewrite_kills_a_pointer)
     (void) pc;
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
-    liveness lv = liveness_analyze(g, insns.view, pointer_and_temp(&arena), 0, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, pointer_and_temp(&arena), 0, &arena, scratch);
     RC_CHECK_FALSE(liveness_interferes(&lv, 0, 1));   // t is dead before the rewrite begins - reuse is safe
     RC_CHECK_FALSE(liveness_is_live_in(&lv, 0, 0));   // and nothing of p's old value flows in
 
@@ -516,7 +527,7 @@ RC_TEST(liveness, unknown_successor_keeps_everything_live)
     (void) pc;
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
-    liveness lv = liveness_analyze(g, insns.view, width1_vars(2, &arena), 0, &arena, scratch);   // v1 exists in the id space, unused
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(2, &arena), 0, &arena, scratch);   // v1 exists in the id space, unused
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 0));   // v0 forced live out by the taint...
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 1));   // ...as is v1
     RC_CHECK_TRUE(liveness_interferes(&lv, 0, 1));    // so v0's def collides with v1 - no reuse across it

@@ -20,30 +20,17 @@ typedef struct fp_ctx {
 // fp_visit and fp_visit_call are mutually recursive (a call reaches a routine, whose blocks make more calls).
 static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch);
 
-// Descend into what call site `n` reaches. A CANCALL annotation for n.pc overrides the literal target with the
-// declared set; otherwise the literal target is followed. A target that resolves to no block is either
-// EXTERNAL (a constant address off the assembled stream - a JSR &FFEE into the OS, which touches none of our
-// variables, so it contributes an empty footprint) or untrackable (computed), which sets the unknown flag.
+// Descend into what call site `n` reaches. cfg_call_targets applies the whole target policy - a CANCALL
+// override, label resolution (so a JSR into another section finds the right block), external arms
+// contributing nothing - and flags the one shape we cannot follow, a computed unannotated call.
 static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
 {
-    bool annotated = false;
-    for (uint32_t j = 0; j < c->cflows.num; j++) {
-        zp_cflow cf = rc_view_zp_cflow_get(c->cflows, j);
-        if (cf.kind == zp_cflow_cancall && cf.site == n.pc) {
-            annotated = true;
-            uint32_t tb = cfg_block_at(c->g, n.section, cf.target);   // CANCALL names a same-section address
-            // A declared target with no block is an address outside the program: an external entry in the
-            // dispatch set, contributing nothing - same policy as an unannotated JSR to a constant. (The
-            // CFG marks every declared target as a block leader, so an in-program address always HAS a
-            // block, even one that would otherwise sit mid-run.)
-            if (tb != RC_INDEX_NONE) { fp_visit(c, tb, scratch); }
-        }
+    call_targets t = cfg_call_targets(c->g, c->cflows, n, &scratch);
+    if (t.unknown) {
+        *c->unknown = true;
     }
-    if (!annotated) {
-        // The callee, resolved by label - so a JSR into another section (a paged bank) finds the right block.
-        uint32_t tb = cfg_target_block(c->g, n);
-        if (tb != RC_INDEX_NONE) { fp_visit(c, tb, scratch); }
-        else if (!cfg_target_is_external(c->g, n)) { *c->unknown = true; }   // a computed call we cannot follow
+    for (uint32_t i = 0; i < t.blocks.view.num; i++) {
+        fp_visit(c, rc_array_u32_get(&t.blocks, i), scratch);
     }
 }
 

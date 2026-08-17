@@ -142,16 +142,16 @@ cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 // A resolved binding's IDENTITY: its def cursor plus the scope it was declared in. The def cursor ALONE is
 // not unique - a macro / FOR body shares one def across every instantiation - so the declaring scope, which
 // the per-instantiation child scope makes distinct, is what tells two instances apart. `def` is cursor_none()
-// and `scope` is RC_INDEX_NONE when the name is unbound or dotted.
+// and `scope` is RC_INDEX_NONE when the name is unbound.
 typedef struct symbol_ref {
     cursor   def;
     uint32_t scope;
 } symbol_ref;
 
-// Resolve a BARE name from scope_index, walking up the parent chain (nearest enclosing definition wins - the
-// same shadowing rule as scopes_get_symbol). Returns the binding's identity (def + declaring scope), or an
-// all-none symbol_ref if unbound / dotted. Used by the ZP allocator to map an operand to the exact variable
-// instance it references.
+// Resolve a name from scope_index with the same rules as scopes_get_symbol - a bare name walks up the parent
+// chain (nearest enclosing definition wins), a dotted path (a.b.sym) descends the child scopes - but return
+// the binding's identity (def + declaring scope) rather than its value. Used by the ZP allocator to map an
+// operand to the exact variable instance it references, wherever it was declared.
 symbol_ref scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 
 // Look a symbol up, starting from scope_index. A bare name walks up the parent

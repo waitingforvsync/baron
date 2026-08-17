@@ -142,6 +142,35 @@ uint32_t cfg_succ(cfg g, basic_block b, uint32_t i)
     return rc_view_u32_get(g.succs.view, b.succ_first + i);
 }
 
+call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_arena *arena)
+{
+    call_targets t = {.blocks = rc_array_u32_make(4, arena), .unknown = false};
+
+    bool annotated = false;
+    for (uint32_t j = 0; j < cflows.num; j++) {
+        zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
+        if (cf.kind == zp_cflow_cancall && cf.site == n.pc) {
+            annotated = true;
+            // CANCALL names a same-section address. Every declared target is a block leader, so an
+            // in-program address always has a block; one without is an external arm and contributes nothing.
+            uint32_t tb = cfg_block_at(g, n.section, cf.target);
+            if (tb != RC_INDEX_NONE) {
+                rc_array_u32_push(&t.blocks, tb, arena);
+            }
+        }
+    }
+    if (!annotated) {
+        uint32_t tb = cfg_target_block(g, n);
+        if (tb != RC_INDEX_NONE) {
+            rc_array_u32_push(&t.blocks, tb, arena);
+        }
+        else if (!cfg_target_is_external(g, n)) {
+            t.unknown = true;   // a computed call we cannot follow
+        }
+    }
+    return t;
+}
+
 // Append `succ_block` to the shared pool as one more successor of `block`. The pool grows independently of the
 // blocks array, so a `block` pointer into the blocks array stays valid across this (only the pool relocates).
 // A block's successors are pushed contiguously, so succ_first (set before the first push) + succ_count spans

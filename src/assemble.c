@@ -2580,7 +2580,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
     // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
     cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), &work, scratch);
-    liveness lv = liveness_analyze(g, insns, zeropage_vars(&b->zeropage), 0, &work, scratch);
+    liveness lv = liveness_analyze(g, insns, cflows, zeropage_vars(&b->zeropage), 0, &work, scratch);
 
     // A variable no instruction touches gets a WARNING, no address, and no definition (the rewrite below
     // removes its binding): a declaration costing a byte of the pool for nothing is more likely a leftover
@@ -2654,6 +2654,21 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                                 rc_bitset_set(&lv.interfere[c], t);
                                 rc_bitset_set(&lv.interfere[t], c);
                             }
+                        }
+                    }
+                }
+            }
+            if (n.flow == zp_flow_call) {
+                // Before the call (we walk backward), its callees' inputs are live: the arguments the call
+                // consumes. Injected AFTER the live-across checks above, so an input is not "live across"
+                // its own call - only across any EARLIER call it must survive. This mirrors the dataflow's
+                // call-input injection, at this sweep's variable granularity.
+                call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
+                for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
+                    uint32_t e = rc_array_u32_get(&ct.blocks, c);
+                    for (uint32_t v = 0; v < nv; v++) {
+                        if (liveness_is_live_in(&lv, e, v)) {
+                            rc_bitset_set(&live, v);
                         }
                     }
                 }
@@ -3446,6 +3461,73 @@ RC_TEST_STEP(assemble, zpauto_interprocedural_allocation, fix)
     RC_CHECK(zp_addr(&fix->r, "sub.loc"), ==, 0x70);   // dead across the call -> reuses the callee's byte
 }
 
+RC_TEST_STEP(assemble, zpauto_dotted_interface_variables, fix)
+{
+    // A routine's inputs and outputs declared in ITS scope, reached by the caller via the dotted path: the
+    // operands attribute (and so are patched - the byte compare is the proof), the argument written before
+    // the call is held live TO the call (a call consumes its callees' inputs), so the unrelated temp `t`
+    // cannot be coloured over it, and the result is protected across the call by the footprint edges.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 t\n"
+                          "LDA #3 : STA sub.wid\n"
+                          "LDA #9 : STA t\n"
+                          "LDA t\n"
+                          "JSR sub\n"
+                          "LDA sub.res\n"
+                          "RTS\n"
+                          ".sub { ZPAUTO1 wid, res : LDA wid : STA res : RTS }");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "t"),       ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "sub.wid"), ==, 0x71);   // NOT t's byte: the argument survives to the JSR
+    RC_CHECK(zp_addr(&fix->r, "sub.res"), ==, 0x72);   // live across the call, clear of the callee
+    RC_CHECK_TRUE(code_is(&fix->r, passes,
+        (uint8_t[]) {0xA9, 0x03, 0x85, 0x71,           // LDA #3 : STA sub.wid  - dotted operand PATCHED
+                     0xA9, 0x09, 0x85, 0x70,           // LDA #9 : STA t
+                     0xA5, 0x70,                       // LDA t
+                     0x20, 0x10, 0x00,                 // JSR sub
+                     0xA5, 0x72,                       // LDA sub.res           - dotted operand PATCHED
+                     0x60,
+                     0xA5, 0x71, 0x85, 0x72, 0x60},    // .sub: LDA wid : STA res : RTS
+        21));
+}
+
+RC_TEST_STEP(assemble, zpauto_argument_survives_intermediate_call, fix)
+{
+    // An argument stored before TWO calls must survive the first: sub.wid is live from its store to the
+    // JSR sub that consumes it, so it is live ACROSS the intervening JSR other and interferes with other's
+    // whole footprint - other.loc cannot take its byte.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+                          "LDA #3 : STA sub.wid : JSR other : JSR sub : RTS\n"
+                          ".other { ZPAUTO1 loc : STA loc : LDA loc : RTS }\n"
+                          ".sub { ZPAUTO1 wid : LDA wid : RTS }");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "other.loc"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "sub.wid"),   ==, 0x71);   // pushed off loc's byte by the intervening call
+}
+
+RC_TEST_STEP(assemble, zpauto_dotted_pipeline_reuses_input_bytes, fix)
+{
+    // The reuse side of the same coin: two stages fed through their scoped interface variables. Each
+    // stage's input dies inside its stage, so the two xins share one byte - holding an argument live to
+    // its call must not pin it beyond the call.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+                          ".stage1 { ZPAUTO1 xin, res : LDA xin : ASL A : STA res : RTS }\n"
+                          ".stage2 { ZPAUTO1 xin, res : LDA xin : CLC : ADC #7 : STA res : RTS }\n"
+                          "LDA #5 : STA stage1.xin\n"
+                          "JSR stage1\n"
+                          "LDA stage1.res : STA stage2.xin\n"
+                          "JSR stage2\n"
+                          "LDA stage2.res\n"
+                          "RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "stage1.xin"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "stage2.xin"), ==, 0x70);   // stage1's argument byte, reused
+    RC_CHECK(zp_addr(&fix->r, "stage1.res"), ==, 0x71);
+    RC_CHECK(zp_addr(&fix->r, "stage2.res"), ==, 0x72);
+}
+
 RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
 {
     // The certainty contract: rather than emit code it cannot prove correct, the allocator errors and points
@@ -3940,8 +4022,8 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
 
     cfg g = cfg_build(zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage), zeropage_labels(&b.zeropage),
                       &arena, scratch);
-    liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_vars(&b.zeropage), 0,
-                                   &arena, scratch);
+    liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage),
+                                   zeropage_vars(&b.zeropage), 0, &arena, scratch);
 
     // Classification: in1 is read before written (input), tmp is born and consumed inside (temp), out1 is
     // written but never read inside (output).
