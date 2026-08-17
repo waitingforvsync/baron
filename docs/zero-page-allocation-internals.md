@@ -1,250 +1,423 @@
 # Zero-page allocation: internals #
 
-The technical companion to [the usage guide](zero-page-allocation.md), for anyone changing the allocator.
+The technical companion to [the usage guide](zero-page-allocation.md), for anyone changing the allocator -
+or just curious how it works. No compiler background is assumed: the ideas are introduced as they are
+needed, and every example here is a real program with the addresses Baron actually assigns.
 
-The problem: the user declares named zero-page variables and we must give each a real byte such that no two
-variables ever simultaneously live share one - and *prove* it, refusing rather than emitting code we cannot
-vouch for. This is register allocation by graph colouring, with the zero page standing in for the register
-file. The twist is that we are an assembler, not a compiler: we see a raw instruction stream, we only have a
-settled layout after multi-pass convergence, and we must cope with subroutine calls, computed jumps, paged
-banks sharing addresses, and recursion - each a place where a naive analysis would silently under-approximate
-a live range and hand back a wrong byte.
+## Contents ##
+- [The problem](#the-problem)
+- [Live ranges, interference, colouring](#live-ranges-interference-colouring)
+- [Why an assembler makes this interesting](#why-an-assembler-makes-this-interesting)
+- [The pipeline](#the-pipeline)
+- [Recording: what the analyses see](#recording-what-the-analyses-see)
+- [Easy checks first: bounds and indexed access](#easy-checks-first-bounds-and-indexed-access)
+- [The control-flow graph](#the-control-flow-graph)
+- [Liveness: walking backward](#liveness-walking-backward)
+- [Calls](#calls)
+- [Colouring](#colouring)
+- [Patch and rewrite](#patch-and-rewrite)
+- [The certainty contract](#the-certainty-contract)
+- [Known gaps](#known-gaps)
+- [Map of the code](#map-of-the-code)
+
+## The problem ##
+
+The user declares named zero-page variables and hands us a pool of bytes. We must give each variable a
+real address such that the program still behaves exactly as written - and we want to be *stingy*: two
+variables should share a byte whenever that is provably safe.
+
+When is it safe? Exactly when their values are never needed at the same moment. That one sentence is the
+whole design; everything below is the machinery for making "never needed at the same moment" precise, and
+for proving it from the instruction stream rather than guessing.
+
+Compiler folk will recognise this as **register allocation by graph colouring**, with the zero page
+standing in for the register file. If that phrase means nothing to you, good - the next section builds it
+from scratch.
+
+## Live ranges, interference, colouring ##
+
+Three ideas, each small.
+
+**A variable is *live* when its current value is still needed** - some instruction later on the path will
+read it before anything overwrites it. It becomes live when written, and dies at its last read. The span
+in between is its *live range*.
+
+Here is a real program (it is test `zpauto_allocates_and_reuses` in `assemble.c`), with each variable's
+live range drawn beside the code:
+
+```
+                                 in1   tmp   out1
+    LDA in1                       |                  in1 is an input: live from entry
+    ASL A                         |
+    STA tmp                       |     |            tmp born while in1 still lives
+    LDA in1                       x     |            in1's LAST read: it dies here
+    CLC                                 |
+    ADC tmp                             x            tmp's last read
+    STA out1                                  |      out1 born - nobody else is alive
+    RTS
+```
+
+**Two variables *interfere* when their live ranges overlap** - at some moment both values matter, so they
+must not share a byte. Draw every variable as a node and every overlap as an edge and you have the
+*interference graph*:
+
+```
+    in1 --- tmp        out1
+```
+
+`in1` and `tmp` overlap (look at the `STA tmp` line: both bars present), so they get an edge. `out1` is
+born after both are dead - no edges at all.
+
+**Colouring is assigning addresses so that neighbours differ.** Walk the nodes, give each the lowest pool
+byte that no neighbour already holds:
+
+```
+    in1  = &70
+    tmp  = &71     (in1 is a neighbour, so not &70)
+    out1 = &70     (no neighbours - reuse the first byte)
+```
+
+Three variables, two bytes, provably safe. That is the entire trick. Everything else in this document is
+about computing the live ranges *honestly* - because a live range that comes out too short lets the
+colourer overlap two values that both matter, which is a silent runtime corruption. The governing rule
+throughout: when in doubt, a range gets **longer** (costing at worst a byte), never shorter.
+
+## Why an assembler makes this interesting ##
+
+A compiler allocates registers with the source structure in its hands. We have a raw instruction stream,
+which changes the game in a few ways:
+
+- **There is no structure to lean on.** Braces are *naming*, not lifetime: control happily branches out
+  of a `{ }` block or into one, and one block can hold three routines. We must recover the real control
+  flow from the branches themselves.
+- **Layout settles over many passes.** A forward reference can change an instruction's size, shifting
+  every later address - so we cannot allocate mid-assembly. The trick (`src/zeropage.c`): `ZPAUTO` binds
+  its name to a *placeholder* address 0, typed zero-page, so `LDA var` is a two-byte zero-page
+  instruction from the very first pass. The layout never depends on the allocation, which means the whole
+  analysis can run **once, after convergence** (`zeropage_finalize` in `src/assemble.c`) and patch
+  addresses into place without moving a single byte.
+- **Subroutines, computed jumps, paged banks and recursion** all threaten to hide a read from us - and a
+  hidden read is a too-short range. Each gets its own machinery below.
 
 ## The pipeline ##
 
-Everything runs in `zeropage_finalize` (`src/assemble.c`), once, after the final assembly pass:
+Everything runs inside `zeropage_finalize` (`src/assemble.c`), once, after the final pass:
 
 ```
-  assembly passes (settling)              zeropage_finalize (once, post-convergence)
-  --------------------------              ------------------------------------------
-  ZPRESERVE -> reserved-byte set          1. resolve vregs  (operand identity -> vreg id)
-  ZPAUTO    -> placeholder symbol         2. bounds + indexed-access checks
-  final pass -> record the IR:            3. build the CFG  (blocks keyed (section, pc))
-    zp_var   declarations                 4. liveness       (backward byte-level fixpoint -> interference)
-    zp_insn  instructions                 5. footprints     (what each call clobbers) + the guards
-    zp_cflow annotations                  6. colour         (first-fit-decreasing)
-    zp_label label markers                7. patch operands + rewrite symbols  (or refuse)
+  during assembly (every pass)          zeropage_finalize (once, post-convergence)
+  ----------------------------          ------------------------------------------
+  ZPRESERVE -> reserved-byte set        1. resolve vregs   (operand identity -> variable id)
+  ZPAUTO    -> placeholder symbol       2. bounds + indexed-access checks
+  final pass -> record the IR           3. build the CFG   (basic blocks + edges)
+                                        4. liveness        (ranges -> interference graph)
+                                        5. call analyses   (footprints + the guards)
+                                        6. colour          (first-fit-decreasing)
+                                        7. patch operands + rewrite symbols  (or refuse)
 ```
 
-If any guard refuses, we record diagnostics, patch nothing, and the assemble fails. Only a fully analysable,
-colourable program gets real addresses.
+If any guard refuses, we record diagnostics, patch nothing, and the assemble fails. Only a fully
+analysable, colourable program gets real addresses.
 
-## Recording ##
+## Recording: what the analyses see ##
 
-During the settling passes the allocator's one job is not to disturb convergence. `ZPRESERVE` fills a 256-bit
-`reserved` set (re-filled each pass; its presence enables the whole feature). `ZPAUTO` binds its name to a
-*placeholder* symbol at address 0, typed as a zero-page access - so every `LDA var` is a two-byte zero-page
-instruction from the first pass, whatever byte we later choose. The layout never depends on the allocation;
-that is what lets the whole analysis run *after* convergence without perturbing it.
-
-On the final pass, with addresses settled, the manager (`src/zeropage.c`) captures the IR:
+Only the final pass records anything - earlier passes exist to let the layout settle. The IR
+(`src/zeropage.c`, filled by `record_insn` in `src/opcodes.c`) is four flat arrays:
 
 - `zp_var` - one per declaration: name, owning scope, width (1-256), and its **def cursor** (the source
-  position of the `ZPAUTO`), its identity across passes.
-- `zp_insn` - one per instruction (`src/opcodes.c` records them): pc, size, control-flow class, its
-  variable touch if any (`rw` read/write flags, constant offset, indexed/indirect flags), the operand's
-  `(section, offset)` for later patching, and the transfer target.
-- `zp_cflow` - the annotations (`UNREACHABLE` / `CANCALL` / `CANJUMP`).
-- `zp_label` - a marker tying a label's identity `(scope, def)` to its physical `(section, pc)` - what lets
-  a transfer that *named a label* find the right block even when two banks share an address.
+  position of the `ZPAUTO` statement).
+- `zp_insn` - one per *instruction*: pc, size, control-flow class (`zp_flow`), which variable it touches
+  and how (`rw` read/write flags, constant offset, indexed/indirect flags), where its operand byte lives
+  for later patching, and its transfer target.
+- `zp_cflow` - the annotations: `UNREACHABLE`, `CANCALL`, `CANJUMP`.
+- `zp_label` - each label's identity mapped to its physical `(section, pc)`.
 
-A variable can be used textually before its declaration, so an operand records the binding's
-`(scope, def cursor)` pair and `zeropage_resolve_vregs` maps pairs to vreg ids once the registry is complete.
-The *pair* is the identity: a macro / `FOR` body's instantiations share one def cursor but run in distinct
-child scopes. Operand attribution (`scopes_resolve_symbol_def`) follows the same rules as a value lookup -
-a bare name shadows up the parent chain, a dotted path (`routine.var`) descends the child scopes - so a
-cross-scope reference to a routine's interface variable attributes, and is patched and analysed, exactly
-like a local one.
+Two details worth knowing:
 
-## Bounds and indexed access ##
+- **A variable's identity is the pair (scope, def cursor)** - not the def cursor alone. A macro or `FOR`
+  body shares one `ZPAUTO` across every instantiation, but each instantiation runs in its own child
+  scope, so the pair tells the copies apart (each iteration's `loc` is a genuinely distinct variable).
+  Operands record the pair; `zeropage_resolve_vregs` maps pairs to dense ids once the registry is
+  complete, which is also why a use may precede its declaration.
+- **Dotted operands attribute like local ones.** `STA sub.wid` resolves through the scope tree
+  (`scopes_resolve_symbol_def`, `src/scopes.c`) to the exact variable instance, so cross-scope interface
+  variables are patched and analysed exactly like everything else.
 
-Decided from the instruction stream alone, before any CFG exists.
+## Easy checks first: bounds and indexed access ##
 
-Every access spans a window `[offset, offset + access)` of its variable - `offset` is the constant in
-`var + offset` (the operand's evaluated value, since the symbol is still the placeholder 0), `access` is 1
-for a direct byte or 2 for an indirect pointer deref (`(var),Y` / `(var)`). A window past the declared width
-lands on a byte we never reserved for this variable, so it is **refused**: `zpauto_narrow_pointer` for the
-pointer-deref-of-a-1-byte special case, `zpauto_out_of_bounds` for everything else, including the constant
-*base* of an indexed access (`var+4,X` on a 4-wide table is off the end before X gets a say).
+Before any graph exists, some things are decidable from single instructions (the first loop in
+`zeropage_finalize`):
 
-An indexed access itself (`var,X`, `var,Y`, `(var,X)`) is a **warning**, not a refusal
-(`zpauto_indexed_access`, `severity_optional`): the whole variable is reserved and liveness treats any
-indexed touch as using all of it, so an in-width index is sound - and the run-time index is the one thing no
-static check can see, so it is trusted to the user, the same trust as an annotation.
+- **`var + n` must stay inside the variable.** During assembly the symbol is the placeholder 0, so an
+  operand's evaluated value *is* its offset within the variable. A window past the declared width lands
+  on a byte reserved for someone else: **refused**. `(var),Y` on a one-byte variable gets the pointed
+  `zpauto_narrow_pointer` ("declare it ZPAUTO2"); everything else gets `zpauto_out_of_bounds` - including
+  the constant *base* of an indexed access (`table+4,X` on a 4-wide table is off the end before X has a
+  say).
+- **Indexed access itself is a warning, not a refusal** (`zpauto_indexed_access`, opt-in severity). The
+  whole variable is reserved and liveness treats an indexed touch as using all of it, so an in-width
+  index is sound - and the run-time index is the one thing no static check can see. The same trust as an
+  annotation.
 
-## The CFG ##
+## The control-flow graph ##
 
-`cfg_build` (`src/cfg.c`) cuts the stream into basic blocks. It is intraprocedural: a `JSR` is an in-block
-instruction (callees are reached through the call graph, not CFG edges) and an `RTS` ends a block with no
-successor - "routines" fall out as whatever is reachable from an entry without crossing a call or return.
-The one exception: an `RTS` carrying a `CANJUMP` is the dispatch trick (push a target address, RTS into
-it), and is wired exactly like an annotated computed jump - declared edges, external arms contributing
-nothing. An unannotated dispatch is indistinguishable from a real return, so it stays a trusted
-precondition, never a taint.
+To trace lifetimes we must know where control can go. The unit for this is the **basic block**: a
+maximal straight-line run of instructions - one way in (the top), one way out (the bottom). Within a
+block, execution is a simple sequence; all the interesting control flow lives on the **edges** between
+blocks.
 
-- **Block identity is `(section, pc)`.** Paged banks may share an address, so `pc` alone cannot name a
-  block. Within a section, pc is strictly monotonic by construction (org fixed at open, cursor only
-  advances) - asserted in debug builds, so within-section collisions cannot happen.
-- **Leaders** are the first instruction, every transfer target, every fall-through after a branch / jump /
-  return, every section boundary - plus every *declared* `CANCALL` / `CANJUMP` target, so an in-program
-  declared target always gets a block even mid-run.
-- **Targets** resolve through the label markers when the operand named a label (this is how a transfer
-  crosses sections); a bare number resolves within its own section only; a computed target resolves to
-  nothing. An indirect `JMP`'s operand names its vector *cell*, not its destination
+`cfg_build` (`src/cfg.c`) recovers blocks from the stream in three passes:
+
+1. **Find the leaders** - every instruction where a block must start: the first instruction, every
+   branch/jump/call target, the instruction after any branch, jump or return, every section boundary,
+   and every `CANCALL`/`CANJUMP`-declared target.
+2. **Cut the stream** at the leaders.
+3. **Wire the edges** from each block's last instruction.
+
+A tiny loop, and its graph:
+
+```
+    .loop                        +------------------+
+        DEX                +---->| b0:  DEX         |
+        BNE loop           |     |      BNE loop    |
+        RTS                |     +---+----------+---+
+                           |  taken |          | fall through
+                           +--------+          v
+                                        +-----------+
+                                        | b1:  RTS  |
+                                        +-----------+
+```
+
+`b0` has two successors: itself (the branch taken) and `b1` (the fall-through). `b1` ends in `RTS` and
+has none. Liveness will walk these edges; braces never appear anywhere in the picture.
+
+The details that make the CFG honest:
+
+- **A block's identity is `(section, pc)`, not `pc` alone.** Two paged banks may both sit at `&8000`;
+  the pair keeps their flow apart. Within one section, pc is strictly monotonic by construction
+  (asserted in debug builds), so identity is unambiguous.
+- **A `JSR` is an in-block instruction, not an edge.** Callees are reached through the [call
+  analyses](#calls); an `RTS` ends a block with no successor. "Routines" are simply whatever is
+  reachable from an entry without crossing a call or return.
+- **Targets resolve by label** (`cfg_target_block`, via the `zp_label` markers) - which is how a
+  transfer crosses sections and still finds the right bank. A bare number resolves within its own
+  section only. An indirect `JMP`'s operand names its vector *cell*, never its destination
   (`zp_insn.target_via`), so the cell's address is never mistaken for an edge.
-- **External transfers.** A *constant* destination matching nothing we assembled is a transfer out of the
-  program - `JSR &FFEE`, a tail `JMP &FFEE`, `JMP (&FFFC)` through a vector cell that is not ours.
-  External code cannot touch the pool (`ZPRESERVE` names precisely the bytes nothing else uses), so an
-  external exit is as clean as an `RTS` and an external call has an empty footprint. `cfg_target_is_external`
-  is the shared test; a declared annotation target with no block reads the same way (an external arm,
-  `CANJUMP mode_a, &FFEE`).
-- **`unknown_succ`** taints a block whose control may leave for code we cannot model: an unannotated
-  indirect `JMP` through our own vector, an indexed dispatch, an unresolved target. The taint later forces
-  "everything live" out of that block.
-- `UNREACHABLE` prunes a branch's fall-through edge; `CANJUMP` wires the declared targets as real
-  successors (a variable-length successor slice, so jump tables are representable).
+- **A constant destination matching nothing we assembled is a transfer out of the program**
+  (`cfg_target_is_external`): `JSR &FFEE`, a tail `JMP &FFEE`, `JMP (&FFFC)` through an OS vector.
+  External code cannot touch the pool - `ZPRESERVE` names precisely the bytes nothing else uses - so an
+  external exit is as clean as an `RTS`, and needs no annotation.
+- **Flow we genuinely cannot place taints its block** (`unknown_succ`): an unannotated indirect `JMP`
+  through our own vector, an indexed dispatch `JMP (table,X)`. The taint later forces "everything live"
+  out of that block - and Guard 1 refuses the program if any variables are in play at all.
+- **Annotations adjust the graph**: `UNREACHABLE` prunes a branch's fall-through edge; `CANJUMP` wires a
+  computed jump's declared targets as real successors (external arms contributing nothing). An `RTS`
+  carrying a `CANJUMP` is the dispatch trick - push a target address, "return" into it - and is wired
+  exactly like an annotated jump. An *unannotated* dispatch is indistinguishable from a real return, so
+  it remains a trusted precondition, never a taint.
 
-## Liveness ##
+## Liveness: walking backward ##
 
-`liveness_analyze` (`src/liveness.c`) is a standard backward dataflow fixpoint plus interference
-construction - but it runs over a **byte** id space, not the vreg space: variable `v` owns bytes
-`[base[v], base[v] + width[v])` and every dataflow set is a byte set. That is what makes partial writes come
-out right: a 6502 store writes one byte, so `STA ptr` alone redefines the LSB while the MSB's old value
-flows through and keeps the pointer live - and a `STA ptr : STA ptr+1` pair accumulates, across blocks too,
-into a genuine full kill. (Treating any store as a whole-variable kill was the bug that let another variable
-be allocated over a pointer's once-written MSB.)
+Now the central question: at each point, which variables are live? The natural direction is
+**backward** - liveness is about the *future* ("will this value be read again?"), and walking from the
+end toward the start means that by the time we reach an instruction, we already know what the code after
+it needs.
 
-1. Each instruction's touch maps to read/write windows (`insn_window`): a read consumes the addressed byte
-   (two for a pointer deref, the whole variable for indexed / unknown offsets); a write provably redefines
-   only a direct store's one byte.
-2. **Must-write (definite assignment).** Before the liveness fixpoint, a forward "must" analysis computes,
-   for every routine entered by a call, the bytes it writes on *every* path to a returning exit (meet =
-   intersection, seeded FULL and shrinking; per entry over the blocks reachable from it, inside an outer
-   fixpoint so nested and recursive calls converge). A returning exit (`block_returns`) is an RTS/RTI *or*
-   a transfer out of the program - the external routine's own RTS returns to our caller, the tail-call
-   idiom - including an external `CANJUMP` arm; an RTS carrying a `CANJUMP` is *not* one (the dispatch
-   trick continues at its declared targets, whose own exits return) unless one of its arms is external. A
-   routine with no returning path vacuously must-writes everything. A call's kill set is the intersection
-   over its arms (`call_kill_bytes`), so any external or untrackable arm empties it.
-3. The round-robin fixpoint: `live_out = union of successors' live_in` (plus *all* bytes under the
-   `unknown_succ` taint, plus the **return edges** below), then `live_in` comes from walking the block's
-   instructions backward - a write removes its provable bytes, a read adds its bytes, and a call applies
-   its transfer: **it kills its must-write set and adds its callees' live-in**. The two halves are dual: a
-   call *consumes its inputs* (an argument stored by the caller stays live from the store to the `JSR` -
-   nothing can be coloured over it in between) and *delivers its results* (a byte every arm definitely
-   rewrites is dead before the call, so a delivered result's range starts at its call rather than pinning
-   the whole caller). Both chain transitively through nested calls. Call targets resolve once through
-   `cfg_call_targets` (the shared policy: CANCALL overrides, label resolution, external arms; a computed
-   unannotated call injects and kills nothing - annotation territory, as ever). The set algebra is richc's
-   `rc_bitset`.
-4. **Return edges.** The must-write kill makes the reverse direction load-bearing: an escaping result's
-   only reads are in the caller, so without help it would go dead the moment its producer stores it - and
-   the producer's own *later* writes could land on it. So every returning block's live-out also unions the
-   live-*after* set of each call site that reaches its routine (`ret_from` / `after`, maintained inside the
-   fixpoint), keeping an escaping value live from its store to the RTS.
-5. Interference: sweep each block backward with the same per-instruction transfer; at any write the
-   variable is pinned to its bytes and interferes with the owner of every other live byte. Two vregs
-   interfere iff some pair of their bytes' ranges overlap. All the "output reuses the dead input's byte"
-   legality falls out of these overlaps - no special cases.
-6. Variables live-in at the entry block are the routine's inputs and pairwise interfere (read-only inputs
-   coexist at entry even if no instruction sees them simultaneously live).
-7. Each vreg is classified `input` / `output` / `temp` / `unused` for the diagnostics and the unused-variable
-   handling. The var-level projection of the must-write sets (a variable is killed only when *all* its
-   bytes are) is exported as `liveness.must_write` for the finalize sweep.
+Walk one block backward with a set of live bytes in hand:
 
-The public results (interference rows, live-in/out, classes) are projected back to variable level - a
-variable is live iff any of its bytes is - because the allocator places whole variables.
+- at a **read**, the value clearly matters: *add* the read bytes to the set;
+- at a **write**, the old value is gone: *remove* the written bytes;
+- at a **call**, apply the call's transfer (next section).
 
-## Footprints and the guards ##
+Blocks chain through the CFG: a block's *live-out* is the union of its successors' *live-in* (any
+successor might read it), and a tainted (`unknown_succ`) block's live-out is everything. Loops make the
+sets provisional, so `liveness_analyze` (`src/liveness.c`) just iterates the whole thing until nothing
+changes - a *fixpoint*. The sets only ever grow, so it terminates.
 
-Liveness is intraprocedural, so alone it would miss that a `JSR` clobbers the callee's variables.
-`footprint_of_call` (`src/footprint.c`) computes what a call site reaches: a DFS over the call graph
-gathering `touched` (every vreg the callee subtree touches) and `killed` (vregs given a write-only def
-anywhere in it); revisiting an on-stack entry flags `recursive`; an untrackable target - a computed call, or
-a callee that leaves via computed flow - sets `unknown_call`. A `CANCALL` overrides the literal target with
-the declared set (which is what makes a self-modified call sound: its constant placeholder otherwise reads
-as external). External targets contribute nothing.
+Two refinements:
 
-`zeropage_finalize` then sweeps each block backward with a variable-level live set (its kill test,
-`zp_insn_write_kills`, ends a range only on a full single-store rewrite - coarser than stage 4's
-byte-accurate dataflow, but a too-live set only ever *adds* edges, so it stays sound):
+- **The dataflow is per BYTE, not per variable.** A `ZPAUTO2` pointer occupies two byte-ids; `STA ptr`
+  rewrites only the low one. So a pointer whose MSB was written once and whose LSB is refreshed before
+  each use stays live - nothing gets allocated over the MSB - while a `STA ptr : STA ptr+1` pair
+  accumulates into a genuine full kill. (Treating any store as a whole-variable kill was a real bug: it
+  severed a pointer's MSB from its dereferences and let another variable land on it.) `insn_window` maps
+  each touch to its read/write byte windows; the public results are projected back to variable level,
+  since whole variables are what we place.
+- **Interference is collected during one more backward sweep**: at every write, the written variable
+  gains an edge to the owner of every other live byte. That single rule generates the entire graph -
+  "the output can reuse the dead input's byte" and all its friends fall out with no special cases.
 
-- **Computed flow**: any `unknown_succ` block, with variables in play, is refused
-  (`zpauto_computed_flow`) - annotate or keep clear.
-- **Calls**: at a call with variables live across it (the live set at a `JSR` *is* the live-across set - a
-  call touches no variable of its own): `unknown_call` refuses (`zpauto_across_call`); recursion refuses
-  only if a live-across variable is in the cycle's `killed` set (`zpauto_recursion` - a *freshly written*
-  per-level value cannot ride one static byte, while a merely-read or `DEC`/`INC`-accumulated one can; the
-  test is `live intersects killed`, keyed purely off the rw flags, so it handles direct and mutual recursion
-  alike; judged on the live set *before* the must-write reduction, deliberately - reading a value back
-  after a recursive call that rewrites it IS the per-level pattern, however definite the write); otherwise
-  every live-across variable gains an interference edge to every vreg in `touched` - except one the call
-  definitely rewrites (`call_rewrites` over `liveness.must_write`), whose post-call value is born inside
-  the callee, not carried across. The sweep then applies the call's transfer (must-write kills, then the
-  callees' live-in) - after the checks, so an argument is never "live across" the call that consumes it,
-  yet counts as live across any *earlier* call it must survive.
+Finally, variables live-in at the program entry are its *inputs*; they pairwise interfere (two read-only
+inputs coexist at entry even if no instruction sees both at once), and each variable is classified
+`input` / `output` / `temp` / `unused` for diagnostics and the unused-variable handling.
 
-## Colouring, patching, rewriting ##
+## Calls ##
 
-`zp_color` (`src/zpalloc.c`) is first-fit-decreasing by width: widest variables first, each placed at the
-lowest base whose whole span is reserved and overlaps no interfering variable's span. The span logic is
-width-generic, so a `ZPAUTO 16` table packs exactly like a pointer, just wider. An `unused` variable is
-skipped - no address, not a spill - warned once per declaration site (`zpauto_unused`), and its binding
-*removed* at the rewrite step, so it ends up exactly as if never declared. A *used* variable with no home is
-a spill: `zeropage_full`, naming it.
+A `JSR` is where naive liveness falls apart, because the callee's code is not on the caller's CFG path.
+Four rules close the gap - each one exists because a real program broke without it.
 
-With a spill-free colouring, the finalizer patches each recorded operand (`sections_patch_add_u8` folds the
-assigned base into the byte, which held only the intra-variable offset) and rewrites each symbol from the
-placeholder to its real address. No instruction changes size - every reference was zero-page-sized all
-along - so the converged layout is untouched. Under `-v`, the listing pass then re-emits from the rewritten
-symbols, reproducing the same bytes the patches produced.
+```
+   caller                                 callee
+   ------                                 ------
+   STA sub.wid  ------ argument ------.
+   ...                                |
+   JSR sub  ..... consumes In(sub) ...+....... kills MustWrite(sub) .....
+     |                                v
+     |                        .sub:  LDA wid
+     |                               STA res -----------------.
+     |                               RTS  <-- return edge     | result
+     |                                        sees live-after |
+   LDA sub.res  <---------------------------------------------+
+```
 
-## Data structures ##
+**1. A call clobbers its callee's footprint** (`src/footprint.c`). A routine's *footprint* is every
+variable it touches, transitively through everything it calls (`fp_visit`, a walk over the call graph).
+Any variable live *across* a call interferes with the whole footprint - that is Guard 2 in
+`zeropage_finalize`. In this real test (`zpauto_interprocedural_allocation`):
 
-| Type | File | Role |
-|------|------|------|
-| `zp_var` | zeropage.h | a declaration: name, scope, width, def cursor (identity) |
-| `zp_insn` | zeropage.h | one instruction: pc, size, flow, touch (`rw`, offset, flags), patch site, target |
-| `zp_cflow` | zeropage.h | one annotation at a site |
-| `zp_label` | zeropage.h | label identity `(scope, def)` -> physical `(section, pc)` |
-| `basic_block` / `cfg` | cfg.h | `(section, pc)`-keyed blocks, successor slices, `unknown_succ` |
-| `liveness` | liveness.h | live-in/out, interference rows, per-entry must-write sets, per-vreg class (byte-accurate inside) |
-| `footprint` | footprint.h | `touched` + `killed`, `unknown_call`, `recursive` |
-| `zp_coloring` | zpalloc.h | per-vreg base (or `RC_INDEX_NONE`), `any_spilled` |
+```
+    LDA #1 : STA keep
+    JSR sub             ; keep is live across this call...
+    LDA keep
+    RTS
+.sub { ZPAUTO1 loc : STA loc : LDA loc : RTS }
+```
+
+`keep` gets `&70` and `loc` is forced to `&71` - without the rule both took `&70` and the call corrupted
+`keep`. A variable already dead at the call is free to reuse the callee's bytes. `CANCALL` supplies the
+targets of a call the analysis cannot follow; a call *out of the program* has an empty footprint.
+
+**2. A call consumes its inputs.** The callee's live-in set - what it reads before writing - is treated
+as *used by the call itself* (`liveness_analyze`, at each `zp_flow_call`). So an argument stored by the
+caller stays live from the store to the `JSR`:
+
+```
+    LDA #3 : STA sub.wid    ; wid live from here...
+    LDA #9 : STA t          ; ...so t cannot take wid's byte...
+    LDA t
+    JSR sub                 ; ...until the call consumes it
+```
+
+Without this rule `t` landed on `wid`'s byte and overwrote the argument (a silent miscompile we shipped
+briefly and caught by byte-comparing real output). Since a callee's own live-in includes whatever *its*
+calls inject, the rule chains through nested calls for free.
+
+**3. A call delivers its results.** The dual rule: a forward *must-write* analysis (also in
+`liveness_analyze`) computes, per routine, the bytes written on **every** path to a returning exit. A
+call *kills* the intersection over its arms (`call_kill_bytes`) - the caller's read after the call can
+only see the callee's value, so the pre-call byte is dead and a result's range *starts at its call*.
+This is what lets the usage guide's two-stage pipeline run four interface variables in one byte. The
+proof is genuine: make the store conditional -
+
+```
+.offset { ZPAUTO1 xin, res : LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS }
+```
+
+- and `res` is no longer must-written, so it is preserved across the whole journey on its own byte
+(test `zpauto_conditional_result_is_preserved`). A "returning exit" (`block_returns`) is an RTS/RTI *or*
+a transfer out of the program - the OS routine's own RTS returns to our caller, the tail-call idiom -
+but *not* an RTS wearing a `CANJUMP`, whose control continues at its declared targets.
+
+**4. Returns see the caller.** Rule 3 creates a hazard: an escaping result's only reads are in the
+caller, so inside its producer it would look dead the moment it is stored - and the producer's *later*
+code could take its byte:
+
+```
+.sub { ZPAUTO1 res, t : LDA #1 : STA res : LDA #2 : STA t : LDA t : RTS }
+                                  ^ res "dead" here?     ^ then t may land on it!
+```
+
+So every returning block's live-out also unions the live-*after* set of each call site that reaches its
+routine (the `ret_from` map and per-call `after` snapshots, maintained inside the fixpoint). `res` stays
+live from its store to the `RTS`, and `t` gets its own byte (test
+`zpauto_result_survives_producer_tail`).
+
+**Recursion** gets one extra check: a value the cycle writes *afresh* at each level and reads back after
+the recursive call would need a byte per level, which one static address cannot give - refused
+(`zpauto_recursion`, keyed on the footprint's write-only `killed` set against the live set *before* the
+must-write reduction, so the kill cannot hide the pattern). A counter merely `DEC`ed through the
+recursion is a single running value and rides one byte happily.
+
+## Colouring ##
+
+With the interference graph built, `zp_color` (`src/zpalloc.c`) assigns addresses by
+**first-fit-decreasing**:
+
+- widths are processed widest first - a `ZPAUTO 8` table is far more constrained than a lone byte, so it
+  places while the pool is open;
+- each variable takes the lowest reserved base whose whole span `[base, base+width)` is free of every
+  interfering neighbour's span (`span_reserved` / `spans_overlap` - width-generic, so a table packs
+  exactly like a pointer, just wider);
+- an `unused` variable (touched by no instruction) is skipped entirely: warned once per declaration
+  site, given no address, and its binding *removed* at the rewrite - as if never declared;
+- a *used* variable with no home is a spill: `zeropage_full`, naming the variable.
+
+The graphs are tiny (dozens of nodes), so the quadratic scan is irrelevant and first-fit is close enough
+to optimal in practice.
+
+## Patch and rewrite ##
+
+With a spill-free colouring, the finalizer walks the recorded instructions and folds each assignment in:
+
+- **operands**: every reference was emitted against placeholder base 0, so the operand byte currently
+  holds only the intra-variable offset (0 for `var`, 1 for `var+1`); `sections_patch_add_u8` adds the
+  assigned base in place;
+- **symbols**: each variable's binding moves from the placeholder to its real address, so the symbol
+  table (and the `-v` listing's `var = &70 [auto]` lines) tell the truth.
+
+No instruction changes size - everything was zero-page-shaped from pass one - so the converged layout is
+untouched. Under `-v`, the listing pass then re-emits from the rewritten symbols and reproduces the same
+bytes the patches made. (Beware when testing: because the listing re-emits, it shows the *intended*
+operand even if a patch were missed - byte-compare the saved output, as `zpauto_dotted_interface_variables`
+does.)
 
 ## The certainty contract ##
 
-We only patch a program we can prove; everything else becomes a diagnostic pointing at the fix. The
-refusals (all fatal): the bounds pair (`zpauto_narrow_pointer` / `zpauto_out_of_bounds`), `zpauto_bad_width`
-at parse, `zpauto_computed_flow`, `zpauto_across_call`, `zpauto_recursion`, and `zeropage_full`. The two
-warnings: `zpauto_indexed_access` (opt-in) and `zpauto_unused` (default).
+We only patch a program we can prove; everything else becomes a diagnostic pointing at the fix.
 
-The annotations are *trusted* assertions sitting exactly where the analysis would otherwise refuse; a wrong
-one is the one way to defeat the contract. The external-target policy is a second, implicit trust: a
-constant destination off the assembled stream is assumed to leave the program - true for real OS calls
-(the point: `JSR &FFEE` needs no markup), the user's responsibility for a self-modified placeholder or a
-bare cross-bank number (name the label and it resolves properly, banks included).
+The refusals (all fatal):
+
+| Code | Cause |
+|------|-------|
+| `zpauto_narrow_pointer` / `zpauto_out_of_bounds` | an access window past the declared width |
+| `zpauto_bad_width` | `ZPAUTO n` outside 1-256 (at parse) |
+| `zpauto_computed_flow` | an `unknown_succ` block with variables in play (Guard 1) |
+| `zpauto_across_call` | live across a call whose footprint cannot be bounded (Guard 2) |
+| `zpauto_recursion` | a fresh per-level value held across a recursive call (Guard 2) |
+| `zeropage_full` | a spill: more simultaneous liveness than reserved bytes |
+
+The warnings: `zpauto_unused` (default level) and `zpauto_indexed_access` (opt-in).
+
+And the trust points - the deliberate holes in the proof, each an explicit contract with the user:
+
+- **Annotations are believed.** A wrong `UNREACHABLE`, `CANCALL` or `CANJUMP` defeats the analysis; a
+  *missing* one is caught wherever possible (Guards 1 and 2) - except an unmarked RTS-dispatch, which is
+  indistinguishable from a real return.
+- **A constant destination off the assembled stream is assumed external.** True for real OS calls, and
+  the user's responsibility for a self-modified placeholder or a bare cross-bank number (name the label
+  and it resolves properly).
+- **The run-time value of an index register is the user's.** As is anything invisible in the stream: a
+  self-modified operand, a stray pointer aimed into the pool.
 
 ## Known gaps ##
 
-Three deliberate limitations:
+Three deliberate limitations, all soundness-safe:
 
-- **Single-entry classification.** Entry-input interference and the `input` class seed from block 0. A bank
-  reached only by cross-section calls should seed from its own entry - a precision refinement only, since
+- **Single-entry classification.** Entry-input interference and the `input` class seed from block 0; a
+  bank entered only by cross-section calls gets a slightly coarser classification. Precision only -
   Guard 2's footprint edges keep the colouring correct regardless.
-- **Annotation operands resolve in their own section.** Ordinary cross-section transfers resolve by label;
-  a `CANCALL` / `CANJUMP` *operand* is still a bare number resolved in the annotating instruction's section,
-  so it cannot yet name a target in a different bank.
+- **Annotation operands resolve in their own section.** Ordinary cross-section transfers resolve by
+  label; a `CANCALL`/`CANJUMP` *operand* is still a bare number resolved in the annotating
+  instruction's section, so it cannot yet name a target in a different bank.
 - **The reserved set is global.** One physical zero page, one pool.
 
-## Where the code lives ##
+## Map of the code ##
 
-```
-src/zeropage.{h,c}   the manager: reserved set, var/insn/cflow/label registries, vreg resolution
-src/cfg.{h,c}        basic blocks over the instruction stream, label-resolved targets
-src/liveness.{h,c}   backward byte-level fixpoint + interference + classification
-src/footprint.{h,c}  per-call-site Touch(R), recursion + unknown-call detection
-src/zpalloc.{h,c}    first-fit-decreasing colouring
-src/assemble.c       zeropage_finalize: drives the stages and guards, then patches
-src/opcodes.c        records each instruction's touch / flow / target into the IR
-```
+| Piece | Where | What |
+|-------|-------|------|
+| IR + registries | `src/zeropage.{h,c}` | reserved set, `zp_var`/`zp_insn`/`zp_cflow`/`zp_label`, vreg resolution |
+| recording | `src/opcodes.c` | `record_insn`: each instruction's touch, flow and target |
+| basic blocks | `src/cfg.{h,c}` | `cfg_build`, target resolution, `cfg_call_targets`, the external rule |
+| liveness | `src/liveness.{h,c}` | backward byte-level fixpoint, must-write, return edges, interference, classes |
+| footprints | `src/footprint.{h,c}` | transitive Touch(R) per call site, recursion / unknown-call detection |
+| colouring | `src/zpalloc.{h,c}` | first-fit-decreasing over the interference graph |
+| the driver | `src/assemble.c` | `zeropage_finalize`: checks, guards, colour, patch, rewrite |
