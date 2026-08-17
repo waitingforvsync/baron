@@ -269,6 +269,8 @@ SHAPE({1, 2, 3})                ; {3}
 SHAPE({{1, 2, 3}, {4, 5, 6}})   ; {2, 3} - two rows of three
 RANK({{1, 2, 3}, {4, 5, 6}})    ; 2
 SHAPE(5)                        ; {} - a scalar has no axes
+SHAPE({})                       ; {0} - one axis, nothing on it
+SHAPE(0..255)                   ; {256} - a range is a rank-1 list
 SHAPE({{1, 2}, {3, 4, 5}})      ; {2} - ragged rows agree on one axis only
 ```
 

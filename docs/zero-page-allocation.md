@@ -112,8 +112,9 @@ The promises, briefly - each proved from your actual code, not guessed:
 
 ## Subroutine inputs and outputs ##
 
-Declare a routine's inputs and outputs as variables in *its own* scope, and let callers reach them by the
-dotted path - the natural calling convention for anything a register or two cannot carry:
+Here's a paradigm I like: declare a routine's inputs and outputs as variables in *its own* scope,
+and let callers reach them by the dotted path - the natural calling convention for anything a register or
+two cannot carry:
 
 ```
 ZPRESERVE &70..&8F          ; In reality only uses ONE byte for the lot
@@ -158,7 +159,19 @@ result out. That is the packing a calling convention should get, and it rests on
   dead, and the call is where the result's life begins. That is what lets `offset.res` take the very byte
   `scale.res` just vacated, instead of being held clear of every earlier call "just in case".
 
-The proof in that last one is genuine, not assumed - change `offset` so the store is *conditional* and
+When using the Baron's allocator, it's advisable to look at the verbose listing sometimes to see what's
+being produced. In the example above, this line here:
+```
+    LDA scale.res : STA offset.xin      ; one stage's result feeds the next
+```
+will be a load followed by a store to the same place, i.e. wasted instructions. This should be wrapped with:
+```
+IF scale.res <> offset.xin
+    LDA scale.res : STA offset.xin      ; one stage's result feeds the next
+ENDIF
+```
+
+We can show that the allocation is working as hoped - let's change `offset` so the store is *conditional* and
 watch the allocation change with it:
 
 ```

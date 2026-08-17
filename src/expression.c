@@ -364,10 +364,22 @@ static value op_range_excl(value a, value b, rc_arena *arena)
 
 #define MAX_RANK 32   // shape is truncated past this depth; far beyond any real list
 
+// The element count of a bounded range: (end - start) / step + 1 (the constructor stores end as the
+// canonical last element, so the division is exact). Saturates at UINT32_MAX, far beyond anything
+// materialisable - shape is pure arithmetic and never builds the list.
+static uint32_t range_count(value_range r)
+{
+    int64_t step = value_range_step(r);
+    int64_t n    = (r.end - r.start) / step + 1;
+    return n > (int64_t) UINT32_MAX ? UINT32_MAX : (uint32_t) n;
+}
+
 // The uniform-length-prefix shape of v written into dims[], returning its rank: descend
 // while every node at a level is a list of the same length, stopping at the first axis
 // that is not uniform (so a ragged list reports the axes that ARE uniform). A scalar is
-// rank 0; a leading length-1 axis is kept, not squashed.
+// rank 0; a leading length-1 axis is kept, not squashed. A bounded range shapes as the
+// rank-1 list it stands for ({count}); an unbounded one has no honest length to report,
+// so it degrades to rank 0 here (fn_shape errors on it at top level).
 //
 // The whole thing rests on one recursive idea: a list's shape is its own length, followed
 // by the shape that ALL of its elements agree on. So {{1,2},{3,4}} is 2-of-(things that
@@ -376,8 +388,18 @@ static value op_range_excl(value a, value b, rc_arena *arena)
 // elements' shapes, and each element can only ever trim that prefix shorter.
 static uint32_t shape_dims(value v, uint32_t dims[], uint32_t max)
 {
-    if (!value_is_list(v) || max == 0) {
-        return 0;   // a scalar (or we have run out of room): empty shape, rank 0
+    if (max == 0) {
+        return 0;   // out of room: report no further axes
+    }
+    if (value_is_range(v)) {
+        if (!v.range.has_start || !v.range.has_end) {
+            return 0;   // unbounded: no length to report
+        }
+        dims[0] = range_count(v.range);
+        return 1;   // a bounded range is a compact rank-1 list of numbers
+    }
+    if (!value_is_list(v)) {
+        return 0;   // a scalar: empty shape, rank 0
     }
     
     dims[0] = v.list.num;   // axis 0 is always just how many things we are holding
@@ -424,6 +446,9 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
     value v = rc_view_value_get(args, 0);
     if (value_is_error(v)) {
         return v;   // functions get raw args now, so propagate an error operand ourselves
+    }
+    if (value_is_range(v) && (!v.range.has_start || !v.range.has_end)) {
+        return value_make_error(error_type_domain);   // an unbounded range has no length to report
     }
 
     uint32_t dims[MAX_RANK];
@@ -861,7 +886,8 @@ static value fn_len(rc_view_value args, rc_arena *arena)
     return value_make_error(error_type_type_mismatch);   // a scalar has no length
 }
 
-// rank: the number of axes (0 for a scalar).
+// rank: the number of axes (0 for a scalar). A range is one axis whether or not its ends are
+// bounded - rank needs no length, so even 2.. answers 1.
 static value fn_rank(rc_view_value args, rc_arena *arena)
 {
     (void)arena;
@@ -871,9 +897,10 @@ static value fn_rank(rc_view_value args, rc_arena *arena)
     }
 
     value v = rc_view_value_get(args, 0);
-    return value_is_error(v) ?
-        v :
-        value_make_numeric(rank_of(v));
+    if (value_is_error(v)) {
+        return v;
+    }
+    return value_make_numeric(value_is_range(v) ? 1.0 : (double) rank_of(v));
 }
 
 // full(count, value): a list of `count` copies of value (NumPy's full(shape, fill_value)). value may be
@@ -2271,6 +2298,25 @@ RC_TEST_STEP(expression, list_shape, fix)
 
     value sr[] = {value_make_numeric(2)};   // ragged: shape is the uniform prefix
     RC_CHECK_TRUE(value_is_equal(VAL("shape({1,{2,3}})"), value_make_list((rc_view_value) RC_VIEW(sr))));
+
+    // Empty axes are real lengths, not absences: {} is one axis of length 0, {{}} one row of nothing.
+    value s0[] = {value_make_numeric(0)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape({})"), value_make_list((rc_view_value) RC_VIEW(s0))));
+    value s10[] = {value_make_numeric(1), value_make_numeric(0)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape({{}})"), value_make_list((rc_view_value) RC_VIEW(s10))));
+
+    // A range shapes as the rank-1 list it stands for, stepped and descending included; nested in a list
+    // it contributes its length like any row. An unbounded range has no length to report (rank still 1).
+    value sr10[] = {value_make_numeric(10)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape(0..9)"),     value_make_list((rc_view_value) RC_VIEW(sr10))));
+    value sr5[] = {value_make_numeric(5)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape(0..2..9)"),  value_make_list((rc_view_value) RC_VIEW(sr5))));
+    RC_CHECK_TRUE(value_is_equal(VAL("shape(9..5)"),     value_make_list((rc_view_value) RC_VIEW(sr5))));
+    value s210[] = {value_make_numeric(2), value_make_numeric(10)};
+    RC_CHECK_TRUE(value_is_equal(VAL("shape({0..9, 10..19})"), value_make_list((rc_view_value) RC_VIEW(s210))));
+    RC_CHECK_TRUE(value_is_equal(VAL("rank(0..9)"), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("rank(2..)"),  value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_error(VAL("shape(2..)")));
 }
 
 RC_TEST_STEP(expression, list_broadcast, fix)

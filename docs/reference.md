@@ -203,8 +203,8 @@ All broadcast; trigonometry is in radians.
 | Function | Meaning |
 |----------|---------|
 | `LEN(x)` | Length of the outermost axis (elements, characters, or range count). |
-| `SHAPE(x)` | The axis lengths as a list, outermost first; the axes all elements agree on (`SHAPE({{1,2},{3,4,5}})` is `{2}`). `{}` for a scalar - and for a range, which `SHAPE` does not enumerate. |
-| `RANK(x)` | The number of axes (0 for a scalar). |
+| `SHAPE(x)` | The axis lengths as a list, outermost first; the axes all elements agree on (`SHAPE({{1,2},{3,4,5}})` is `{2}`). `{}` for a scalar; a range counts as the rank-1 list it stands for (`SHAPE(0..9)` is `{10}`; unbounded errors); empty axes are real lengths (`SHAPE({})` is `{0}`, `SHAPE({{}})` is `{1, 0}`). |
+| `RANK(x)` | The number of axes (0 for a scalar; 1 for any range, unbounded included). |
 | `FULL(n, v)` | A list of `n` copies of `v`. |
 | `FLATTEN(x)` | Every leaf, in order, as one flat list. |
 | `CONCAT(a, b, ...)` | Join: each list contributes its elements, each scalar itself. |
