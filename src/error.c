@@ -61,6 +61,7 @@ rc_str error_type_name(error_type e)
         case error_type_zpauto_narrow_pointer:   return RC_STR("ZPAUTO1 dereferenced as a pointer (declare it ZPAUTO2)");
         case error_type_zpauto_out_of_bounds:    return RC_STR("Access past the end of ZPAUTO variable");
         case error_type_zpauto_bad_width:        return RC_STR("ZPAUTO count must be 1 to 256");
+        case error_type_zpauto_address:          return RC_STR("Cannot use a ZPAUTO address here: '%'");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol: '%'");
         case error_type_duplicate_symbol:        return RC_STR("Duplicate symbol: '%'");
         case error_type_original_definition:     return RC_STR("First defined here: '%'");

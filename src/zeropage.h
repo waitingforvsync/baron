@@ -98,8 +98,10 @@ typedef struct zp_insn {
     uint8_t  target_via;     // zp_target_via: how the transfer reaches its destination. For an indirect jump
                              // the operand (and so target_scope/def) names the VECTOR, never the destination -
                              // the CFG must not wire an edge to the vector cell's own address
-    uint32_t section;        // which section the operand byte lives in (for the allocation patch)
-    uint32_t operand_offset; // byte offset of the operand within that section's code buffer
+    bool     target_is_zpvar;// the target identity names a ZPAUTO variable (resolved post-pass, like vreg):
+                             // a JMP through such a vector is a cell WE own - computed flow needing CANJUMP,
+                             // never the external-OS-vector exit
+    uint32_t section;        // which section this instruction's bytes live in (half of a block's identity)
     cursor   at;
 } zp_insn;
 
@@ -179,12 +181,6 @@ typedef struct zeropage {
 } zeropage;
 
 enum { zeropage_size = 256 };   // the 6502 zero page is one 256-byte page
-
-// An unallocated ZPAUTO resolves to this zero-page address during the settling passes. Any value in [0,256)
-// works - it only has to size `LDA var` as a 2-byte zero-page access; the real address is assigned later,
-// at the allocation phase, and the operand bytes patched. A fixed sentinel keeps the binding convergent
-// (constant value -> never "changed") and is honest that no allocation has happened yet.
-enum { zeropage_var_placeholder = 0 };
 
 // Stand up an empty reserve set (256 zeroed bits) with the feature off. Borrows `permanent`.
 void zeropage_init(zeropage *zp, rc_arena *permanent);

@@ -68,6 +68,20 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
         };
     }
 
+    if (value_is_zpauto(v)) {
+        // A ZPAUTO address: known as far as sizing goes (the offset stands in, and the real base
+        // cannot leave the zero page), with the identity riding along for the caller to accept -
+        // an instruction operand, a data byte - or refuse - a count, a condition, a layout address.
+        return (int_argument) {
+            .type     = int_argument_type_known,
+            .value    = v.zpauto.offset,
+            .zpauto   = true,
+            .zp_scope = v.zpauto.scope,
+            .zp_def   = v.zpauto.def,
+            .zp_name  = v.zpauto.name
+        };
+    }
+
     if (value_is_error(v) && v.error.code == error_type_unknown_symbol) {
         if (final_pass) {
             return (int_argument) {
@@ -88,6 +102,23 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
         .error_at = at,
         .error_detail = value_is_error(v) ? v.error.detail : (rc_str) {0}
     };
+}
+
+// Refuse a ZPAUTO address in a context that needs a real number NOW - a count, a condition, a layout
+// address: the address exists only after allocation, long after this decision must be made. Demotes the
+// argument to the dedicated error, which the caller's ordinary error path then reports (self-gated on
+// the final pass, at the use site, naming the variable).
+static int_argument int_argument_no_zpauto(int_argument arg, uint32_t at)
+{
+    if (arg.zpauto) {
+        return (int_argument) {
+            .type         = int_argument_type_error,
+            .error        = error_type_zpauto_address,
+            .error_at     = at,
+            .error_detail = arg.zp_name
+        };
+    }
+    return arg;
 }
 
 
@@ -457,7 +488,7 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
 
     bool unresolved = false;
     if (flags.active) {
-        int_argument arg = int_argument_make(e.value, flags.final, at.pos);
+        int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (arg.type) {
             case int_argument_type_known:
                 if (arg.value < 0) {
@@ -497,7 +528,7 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
 
     bool unresolved = false;
     if (flags.active) {
-        int_argument arg = int_argument_make(e.value, flags.final, at.pos);
+        int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (arg.type) {
             case int_argument_type_known: {
                 uint32_t pc = sections_pc(&b->sections, section);
@@ -539,7 +570,7 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 
     bool unresolved = false;
     if (flags.active) {
-        int_argument arg = int_argument_make(e.value, flags.final, at.pos);
+        int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (arg.type) {
             case int_argument_type_known:
                 if (arg.value < 1) {
@@ -641,7 +672,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         if (child != RC_INDEX_NONE) {
             sections_add_attribute(&b->sections, child, key.token.identifier.name, e.value, cursor_at(at, comma.next));
             if (rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"))) {
-                int_argument arg = int_argument_make(e.value, flags.final, eq.next);
+                int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, eq.next), eq.next);
                 switch (arg.type) {
                     case int_argument_type_known:
                         sections_org(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
@@ -815,13 +846,13 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
             semantic_error(b, flags, error_type_zpauto_register_name, def);
         }
         else if (flags.active) {
-            // The listing pass leaves the binding ALONE: zeropage_finalize has already rewritten it to the
+            // The output pass leaves the binding ALONE: zeropage_finalize has already rewritten it to the
             // allocated address, which is exactly what re-emission must see. Re-binding the placeholder here
-            // would put the un-allocated bytes back into the listing (and the output).
-            if (!flags.listing) {
+            // would put the un-allocated values back into the output.
+            if (!flags.output) {
                 symbol_status st = scopes_set_symbol(
                     &b->scopes, scope, name,
-                    value_make_numeric((double) zeropage_var_placeholder), def);
+                    value_make_zpauto(scope, def, 0, name), def);
 
                 if (st == symbol_status_duplicate) {
                     semantic_error_payload(b, flags, error_type_duplicate_symbol, def, name);
@@ -837,7 +868,7 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
                     zeropage_add_var(&b->zeropage, name, scope, width, def);
                 }
             }
-            else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
+            else if (flags.listing && cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
                 // ...and instead lists the assignment the declaration BECAME: the symbol now holds the
                 // allocated byte, so `zpauto1 tmp` reads back as `tmp = &70 [auto]` - echoing the source
                 // would only show a name with no address, and the address is the interesting part. The
@@ -898,7 +929,7 @@ static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t s
     // do not cascade), exactly as the feature-off / bad-name paths do.
     uint16_t width = 1;
     bool     unresolved = false;
-    int_argument arg = int_argument_make(e.value, flags.final, at.pos);
+    int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
     if (arg.type == int_argument_type_unresolved) {
         unresolved = true;
     }
@@ -975,7 +1006,7 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
         }
 
         if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage) && site != RC_INDEX_NONE) {
-            int_argument arg = int_argument_make(e.value, flags.final, pos);
+            int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, pos), pos);
             switch (arg.type) {
                 case int_argument_type_known:
                     zeropage_add_cflow(&b->zeropage, (zp_cflow) {
@@ -1143,12 +1174,14 @@ static const token print_token_entries[] = {
 };
 static const token_table print_tokens = RC_VIEW(print_token_entries);
 
-// True on the one pass whose PRINT output the caller receives: the listing pass under -v (so the text
-// lands in channel 0 between the listing lines being built there), the final pass otherwise. Everything
-// has settled by either, so each PRINT speaks exactly once.
+// True on the one pass whose PRINT output the caller receives: the output pass when one runs (under
+// -v the text lands in channel 0 between the listing lines being built there, and a ZPAUTO symbol
+// prints its ALLOCATED address - during the settling passes it is not a number at all), the final
+// pass otherwise. Everything has settled by either, so each PRINT speaks exactly once.
 static bool print_on(const baron *b, parse_flags flags)
 {
-    return flags.active && (b->want_verbose ? flags.listing : flags.final);
+    bool extra_pass = b->want_verbose || zeropage_is_enabled(&b->zeropage);
+    return flags.active && (extra_pass ? flags.output : flags.final);
 }
 
 // Append one PRINT value to its channel: strings raw (concatenation is the point - spacing belongs to
@@ -1487,7 +1520,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
     parse_result acc = {.next = sep.next};
 
     if (flags.active) {
-        int_argument cond = int_argument_make(e.value, flags.final, at.pos);
+        int_argument cond = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (cond.type) {
             case int_argument_type_known:
                 if_cond = (cond.value != 0);
@@ -1510,7 +1543,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
             cursor_at(at, acc.next),
             scope,
             section,
-            (parse_flags) {flags.final, flags.active && if_cond, flags.listing},
+            (parse_flags) {.final = flags.final, .active = flags.active && if_cond, .output = flags.output, .listing = flags.listing},
             scratch
         )
     );
@@ -1531,7 +1564,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
                 cursor_at(at, t.next),
                 scope,
                 section,
-                (parse_flags) {flags.final, flags.active && else_cond, flags.listing},
+                (parse_flags) {.final = flags.final, .active = flags.active && else_cond, .output = flags.output, .listing = flags.listing},
                 scratch
             )
         );
@@ -1553,7 +1586,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
                 cursor_at(at, sep.next),
                 scope,
                 section,
-                (parse_flags) {flags.final, flags.active && else_cond, flags.listing},
+                (parse_flags) {.final = flags.final, .active = flags.active && else_cond, .output = flags.output, .listing = flags.listing},
                 scratch
             )
         );
@@ -1733,7 +1766,7 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
             scopes_set_symbol(&b->scopes, child, name, rc_view_value_get(items, i), at);
         }
         acc = fold(acc, parse_block(b, cursor_at(at, body_start), child, section,
-                                    (parse_flags) {flags.final, active_body, flags.listing}, scratch));
+                                    (parse_flags) {.final = flags.final, .active = active_body, .output = flags.output, .listing = flags.listing}, scratch));
     }
     if (acc.fatal) {
         return acc;
@@ -1844,7 +1877,7 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
         if (value_is_string(e.value)) {
             rc_str base = source_files_name(&b->source_files, at.source);
             rc_str path = file_path_resolve(base, e.value.string, &scratch);
-            if (flags.final || flags.listing) {
+            if (flags.final || flags.output) {
                 // Final pass: load the file and emit its bytes for real (one byte at a time, via emit_data).
                 // The listing pass repeats this - its sections are the ones the result carries, so it must
                 // hold the real bytes too (and the listing's hex dump reads them back).
@@ -1984,7 +2017,7 @@ static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scop
 
     // Scan the body inactively to find its ENDMACRO. Nested calls consume their arguments but do not expand
     // (see handle_macro_invocation), so the scan never recurses and always stops at this macro's ENDMACRO.
-    parse_result scan = parse_block(b, body, scope, section, (parse_flags) {flags.final, false, flags.listing}, scratch);
+    parse_result scan = parse_block(b, body, scope, section, (parse_flags) {.final = flags.final, .active = false, .output = flags.output, .listing = flags.listing}, scratch);
     if (scan.fatal) {
         return scan;   // a structurally broken body aborts, reported at the definition
     }
@@ -2451,8 +2484,8 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     // token tables are reseeded from their static bases, with room for per-name tokens).
     rc_arena_reset(b->per_pass);
     sections_reset(&b->sections);
-    if (!flags.listing) {
-        // ZPRESERVE re-runs this pass and refills the (permanent) set. The LISTING pass leaves the whole
+    if (!flags.output) {
+        // ZPRESERVE re-runs this pass and refills the (permanent) set. The OUTPUT pass leaves the whole
         // zeropage subsystem alone: allocation already ran, and the final pass's IR/vars stay readable
         // (everything that appends to them is final-gated; ZPRESERVE re-marking its bits is idempotent).
         zeropage_reset(&b->zeropage);
@@ -2496,6 +2529,12 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
             r.fatal = true;
         }
         sections_note_sizes(&b->sections);
+        // Convergence hardening: emission that shifted with no symbol moving still owes another pass
+        // (an RND draw set displaced by a settling structure, say). Settling passes only - the final
+        // pass differs legitimately at INCBIN spans, the output pass at every ZPAUTO address.
+        if (!flags.final && !flags.output) {
+            r.changed |= sections_emission_changed(&b->sections);
+        }
     }
     return r;
 }
@@ -2740,18 +2779,12 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             }
         }
         else {
-            // Patch each recorded operand: it was emitted with the placeholder base 0, so the byte held only
-            // the intra-variable offset (0 for `var`, 1 for `var+1`); fold in the assigned base.
-            for (uint32_t i = 0; i < insns.num; i++) {
-                zp_insn n = rc_view_zp_insn_get(insns, i);
-                if (n.vreg != RC_INDEX_NONE) {
-                    sections_patch_add_u8(&b->sections, n.section, n.operand_offset, (uint8_t) col.base[n.vreg]);
-                }
-            }
-            // Rewrite each variable's symbol from the placeholder to its real zero-page address - except an
-            // unused one, whose binding is REMOVED: it has no address to give, so leaving the placeholder
-            // would quietly resolve it to 0. Gone from the symbol table (and so from the -v listing's
-            // `var = &xx [auto]` lines), it is exactly as if the declaration were not there.
+            // Rewrite each variable's symbol from the typed placeholder to its real zero-page address;
+            // the OUTPUT pass then re-emits every operand and data byte against the real values (there
+            // is no operand patching - a settling pass's bytes hold only intra-variable offsets). An
+            // unused variable's binding is REMOVED instead: it has no address to give. Gone from the
+            // symbol table (and so from the -v listing's `var = &xx [auto]` lines), it is exactly as
+            // if the declaration were not there.
             for (uint32_t v = 0; v < nv; v++) {
                 zp_var var = zeropage_var_get(&b->zeropage, v);
                 if (col.base[v] == RC_INDEX_NONE) {
@@ -2801,29 +2834,34 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             if (fin.fatal || baron_has_errors(b)) {
                 return assemble_failed(b);
             }
-            // Layout has settled: now assign real zero-page bytes to the ZPAUTO variables and patch the
-            // placeholder operands. This refuses (records errors, patches nothing) on anything it cannot prove
-            // correct, so a fresh error here fails the assemble just like a pass error would.
+            // Layout has settled: now assign real zero-page bytes to the ZPAUTO variables and rewrite
+            // their symbols to the chosen addresses. This refuses (records errors, assigns nothing) on
+            // anything it cannot prove correct, so a fresh error here fails the assemble just like a
+            // pass error would.
             zeropage_finalize(b, *b->per_pass, scratch);
             if (baron_has_errors(b)) {
                 return assemble_failed(b);
             }
-            // When asked for (baron_desc.verbose), one last LISTING pass, now that the ZPAUTO symbols hold
-            // their allocated addresses: re-emission reproduces the final output (so the sections the result
-            // carries then come from HERE - byte-identical to the patched settling pass's) and builds the
-            // verbose listing beside it, with the true bytes in every line. It runs final=false, so nothing
-            // gated on the settling pass (diagnostics, the zeropage IR) records twice; nothing can newly fail
-            // in a converged program, but the guard costs one line.
-            if (b->want_verbose) {
-                parse_result lst = run_pass(b, source, (parse_flags) {.active = true, .listing = true}, scratch);
-                if (lst.fatal || baron_has_errors(b)) {
+            // The OUTPUT pass: one re-emission with the ZPAUTO symbols holding their allocated
+            // addresses, whose sections ARE the result (there is no operand patching - a settling
+            // pass's operands hold intra-variable offsets, meaningless as output). It must run
+            // whenever the zp feature is on; -v rides the same pass to build the listing text, with
+            // the true bytes in every line. Re-emission cannot move anything: a ZPAUTO address is a
+            // typed value that every layout-affecting context refuses, and the contexts that accept
+            // one (instruction operands, data elements) are width-stable, so the converged layout is
+            // reproduced exactly. It runs final=false, so nothing gated on the settling pass
+            // (diagnostics, the zeropage IR) records twice.
+            if (b->want_verbose || zeropage_is_enabled(&b->zeropage)) {
+                parse_result out = run_pass(b, source,
+                    (parse_flags) {.active = true, .output = true, .listing = b->want_verbose}, scratch);
+                if (out.fatal || baron_has_errors(b)) {
                     return assemble_failed(b);
                 }
             }
-            // The INCSECTION fixup, absolutely last: after the zero-page patches (so a spliced copy carries
-            // the PATCHED bytes) and after the listing pass (whose rebuilt sections are the ones the result
-            // snapshots). splices_resolve copies in dependency order; an unknown source is judged - and
-            // refused - only here, once every IF arm has settled.
+            // The INCSECTION fixup, absolutely last: after the output pass (so a spliced copy carries
+            // the allocated addresses, and the rebuilt sections are the ones the result snapshots).
+            // splices_resolve copies in dependency order; an unknown source is judged - and refused -
+            // only here, once every IF arm has settled.
             if (!splices_resolve(b, true, scratch)) {
                 return assemble_failed(b);
             }
@@ -3583,6 +3621,132 @@ RC_TEST_STEP(assemble, zpauto_result_survives_producer_tail, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "sub.res"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "sub.t"),   ==, 0x71);   // written after res, which is still en route out
+}
+
+RC_TEST_STEP(assemble, zpauto_address_is_typed, fix)
+{
+    // A ZPAUTO address is a TYPED value that exists only after allocation, so every context that needs
+    // a real number NOW refuses it - eagerly, on the final pass, at the use site, naming the variable.
+    // (Before the type, the placeholder 0 leaked in silently: IF deleted code, SKIP skipped nothing.)
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : SKIP v") == error_type_zpauto_address);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : SKIPTO v") == error_type_zpauto_address);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : ALIGN v") == error_type_zpauto_address);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : ZPAUTO v, q") == error_type_zpauto_address);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : IF v : NOP : ENDIF") == error_type_zpauto_address);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v\n"
+                      "SECTION S, org = v : ENDSECTION") == error_type_zpauto_address);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : JSR sub : CANCALL v : RTS\n"
+                      ".sub RTS") == error_type_zpauto_address);
+
+    // The only arithmetic an address supports is +/- an integer; everything else refuses through the
+    // evaluator's ordinary type checks. A comparison, a multiply, a range endpoint - all caught.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : IF v = 1 : NOP : ENDIF") == error_type_type_mismatch);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : EQUB v * 2") == error_type_type_mismatch);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v\n"
+                      "FOR n = v..8 : NEXT") == error_type_type_mismatch);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v, q : STA v : LDA v : STA q : LDA q\n"
+                      "EQUB v - q") == error_type_domain);   // two different bases have no knowable distance
+}
+
+RC_TEST_STEP(assemble, zpauto_address_arithmetic, fix)
+{
+    // The affine cases still work exactly as before: an offset rides the value, and the output pass
+    // emits base+offset. The pointer idiom's bytes are the proof.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x60}, 7));
+
+    // The distance between two offsets into the SAME variable is a plain number.
+    RC_CHECK_TRUE(code_is(&fix->r,
+        ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y : EQUB (p+2)-p"),
+        (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x02}, 7));
+}
+
+RC_TEST_STEP(assemble, zpauto_address_tables_work, fix)
+{
+    // Data emission accepts an address: element widths are fixed, so the layout cannot depend on the
+    // value, and the output pass emits the ALLOCATED address - address tables of variables just work.
+    // (Before the type, EQUB var silently emitted the placeholder 0 into the real output.)
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : EQUB v : EQUW v+1");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x70, 0x71, 0x00}, 7));
+}
+
+RC_TEST_STEP(assemble, zpauto_immediate_address_works, fix)
+{
+    // An immediate accepts an address too - the way a pointer is seeded with a variable's location.
+    // (Before the type, LDA #var silently emitted #0: immediates are never attributed or patched.)
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 v\n"
+                          "LDA #v : STA ptr : LDA #0 : STA ptr+1\n"
+                          "STA v : LDA v\n"
+                          "LDA (ptr),Y : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "ptr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "v"),   ==, 0x72);
+    RC_CHECK_TRUE(code_is(&fix->r, passes,
+        (uint8_t[]) {0xA9, 0x72, 0x85, 0x70, 0xA9, 0x00, 0x85, 0x71,
+                     0x85, 0x72, 0xA5, 0x72, 0xB1, 0x70, 0x60}, 15));
+}
+
+RC_TEST_STEP(assemble, zpauto_alias_attributes, fix)
+{
+    // The value CARRIES the variable's identity, so an alias attributes like the variable itself -
+    // the instruction joins liveness and emits the real address. (Before, `LDA x` emitted &00: the
+    // lex-based attribution saw only `x`, whose binding is an assignment, not a variable.)
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : x = v : STA x : LDA x : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
+    // The output pass re-binds the alias against the real address, so the result symbol is honest.
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x70)));
+
+    // Offset arithmetic rides through the alias too, and the derived binding CONVERGES (the zpauto
+    // equality case) - a hi-byte alias of a pointer works end to end.
+    uint32_t q = ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : hi = p + 1 : STA p : STA hi : LDA (p),Y : RTS");
+    RC_CHECK_TRUE(q != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(code_is(&fix->r, q, (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x60}, 7));
+}
+
+RC_TEST_STEP(assemble, zpauto_print_allocated_address, fix)
+{
+    // PRINT speaks on the output pass, where the symbol holds its allocated address - in EVERY mode
+    // (before, a non-verbose PRINT printed the placeholder 0 while -v printed the real byte).
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : PRINT v");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(rc_str_is_equal(fix->r.channels[0], RC_STR("112\n")));   // &70, in PRINT's decimal
+}
+
+RC_TEST_STEP(assemble, zpauto_jmp_via_variable_vector, fix)
+{
+    // A JMP through a ZPAUTO pointer is a dispatch through a cell WE own: computed flow, refused
+    // without a CANJUMP naming the arms. (Before, the placeholder vector &0000 read as an external
+    // OS cell - a clean exit - and the emitted operand was never patched.)
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO2 vec : STA vec : STA vec+1 : JMP (vec)\n"
+                      ".h RTS") == error_type_zpauto_computed_flow);
+
+    // Annotated, it works: the edge is wired, the vector stays LIVE to the jump (the dispatch reads
+    // the pair), and the emitted operand carries the allocated cell.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 vec\n"
+                          "LDA #LO(h) : STA vec\n"
+                          "LDA #HI(h) : STA vec+1\n"
+                          "JMP (vec)\n"
+                          "CANJUMP h\n"
+                          ".h RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "vec"), ==, 0x70);
+    RC_CHECK_TRUE(code_is(&fix->r, passes,
+        (uint8_t[]) {0xA9, 0x0B, 0x85, 0x70, 0xA9, 0x00, 0x85, 0x71, 0x6C, 0x70, 0x00, 0x60}, 12));
+
+    // A one-byte variable cannot hold a two-byte vector - the pointer-width check applies here too.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 vec : STA vec : JMP (vec) : CANJUMP h\n"
+                      ".h RTS") == error_type_zpauto_narrow_pointer);
 }
 
 RC_TEST_STEP(assemble, zpauto_conditional_result_is_preserved, fix)

@@ -71,6 +71,8 @@ typedef enum error_type {
     error_type_zpauto_narrow_pointer, // a 1-byte ZPAUTO1 dereferenced as a pointer ((var),Y / (var)) - needs ZPAUTO2
     error_type_zpauto_out_of_bounds,  // a var+n access reaches past the ZPAUTO variable's declared width
     error_type_zpauto_bad_width,      // ZPAUTO <count> with a count outside 1..256
+    error_type_zpauto_address,        // a ZPAUTO address used where a number is needed NOW (a count, a
+                                      // condition, a layout address) - addresses exist only after allocation
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

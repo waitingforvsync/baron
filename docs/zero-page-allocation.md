@@ -17,6 +17,7 @@ This is the usage guide. If you want to know *how* Baron pulls it off, the machi
 - [A first taste](#a-first-taste)
 - [ZPRESERVE: the pool](#zpreserve-the-pool)
 - [ZPAUTO: the variables](#zpauto-the-variables)
+- [The address of a variable](#the-address-of-a-variable)
 - [What you can rely on](#what-you-can-rely-on)
 - [Subroutine inputs and outputs](#subroutine-inputs-and-outputs)
 - [Annotations](#annotations)
@@ -84,6 +85,34 @@ ZPAUTO2 ptr
 
 Wider variables are walked the same way - `table`, `table+1`, up to `table+count-1` - or with an index
 (`table,X`), which is allowed but yours to bounds-check (see [The rules](#the-rules)).
+
+## The address of a variable ##
+
+A variable's *address* is chosen at the very end, so during assembly it is a special typed value rather
+than a number. You can still use it anywhere the layout does not depend on it, and Baron fills in the
+real address at the end:
+
+```
+    LDA #v : STA ptr        ; the address as an immediate - seeding a pointer
+    LDA #0 : STA ptr+1
+
+.handlers
+    EQUW v, w               ; address tables of variables just work
+
+vhi = v + 1                 ; aliases carry the identity: LDA vhi is a use of v
+
+    PRINT "v lives at ", v  ; PRINT speaks after allocation, so this is the real address
+```
+
+You can even dispatch through a variable used as a vector - `JMP (vec)` on a `ZPAUTO2` - which Baron
+treats as computed flow through a cell it owns: annotate it with `CANJUMP`, exactly like any jump table
+(see [Annotations](#annotations)).
+
+What you cannot do is make the program's *shape* depend on an address: a condition (`IF v <> w`), a
+count (`SKIP v`, `ZPAUTO v, q`), a loop bound (`FOR n = v..8`), a section's `org`. Those need a number
+before allocation exists, and Baron refuses them at the line - `Cannot use a ZPAUTO address here: 'v'`.
+The only arithmetic an address supports is adding or subtracting an integer (that is how `ptr+1` works);
+anything else - multiply, compare, a range - is a type error.
 
 ## What you can rely on ##
 
@@ -159,17 +188,42 @@ result out. That is the packing a calling convention should get, and it rests on
   dead, and the call is where the result's life begins. That is what lets `offset.res` take the very byte
   `scale.res` just vacated, instead of being held clear of every earlier call "just in case".
 
-When using the Baron's allocator, it's advisable to look at the verbose listing sometimes to see what's
-being produced. In the example above, this line here:
+When using the allocator, it is worth glancing at the verbose listing now and then to see what was really
+produced. In the example above, the relay line assembles to a load and a store of the *same* byte:
+
 ```
-    LDA scale.res : STA offset.xin      ; one stage's result feeds the next
+  0015  A5 70           LDA scale.res
+  0017  85 70           STA offset.xin
 ```
-will be a load followed by a store to the same place, i.e. wasted instructions. This should be wrapped with:
+
+The store is wasted - harmless, but six cycles of nothing. You might be tempted to guard the relay with
+`IF scale.res <> offset.xin` - but **an `IF` on a ZPAUTO variable is an error, and the assembly fails**:
+
 ```
-IF scale.res <> offset.xin
-    LDA scale.res : STA offset.xin      ; one stage's result feeds the next
-ENDIF
+relay.6502:8:7: error: Incompatible types
 ```
+
+A conditional cannot depend on an allocated address, because addresses are assigned only *after* the
+whole assembly has converged - at `IF` time there is nothing to compare. Baron refuses rather than
+guessing, and the same applies to every construct that would let the program's *shape* depend on an
+address: `IF var` alone (`Cannot use a ZPAUTO address here: 'v'`), `SKIP var`, `FOR n = var..8`,
+`org = var` and friends - see [The address of a variable](#the-address-of-a-variable).
+
+If you want the copy gone, say so by *naming*: when two stages should hand a value over in place, give
+that value one name they share -
+
+```
+ZPAUTO1 pipe                ; scale's result IS offset's input
+
+.scale  { ZPAUTO1 xin : LDA xin : ASL A : STA pipe : RTS }
+.offset { ZPAUTO1 res : LDA pipe : CLC : ADC #7 : STA res : RTS }
+
+    JSR scale
+    JSR offset              ; no relay - the value is already where offset looks
+```
+
+- still one byte for the lot, and the relay instructions are gone entirely. The dotted interface buys
+decoupling; the shared variable buys fusion. Pick per joint.
 
 We can show that the allocation is working as hoped - let's change `offset` so the store is *conditional* and
 watch the allocation change with it:
@@ -304,6 +358,7 @@ fall back to a hand-placed address.
 | `ZPRESERVE address outside the zero page` | The pool can only contain bytes &00-&FF. |
 | `ZPAUTO needs a prior ZPRESERVE` | A variable with no pool reserved. Add a `ZPRESERVE` first. |
 | `ZPAUTO count must be 1 to 256` | A generic `ZPAUTO n` with a count outside 1-256. |
+| `Cannot use a ZPAUTO address here: '...'` | A variable's address used where a number is needed before allocation exists - a condition, a count, an `org`, an annotation target. See [The address of a variable](#the-address-of-a-variable). |
 | `ZPAUTO variable cannot be named 'A'` | The accumulator clash. Rename it. |
 | `No free zero-page byte for ZPAUTO variable: '...'` | A spill: more variables live at once than reserved bytes. |
 | `ZPAUTO variable live across an unanalysable JSR (annotate with CANCALL)` | A variable held across a call whose destination Baron cannot follow. |

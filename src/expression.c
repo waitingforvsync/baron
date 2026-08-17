@@ -44,6 +44,22 @@ typedef enum prec {
 static int32_t  as_i32(value v) { return (int32_t)(int64_t)v.numeric; }
 static uint32_t as_u32(value v) { return (uint32_t)(int64_t)v.numeric; }
 
+// Adjust a zpauto address by a numeric delta. The offset must stay an integral, non-negative byte
+// index into the variable; whether it stays within the declared WIDTH is checked later, at the
+// operand bounds check, where the width is known.
+static value zp_offset_add(value zp, double delta)
+{
+    if (floor(delta) != delta) {
+        return value_make_error(error_type_domain);
+    }
+    int64_t off = (int64_t) zp.zpauto.offset + (int64_t) delta;
+    if (off < 0 || off > INT32_MAX) {
+        return value_make_error(error_type_domain);
+    }
+    zp.zpauto.offset = (int32_t) off;
+    return zp;
+}
+
 static value op_add(value a, value b, rc_arena *arena)
 {
     if (value_is_string(a) && value_is_string(b)) {
@@ -52,6 +68,15 @@ static value op_add(value a, value b, rc_arena *arena)
         rc_mstr_append(&m, b.string, arena);
         return value_make_string(m.view);   // '+' concatenates two strings
     }
+    // A zpauto address plus an integer is the same address further in: ptr+1 is the pointer's high
+    // byte, whichever byte the allocator eventually picks. This and subtraction below are the ONLY
+    // arithmetic a zpauto value supports - every other operator's numeric check refuses it.
+    if (value_is_zpauto(a) && value_is_numeric(b)) {
+        return zp_offset_add(a, b.numeric);
+    }
+    if (value_is_numeric(a) && value_is_zpauto(b)) {
+        return zp_offset_add(b, a.numeric);
+    }
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric(a.numeric + b.numeric);
 }
@@ -59,6 +84,17 @@ static value op_add(value a, value b, rc_arena *arena)
 static value op_sub(value a, value b, rc_arena *arena)
 {
     (void)arena;
+    if (value_is_zpauto(a) && value_is_numeric(b)) {
+        return zp_offset_add(a, -b.numeric);
+    }
+    if (value_is_zpauto(a) && value_is_zpauto(b)) {
+        // The distance between two offsets into the SAME variable is a plain number; two different
+        // variables have no knowable distance before allocation.
+        if (a.zpauto.scope == b.zpauto.scope && cursor_is_equal(a.zpauto.def, b.zpauto.def)) {
+            return value_make_numeric((double) a.zpauto.offset - (double) b.zpauto.offset);
+        }
+        return value_make_error(error_type_domain);
+    }
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric(a.numeric - b.numeric);
 }

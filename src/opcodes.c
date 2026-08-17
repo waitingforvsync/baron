@@ -545,6 +545,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     uint32_t target = RC_INDEX_NONE;
     if ((flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call)
         && arg.type == int_argument_type_known
+        && !arg.zpauto   // a ZPAUTO destination has no address yet: its offset must not read as one
         && (mode == addr_mode_rel || mode == addr_mode_abs)) {
         target = (uint32_t) (arg.value & 0xFFFF);
     }
@@ -558,37 +559,41 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
 
     operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
 
-    // The same resolved operand identity plays one of two roles by control-flow class. For a branch/jump/call
-    // the operand names the TARGET label, so its (scope, def) is the target identity that lets the CFG cross a
-    // section by label; for everything else it may name a ZPAUTO VARIABLE. The two are mutually exclusive - a
-    // control-transfer instruction touches no data variable - so we file the identity into one pair or the
-    // other and leave the unused pair empty.
-    bool is_control = (flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call);
-
-    // The operand byte lands right after the opcode byte we are about to emit: the section's current code
-    // length is the opcode's offset, so the operand is at +1. Recorded so the allocation patch can find it.
-    uint32_t operand_offset = sections_code(&b->sections, section).num + 1;
+    // The operand's identity plays one of two roles by control-flow class: for a branch/jump/call it names
+    // the TARGET (a label, or a ZPAUTO cell dispatched through); for everything else it may name a ZPAUTO
+    // VARIABLE the instruction touches. Usually the two are exclusive - a control-transfer instruction
+    // touches no data variable - but an indirect jump THROUGH a ZPAUTO variable plays both at once: the
+    // variable is the dispatch target (the CFG's business) AND the jump READS its bytes at run time, so
+    // it must also count as a touch or liveness would let another variable take the vector's bytes
+    // between its last store and the jump. WHERE the identity comes from differs too: a ZPAUTO reference
+    // carries its own identity in its VALUE (so `x = var : LDA x` attributes through the alias), while a
+    // label target still resolves through attribute_operand's lex of the operand text (labels are plain
+    // numbers, with nothing to carry).
+    bool is_control  = (flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call);
+    bool vector_var  = arg.zpauto && (via == zp_target_via_vector || via == zp_target_via_table);
+    bool is_var      = !is_control || vector_var;
+    uint32_t id_scope = arg.zpauto ? arg.zp_scope : op.scope;
+    cursor   id_def   = arg.zpauto ? arg.zp_def : op.def;
 
     zeropage_add_insn(&b->zeropage, (zp_insn) {
         .pc             = pc,
         .size           = (uint16_t) (1 + mode_operand_bytes(mode)),
         .flow           = (uint8_t) flow,
-        .rw             = is_control ? (uint8_t) vref_none : op.rw,
+        // A dispatch through a ZPAUTO vector reads the pointer (both bytes; a table read is indexed).
+        .rw             = !is_control ? op.rw : (vector_var ? (uint8_t) vref_read : (uint8_t) vref_none),
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
-        .var_scope      = is_control ? RC_INDEX_NONE : op.scope,
-        .var_def        = is_control ? cursor_none() : op.def,
-        .var_indexed    = is_control ? false : op.outside_envelope,
-        .var_indirect   = is_control ? false : op.indirect,
-        // The operand evaluates against the var's PLACEHOLDER (0) until allocation, so its known value IS the
-        // offset into the var (0 for `var`, k for `var+k`). Kept so the final pass can bounds-check it.
-        .var_offset     = (is_control || cursor_is_none(op.def) || arg.type != int_argument_type_known)
-                              ? RC_INDEX_NONE : (uint32_t) arg.value,
+        .var_scope      = is_var ? id_scope : RC_INDEX_NONE,
+        .var_def        = is_var ? id_def : cursor_none(),
+        .var_indexed    = is_control ? (vector_var && via == zp_target_via_table) : op.outside_envelope,
+        .var_indirect   = is_control ? (vector_var && via == zp_target_via_vector) : op.indirect,
+        // A ZPAUTO operand's known value IS the offset into the variable (0 for `var`, k for `var+k`) -
+        // the base does not exist yet. Kept so the finalize pass can bounds-check it against the width.
+        .var_offset     = (arg.zpauto && is_var) ? (uint32_t) arg.value : RC_INDEX_NONE,
         .target         = target,
-        .target_scope   = is_control ? op.scope : RC_INDEX_NONE,
-        .target_def     = is_control ? op.def : cursor_none(),
+        .target_scope   = is_control ? id_scope : RC_INDEX_NONE,
+        .target_def     = is_control ? id_def : cursor_none(),
         .target_via     = (uint8_t) via,
         .section        = section,
-        .operand_offset = operand_offset,
         .at             = at,
     });
 }

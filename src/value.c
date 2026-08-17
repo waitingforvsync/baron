@@ -43,6 +43,12 @@ value value_make_list(rc_view_value items)
     return (value) {.type = value_type_list, .list = items};
 }
 
+value value_make_zpauto(uint32_t scope, cursor def, int32_t offset, rc_str name)
+{
+    return (value) {.type = value_type_zpauto,
+                    .zpauto = {.scope = scope, .def = def, .offset = offset, .name = name}};
+}
+
 
 value value_make_copy(value v, rc_arena *arena)
 {
@@ -51,6 +57,7 @@ value value_make_copy(value v, rc_arena *arena)
         case value_type_numeric:
         case value_type_range:
         case value_type_error:
+        case value_type_zpauto:   // the name view is into permanent source text, so no copy needed
             return v;   // wholly inline: nothing to deep-copy
 
         case value_type_string:
@@ -202,10 +209,13 @@ bool value_is_string(value v)      { return v.type == value_type_string; }
 bool value_is_list(value v)        { return v.type == value_type_list; }
 bool value_is_range(value v)       { return v.type == value_type_range; }
 bool value_is_error(value v)       { return v.type == value_type_error; }
+bool value_is_zpauto(value v)      { return v.type == value_type_zpauto; }
 
-// Simple values stand alone (a number, a string, an error); compound values gather
-// others (a list of values, a range that enumerates to one). none belongs to neither.
-bool value_is_simple(value v)      { return value_is_numeric(v) || value_is_string(v) || value_is_error(v); }
+// Simple values stand alone (a number, a string, an error, a zpauto address); compound values
+// gather others (a list of values, a range that enumerates to one). none belongs to neither.
+// zpauto being simple is load-bearing: it routes through the broadcast machinery as a scalar,
+// reaching the operator handlers (whose numeric checks refuse it) instead of the list paths.
+bool value_is_simple(value v)      { return value_is_numeric(v) || value_is_string(v) || value_is_error(v) || value_is_zpauto(v); }
 bool value_is_compound(value v)    { return value_is_list(v) || value_is_range(v); }
 
 
@@ -240,6 +250,12 @@ bool value_is_equal(value a, value b)
                 }
             }
             return true;
+        case value_type_zpauto:
+            // Identity plus offset - the name is descriptive. This equality is what lets a derived
+            // binding (x = var + 1) report `unchanged` pass after pass, so the assemble converges.
+            return a.zpauto.scope == b.zpauto.scope
+                && cursor_is_equal(a.zpauto.def, b.zpauto.def)
+                && a.zpauto.offset == b.zpauto.offset;
     }
 
     RC_UNREACHABLE();
@@ -289,6 +305,18 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
                 value_format(out, v.list.data[i], arena);
             }
             rc_mstr_append_char(out, '}', arena);
+            return;
+        case value_type_zpauto:
+            // Normally invisible - PRINT speaks on the output pass, where the symbol is a real number -
+            // but an edge path (ERROR, say) may still render one before allocation.
+            rc_mstr_append(out, RC_STR("<zpauto '"), arena);
+            rc_mstr_append(out, v.zpauto.name, arena);
+            rc_mstr_append_char(out, '\'', arena);
+            if (v.zpauto.offset != 0) {
+                rc_mstr_append_char(out, '+', arena);
+                rc_mstr_append_i64(out, v.zpauto.offset, arena);
+            }
+            rc_mstr_append_char(out, '>', arena);
             return;
     }
 

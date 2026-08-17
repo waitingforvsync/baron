@@ -14,10 +14,11 @@ void sections_init(sections *sec, rc_arena *per_pass, rc_arena *permanent)
 {
     RC_ASSERT(sec != NULL && per_pass != NULL && permanent != NULL);
     sec->arena     = per_pass;          // borrowed; baron owns it
-    sec->permanent = permanent;         // borrowed; backs the cross-pass size map only
+    sec->permanent = permanent;         // borrowed; backs the cross-pass size + emission maps only
     sec->nodes     = (rc_array_section) {0};   // sections_reset builds the list each pass
     sec->splices   = (rc_array_splice) {0};
     sec->sizes     = (rc_array_section_size) {0};   // lazily made; deliberately NOT reset per pass
+    sec->emissions = (rc_array_section_emission) {0};   // ditto: last settling pass's fingerprints
 }
 
 void sections_reset(sections *sec)
@@ -133,12 +134,40 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count)
     s->pc += count;
 }
 
-void sections_patch_add_u8(sections *sec, uint32_t id, uint32_t offset, uint8_t delta)
+// CRC-32 (the standard reflected polynomial), bitwise - no table. The inputs are one program's object
+// code once per settling pass, so simplicity beats speed.
+static uint32_t crc32_bytes(rc_view_bytes bytes)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < bytes.num; i++) {
+        crc ^= rc_view_bytes_get(bytes, i);
+        for (uint32_t k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+bool sections_emission_changed(sections *sec)
 {
     RC_ASSERT(sec != NULL);
-    section *s = &RC_AT(sec->nodes, id);
-    uint8_t *byte = &RC_AT(s->code, offset);
-    *byte = (uint8_t) (*byte + delta);
+    bool first   = sec->emissions.num == 0;   // nothing noted yet: the first pass has no comparison
+    bool changed = !first && sec->emissions.num != sec->nodes.num;
+
+    rc_array_section_emission next = rc_array_section_emission_make(sec->nodes.num, sec->permanent);
+    for (uint32_t i = 0; i < sec->nodes.num; i++) {
+        section_emission e = {
+            .size = RC_AT(sec->nodes, i).code.num,
+            .crc  = crc32_bytes(RC_AT(sec->nodes, i).code.view),
+        };
+        if (!first && i < sec->emissions.num) {
+            section_emission prev = rc_array_section_emission_get(&sec->emissions, i);
+            changed = changed || prev.size != e.size || prev.crc != e.crc;
+        }
+        rc_array_section_emission_push(&next, e, sec->permanent);
+    }
+    sec->emissions = next;
+    return changed;
 }
 
 // The size the named section ended the LAST pass with, or 0 when it has never been seen - the best a
@@ -276,6 +305,47 @@ section section_make_copy(section s, rc_arena *arena)
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
+
+RC_TEST(sections, emission_changed_tracks_content)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+
+    // Pass 1: nothing to compare against, whatever we emitted.
+    sections_reset(&sec);
+    sections_emit_u8(&sec, 0, 0xA9);
+    sections_emit_u8(&sec, 0, 0x42);
+    RC_CHECK_FALSE(sections_emission_changed(&sec));
+
+    // Pass 2, identical emission: no change.
+    sections_reset(&sec);
+    sections_emit_u8(&sec, 0, 0xA9);
+    sections_emit_u8(&sec, 0, 0x42);
+    RC_CHECK_FALSE(sections_emission_changed(&sec));
+
+    // Pass 3, same LENGTH but different content: the crc notices.
+    sections_reset(&sec);
+    sections_emit_u8(&sec, 0, 0xA9);
+    sections_emit_u8(&sec, 0, 0x43);
+    RC_CHECK_TRUE(sections_emission_changed(&sec));
+
+    // Pass 4, same content but a new section appears: the count notices.
+    sections_reset(&sec);
+    sections_emit_u8(&sec, 0, 0xA9);
+    sections_emit_u8(&sec, 0, 0x43);
+    sections_make(&sec, RC_STR("extra"));
+    RC_CHECK_TRUE(sections_emission_changed(&sec));
+
+    // Pass 5, stable again.
+    sections_reset(&sec);
+    sections_emit_u8(&sec, 0, 0xA9);
+    sections_emit_u8(&sec, 0, 0x43);
+    sections_make(&sec, RC_STR("extra"));
+    RC_CHECK_FALSE(sections_emission_changed(&sec));
+
+    rc_arena_deinit(&arena);
+}
 
 RC_TEST(sections, emit_org_reset)
 {

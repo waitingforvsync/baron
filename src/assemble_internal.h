@@ -23,9 +23,11 @@ typedef struct baron baron;
 // is built as we go (diagnostics stay quiet - their gate is final, which a listing pass is not).
 // The flags are independent, hence a struct not a bool.
 typedef struct parse_flags {
-    bool final;
-    bool active;
-    bool listing;
+    bool final;     // the single armed pass after convergence: diagnostics record, the zp IR fills
+    bool active;    // false inside a dead IF/FOR branch: parse for extent, effect nothing
+    bool output;    // the post-allocation re-emission pass: ZPAUTO symbols hold their real addresses,
+                    // and the sections it builds ARE the output (there is no operand patching)
+    bool listing;   // build the -v listing text (rides on the output pass; implies output)
 } parse_flags;
 
 // The outputs of a parse, returned by value for the caller to fold into its own running state.
@@ -77,12 +79,22 @@ typedef struct int_argument {
     error_type        error;        // set when type == int_argument_type_error
     uint32_t          error_at;
     rc_str            error_detail; // the error's payload (e.g. the undefined symbol's name), or {0}
+    bool              zpauto;       // the value was a ZPAUTO address: `value` holds the OFFSET within
+                                    // the variable (the real base exists only after allocation), and
+                                    // zp_scope/zp_def/zp_name carry its identity. Callers that need a
+                                    // real number NOW must refuse (error_type_zpauto_address); the
+                                    // operand and data-emission paths accept, and the output pass
+                                    // re-evaluates against the allocated address.
+    uint32_t          zp_scope;
+    cursor            zp_def;
+    rc_str            zp_name;
 } int_argument;
 
 // Reduce an evaluated expression value to an integer argument (pure: inputs in, result out). A plain
-// numeric comes back known; a forward reference (unknown symbol) comes back unresolved, to settle on
-// a later pass; a value that can never be an address - or an unknown symbol on the final pass - comes
-// back as an error. `at` is the offset to blame.
+// numeric comes back known; a ZPAUTO address comes back known-with-the-zpauto-flag (see above); a
+// forward reference (unknown symbol) comes back unresolved, to settle on a later pass; a value that
+// can never be an address - or an unknown symbol on the final pass - comes back as an error. `at` is
+// the offset to blame.
 int_argument int_argument_make(value v, bool final_pass, uint32_t at);
 
 // The separator (':' / newline / EOF) that must follow a non-label statement, starting at `at`. A

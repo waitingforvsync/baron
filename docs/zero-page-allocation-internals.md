@@ -15,7 +15,7 @@ needed, and every example here is a real program with the addresses Baron actual
 - [Liveness: walking backward](#liveness-walking-backward)
 - [Calls](#calls)
 - [Colouring](#colouring)
-- [Patch and rewrite](#patch-and-rewrite)
+- [The output pass](#the-output-pass)
 - [The certainty contract](#the-certainty-contract)
 - [Known gaps](#known-gaps)
 - [Map of the code](#map-of-the-code)
@@ -91,11 +91,14 @@ which changes the game in a few ways:
   of a `{ }` block or into one, and one block can hold three routines. We must recover the real control
   flow from the branches themselves.
 - **Layout settles over many passes.** A forward reference can change an instruction's size, shifting
-  every later address - so we cannot allocate mid-assembly. The trick (`src/zeropage.c`): `ZPAUTO` binds
-  its name to a *placeholder* address 0, typed zero-page, so `LDA var` is a two-byte zero-page
-  instruction from the very first pass. The layout never depends on the allocation, which means the whole
-  analysis can run **once, after convergence** (`zeropage_finalize` in `src/assemble.c`) and patch
-  addresses into place without moving a single byte.
+  every later address - so we cannot allocate mid-assembly. The trick: `ZPAUTO` binds its name to a
+  **typed placeholder value** (`value_type_zpauto` in `src/value.h`) carrying the variable's identity
+  and a byte offset, never a number. Every context that would let the layout depend on an address - a
+  condition, a count, a section `org` - *refuses* the type with an eager error; the contexts that accept
+  it (instruction operands, immediates, data elements) are width-stable, `LDA var` being a two-byte
+  zero-page instruction from the very first pass. So the layout provably never depends on the
+  allocation, the analysis runs **once, after convergence** (`zeropage_finalize` in `src/assemble.c`),
+  and one final re-emission - the [output pass](#the-output-pass) - produces the true bytes.
 - **Subroutines, computed jumps, paged banks and recursion** all threaten to hide a read from us - and a
   hidden read is a too-short range. Each gets its own machinery below.
 
@@ -107,15 +110,16 @@ Everything runs inside `zeropage_finalize` (`src/assemble.c`), once, after the f
   during assembly (every pass)          zeropage_finalize (once, post-convergence)
   ----------------------------          ------------------------------------------
   ZPRESERVE -> reserved-byte set        1. resolve vregs   (operand identity -> variable id)
-  ZPAUTO    -> placeholder symbol       2. bounds + indexed-access checks
+  ZPAUTO    -> typed placeholder        2. bounds + indexed-access checks
   final pass -> record the IR           3. build the CFG   (basic blocks + edges)
                                         4. liveness        (ranges -> interference graph)
                                         5. call analyses   (footprints + the guards)
                                         6. colour          (first-fit-decreasing)
-                                        7. patch operands + rewrite symbols  (or refuse)
+                                        7. rewrite symbols (or refuse)
+                                        8. the OUTPUT pass re-emits with the real addresses
 ```
 
-If any guard refuses, we record diagnostics, patch nothing, and the assemble fails. Only a fully
+If any guard refuses, we record diagnostics, rewrite nothing, and the assemble fails. Only a fully
 analysable, colourable program gets real addresses.
 
 ## Recording: what the analyses see ##
@@ -126,8 +130,7 @@ Only the final pass records anything - earlier passes exist to let the layout se
 - `zp_var` - one per declaration: name, owning scope, width (1-256), and its **def cursor** (the source
   position of the `ZPAUTO` statement).
 - `zp_insn` - one per *instruction*: pc, size, control-flow class (`zp_flow`), which variable it touches
-  and how (`rw` read/write flags, constant offset, indexed/indirect flags), where its operand byte lives
-  for later patching, and its transfer target.
+  and how (`rw` read/write flags, constant offset, indexed/indirect flags), and its transfer target.
 - `zp_cflow` - the annotations: `UNREACHABLE`, `CANCALL`, `CANJUMP`.
 - `zp_label` - each label's identity mapped to its physical `(section, pc)`.
 
@@ -138,9 +141,14 @@ Two details worth knowing:
   scope, so the pair tells the copies apart (each iteration's `loc` is a genuinely distinct variable).
   Operands record the pair; `zeropage_resolve_vregs` maps pairs to dense ids once the registry is
   complete, which is also why a use may precede its declaration.
-- **Dotted operands attribute like local ones.** `STA sub.wid` resolves through the scope tree
-  (`scopes_resolve_symbol_def`, `src/scopes.c`) to the exact variable instance, so cross-scope interface
-  variables are patched and analysed exactly like everything else.
+- **Attribution comes from the VALUE.** A ZPAUTO reference evaluates to the typed placeholder, which
+  carries its own identity - so `record_insn` reads the touched variable straight off the evaluated
+  operand. Dotted paths (`STA sub.wid`), locals, and even *aliases* (`x = var : LDA x` - the identity
+  rides through the assignment) all attribute through one uniform channel. Only control-transfer
+  TARGETS still resolve by lexing the operand text (labels are plain numbers, with nothing to carry).
+  One instruction plays both roles at once: a `JMP` through a ZPAUTO vector names the variable as its
+  target *and* reads its bytes, so it is recorded as a pointer read too - without that, liveness would
+  let another variable take the vector's bytes between its last store and the jump.
 
 ## Easy checks first: bounds and indexed access ##
 
@@ -207,8 +215,11 @@ The details that make the CFG honest:
   External code cannot touch the pool - `ZPRESERVE` names precisely the bytes nothing else uses - so an
   external exit is as clean as an `RTS`, and needs no annotation.
 - **Flow we genuinely cannot place taints its block** (`unknown_succ`): an unannotated indirect `JMP`
-  through our own vector, an indexed dispatch `JMP (table,X)`. The taint later forces "everything live"
-  out of that block - and Guard 1 refuses the program if any variables are in play at all.
+  through our own vector, an indexed dispatch `JMP (table,X)`. A vector that is a ZPAUTO *variable* is
+  ours too (`zp_insn.target_is_zpvar`, resolved alongside the vregs), so `JMP (vec)` on a `ZPAUTO2` is
+  computed flow wanting `CANJUMP`, never mistaken for a constant OS cell. The taint later forces
+  "everything live" out of that block - and Guard 1 refuses the program if any variables are in play at
+  all.
 - **Annotations adjust the graph**: `UNREACHABLE` prunes a branch's fall-through edge; `CANJUMP` wires a
   computed jump's declared targets as real successors (external arms contributing nothing). An `RTS`
   carrying a `CANJUMP` is the dispatch trick - push a target address, "return" into it - and is wired
@@ -354,25 +365,26 @@ With the interference graph built, `zp_color` (`src/zpalloc.c`) assigns addresse
 The graphs are tiny (dozens of nodes), so the quadratic scan is irrelevant and first-fit is close enough
 to optimal in practice.
 
-## Patch and rewrite ##
+## The output pass ##
 
-With a spill-free colouring, the finalizer walks the recorded instructions and folds each assignment in:
+With a spill-free colouring, the finalizer rewrites each variable's symbol from the typed placeholder to
+its real address (an *unused* variable's binding is removed instead), and then `run_passes` runs one last
+re-emission - the **output pass** (`parse_flags.output`) - whose sections ARE the result. There is no
+operand patching: a settling pass's operand bytes hold only intra-variable offsets, meaningless as
+output, and simply get thrown away with the rest of that pass's sections.
 
-- **operands**: every reference was emitted against placeholder base 0, so the operand byte currently
-  holds only the intra-variable offset (0 for `var`, 1 for `var+1`); `sections_patch_add_u8` adds the
-  assigned base in place;
-- **symbols**: each variable's binding moves from the placeholder to its real address, so the symbol
-  table (and the `-v` listing's `var = &70 [auto]` lines) tell the truth.
-
-No instruction changes size - everything was zero-page-shaped from pass one - so the converged layout is
-untouched. Under `-v`, the listing pass then re-emits from the rewritten symbols and reproduces the same
-bytes the patches made. (Beware when testing: because the listing re-emits, it shows the *intended*
-operand even if a patch were missed - byte-compare the saved output, as `zpauto_dotted_interface_variables`
-does.)
+Why re-emission cannot move anything: a ZPAUTO address is a typed value, and every context is statically
+one of two kinds. The layout-affecting kind (conditions, counts, `org`) *refused* it during assembly, so
+no branch flips and no size changes; the accepting kind (operands, immediates, `EQU*` elements) is
+width-stable - a base+offset cannot leave the zero page, and data widths are fixed per element. So the
+output pass reproduces the converged layout exactly, with the true values in every byte. It is also
+where `-v` builds its listing text (`parse_flags.listing` rides on it) and where `PRINT` speaks - which
+is how `PRINT var` shows the allocated address, and why address tables (`EQUW var`), immediates
+(`LDA #var`) and derived symbols (`x = var + 1`) all come out real.
 
 ## The certainty contract ##
 
-We only patch a program we can prove; everything else becomes a diagnostic pointing at the fix.
+We only emit a program we can prove; everything else becomes a diagnostic pointing at the fix.
 
 The refusals (all fatal):
 
@@ -380,6 +392,7 @@ The refusals (all fatal):
 |------|-------|
 | `zpauto_narrow_pointer` / `zpauto_out_of_bounds` | an access window past the declared width |
 | `zpauto_bad_width` | `ZPAUTO n` outside 1-256 (at parse) |
+| `zpauto_address` | a ZPAUTO address in a context needing a number now: a condition, a count, an `org`, an annotation operand (the typed placeholder refused at the use site) |
 | `zpauto_computed_flow` | an `unknown_succ` block with variables in play (Guard 1) |
 | `zpauto_across_call` | live across a call whose footprint cannot be bounded (Guard 2) |
 | `zpauto_recursion` | a fresh per-level value held across a recursive call (Guard 2) |
@@ -420,4 +433,4 @@ Three deliberate limitations, all soundness-safe:
 | liveness | `src/liveness.{h,c}` | backward byte-level fixpoint, must-write, return edges, interference, classes |
 | footprints | `src/footprint.{h,c}` | transitive Touch(R) per call site, recursion / unknown-call detection |
 | colouring | `src/zpalloc.{h,c}` | first-fit-decreasing over the interference graph |
-| the driver | `src/assemble.c` | `zeropage_finalize`: checks, guards, colour, patch, rewrite |
+| the driver | `src/assemble.c` | `zeropage_finalize`: checks, guards, colour, symbol rewrite; `run_passes` runs the output pass |

@@ -107,8 +107,12 @@ static bool target_is_external(rc_view_zp_label labels, zp_insn n)
         case zp_target_via_vector:
             // A literal vector address (JMP (&FFFC)) - or a named constant standing for one (wrchv = &20E) -
             // is a cell outside the program: whatever it dispatches to is by policy external. A vector that
-            // IS one of our labels is a cell we assembled, whose run-time contents may point anywhere,
-            // including back at us - that stays computed (annotate with CANJUMP).
+            // IS one of our labels - or a ZPAUTO variable the allocator owns - is a cell we assembled, whose
+            // run-time contents may point anywhere, including back at us - that stays computed (annotate
+            // with CANJUMP).
+            if (n.target_is_zpvar) {
+                return false;
+            }
             if (n.target_scope == RC_INDEX_NONE) {
                 return true;
             }

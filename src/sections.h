@@ -78,12 +78,24 @@ typedef struct section_size {
 // sections_reset at the top of each pass (after that arena is reset once). The one exception is `sizes`,
 // the name -> last-pass-size map splices reserve from: it lives in the borrowed PERMANENT arena and is
 // deliberately NOT reset.
+// One section's emission fingerprint at the end of a pass: enough to notice the content changing
+// between settling passes even when no symbol moved (see sections_emission_changed).
+typedef struct section_emission {
+    uint32_t size;
+    uint32_t crc;
+} section_emission;
+
+#define RC_ARRAY_TYPE section_emission
+#define RC_ARRAY_NAME section_emission
+#include "richc/template/array.h"
+
 typedef struct sections {
-    rc_arena              *arena;       // BORROWED: baron's per_pass arena - nodes, code, attributes, splices
-    rc_arena              *permanent;   // BORROWED: backs `sizes`, the only cross-pass state
-    rc_array_section       nodes;       // index 0 is the default section
-    rc_array_splice        splices;     // this pass's INCSECTIONs, in statement order
-    rc_array_section_size  sizes;       // name -> size at the end of the last pass
+    rc_arena                  *arena;       // BORROWED: baron's per_pass arena - nodes, code, attributes, splices
+    rc_arena                  *permanent;   // BORROWED: backs `sizes` + `emissions`, the only cross-pass state
+    rc_array_section           nodes;       // index 0 is the default section
+    rc_array_splice            splices;     // this pass's INCSECTIONs, in statement order
+    rc_array_section_size      sizes;       // name -> size at the end of the last pass
+    rc_array_section_emission  emissions;   // per-section {size, crc} at the end of the last settling pass
 } sections;
 
 enum { sections_default = 0 };   // index of the default section
@@ -107,10 +119,15 @@ void sections_emit_u8(sections *sec, uint32_t id, uint8_t b);     // append a by
 void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);   // little-endian word, pc += 2
 void sections_skip(sections *sec, uint32_t id, uint32_t count);   // append `count` zero bytes, pc += count
 
-// Post-hoc patch: add `delta` (mod 256) to the byte already emitted at `offset` in section `id`. Used by the
-// zero-page allocator to fold a variable's assigned base address into an operand that was emitted with the
-// placeholder base (so the emitted byte held just the intra-variable offset). Does NOT touch pc.
-void sections_patch_add_u8(sections *sec, uint32_t id, uint32_t offset, uint8_t delta);
+// Convergence hardening: did this pass EMIT differently from the previous one? Compares every section's
+// {length, crc} against the values noted last time (and notes this pass's for next time). The symbol
+// table is the only state a pass hands to the next, so a content change with no symbol change cannot
+// make the output wrong - but it means something's emission depends on more than the symbols, which is
+// worth another pass to let it settle (e.g. an RND draw set shifted by a settling structure). Call it on
+// SETTLING passes only: the final pass legitimately differs wherever INCBIN sits (real bytes load only
+// there), and the output pass differs wherever a ZPAUTO address lands. The first pass, with nothing to
+// compare against, reports false.
+bool sections_emission_changed(sections *sec);
 
 // Create the section named `name` (its own pc 0, empty code buffer, empty attribute bag) and return its
 // stable index. Section names are UNIQUE: if one already exists this pass, this makes nothing and returns
