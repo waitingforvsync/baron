@@ -203,7 +203,7 @@ workflow. Assemble the code at its *runtime* address in its own section, then sp
 loadable section behind a copy-down stub:
 
 ```
-SECTION Loader, org = &1200, filename = "GAME"
+SECTION Loader, org = &1200, filename = "GAME", exec = entry
 .payload
     INCSECTION Code
 .entry

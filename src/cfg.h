@@ -29,7 +29,8 @@ typedef struct basic_block {
                              // complete. This is NOT a plain RTS/RTI return - a return has NO successor and is
                              // fully known. (An RTS-dispatch masquerading as a return, and a self-modified JSR,
                              // cannot be seen here; CANCALL/CANJUMP annotations supply the targets we cannot
-                             // recover. Until then those are unsound-if-unannotated preconditions.)
+                             // recover - CANJUMP after the RTS marks the dispatch trick and wires its declared
+                             // edges. UNannotated, both remain unsound-if-unmarked preconditions.)
 } basic_block;
 
 #define RC_ARRAY_TYPE basic_block

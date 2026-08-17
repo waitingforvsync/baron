@@ -940,12 +940,14 @@ static parse_result handle_unreachable(baron *b, cursor stmt, cursor at, uint32_
 }
 
 // The shared body of CANCALL / CANJUMP: parse a comma-separated list of target addresses and record one cflow
-// of `kind` per target, sited on the last recorded instruction (the JSR / JMP this annotation qualifies) - but
-// only when that instruction's flow is `expect_flow`, so a stray CANCALL after a JMP (or vice versa) binds to
-// nothing rather than mis-annotating. Only the final pass records instructions, so only then is there a site;
-// the settling passes still parse the list so the statement stays well-formed. A forward target defers.
+// of `kind` per target, sited on the last recorded instruction (the JSR / JMP / RTS this annotation
+// qualifies) - but only when that instruction's flow fits the kind (a call for CANCALL; a jump OR a return
+// for CANJUMP, the return being the RTS-dispatch trick - push a target address, RTS into it), so a stray
+// CANCALL after a JMP (or vice versa) binds to nothing rather than mis-annotating. Only the final pass
+// records instructions, so only then is there a site; the settling passes still parse the list so the
+// statement stays well-formed. A forward target defers.
 static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
-                                       zp_flow expect_flow, zp_cflow_kind kind, rc_arena scratch)
+                                       zp_cflow_kind kind, rc_arena scratch)
 {
     (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -957,7 +959,10 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
         uint32_t ni = zeropage_insn_count(&b->zeropage);
         if (ni > 0) {
             zp_insn last = zeropage_insn_get(&b->zeropage, ni - 1);
-            if (last.flow == expect_flow) {
+            bool fits = (kind == zp_cflow_cancall)
+                            ? last.flow == zp_flow_call
+                            : last.flow == zp_flow_jump || last.flow == zp_flow_return;
+            if (fits) {
                 site = last.pc;
             }
         }
@@ -1008,16 +1013,18 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
 // annotation is what makes it sound.
 static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, stmt, at, scope, section, flags, zp_flow_call, zp_cflow_cancall, scratch);
+    return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_cancall, scratch);
 }
 
 // CANJUMP <targets> - the programmer declares the possible destinations of the computed / indirect JMP
 // immediately preceding it (a jump table). Without it, the jump reaches code the CFG cannot follow and, with
 // variables live, is refused (error_type_zpauto_computed_flow); with it, the CFG wires every named target as a
-// real successor edge, so liveness follows control to each one. TRUSTED, like UNREACHABLE.
+// real successor edge, so liveness follows control to each one. TRUSTED, like UNREACHABLE. Also legal after
+// an RTS, for the dispatch trick (push a target address minus one, RTS into it): the annotated RTS is a jump
+// in a return's clothing, and gets the declared edges instead of ending the routine.
 static parse_result handle_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, stmt, at, scope, section, flags, zp_flow_jump, zp_cflow_canjump, scratch);
+    return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_canjump, scratch);
 }
 
 // Emit `bits` as `width` little-endian bytes into the current section.
@@ -3889,6 +3896,61 @@ RC_TEST_STEP(assemble, zpauto_canjump_bounds_computed_jump, fix)
     RC_CHECK_TRUE(q != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpauto_rts_dispatch_canjump, fix)
+{
+    // The RTS-dispatch trick: push a target address minus one, RTS into it. CANJUMP after the RTS marks it
+    // as the jump it really is, wiring the declared edge - so v, consumed by the dispatch target, is live
+    // through the pushes and the unrelated temp w cannot take its byte. (Unannotated, an RTS-dispatch is
+    // indistinguishable from a real return and remains a trusted precondition, like a wrong UNREACHABLE.)
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+                          "STA v\n"
+                          "LDA #HI(target-1) : PHA\n"
+                          "LDA #LO(target-1) : PHA\n"
+                          "STA w : LDA w\n"
+                          "RTS\n"
+                          "CANJUMP target\n"
+                          ".target : LDA v : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);   // v is live across the pushes: no sharing
+
+    // The dispatch composes with the call analyses: a routine that RTS-dispatches into a helper has the
+    // helper in its extent, so a caller variable live across the JSR is kept off the helper's local, and
+    // the routine's returning exit is the HELPER's RTS, not the dispatch.
+    uint32_t q = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                     "STA keep : JSR disp : LDA keep : RTS\n"
+                     ".disp { LDA #HI(helper-1) : PHA : LDA #LO(helper-1) : PHA : RTS : CANJUMP helper }\n"
+                     ".helper { ZPAUTO1 loc : STA loc : LDA loc : RTS }");
+    RC_CHECK_TRUE(q != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"),       ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "helper.loc"), ==, 0x71);   // reached through the dispatch edge
+
+    // An external arm - RTS-dispatching into the OS - is a clean exit that returns to our caller through
+    // the OS routine's own RTS, so keep survives it with nothing to dodge.
+    uint32_t r = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+                     "STA keep : JSR disp : LDA keep : RTS\n"
+                     ".disp { LDA #HI(&FFEE-1) : PHA : LDA #LO(&FFEE-1) : PHA : RTS : CANJUMP &FFEE }");
+    RC_CHECK_TRUE(r != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+
+    // The PHP:RTI flavour (address pushed unadjusted, RTI pops the status byte first) is the same flow
+    // class as RTS, so the annotation works identically.
+    uint32_t s = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+                     "STA v\n"
+                     "LDA #HI(target) : PHA : LDA #LO(target) : PHA : PHP\n"
+                     "STA w : LDA w\n"
+                     "RTI\n"
+                     "CANJUMP target\n"
+                     ".target : LDA v : RTS");
+    RC_CHECK_TRUE(s != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
 }
 
 RC_TEST_STEP(assemble, zpauto_partial_write_tracks_bytes, fix)

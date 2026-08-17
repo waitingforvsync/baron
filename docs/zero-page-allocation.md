@@ -214,15 +214,30 @@ External arms work here too: `JMP (myvec) : CANJUMP &FFEE` says the vector may h
 that arm is as clean an exit as an `RTS`. (A jump through a *constant* OS vector needs no annotation at
 all.)
 
-For both, list *every* destination - an omission is how you get it wrong.
+`CANJUMP` also marks the **RTS-dispatch trick** - pushing a target address and jumping to it with an
+`RTS`. An unmarked `RTS` looks exactly like a real return, and Baron trusts it as one; the annotation
+tells it this one is a jump, and the analysis follows control to the declared targets like any other
+dispatch:
+
+```
+    LDA #HI(handler-1) : PHA
+    LDA #LO(handler-1) : PHA
+    RTS                         ; not a return: it "returns" into handler
+    CANJUMP handler
+```
+
+The `PHP : RTI` flavour (address pushed unadjusted) is annotated the same way.
+
+For all of these, list *every* destination - an omission is how you get it wrong.
 
 ## The rules ##
 
 What the allocator will not accept, and what it trusts you with:
 
 - **No unannotated computed flow.** An indirect `JMP` through your own vector, or a jump table, is
-  refused while variables are live - annotate it (`CANJUMP` / `CANCALL`) or keep clear. RTS-dispatch has
-  no annotation; keep those clear of live variables.
+  refused while variables are live - annotate it (`CANJUMP` / `CANCALL`) or keep clear. An RTS-dispatch
+  is the one computed transfer Baron *cannot* refuse: it is indistinguishable from a real return, so an
+  unmarked one is silently trusted - annotating it with `CANJUMP` is on you.
 - **A pointer dereference needs a `ZPAUTO2`.** `(var),Y` reads two bytes; dereferencing a one-byte
   variable that way is refused - declare it `ZPAUTO2` or wider.
 - **`var+n` must stay inside the variable.** `var+1` on a `ZPAUTO1`, or `table+16` on a `ZPAUTO 16`, is

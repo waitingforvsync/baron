@@ -254,9 +254,10 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         // A declared CANJUMP / CANCALL target is a code entry just as a literal target is: mark it a leader,
         // so an in-program declared target always gets its own block (even mid-run). That is what lets a
         // declared target with NO block reliably mean "off the assembled stream" - an external arm - in the
-        // edge wiring and the footprint walk, rather than an address we merely failed to split at.
-        if (insn.flow == zp_flow_jump || insn.flow == zp_flow_call) {
-            zp_cflow_kind want = (insn.flow == zp_flow_jump) ? zp_cflow_canjump : zp_cflow_cancall;
+        // edge wiring and the footprint walk, rather than an address we merely failed to split at. A RETURN
+        // takes CANJUMP too: the RTS-dispatch trick jumps to a pushed address, and the annotation names it.
+        if (insn.flow == zp_flow_jump || insn.flow == zp_flow_call || insn.flow == zp_flow_return) {
+            zp_cflow_kind want = (insn.flow == zp_flow_call) ? zp_cflow_cancall : zp_cflow_canjump;
             for (uint32_t j = 0; j < cflows.num; j++) {
                 zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
                 if (cf.kind == (uint8_t) want && cf.site == insn.pc) {
@@ -360,7 +361,21 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 break;
             }
             case zp_flow_return:
-                break;   // a genuine return: no successor, fully known (an RTS-dispatch would need markup)
+                // A genuine return: no successor, fully known. A CANJUMP at the RTS is the dispatch trick -
+                // a jump in a return's clothing - and gets the declared edges exactly as a computed JMP
+                // does (an external arm contributes no edge: control leaves for the OS and returns to our
+                // caller through its RTS). An UNANNOTATED dispatch is indistinguishable from a real return,
+                // so it stays a trusted precondition, never a taint.
+                for (uint32_t i = 0; i < cflows.num; i++) {
+                    zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
+                    if (cf.kind == zp_cflow_canjump && cf.site == last.pc) {
+                        uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
+                        if (tb != RC_INDEX_NONE) {
+                            add_succ(&result, block, tb, arena);
+                        }
+                    }
+                }
+                break;
             case zp_flow_call:
             case zp_flow_normal:
             default: {

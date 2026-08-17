@@ -74,29 +74,33 @@ static void add_edge(rc_bitset *interfere, uint32_t a, uint32_t b)
 // Does this block hand control back to the caller of the routine containing it? True for an RTS/RTI - and
 // for a transfer OUT of the program, because the external routine's own RTS returns to OUR caller (the
 // tail-call idiom); that includes an external CANJUMP arm of a dispatch, which the CFG wires no edge for.
+// An RTS wearing a CANJUMP is the dispatch trick - control continues at the declared targets, not the
+// caller - so it does NOT return here (its targets' own exits do), unless one of its arms is external.
 static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, basic_block blk)
 {
     if (blk.num_insns == 0) {
         return false;
     }
     zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
-    if (last.flow == zp_flow_return) {
-        return true;
+    bool dispatch = last.flow == zp_flow_jump || last.flow == zp_flow_branch
+                 || last.flow == zp_flow_return;
+    if (!dispatch || (last.flow != zp_flow_return && cfg_target_block(g, last) != RC_INDEX_NONE)) {
+        return false;   // normal/call flow, or a plain resolved jump/branch: not an exit of any kind
     }
-    if ((last.flow == zp_flow_jump || last.flow == zp_flow_branch)
-        && cfg_target_block(g, last) == RC_INDEX_NONE) {
-        if (cfg_target_is_external(g, last)) {
-            return true;
-        }
-        for (uint32_t j = 0; j < cflows.num; j++) {
-            zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
-            if (cf.kind == zp_cflow_canjump && cf.site == last.pc
-                && cfg_block_at(g, last.section, cf.target) == RC_INDEX_NONE) {
-                return true;
+    bool annotated = false;
+    for (uint32_t j = 0; j < cflows.num; j++) {
+        zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
+        if (cf.kind == zp_cflow_canjump && cf.site == last.pc) {
+            annotated = true;
+            if (cfg_block_at(g, last.section, cf.target) == RC_INDEX_NONE) {
+                return true;   // an external arm hands back, via the external routine's RTS
             }
         }
     }
-    return false;
+    if (last.flow == zp_flow_return) {
+        return !annotated;   // a bare RTS/RTI returns; an annotated one continues at its targets
+    }
+    return !annotated && cfg_target_is_external(g, last);   // an unannotated external jump/branch out
 }
 
 // The bytes a call definitely writes whichever arm it takes: the intersection of its callees' current

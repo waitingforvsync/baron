@@ -77,6 +77,10 @@ static check can see, so it is trusted to the user, the same trust as an annotat
 `cfg_build` (`src/cfg.c`) cuts the stream into basic blocks. It is intraprocedural: a `JSR` is an in-block
 instruction (callees are reached through the call graph, not CFG edges) and an `RTS` ends a block with no
 successor - "routines" fall out as whatever is reachable from an entry without crossing a call or return.
+The one exception: an `RTS` carrying a `CANJUMP` is the dispatch trick (push a target address, RTS into
+it), and is wired exactly like an annotated computed jump - declared edges, external arms contributing
+nothing. An unannotated dispatch is indistinguishable from a real return, so it stays a trusted
+precondition, never a taint.
 
 - **Block identity is `(section, pc)`.** Paged banks may share an address, so `pc` alone cannot name a
   block. Within a section, pc is strictly monotonic by construction (org fixed at open, cursor only
@@ -116,10 +120,12 @@ be allocated over a pointer's once-written MSB.)
 2. **Must-write (definite assignment).** Before the liveness fixpoint, a forward "must" analysis computes,
    for every routine entered by a call, the bytes it writes on *every* path to a returning exit (meet =
    intersection, seeded FULL and shrinking; per entry over the blocks reachable from it, inside an outer
-   fixpoint so nested and recursive calls converge). A returning exit is an RTS/RTI *or* a transfer out of
-   the program - the external routine's own RTS returns to our caller, the tail-call idiom - including an
-   external `CANJUMP` arm; a routine with no returning path vacuously must-writes everything. A call's kill
-   set is the intersection over its arms (`call_kill_bytes`), so any external or untrackable arm empties it.
+   fixpoint so nested and recursive calls converge). A returning exit (`block_returns`) is an RTS/RTI *or*
+   a transfer out of the program - the external routine's own RTS returns to our caller, the tail-call
+   idiom - including an external `CANJUMP` arm; an RTS carrying a `CANJUMP` is *not* one (the dispatch
+   trick continues at its declared targets, whose own exits return) unless one of its arms is external. A
+   routine with no returning path vacuously must-writes everything. A call's kill set is the intersection
+   over its arms (`call_kill_bytes`), so any external or untrackable arm empties it.
 3. The round-robin fixpoint: `live_out = union of successors' live_in` (plus *all* bytes under the
    `unknown_succ` taint, plus the **return edges** below), then `live_in` comes from walking the block's
    instructions backward - a write removes its provable bytes, a read adds its bytes, and a call applies
