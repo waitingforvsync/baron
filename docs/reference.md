@@ -235,9 +235,3 @@ Your own `FUNCTION` names join the table as they are defined, callable as `name(
 - **0.1** (August 2026) - first release: the full assembler described here. NMOS 6502; sections with
   loose-file and `.ssd` output; zero-page auto-allocation; macros, functions, lists and broadcasting;
   `PRINT` channels; the `-v` listing.
-
-## Authorship ##
-
-Baron is written by Rich Talbot-Watkins, and is the successor to
-[BeebAsm](https://github.com/stardot/beebasm). Thanks are due to the BBC Micro community at
-[stardot](https://stardot.org.uk), who kept these machines - and the tools around them - very much alive.

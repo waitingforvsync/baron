@@ -49,7 +49,7 @@ into its own:
 - **Local labels.** `.@` binds an anonymous label; `@-` and `@+` reference the nearest one either side.
 - **`PRINT` has ten channels**, redirectable to files from the command line - build logs, symbol dumps,
   whatever you like.
-  **An inline BASIC tokeniser.** Just incorporate BASIC programs into your source files, mixed with assembly
+- **An inline BASIC tokeniser.** Just incorporate BASIC programs into your source files, mixed with assembly
   as you wish.
 - **One file, one assembly.** Each source file on the command line assembles in a fresh world; symbols
   never leak between them.
@@ -611,5 +611,12 @@ else is. There are two destinations:
 A multi-file run (`baron main.6502 loader.6502`) assembles each file independently and pools all their
 saved sections into the output. If *anything* failed to assemble, nothing at all is written - no
 half-built discs.
+
+## Examples ##
+
+Take a look in the `examples/` directory for some Baron source code samples, including the obligatory
+spinning star globe (now with even more dots!).
+
+---
 
 That is the tour. The full switch, keyword and operator tables await in the [reference](reference.md).
