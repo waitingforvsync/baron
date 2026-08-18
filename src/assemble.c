@@ -3999,6 +3999,25 @@ RC_TEST_STEP(assemble, cmos_section_enables, fix)
         18));
 }
 
+RC_TEST_STEP(assemble, cmos_bit_indexed, fix)
+{
+    // BIT zp,X and BIT abs,X are 65C02 additions too, gated exactly like the other CMOS-only modes
+    // (they were missing their cmos flag until now).
+    uint32_t passes = ASM("SECTION C, cmos = TRUE\n"
+                          "BIT &70,X\n"
+                          "BIT &1234,X\n"
+                          "ENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("C"),
+        (uint8_t[]) {0x34, 0x70,                       // BIT &70,X
+                     0x3C, 0x34, 0x12},                // BIT &1234,X
+        5));
+
+    RC_CHECK_TRUE(ERR("BIT &70,X") == error_type_needs_cmos);
+    RC_CHECK_TRUE(ERR("BIT &1234,X") == error_type_needs_cmos);
+}
+
 RC_TEST_STEP(assemble, cmos_refused_outside, fix)
 {
     // Without the attribute (the default section included) every CMOS encoding refuses with its own

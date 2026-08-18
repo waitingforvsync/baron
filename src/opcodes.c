@@ -59,9 +59,9 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     [mnemonic_bit] = {
         [addr_mode_imm]  = 0x89 | cmos,
         [addr_mode_zp]   = 0x24 | op_zpread,
-        [addr_mode_zpx]  = 0x34 | op_zpread,
+        [addr_mode_zpx]  = 0x34 | cmos | op_zpread,
         [addr_mode_abs]  = 0x2C,
-        [addr_mode_absx] = 0x3C,
+        [addr_mode_absx] = 0x3C | cmos,
     },
     [mnemonic_bmi] = {
         [addr_mode_rel] = 0x30 | op_branch,
