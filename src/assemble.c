@@ -607,8 +607,9 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 // SECTION name, key = expr, ... / ENDSECTION - a lexically scoped region of object code, and its own address
 // space. The name is UNIQUE (a repeat is error_type_duplicate_section: a name identifies one output blob, and
 // there is no concatenation). The attributes are `key = expr` pairs resolved here: the assembler acts on `org`
-// (this section's start address) and stores every attribute on the section for the output utility to read out
-// of the result. `org` is an ordinary INHERITED attribute: a section with no `org` of its own starts at its
+// (this section's start address), `cmos` (65C02 encodings) and `guard` (the first address emission must not
+// reach, checked when the block closes) and stores every attribute on the section for the output utility to
+// read out of the result. `org` is an ordinary INHERITED attribute: a section with no `org` of its own starts at its
 // parent's org (the default section's org is 0), and a section's emission never moves its parent's cursor -
 // the two are separate spaces, so laying two sections at one address is fine (they never fall through into
 // each other; only a control transfer that names a label crosses between them). A SECTION does NOT open a
@@ -641,8 +642,9 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         // wherever the parent has emitted to; `cmos` likewise carries the parent's instruction set down.
         // Explicit attributes below override. A section's emission never moves its parent's cursor - the
         // two are separate address spaces.
-        uint32_t parent_org  = 0;
-        bool     parent_cmos = false;
+        uint32_t parent_org   = 0;
+        bool     parent_cmos  = false;
+        uint32_t parent_guard = RC_INDEX_NONE;
         rc_view_attribute inherited = sections_attributes(&b->sections, section);
         for (uint32_t i = 0; i < inherited.num; i++) {
             attribute a = rc_view_attribute_get(inherited, i);
@@ -653,9 +655,13 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             else if (rc_str_is_equal_insensitive(a.key, RC_STR("cmos")) && value_is_numeric(a.v)) {
                 parent_cmos = a.v.numeric != 0;
             }
+            else if (rc_str_is_equal_insensitive(a.key, RC_STR("guard")) && value_is_numeric(a.v)) {
+                parent_guard = (uint32_t) ((int64_t) a.v.numeric & 0xFFFF);
+            }
         }
         sections_org(&b->sections, child, parent_org);
         sections_set_cmos(&b->sections, child, parent_cmos);
+        sections_set_guard(&b->sections, child, parent_guard);
     }
 
     // The attribute list: `, key = expr` pairs to the end of the SECTION line. Parsed structurally even in a
@@ -682,17 +688,21 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 
         if (child != RC_INDEX_NONE) {
             sections_add_attribute(&b->sections, child, key.token.identifier.name, e.value, cursor_at(at, comma.next));
-            bool is_org  = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"));
-            bool is_cmos = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("cmos"));
-            if (is_org || is_cmos) {
+            bool is_org   = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"));
+            bool is_cmos  = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("cmos"));
+            bool is_guard = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("guard"));
+            if (is_org || is_cmos || is_guard) {
                 int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, eq.next), eq.next);
                 switch (arg.type) {
                     case int_argument_type_known:
                         if (is_org) {
                             sections_org(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
                         }
-                        else {
+                        else if (is_cmos) {
                             sections_set_cmos(&b->sections, child, arg.value != 0);
+                        }
+                        else {
+                            sections_set_guard(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
                         }
                         break;
                     case int_argument_type_unresolved:
@@ -736,6 +746,17 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
     if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
         if (child != RC_INDEX_NONE) {
+            // The guard check: the section is complete (INCSECTION reservations included), so its pc
+            // is the address just past the last byte - past the guard means the guarded address was
+            // written. Recoverable: the report names the overshoot and assembly carries on.
+            uint32_t guard = sections_guard(&b->sections, child);
+            uint32_t pc    = sections_pc(&b->sections, child);
+            if (guard != RC_INDEX_NONE && pc > guard) {
+                char storage[16];
+                rc_mstr over = {.data = storage, .len = 0, .cap = sizeof storage};
+                rc_mstr_append_u32(&over, pc - guard, NULL);
+                semantic_error_payload(b, flags, error_type_guard_exceeded, stmt, over.view);
+            }
             // The ENDSECTION line at the margin too, and a blank line sets sections apart. Note the start
             // cursor is built here: `stmt` is the SECTION statement, not this closer.
             verbose_text_line(b, flags, cursor_at(at, body.next), cl.next, 0, verbose_text_margin);
@@ -3315,6 +3336,40 @@ RC_TEST_STEP(assemble, section_name_errors, fix)
     RC_CHECK_TRUE(ERR("SECTION 5 : ENDSECTION") == error_type_expected_section_name);   // a number is not a name
     RC_CHECK_TRUE(ERR("SECTION a : LDA #0") == error_type_unclosed_section);   // no ENDSECTION
     RC_CHECK_TRUE(ERR("ENDSECTION") == error_type_unexpected_endsection);   // no SECTION to close
+}
+
+RC_TEST_STEP(assemble, section_guard, fix)
+{
+    // The guard is the first address emission must not reach: filling right up to it is fine, one
+    // byte onto it is a recoverable error whose payload is the overshoot.
+    RC_CHECK_TRUE(ASM("SECTION code, org=&2000, guard=&2003\nEQUB 1,2,3\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ERR("SECTION code, org=&2000, guard=&2002\nEQUB 1,2,3\nENDSECTION") == error_type_guard_exceeded);
+    RC_CHECK(diag_payload(&fix->r, error_type_guard_exceeded), ==, RC_STR("1"));
+
+    // Non-halting: every offender is reported in one run.
+    RC_CHECK_TRUE(ERR("SECTION a, org=0, guard=1\nEQUB 1,2\nENDSECTION\n"
+                      "SECTION b, org=0, guard=1\nEQUB 1,2,3\nENDSECTION") == error_type_guard_exceeded);
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < fix->r.diagnostics.num; i++) {
+        if (rc_view_diagnostic_get(fix->r.diagnostics, i).code == error_type_guard_exceeded) {
+            count++;
+        }
+    }
+    RC_CHECK(count, ==, 2u);
+}
+
+RC_TEST_STEP(assemble, section_guard_inherits_and_converges, fix)
+{
+    // A nested section inherits the guard (measured against its OWN bytes; its own key overrides),
+    // and a forward-referenced guard settles like any other attribute.
+    RC_CHECK_TRUE(ERR("SECTION outer, org=&2000, guard=&2001\nSECTION inner\nEQUB 1,2\nENDSECTION\nENDSECTION")
+                  == error_type_guard_exceeded);
+    RC_CHECK_TRUE(ASM("SECTION outer, org=&2000, guard=&2001\n"
+                      "SECTION inner, guard=&2002\nEQUB 1,2\nENDSECTION\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM("SECTION code, org=0, guard=lim\nEQUB 1,2,3\nENDSECTION\nlim=3") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 

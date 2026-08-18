@@ -1,9 +1,9 @@
 # Zero page allocation #
 
-Zero page is a valuable and limited resource. Instructions that reach it are a byte shorter and a
+Zero page is a valuable but limited resource on the 6502. Instructions that reach it are a byte shorter and a
 cycle faster, and the indirect addressing modes (`(ptr),Y` and friends) live there and nowhere else. In a
-complicated program, hand-managing which routine borrows which byte is exactly the sort of fiddly
-bookkeeping we would rather a tool did for us.
+complicated program, hand-managing which zero page locations a routine uses as inputs, outputs or scratch
+space is exactly the sort of fiddly bookkeeping we would rather a tool did for us.
 
 So Baron does it. You hand over a pool of zero-page bytes, declare named variables, and Baron works out
 where each one lives - packing several onto the same byte when their lifetimes never overlap, and
@@ -101,7 +101,7 @@ real address at the end:
 
 vhi = v + 1                 ; aliases carry the identity: LDA vhi is a use of v
 
-    PRINT "v lives at ", v  ; PRINT speaks after allocation, so this is the real address
+    PRINT "v lives at ", v  ; PRINT is invoked after allocation, so this is the real address
 ```
 
 You can even dispatch through a variable used as a vector - `JMP (vec)` on a `ZPAUTO2` - which Baron
@@ -118,15 +118,15 @@ anything else - multiply, compare, a range - is a type error.
 
 The promises, briefly - each proved from your actual code, not guessed:
 
-- **Lifetime, not declaration, decides sharing.** Six variables that take turns can live in two bytes;
-  two that overlap need two, even if you only ever touch one at a time.
+- **Lifetime, not declaration, decides sharing.** Three variables that are used in strict succession
+  can live in a single byte; two that overlap need two, even if you only ever touch one at a time.
 - **Braces do not fence anything.** Control flow is followed as it really runs - branch out of a block,
   `JMP` into another scope, put three routines in one brace pair or one routine across three. Scopes are
   about *naming*; the analysis follows the branches.
 - **Calls are safe.** A variable held live across a `JSR` is kept clear of every byte the callee (and
   everything *it* calls) touches. A variable already dead at the call is free to reuse them. A call
   *consumes its arguments* - a value stored into a callee's input variable is held live up to the `JSR` -
-  and *delivers its results*: one the callee provably writes on every path is reborn at the call, its
+  and *delivers its results*: one the callee provably writes on every path is "reborn" at the call, its
   pre-call byte free for reuse. See [Subroutine inputs and outputs](#subroutine-inputs-and-outputs).
 - **OS calls are free.** `JSR &FFEE` - or `JSR oswrch` with `oswrch = &FFEE` - targets code outside the
   program, which cannot touch your pool, so nothing special is needed. Same for a tail `JMP &FFEE` or a
@@ -141,52 +141,74 @@ The promises, briefly - each proved from your actual code, not guessed:
 
 ## Subroutine inputs and outputs ##
 
-Here's a paradigm I like: declare a routine's inputs and outputs as variables in *its own* scope,
-and let callers reach them by the dotted path - the natural calling convention for anything a register or
-two cannot carry:
+You can declare a routine's inputs and outputs as variables in *its own* scope, and let callers reach
+them by their fully scoped (dot separated) path:
 
 ```
 ZPRESERVE &70..&8F          ; In reality only uses ONE byte for the lot
 
-.scale                      ; scale.xin * 2 -> scale.res
+.scale                      ; scale.input * 2 -> scale.result
 {
-    ZPAUTO1 xin
-    ZPAUTO1 res
-    LDA xin : ASL A : STA res
+    ZPAUTO1 input
+    ZPAUTO1 result
+    LDA input : ASL A : STA result
     RTS
 }
 
-.offset                     ; offset.xin + 7 -> offset.res
+.offset                     ; offset.input + 7 -> offset.result
 {
-    ZPAUTO1 xin
-    ZPAUTO1 res
-    LDA xin : CLC : ADC #7 : STA res
+    ZPAUTO1 input
+    ZPAUTO1 result
+    LDA input : CLC : ADC #7 : STA result
     RTS
 }
 
 .start
-    LDA #5 : STA scale.xin
+    LDA #5 : STA scale.input
     JSR scale
-    LDA scale.res : STA offset.xin      ; one stage's result feeds the next
+    LDA scale.result : STA offset.input    ; one stage's result feeds the next
     JSR offset
-    LDA offset.res                      ; A = (5 * 2) + 7
+    LDA offset.result                      ; A = (5 * 2) + 7
     RTS
 ```
 
 Four variables, and the whole relay runs in a **single byte** - the `-v` listing shows every one of them
 landing on `&70`. The value simply flows through it: argument in, doubled in place, relayed, seven added,
-result out. That is the packing a calling convention should get, and it rests on three guarantees:
+result out. That is the optimal packing, and it's due to three guarantees:
 
-- **An argument survives to its call.** A store into `scale.xin` is held live until the `JSR scale` that
+- **An argument survives to its call.** A store into `scale.input` is held live until the `JSR scale` that
   consumes it - nothing can be allocated over it in between, however much code sits there, and an
   argument stored before *two* calls is kept clear of the first callee's workspace too.
 - **A result survives to its read.** From its store inside the routine to the caller's read, a result is
   protected the whole way - including from its own routine's *later* code: a temp trashed on the way to
   the `RTS` will not land on it.
-- **A delivered result is born at its call.** Baron proves `offset` writes `res` on every path before
+- **A delivered result is "born" at its call.** Baron proves `offset` writes `result` on every path before
   returning, so the caller's read can only ever see the callee's value - the byte's pre-call contents are
-  dead, and the call is where the result's life begins. That is what lets `offset.res` take the very byte
-  `scale.res` just vacated, instead of being held clear of every earlier call "just in case".
+  dead, and the call is where the result's life begins. That is what lets `offset.result` take the exact
+  same byte `scale.result` just vacated, instead of being held clear of every earlier call "just in case".
+
+We can show the final point by contriving a contrary scenario. Let's change `offset` so the store is
+*conditional*, and watch the allocation change with it:
+
+```
+.offset                     ; offset.input + 7 -> offset.result, left alone when the sum is zero
+{
+    ZPAUTO1 input
+    ZPAUTO1 result
+    LDA input : CLC : ADC #7 : BEQ @+
+    STA result : .@
+    RTS
+}
+```
+
+Now the caller's `LDA offset.result` may see the byte as it was *before* the call, so `result` must
+genuinely be preserved across the subroutine - and Baron allocates accordingly: everything else still
+shares `&70`, while this `offset.result` alone is kept clear of the whole journey on `&71` (the pool
+needs two bytes).
+
+Nothing was declared; the routine's own instructions are the specification.
+
+### Wasteful code ###
 
 When using the allocator, it is worth glancing at the verbose listing now and then to see what was really
 produced. In the example above, the relay line assembles to a load and a store of the *same* byte:
@@ -222,37 +244,20 @@ ZPAUTO1 pipe                ; scale's result IS offset's input
     JSR offset              ; no relay - the value is already where offset looks
 ```
 
-- still one byte for the lot, and the relay instructions are gone entirely. The dotted interface buys
-decoupling; the shared variable buys fusion. Pick per joint.
-
-We can show that the allocation is working as hoped - let's change `offset` so the store is *conditional* and
-watch the allocation change with it:
-
-```
-.offset                     ; offset.xin + 7 -> offset.res, left alone when the sum is zero
-{
-    ZPAUTO1 xin
-    ZPAUTO1 res
-    LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS
-}
-```
-
-Now the caller's read may see the byte as it was *before* the call, so `res` must genuinely be preserved
-across the subroutine - and Baron allocates accordingly: everything else still shares `&70`, while this
-`res` alone is kept clear of the whole journey on `&71` (the pool needs two bytes). Nothing was declared;
-the routine's own instructions are the specification.
+They still share a single location, and the relay instructions are gone entirely. The scoped symbol paths
+buy decoupling; the shared variable buys fusion. Choose your weapon!
 
 ## Annotations ##
 
 Some facts Baron cannot see from the instruction stream, and rather than guess it stops and asks. An
-annotation is your promise - so do get it right; a wrong one is the one way to defeat the guarantee.
+annotation is your promise to the allocator.
 
 **`UNREACHABLE`** - after a branch you know is always taken, so the dead fall-through is pruned:
 
 ```
-    CMP #10
+    ADC #10
     BCC in_range        ; carry is always clear here, honest
-    UNREACHABLE
+    UNREACHABLE         ; This is actually some pretty neat documentation, zp allocator or not
 ```
 
 It emits nothing and changes nothing; it just lets Baron pack tighter.
@@ -295,7 +300,8 @@ dispatch:
 
 The `PHP : RTI` flavour (address pushed unadjusted) is annotated the same way.
 
-For all of these, list *every* destination - an omission is how you get it wrong.
+For all of these, list *every* destination - if you omit something by mistake, you may see your zp
+getting clobbered unexpectedly.
 
 ## The rules ##
 
@@ -328,8 +334,6 @@ What the allocator will not accept, and what it trusts you with:
   ```
 
 - **Cross-section transfers go through labels**, so Baron knows which bank you mean.
-- **You cannot name a variable `a`** - `ASL a` would read as accumulator addressing. (`x` and `y` are
-  fine; they only mean registers after a comma.)
 
 ## Tips for tight packing ##
 

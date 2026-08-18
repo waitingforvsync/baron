@@ -55,6 +55,7 @@ rc_str error_type_name(error_type e)
         case error_type_bad_alignment:           return RC_STR("Alignment must be at least 1");
         case error_type_bad_basic_line_number:   return RC_STR("BASIC line number must be 0 to 32767");
         case error_type_basic_line_too_long:     return RC_STR("BASIC line longer than 255 bytes");
+        case error_type_guard_exceeded:          return RC_STR("Section guard exceeded by % bytes");
         case error_type_reserve_not_zeropage:    return RC_STR("ZPRESERVE address outside the zero page");
         case error_type_var_without_reserve:     return RC_STR("ZPAUTO needs a prior ZPRESERVE");
         case error_type_zeropage_full:           return RC_STR("No free zero-page byte for ZPAUTO variable: '%'");

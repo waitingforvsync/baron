@@ -65,6 +65,7 @@ typedef enum error_type {
     error_type_bad_alignment,         // ALIGN n with n < 1
     error_type_bad_basic_line_number, // a BASIC line number past 32767 (the ROM's enterable maximum)
     error_type_basic_line_too_long,   // a tokenised BASIC line record past 255 bytes (its length is one byte)
+    error_type_guard_exceeded,        // a section's emission ran past its `guard` address
     error_type_reserve_not_zeropage,  // a ZPRESERVE address falls outside the zero page ($00-$FF)
     error_type_var_without_reserve,   // a ZPAUTO1/ZPAUTO2 declared with no ZPRESERVE enabling the feature first
     error_type_zeropage_full,         // no free reserved byte to place a ZPAUTO variable (a spill)

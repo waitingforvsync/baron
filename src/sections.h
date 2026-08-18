@@ -32,6 +32,8 @@ typedef struct section {
     rc_str              name;
     uint32_t            pc;
     bool                cmos;        // the consumed `cmos` attribute: 65C02 encodings allowed here
+    uint32_t            guard;      // the consumed `guard` attribute: the first address emission must
+                                    // not reach (RC_INDEX_NONE = unguarded)
     rc_array_bytes      code;
     rc_array_attribute  attributes;
 } section;
@@ -118,6 +120,8 @@ rc_view_attribute sections_attributes(const sections *sec, uint32_t id);
 void sections_org(sections *sec, uint32_t id, uint32_t addr);     // set pc; does not move code
 void sections_set_cmos(sections *sec, uint32_t id, bool cmos);    // the consumed `cmos` attribute
 bool sections_cmos(const sections *sec, uint32_t id);             // are 65C02 encodings allowed here?
+void sections_set_guard(sections *sec, uint32_t id, uint32_t addr);   // the consumed `guard` attribute
+uint32_t sections_guard(const sections *sec, uint32_t id);        // guard address (RC_INDEX_NONE = unguarded)
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b);     // append a byte, pc += 1
 void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);   // little-endian word, pc += 2
 void sections_skip(sections *sec, uint32_t id, uint32_t count);   // append `count` zero bytes, pc += count

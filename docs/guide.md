@@ -1,9 +1,9 @@
 # The Baron guide #
 
 Baron is a 6502 cross-assembler for the BBC Micro. You feed it assembly source, and it hands you back
-binaries, `.inf` sidecars or a ready-to-boot DFS disc image. It is the successor to BeebAsm, rebuilt from
-the ground up: a proper multi-pass assembler with a rich expression language, lexical scoping, macros,
-pure functions - and a register allocator for your zero page, which we are rather proud of.
+binaries, with optional `.inf` sidecars, or a ready-to-boot DFS disc image. It is the successor to BeebAsm,
+rebuilt from the ground up: a proper multi-pass assembler with a rich expression language, lexical scoping,
+macros, pure functions - and a register allocator for your zero page, which we are rather proud of.
 
 This guide walks through the language a feature at a time, teaching by example. The dry lists of every
 switch, keyword and operator live in the [reference](reference.md).
@@ -30,12 +30,12 @@ switch, keyword and operator live in the [reference](reference.md).
 ## Coming from BeebAsm ##
 
 If you know BeebAsm, you already know most of Baron - the mnemonics, the `.label` syntax, `EQUB`, `&` hex,
-`{ }` scopes and colon-separated statements all carry straight over. The differences are where Baron earns
-its keep:
+`{ }` scopes and colon-separated statements all carry straight over. The differences are where Baron comes
+into its own:
 
 - **`ORG`, `SAVE`, `GUARD` and `CLEAR` are gone.** Their jobs are done by [sections](#sections): a named
-  block carrying attributes (`org`, `load`, `exec`, `filename`). Giving a section a filename *is* the
-  request to save it.
+  block carrying attributes (`org`, `load`, `exec`, `filename`, `guard`). Giving a section a filename
+  *is* the request to save it, and a `guard` address is checked when the section closes.
 - **As many passes as it takes.** BeebAsm makes two passes; Baron reassembles until the program converges.
   Forward references work nearly everywhere - in a `FOR` count, an `INCLUDE` filename, a section attribute.
 - **Errors accumulate.** One mistake no longer stops the show; you get the lot in one run, GCC-style
@@ -49,11 +49,13 @@ its keep:
 - **Local labels.** `.@` binds an anonymous label; `@-` and `@+` reference the nearest one either side.
 - **`PRINT` has ten channels**, redirectable to files from the command line - build logs, symbol dumps,
   whatever you like.
+  **An inline BASIC tokeniser.** Just incorporate BASIC programs into your source files, mixed with assembly
+  as you wish.
 - **One file, one assembly.** Each source file on the command line assembles in a fresh world; symbols
   never leak between them.
 
-A few BeebAsm conveniences have no Baron equivalent yet: `PUTBASIC`/`PUTTEXT`/`PUTFILE`, `MAPCHAR` and
-`COPYBLOCK`. `ASSERT` is spelled with the tools you have:
+A few BeebAsm conveniences have no Baron equivalent yet: `MAPCHAR` is best implemented as a user-defined
+function, and `COPYBLOCK` is now better done by `INCSECTION`. `ASSERT` is spelled with the tools you have:
 `IF weird : ERROR "oh frak" : ENDIF`.
 
 ## A first program ##
@@ -77,7 +79,7 @@ SECTION Main, org = &2000, filename = "HELLO"
     RTS
 
 .message
-    EQUS "Hello, Beeb lovers!", 13, 0
+    EQUS "Hello, owl fans!", 13, 0
 
 ENDSECTION
 ```
@@ -125,11 +127,11 @@ The basics, quickly:
 
 - Comments run from `;` or `\` to the end of the line.
 - `:` separates statements, so `LDA #0 : STA &70` is two statements on one line.
-- Everything is case-insensitive: `lda`, `LDA` and `Lda` are all the same instruction.
+- Keywords are case-insensitive: `lda`, `LDA` and `Lda` are all the same instruction.
 - Numbers are decimal (`42`, `1.5`), hex (`&FF` or `$FF`) or binary (`%1010`).
 - Strings are double-quoted; write `""` inside one for a literal quote.
-- `name = expr` binds a symbol. Symbols are immutable - one name, one value - which is what lets Baron
-  re-run passes freely. (Loops that want a changing variable use `FOR`.)
+- `name = expr` binds a case-sensitive symbol. Symbols are immutable - one name, one value -
+  which is what lets Baron re-run passes freely. (Loops that want a changing variable use `FOR`.)
 
 ## Labels and scopes ##
 
@@ -185,9 +187,12 @@ ENDSECTION
 
 - `org` sets the assembly address. Within a section the address only ever moves forwards (`SKIP`,
   `SKIPTO` and `ALIGN` pad with zeroes; there is no rewinding).
+- `guard` sets an address the section must not reach - `guard = &3000` means the last byte may land at
+  `&2FFF` and no further. Overrunning it reports how many bytes too far you went, without stopping the
+  assembly: you get every overrun (and everything else) in one run.
 - `filename` asks for the section to be saved - no filename, no file. `load` defaults to `org`, and
   `exec` defaults to `load`.
-- Sections **nest**, and a child inherits its parent's attributes - handy for one outer section holding
+- Sections nest, and a child inherits its parent's attributes - handy for one outer section holding
   the file attributes and inner ones organising the code. A nested `filename = ""` opts back out of an
   inherited filename.
 - `cmos = TRUE` enables the 65C02 instruction set for the section (and, by inheritance, its children;
@@ -196,7 +201,7 @@ ENDSECTION
   section)`.
 - Section names are their own namespace (they never collide with your symbols) and must be unique.
 - Two sections may sit at the *same* address - sideways banks, swap-in overlays - without complaint;
-  each keeps its own program counter.
+  each keeps its own instruction pointer.
 
 Code outside any section lands in a nameless default section starting at address 0. That is fine for
 scratch and experiments, but it can never be saved - anything you want out of the assembler needs a named
@@ -207,6 +212,10 @@ workflow. Assemble the code at its *runtime* address in its own section, then sp
 loadable section behind a copy-down stub:
 
 ```
+SECTION Code, org = &400        ; assembled for &400, carried inside GAME
+    ; ...
+ENDSECTION
+
 SECTION Loader, org = &1200, filename = "GAME", exec = entry
 .payload
     INCSECTION Code
@@ -220,10 +229,6 @@ SECTION Loader, org = &1200, filename = "GAME", exec = entry
     INC loop+2 : INC loop+5
     DEX : BNE loop
     JMP codeentry
-ENDSECTION
-
-SECTION Code, org = &400        ; assembled for &400, carried inside GAME
-    ; ...
 ENDSECTION
 ```
 
@@ -243,9 +248,9 @@ BASIC 4 itself would store it - handy for a loader that sets the mode and runs t
 ```
 SECTION loader, org=&1900, filename="Loader"
 BASIC
-10REM My loader
-20MODE 7
-30*RUN MAIN
+   10REM My loader
+   20MODE 7
+   30*RUN MAIN
 ENDBASIC
 ENDSECTION
 ```
@@ -405,7 +410,7 @@ rules, in the order they apply:
 1. A range becomes its list of elements.
 2. A scalar pairs with *everything* in the other side, however deep.
 3. When both sides are lists of the *same* depth, elements pair off - lengths must match, except that a
-   length-1 list repeats itself.
+   length 1 list repeats itself.
 4. When one side is *shallower*, it is held whole and applied to each element of the deeper side.
 
 ```

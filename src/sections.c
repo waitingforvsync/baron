@@ -27,7 +27,8 @@ void sections_reset(sections *sec)
     sec->nodes = rc_array_section_make(sections_nodes_reserve, sec->arena);
     rc_array_section_push(                                   // the default section is index 0
         &sec->nodes,
-        (section) { .code = rc_array_bytes_make(section_code_reserve, sec->arena) },
+        (section) { .guard = RC_INDEX_NONE,
+                    .code = rc_array_bytes_make(section_code_reserve, sec->arena) },
         sec->arena);
     sec->splices = (rc_array_splice) {0};   // this pass's records; the arena behind them was just reset
 }
@@ -80,7 +81,8 @@ uint32_t sections_make(sections *sec, rc_str name)
     }
     return rc_array_section_push(
         &sec->nodes,
-        (section) { .name = name, .code = rc_array_bytes_make(section_code_reserve, sec->arena) },
+        (section) { .name = name, .guard = RC_INDEX_NONE,
+                    .code = rc_array_bytes_make(section_code_reserve, sec->arena) },
         sec->arena);
 }
 
@@ -120,6 +122,18 @@ bool sections_cmos(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
     return RC_AT(sec->nodes, id).cmos;
+}
+
+void sections_set_guard(sections *sec, uint32_t id, uint32_t addr)
+{
+    RC_ASSERT(sec != NULL);
+    RC_AT(sec->nodes, id).guard = addr;
+}
+
+uint32_t sections_guard(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+    return RC_AT(sec->nodes, id).guard;
 }
 
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
@@ -394,6 +408,23 @@ RC_TEST(sections, emit_org_reset)
     sections_reset(&sec);
     RC_CHECK(sections_pc(&sec, 0), ==, 0u);
     RC_CHECK(sections_code(&sec, 0).num, ==, 0u);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, guard_field)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+    sections_reset(&sec);
+
+    // Every section starts unguarded - the default and named ones alike.
+    RC_CHECK(sections_guard(&sec, 0), ==, RC_INDEX_NONE);
+    uint32_t s = sections_make(&sec, RC_STR("code"));
+    RC_CHECK(sections_guard(&sec, s), ==, RC_INDEX_NONE);
+    sections_set_guard(&sec, s, 0x3000);
+    RC_CHECK(sections_guard(&sec, s), ==, 0x3000u);
 
     rc_arena_deinit(&arena);
 }
