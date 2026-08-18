@@ -1,7 +1,7 @@
 # Zero page allocation #
 
-Zero page is a valuable but limited resource on the 6502. Instructions that reach it are a byte shorter and a
-cycle faster, and the indirect addressing modes (`(ptr),Y` and friends) live there and nowhere else. In a
+Zero page is a valuable but limited resource on the 6502. It's typically used as if it were an extended
+register file as it's faster to access, and is the only way to access values through a pointer. In a
 complicated program, hand-managing which zero page locations a routine uses as inputs, outputs or scratch
 space is exactly the sort of fiddly bookkeeping we would rather a tool did for us.
 
@@ -104,11 +104,7 @@ vhi = v + 1                 ; aliases carry the identity: LDA vhi is a use of v
     PRINT "v lives at ", v  ; PRINT is invoked after allocation, so this is the real address
 ```
 
-You can even dispatch through a variable used as a vector - `JMP (vec)` on a `ZPAUTO2` - which Baron
-treats as computed flow through a cell it owns: annotate it with `CANJUMP`, exactly like any jump table
-(see [Annotations](#annotations)).
-
-What you cannot do is make the program's *shape* depend on an address: a condition (`IF v <> w`), a
+What you can't do is make the program's *shape* depend on an address: a condition (`IF v <> w`), a
 count (`SKIP v`, `ZPAUTO v, q`), a loop bound (`FOR n = v..8`), a section's `org`. Those need a number
 before allocation exists, and Baron refuses them at the line - `Cannot use a ZPAUTO address here: 'v'`.
 The only arithmetic an address supports is adding or subtracting an integer (that is how `ptr+1` works);
@@ -116,7 +112,7 @@ anything else - multiply, compare, a range - is a type error.
 
 ## What you can rely on ##
 
-The promises, briefly - each proved from your actual code, not guessed:
+These are the promises Baron makes, based on a rigorous analysis of your code:
 
 - **Lifetime, not declaration, decides sharing.** Three variables that are used in strict succession
   can live in a single byte; two that overlap need two, even if you only ever touch one at a time.
@@ -138,6 +134,8 @@ The promises, briefly - each proved from your actual code, not guessed:
   (paged banks), which happily share zero-page bytes since they are never resident together. Just name
   your cross-section entry points: a `JSR label` finds the right bank; a bare `JSR &8003` is assumed to
   leave the program.
+- **Correctness**. Baron will be conservative if necessary in order to not generate broken code. If it
+  needs the user to annotate code which it can't reason about, it will ask for it.
 
 ## Subroutine inputs and outputs ##
 
