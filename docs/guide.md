@@ -15,6 +15,7 @@ switch, keyword and operator live in the [reference](reference.md).
 - [Labels and scopes](#labels-and-scopes)
 - [Sections](#sections)
 - [Includes](#other-includes)
+- [Inline BASIC](#inline-basic)
 - [Expressions](#expressions)
 - [Lists and ranges](#lists-and-ranges)
 - [Subscripts](#subscripts)
@@ -233,6 +234,34 @@ be defined before or after the splice, in the same file or not.
 
 `INCLUDE "file.6502"` splices another source file in textually (paths resolve relative to the including
 file), and `INCBIN "file.dat"` splices a binary file's bytes into the output.
+
+## Inline BASIC ##
+
+`BASIC` ... `ENDBASIC` drops a BBC BASIC program straight into the output, tokenised byte-for-byte as
+BASIC 4 itself would store it - handy for a loader that sets the mode and runs the main binary:
+
+```
+SECTION loader, org=&1900, filename="Loader"
+BASIC
+10REM My loader
+20MODE 7
+30*RUN MAIN
+ENDBASIC
+ENDSECTION
+```
+
+Each line starts with a decimal line number (0 to 32767) and runs to the end of the physical line. The
+whole line belongs to BASIC: `:` separates BASIC statements there and `;` is a print separator, not a
+Baron comment. The tokeniser is the ROM's own algorithm, quirks included - keywords must be uppercase
+(`print` is a variable name, exactly as it would be on the Beeb), abbreviations like `P.` expand in the
+ROM's order, line numbers after `GOTO` and friends get the compact three-byte encoding, and `REM`,
+`DATA`, strings and `*` commands pass through untouched. `ENDBASIC` finishes the program with its
+`&0D &FF` terminator, so the emitted bytes, loaded at `PAGE`, are a complete program ready to `RUN`.
+
+Blank lines and Baron comment lines may sit between BASIC lines; anything else inside the block is an
+error. Lines are emitted exactly in the order written - Baron does not sort them, so keep the numbers
+ascending if you want `GOTO` and `LIST` to behave - and a line whose tokenised record would pass 255
+bytes is refused.
 
 ## Expressions ##
 

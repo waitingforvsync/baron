@@ -43,6 +43,9 @@ rc_str error_type_name(error_type e)
         case error_type_expected_function_params:return RC_STR("Expected a parameter list");
         case error_type_unclosed_function:       return RC_STR("Unclosed FUNCTION");
         case error_type_bad_print_channel:       return RC_STR("Bad PRINT channel (expected #0-#9 and a comma)");
+        case error_type_unclosed_basic:          return RC_STR("Unclosed BASIC");
+        case error_type_unexpected_endbasic:     return RC_STR("ENDBASIC without a BASIC");
+        case error_type_expected_basic_line:     return RC_STR("Expected a BASIC line or ENDBASIC");
         case error_type_bad_addressing_mode:     return RC_STR("No such addressing mode");
         case error_type_needs_cmos:              return RC_STR("CMOS-only instruction (needs cmos=TRUE on the section)");
         case error_type_operand_not_numeric:     return RC_STR("Operand is not a number");
@@ -50,6 +53,8 @@ rc_str error_type_name(error_type e)
         case error_type_branch_out_of_range:     return RC_STR("Branch out of range: % bytes");
         case error_type_skip_backwards:          return RC_STR("Cannot move the program counter backwards");
         case error_type_bad_alignment:           return RC_STR("Alignment must be at least 1");
+        case error_type_bad_basic_line_number:   return RC_STR("BASIC line number must be 0 to 32767");
+        case error_type_basic_line_too_long:     return RC_STR("BASIC line longer than 255 bytes");
         case error_type_reserve_not_zeropage:    return RC_STR("ZPRESERVE address outside the zero page");
         case error_type_var_without_reserve:     return RC_STR("ZPAUTO needs a prior ZPRESERVE");
         case error_type_zeropage_full:           return RC_STR("No free zero-page byte for ZPAUTO variable: '%'");

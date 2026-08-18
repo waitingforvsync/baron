@@ -51,6 +51,9 @@ typedef enum error_type {
     error_type_expected_function_params,// a malformed parameter list (no '(', or a non-identifier parameter)
     error_type_unclosed_function,       // a FUNCTION body reached EOF / a foreign closer with no '=' return
     error_type_bad_print_channel,       // PRINT's '#' not followed by a single digit 0-9 and a comma
+    error_type_unclosed_basic,          // BASIC reached a foreign closer or end of input before ENDBASIC
+    error_type_unexpected_endbasic,     // ENDBASIC with no BASIC to match
+    error_type_expected_basic_line,     // a statement inside BASIC that is neither a numbered line nor ENDBASIC
 
     // Semantic: the statement parses, but its meaning is wrong.
     error_type_bad_addressing_mode,   // the mnemonic has no encoding for that operand shape
@@ -60,6 +63,8 @@ typedef enum error_type {
     error_type_branch_out_of_range,
     error_type_skip_backwards,        // SKIP / SKIPTO would move the pointer backwards
     error_type_bad_alignment,         // ALIGN n with n < 1
+    error_type_bad_basic_line_number, // a BASIC line number past 32767 (the ROM's enterable maximum)
+    error_type_basic_line_too_long,   // a tokenised BASIC line record past 255 bytes (its length is one byte)
     error_type_reserve_not_zeropage,  // a ZPRESERVE address falls outside the zero page ($00-$FF)
     error_type_var_without_reserve,   // a ZPAUTO1/ZPAUTO2 declared with no ZPRESERVE enabling the feature first
     error_type_zeropage_full,         // no free reserved byte to place a ZPAUTO variable (a spill)

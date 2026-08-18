@@ -1,0 +1,359 @@
+SECTION Boot, filename="!BOOT", exec=&FFFFFFFF
+  0000  2A 42 41 53...  EQUS "*BASIC", 13
+  0007  43 48 41 49...  EQUS "CHAIN""LOADER""", 13
+ENDSECTION
+
+SECTION Loader, filename="LOADER", org=&FFFF1900, exec=&FFFF8023
+BASIC
+  1900  0D 00 0A 0D...  10Y%=PAGE DIV256
+  190D  0D 00 14 07...  20CALLTOP
+  1914  0D FF           ENDBASIC
+  1916  A2 1B           LDX #LO(oscli)
+  1918  4C F7 FF        JMP &FFF7
+.oscli
+  191B  2F 44 45 4D...  EQUS "/DEMO", 13
+ENDSECTION
+
+numdots			= 180
+radius			= 110
+timerlength		= 64*8*27
+debugrasters	= FALSE
+multab          = &3900
+mulnegtab       = &3B00
+olddotaddrlo    = &3D00
+olddotaddrhi    = &3E00
+olddotaddry     = &3F00
+screenbase      = &4000
+SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "DEMO"
+vsync = &FF
+multabptr = &00 [auto]
+mulnegtabptr = &02 [auto]
+angle = &04 [auto]
+speed = &06 [auto]
+.start
+{
+xpos = &08 [auto]
+colour = &0A [auto]
+write = &08 [auto]
+behindflag = &0B [auto]
+.mainloop
+  1100  A2 00           LDX #0
+.plotdotloop
+  1102  18              CLC
+  1103  BD 00 15        LDA dotx,X
+  1106  65 05           ADC angle+1
+  1108  A8              TAY
+  1109  18              CLC
+  110A  69 40           ADC #64
+  110C  85 0B           STA behindflag
+  110E  B9 00 13        LDA sintable,Y
+  1111  85 00           STA multabptr
+  1113  49 FF           EOR #255
+  1115  85 02           STA mulnegtabptr
+  1117  B9 00 14        LDA coltable,Y
+  111A  85 0A           STA colour
+  111C  C0 80           CPY #128
+  111E  BC 00 17        LDY dotr,X
+  1121  B0 08           BCS negativesine
+  1123  38              SEC
+  1124  B1 00           LDA (multabptr),Y
+  1126  F1 02           SBC (mulnegtabptr),Y
+  1128  4C 2F 11        JMP positivesine
+.negativesine
+  112B  B1 02           LDA (mulnegtabptr),Y
+  112D  F1 00           SBC (multabptr),Y
+.positivesine
+  112F  18              CLC
+  1130  69 40           ADC #64
+  1132  85 08           STA xpos
+  1134  29 01           AND #1
+  1136  05 0A           ORA colour
+  1138  A8              TAY
+  1139  B9 FD 11        LDA colours,Y
+  113C  85 0A           STA colour
+  113E  A5 08           LDA xpos
+  1140  29 FE           AND #&FE
+  1142  0A              ASL A
+  1143  0A              ASL A
+  1144  85 08           STA write
+  1146  9D 00 3D        STA olddotaddrlo,X
+  1149  08              PHP
+  114A  BD 00 16        LDA doty,X
+  114D  4A              LSR A
+  114E  4A              LSR A
+  114F  29 FE           AND #&FE
+  1151  28              PLP
+  1152  69 40           ADC #HI(screenbase)
+  1154  85 09           STA write+1
+  1156  9D 00 3E        STA olddotaddrhi,X
+  1159  BD 00 16        LDA doty,X
+  115C  29 07           AND #7
+  115E  9D 00 3F        STA olddotaddry,X
+  1161  A8              TAY
+  1162  A5 0A           LDA colour
+  1164  11 08           ORA (write),Y
+  1166  91 08           STA (write),Y
+  1168  24 0B           BIT behindflag
+  116A  30 0F           BMI behind
+  116C  88              DEY
+  116D  10 06           BPL @+
+  116F  C6 09           DEC write+1
+  1171  C6 09           DEC write+1
+  1173  A0 07           LDY #7
+.@
+  1175  A5 0A           LDA colour
+  1177  11 08           ORA (write),Y
+  1179  91 08           STA (write),Y
+.behind
+  117B  E8              INX
+  117C  E0 B4           CPX #numdots
+  117E  D0 82           BNE plotdotloop
+.waitforvsync
+.waitingforvsync
+  1180  A5 FF           LDA vsync
+  1182  F0 FC           BEQ waitingforvsync
+  1184  C9 02           CMP #2
+  1186  B0 68           BCS exit
+  1188  A9 00           LDA #0
+  118A  85 FF           STA vsync
+  118C  AA              TAX
+.eraseloop
+  118D  BC 00 3D        LDY olddotaddrlo,X
+  1190  84 08           STY write
+  1192  BC 00 3E        LDY olddotaddrhi,X
+  1195  84 09           STY write+1
+  1197  BC 00 3F        LDY olddotaddry,X
+  119A  91 08           STA (write),Y
+  119C  88              DEY
+  119D  10 06           BPL erasesamerow
+  119F  C6 09           DEC write+1
+  11A1  C6 09           DEC write+1
+  11A3  A0 07           LDY #7
+.erasesamerow
+  11A5  91 08           STA (write),Y
+  11A7  E8              INX
+  11A8  E0 B4           CPX #numdots
+  11AA  D0 E1           BNE eraseloop
+  11AC  18              CLC
+  11AD  A5 04           LDA angle
+  11AF  65 06           ADC speed
+  11B1  85 04           STA angle
+  11B3  A5 05           LDA angle+1
+  11B5  65 07           ADC speed+1
+  11B7  85 05           STA angle+1
+  11B9  A9 42           LDA #66
+  11BB  8D 4F FE        STA &FE4F
+  11BE  AD 4F FE        LDA &FE4F
+  11C1  10 0B           BPL @+
+  11C3  18              CLC
+  11C4  A5 06           LDA speed
+  11C6  69 10           ADC #16
+  11C8  85 06           STA speed
+  11CA  90 02           BCC @+
+  11CC  E6 07           INC speed+1
+.@
+  11CE  A9 61           LDA #97
+  11D0  8D 4F FE        STA &FE4F
+  11D3  AD 4F FE        LDA &FE4F
+  11D6  10 0B           BPL @+
+  11D8  38              SEC
+  11D9  A5 06           LDA speed
+  11DB  E9 10           SBC #16
+  11DD  85 06           STA speed
+  11DF  B0 02           BCS @+
+  11E1  C6 07           DEC speed+1
+.@
+  11E3  A9 70           LDA #112
+  11E5  8D 4F FE        STA &FE4F
+  11E8  AD 4F FE        LDA &FE4F
+  11EB  30 03           BMI exit
+  11ED  4C 00 11        JMP mainloop
+}
+.exit
+  11F0  6C FC FF        JMP (&FFFC)
+.irq
+  11F3  A9 40           LDA #&40
+  11F5  8D 4D FE        STA &FE4D
+  11F8  E6 FF           INC vsync
+  11FA  A5 FC           LDA &FC
+  11FC  40              RTI
+.colours
+  11FD  00 00           EQUB &00, &00
+  11FF  02 01           EQUB &02, &01
+  1201  08 04           EQUB &08, &04
+  1203  0A 05           EQUB &0A, &05
+  1205  20 10           EQUB &20, &10
+  1207  22 11           EQUB &22, &11
+  1209  28 14           EQUB &28, &14
+  120B  2A 15           EQUB &2A, &15
+  120D  00 00 00 00...  ALIGN &100
+.sintable
+  1300  00 06 0D 13...  EQUB ABS(SIN((0..255) / 128 * PI)) * 255 + 0.5
+  1400                  ALIGN &100
+.coltable
+  1400  08 08 08 08...  EQUB INT((SIN((0..255) / 128 * PI) + 1) / 2.0001 * 7 + 1) * 2
+  1500                  ALIGN &100
+.dotx
+  1500  32 9C 10 12...  EQUB RND(FULL(numdots, 256))
+  15B4  00 00 00 00...  ALIGN &100
+.doty
+  1600  12 14 16 17...  EQUB ball_ypos(0..numdots-1)
+  16B4  00 00 00 00...  ALIGN &100
+.dotr
+  1700  06 0B 0E 11...  EQUB ball_radius(0..numdots-1)
+.entry
+{
+sqr = &04 [auto]
+delta = &06 [auto]
+  17B4  78              SEI
+  17B5  A2 FF           LDX #&FF
+  17B7  9A              TXS
+  17B8  8E 44 FE        STX &FE44
+  17BB  8E 45 FE        STX &FE45
+  17BE  A9 7F           LDA #&7F
+  17C0  8D 4E FE        STA &FE4E
+  17C3  8D 43 FE        STA &FE43
+  17C6  A9 C0           LDA #&C0
+  17C8  8D 4E FE        STA &FE4E
+  17CB  A9 40           LDA #&40
+  17CD  8D 4B FE        STA &FE4B
+  17D0  A9 00           LDA #&00
+  17D2  8D 4C FE        STA &FE4C
+  17D5  A9 0F           LDA #&0F
+  17D7  8D 42 FE        STA &FE42
+  17DA  A9 03           LDA #3
+  17DC  8D 40 FE        STA &FE40
+  17DF  A2 00           LDX #0
+  17E1  86 04           STX sqr
+  17E3  86 05           STX sqr+1
+  17E5  86 06           STX delta
+  17E7  86 00           STX multabptr
+  17E9  86 02           STX mulnegtabptr
+  17EB  A9 39           LDA #HI(multab)
+  17ED  85 01           STA multabptr+1
+  17EF  A9 3B           LDA #HI(mulnegtab)
+  17F1  85 03           STA mulnegtabptr+1
+  17F3  A0 02           LDY #2
+.multableloop
+  17F5  A5 05           LDA sqr+1
+.tabstore
+  17F7  9D 00 39        STA multab,X
+  17FA  18              CLC
+  17FB  A5 04           LDA sqr
+  17FD  65 06           ADC delta
+  17FF  85 04           STA sqr
+  1801  90 02           BCC @+
+  1803  E6 05           INC sqr+1
+.@
+  1805  8A              TXA
+  1806  4A              LSR A
+  1807  B0 02           BCS @+
+  1809  E6 06           INC delta
+.@
+  180B  E8              INX
+  180C  D0 E7           BNE multableloop
+  180E  EE F9 17        INC tabstore+2
+  1811  88              DEY
+  1812  D0 E1           BNE multableloop
+  1814  88              DEY
+.loop2
+  1815  BD 00 39        LDA multab,X
+  1818  99 00 3B        STA mulnegtab,Y
+  181B  BD 01 39        LDA multab+1,X
+  181E  9D 00 3C        STA mulnegtab+256,X
+  1821  88              DEY
+  1822  E8              INX
+  1823  D0 F0           BNE loop2
+  1825  A2 40           LDX #HI(screenbase)
+  1827  A9 00           LDA #0
+  1829  A8              TAY
+.clearloop
+  182A  99 00 40        STA screenbase,Y
+  182D  C8              INY
+  182E  D0 FA           BNE clearloop
+  1830  EE 2C 18        INC clearloop+2
+  1833  CA              DEX
+  1834  D0 F4           BNE clearloop
+  1836  85 04           STA angle
+  1838  85 05           STA angle+1
+  183A  85 FF           STA vsync
+  183C  85 06           STA speed
+  183E  A9 01           LDA #1
+  1840  85 07           STA speed+1
+  1842  A2 0D           LDX #13
+.crtcloop
+  1844  8E 00 FE        STX &FE00
+  1847  BD 9C 18        LDA crtcregs,X
+  184A  8D 01 FE        STA &FE01
+  184D  CA              DEX
+  184E  10 F4           BPL crtcloop
+  1850  A9 F4           LDA #&F4
+  1852  8D 20 FE        STA &FE20
+  1855  A2 0F           LDX #15
+.palloop
+  1857  BD AA 18        LDA paldata,X
+  185A  8D 21 FE        STA &FE21
+  185D  09 80           ORA #&80
+  185F  8D 21 FE        STA &FE21
+  1862  CA              DEX
+  1863  10 F2           BPL palloop
+  1865  A9 02           LDA #2
+  1867  8D 4D FE        STA &FE4D
+.synctimer
+  186A  2C 4D FE        BIT &FE4D
+  186D  F0 FB           BEQ synctimer
+  186F  8D 4D FE        STA &FE4D
+  1872  A9 00           LDA #LO(timerlength)
+  1874  8D 44 FE        STA &FE44
+  1877  A9 36           LDA #HI(timerlength)
+  1879  8D 45 FE        STA &FE45
+  187C  A9 FE           LDA #LO(312*64-2)
+  187E  8D 46 FE        STA &FE46
+  1881  A9 4D           LDA #HI(312*64-2)
+  1883  8D 47 FE        STA &FE47
+  1886  A9 F3           LDA #LO(irq)
+  1888  8D 04 02        STA &204
+  188B  A9 11           LDA #HI(irq)
+  188D  8D 05 02        STA &205
+  1890  58              CLI
+.initialwait
+  1891  A5 FF           LDA vsync
+  1893  F0 FC           BEQ initialwait
+  1895  A9 00           LDA #0
+  1897  85 FF           STA vsync
+  1899  4C 00 11        JMP start
+}
+.crtcregs
+  189C  7F              EQUB 127
+  189D  40              EQUB 64
+  189E  5B              EQUB 91
+  189F  28              EQUB 40
+  18A0  26              EQUB 38
+  18A1  00              EQUB 0
+  18A2  20              EQUB 32
+  18A3  22              EQUB 34
+  18A4  00              EQUB 0
+  18A5  07              EQUB 7
+  18A6  20              EQUB 32
+  18A7  08              EQUB 8
+  18A8  08              EQUB HI(&4000/8)
+  18A9  00              EQUB LO(&4000/8)
+PAL_black	= (0 EOR 7)
+PAL_blue	= (4 EOR 7)
+PAL_red		= (1 EOR 7)
+PAL_magenta = (5 EOR 7)
+PAL_green	= (2 EOR 7)
+PAL_cyan	= (6 EOR 7)
+PAL_yellow	= (3 EOR 7)
+PAL_white	= (7 EOR 7)
+.paldata
+  18AA  07              EQUB &00 + PAL_black
+  18AB  13              EQUB &10 + PAL_blue
+  18AC  26              EQUB &20 + PAL_red
+  18AD  32              EQUB &30 + PAL_magenta
+  18AE  45              EQUB &40 + PAL_green
+  18AF  51              EQUB &50 + PAL_cyan
+  18B0  64              EQUB &60 + PAL_yellow
+  18B1  70              EQUB &70 + PAL_white
+ENDSECTION
+

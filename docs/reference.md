@@ -62,6 +62,7 @@ to the end of the line.
 | `SKIPTO addr` | Pad with zeroes up to `addr` (the address only ever moves forwards). |
 | `ALIGN n` | Pad with zeroes to the next multiple of `n`. |
 | `INCBIN "file"` | Splice a binary file's bytes into the output. Path is relative to the including source file. |
+| `BASIC` ... `ENDBASIC` | Emit an inline BBC BASIC program, tokenised exactly as BASIC 4 stores it (uppercase keywords only, `&8D` line-number encoding, `&0D &FF` terminator). Each line starts with a decimal line number 0-32767 and runs to the end of the physical line; between lines only blanks and comments are allowed. Lines emit in written order and a record past 255 bytes is refused. |
 
 ### Structure and control ###
 

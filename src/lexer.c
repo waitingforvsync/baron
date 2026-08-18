@@ -88,7 +88,7 @@ static uint32_t skip_comment(rc_str text, uint32_t pos)
     return pos;
 }
 
-static uint32_t skip_whitespace(rc_str text, uint32_t pos)
+uint32_t lexer_skip_whitespace(rc_str text, uint32_t pos)
 {
     // Skip whitespace and any trailing comments
     while (!is_eof(text, pos) && is_whitespace(at(text, pos))) {
@@ -115,7 +115,7 @@ static lexer_result lex_terminator(rc_str text, uint32_t pos)
         if (at(text, pos) == ':') {
             only_newlines = false;
         }
-        pos = skip_whitespace(text, pos + 1);
+        pos = lexer_skip_whitespace(text, pos + 1);
     }
     while (!is_eof(text, pos) && is_terminator(at(text, pos)));
 
@@ -310,7 +310,7 @@ lexer_result lexer_next(rc_str text, uint32_t pos, token_table tt)
     RC_ASSERT(rc_view_token_is_valid(tt));
 
     // First skip over whitespace and any trailing comment
-    pos = skip_whitespace(text, pos);
+    pos = lexer_skip_whitespace(text, pos);
 
     // If reached end of file, return a terminator and don't advance the pos
     if (is_eof(text, pos)) {
@@ -380,6 +380,14 @@ lexer_result lexer_next(rc_str text, uint32_t pos, token_table tt)
 bool lexer_at_end(rc_str text, uint32_t pos)
 {
     return is_eof(text, pos);
+}
+
+uint32_t lexer_line_end(rc_str text, uint32_t pos)
+{
+    while (!is_eof(text, pos) && !is_newline(at(text, pos))) {
+        pos++;
+    }
+    return pos;
 }
 
 
@@ -535,6 +543,28 @@ RC_TEST(lexer, whitespace_and_comments)
     r = lexer_next(s, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_binary_op); p = r.next;
     r = lexer_next(s, p, lexer_tt); RC_CHECK(r.token.numeric_literal.value, ==, 2.0); p = r.next;
     r = lexer_next(s, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_terminator);
+}
+
+RC_TEST(lexer, line_end)
+{
+    // A raw scan to the next '\n': nothing else ends a line - not '\r', not ':',
+    // not a comma - and a pos already on the '\n' stays put.
+    rc_str s = RC_STR("10PRINT \"A:B\"\r\n20GOTO 10");
+    RC_CHECK(lexer_line_end(s, 0),  ==, 14u);
+    RC_CHECK(lexer_line_end(s, 14), ==, 14u);
+    RC_CHECK(lexer_line_end(s, 15), ==, s.len);      // last line: no '\n' -> text.len
+    RC_CHECK(lexer_line_end(RC_STR(""), 0), ==, 0u);
+}
+
+RC_TEST(lexer, skip_whitespace)
+{
+    // Blanks and a trailing comment are skipped; the comment's newline is left (it is terminator
+    // territory), as are ':' and any actual token.
+    RC_CHECK(lexer_skip_whitespace(RC_STR("  \t42"), 0), ==, 3u);
+    RC_CHECK(lexer_skip_whitespace(RC_STR("  ; note\n42"), 0), ==, 8u);
+    RC_CHECK(lexer_skip_whitespace(RC_STR(" :42"), 0), ==, 1u);
+    RC_CHECK(lexer_skip_whitespace(RC_STR("42"), 0), ==, 0u);
+    RC_CHECK(lexer_skip_whitespace(RC_STR("  "), 0), ==, 2u);
 }
 
 #endif // BARON_TESTS

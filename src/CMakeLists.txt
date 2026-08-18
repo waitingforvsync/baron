@@ -10,6 +10,8 @@ add_executable(baron
     token.h
     lexer.c
     lexer.h
+    basic.c
+    basic.h
     cursor.h
     scopes.c
     scopes.h

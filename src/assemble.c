@@ -2,6 +2,7 @@
 
 #include "opcodes.h"
 #include "lexer.h"
+#include "basic.h"               // the BBC BASIC 4 line tokeniser behind BASIC ... ENDBASIC
 #include "expression.h"
 #include "cfg.h"                 // post-convergence zero-page allocation: recover the CFG...
 #include "liveness.h"            // ...run liveness over it...
@@ -45,6 +46,7 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
 static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch);
 static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -264,6 +266,7 @@ typedef enum closer_kind {
     closer_next,
     closer_endmacro,
     closer_endsection,
+    closer_endbasic,
 } closer_kind;
 
 // Pre-combined: every mnemonic (its own lexeme type, carrying the id) plus the statement
@@ -362,6 +365,7 @@ static const token statement_token_entries[] = {
     {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
     {RC_STR("incbin"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incbin}}},
     {RC_STR("incsection"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incsection}}},
+    {RC_STR("basic"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_basic}}},   // inline BBC BASIC lines
     {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
     {RC_STR("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
     {RC_STR("print"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_print}}},
@@ -377,6 +381,7 @@ static const token statement_token_entries[] = {
     {RC_STR("next"),    {.type = lexeme_type_closer, .closer = {closer_next,     error_type_unexpected_next}}},
     {RC_STR("endmacro"),{.type = lexeme_type_closer, .closer = {closer_endmacro, error_type_unexpected_endmacro}}},
     {RC_STR("endsection"),{.type = lexeme_type_closer, .closer = {closer_endsection, error_type_unexpected_endsection}}},
+    {RC_STR("endbasic"),{.type = lexeme_type_closer, .closer = {closer_endbasic, error_type_unexpected_endbasic}}},
     {RC_STR("}"),       {.type = lexeme_type_closer, .closer = {closer_brace,    error_type_unexpected_close_brace}}},
 };
 
@@ -742,6 +747,81 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         return fold(body, require_separator(b, cursor_at(at, body.next)));
     }
     return fold(body, syntax_error(b, error_type_unclosed_section, cursor_at(at, body.next)));   // a foreign closer / EOF
+}
+
+// BASIC ... ENDBASIC - an inline BBC BASIC program. Each numbered line is tokenised byte-for-byte as
+// the BASIC 4 ROM would store it (basic.h has the algorithm) and emitted into the current section;
+// ENDBASIC finishes the program with its 0D FF terminator. A line inside the block either starts
+// with a decimal line number - the WHOLE line then belongs to the tokeniser, bypassing the lexer, so
+// ':' and ';' are BASIC text there rather than Baron's separator and comment - or it is blank / a
+// comment line / ENDBASIC; any other statement is refused (interspersing assembly among the lines is
+// a possible later extension). The emitted bytes are pure text, identical every pass, so the block
+// never disturbs convergence; a dead branch walks the lines to find its ENDBASIC and emits nothing.
+static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) scope;
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    // BASIC takes no operands. The BASIC line at the margin, framing what follows like a SECTION.
+    parse_result acc = require_separator(b, at);
+    if (acc.fatal) {
+        return acc;
+    }
+    verbose_text_line(b, flags, stmt, at.pos, 0, verbose_text_margin);
+
+    while (true) {
+        // A statement starting with a digit (past any indent or comment, the lexer's own notion of
+        // blank space) is a BASIC line; nothing else in Baron begins with one, so the peek cannot
+        // misfire. The peek comes before any lexing because the lexer must not see the line itself -
+        // "10PRINT "A:B"" is one opaque span to Baron.
+        uint32_t start = lexer_skip_whitespace(src, acc.next);
+        if (start < src.len && src.data[start] >= '0' && src.data[start] <= '9') {
+            uint32_t line_end   = lexer_line_end(src, start);
+            cursor   line_stmt  = cursor_at(at, start);
+            uint32_t pc0        = sections_pc(&b->sections, section);
+            uint32_t code0      = sections_code(&b->sections, section).num;
+            if (flags.active) {
+                basic_line_result line = basic_tokenise_line(rc_str_substr(src, start, line_end - start), &scratch);
+                if (line.error != error_type_none) {
+                    // A bad line number / overlong line: recoverable, and skipping the record is
+                    // pass-stable because the text never depends on a symbol.
+                    semantic_error(b, flags, line.error, line_stmt);
+                }
+                for (uint32_t i = 0; i < line.bytes.num; i++) {
+                    sections_emit_u8(&b->sections, section, rc_view_bytes_get(line.bytes, i));
+                }
+            }
+            // The listing dumps the whole record from its 0D (a dropped erroring line shows an
+            // empty byte field).
+            verbose_code_line(b, flags, line_stmt, line_end, section, pc0, code0);
+            acc.next = line_end;   // the newline is the next iteration's terminator lexeme
+            continue;
+        }
+
+        lexer_result lr = lexer_next(src, acc.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_terminator) {
+            if (lexer_at_end(src, lr.next)) {
+                return fold(acc, syntax_error(b, error_type_unclosed_basic, cursor_at(at, acc.next)));
+            }
+            acc.next = lr.next;   // a blank or comment line between BASIC lines
+            continue;
+        }
+        if (lr.token.type == lexeme_type_closer) {
+            if (lr.token.closer.id != closer_endbasic) {
+                return fold(acc, syntax_error(b, error_type_unclosed_basic, cursor_at(at, acc.next)));
+            }
+            uint32_t pc0   = sections_pc(&b->sections, section);
+            uint32_t code0 = sections_code(&b->sections, section).num;
+            if (flags.active) {
+                sections_emit_u8(&b->sections, section, 0x0D);
+                sections_emit_u8(&b->sections, section, 0xFF);   // "<cr> FF": the ROM's program-end marker
+            }
+            verbose_code_line(b, flags, cursor_at(at, acc.next), lr.next, section, pc0, code0);
+            acc.next = lr.next;
+            return fold(acc, require_separator(b, cursor_at(at, acc.next)));
+        }
+        return fold(acc, syntax_error(b, error_type_expected_basic_line, cursor_at(at, acc.next)));
+    }
 }
 
 // Add one ZPRESERVE value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
@@ -3384,6 +3464,78 @@ RC_TEST_STEP(assemble, incsection_listing_line, fix)
                     "ENDSECTION\n"
                     "\n"));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xA9, 0x12}, 2));
+    fix->desc.verbose = false;
+}
+
+RC_TEST_STEP(assemble, basic_block_emits_program, fix)
+{
+    // An empty block is the ROM's null program; numbered lines become full records (header, tokens,
+    // patched-in length) and ENDBASIC closes with the 0D FF terminator.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\nENDBASIC"), (uint8_t[]) {0x0D, 0xFF}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\n10PRINT\n20GOTO 10\nENDBASIC"),
+                          (uint8_t[]) {0x0D, 0x00, 0x0A, 0x05, 0xF1,
+                                       0x0D, 0x00, 0x14, 0x0A, 0xE5, 0x20, 0x8D, 0x54, 0x4A, 0x40,
+                                       0x0D, 0xFF}, 17));
+    // Blank lines and Baron comment lines between BASIC lines vanish (the terminator coalesces
+    // them), and the block closes like any statement - a ':' can follow ENDBASIC.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\n\n; a note\n10CLS\n\nENDBASIC:NOP"),
+                          (uint8_t[]) {0x0D, 0x00, 0x0A, 0x05, 0xDB, 0x0D, 0xFF, 0xEA}, 8));
+}
+
+RC_TEST_STEP(assemble, basic_block_advances_pc, fix)
+{
+    // The records land in the section like any other emission, so a label after the block sits past
+    // the whole program (5-byte line + 2-byte terminator).
+    RC_CHECK_TRUE(ASM("BASIC\n10CLS\nENDBASIC\n.here") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(7)));
+}
+
+RC_TEST_STEP(assemble, basic_dead_branch, fix)
+{
+    // A dead branch walks the block (to find ENDBASIC) but emits nothing and raises nothing.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF FALSE\nBASIC\n10PRINT\nENDBASIC\nENDIF\nNOP"),
+                          (uint8_t[]) {0xEA}, 1));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, basic_block_errors, fix)
+{
+    // Unclosed: end of input, a foreign closer, and the '}' of an enclosing scope all mean the
+    // ENDBASIC never came.
+    RC_CHECK_TRUE(ERR("BASIC\n10PRINT") == error_type_unclosed_basic);
+    RC_CHECK_TRUE(ERR("BASIC\nENDIF") == error_type_unclosed_basic);
+    RC_CHECK_TRUE(ERR("{\nBASIC\n}") == error_type_unclosed_basic);
+    RC_CHECK_TRUE(ERR("ENDBASIC") == error_type_unexpected_endbasic);
+    // Only numbered lines (and blanks) live inside the block - assembly statements are refused.
+    RC_CHECK_TRUE(ERR("BASIC\n10REM\nLDA #42\nENDBASIC") == error_type_expected_basic_line);
+    // A bad line number is recoverable: the line is dropped, the rest of the block still parses.
+    RC_CHECK_TRUE(ERR("BASIC\n70000CLS\nENDBASIC") == error_type_bad_basic_line_number);
+}
+
+RC_TEST_STEP(assemble, basic_line_too_long, fix)
+{
+    // A single line whose record would pass 255 bytes (the length is one byte) is refused. Built
+    // with an mstr because nobody wants to read a 252-character string literal.
+    rc_arena build = rc_arena_make_default();
+    rc_mstr  src   = rc_mstr_make(1024, &build);
+    rc_mstr_append(&src, RC_STR("BASIC\n10REM"), &build);
+    rc_mstr_append_n(&src, 'A', 252, &build);
+    rc_mstr_append(&src, RC_STR("\nENDBASIC"), &build);
+    fix->r = assemble_string(&fix->desc, RC_STR("too_long"), src.view);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_basic_line_too_long);
+    rc_arena_deinit(&build);
+}
+
+RC_TEST_STEP(assemble, basic_listing, fix)
+{
+    fix->desc.verbose = true;
+    // BASIC at the margin, then each line's whole record from its 0D, and ENDBASIC's terminator.
+    RC_CHECK_TRUE(ASM("BASIC\n10CLS\n20GOTO 10\nENDBASIC") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("BASIC\n"
+                    "  0000  0D 00 0A 05...  10CLS\n"
+                    "  0005  0D 00 14 0A...  20GOTO 10\n"
+                    "  000F  0D FF           ENDBASIC\n"));
     fix->desc.verbose = false;
 }
 
