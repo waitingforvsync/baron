@@ -16,7 +16,7 @@
 
 
 static const char usage[] =
-    "usage: baron [-v] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>] [--cycle <0-99>]"
+    "usage: baron [-v] [--check] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>] [--cycle <0-99>]"
     " [-log<n> <file>] <source files>\n";
 
 // A decimal option value in [0, max], or -1 with a complaint printed. `what` names the switch.
@@ -72,6 +72,7 @@ int main(int argc, char **argv)
     // Options first. A value-taking switch as the last argument falls through to the unknown-option
     // complaint (there is no value to take), and at least one real file must remain.
     bool verbose = false;
+    bool check = false;   // --check: assemble and validate everything, write nothing
     bool inf = false;
     const char *out = NULL;
     const char *title = "";
@@ -83,6 +84,9 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) {
             verbose = true;
+        }
+        else if (strcmp(argv[i], "--check") == 0) {
+            check = true;
         }
         else if (strcmp(argv[i], "--inf") == 0) {
             inf = true;
@@ -197,8 +201,9 @@ int main(int argc, char **argv)
 
     // The -logN files: each redirected channel's accumulated text lands in its file. Same rule as the
     // output stage below - nothing is written unless every file assembled. A channel nothing printed to
-    // still writes its (empty) file: the switch asked for the file to exist.
-    if (!failed) {
+    // still writes its (empty) file: the switch asked for the file to exist. --check skips the writes
+    // (only the writes: everything above ran in full, so the diagnostics are the real ones).
+    if (!failed && !check) {
         for (uint32_t c = 0; c < baron_num_channels; c++) {
             if (log_paths[c] == NULL) {
                 continue;
@@ -221,24 +226,28 @@ int main(int argc, char **argv)
             failed = true;
         }
         else if (out == NULL) {
-            rc_str err = output_write_files(&sr.spec, inf, &cli);
-            if (err.len != 0) {
-                fprintf(stderr, "baron: %.*s\n", (int) err.len, err.data);
-                failed = true;
+            if (!check) {
+                rc_str err = output_write_files(&sr.spec, inf, &cli);
+                if (err.len != 0) {
+                    fprintf(stderr, "baron: %.*s\n", (int) err.len, err.data);
+                    failed = true;
+                }
             }
         }
         else {
             // An empty disc is still a valid disc - a bare catalogue - but it is more likely a forgotten
             // filename attribute, so say so.
-            if (sr.spec.entries.num == 0) {
+            if (sr.spec.entries.num == 0 && !check) {
                 fprintf(stderr, "baron: warning: no section carries a filename attribute; writing an empty disc image\n");
             }
+            // --check still BUILDS the image - a full disc or a bad catalogue should fail a check run -
+            // it just never lands on disk.
             disc_ssd_result d = disc_ssd_make(&sr.spec, &cli);
             if (d.error.len != 0) {
                 fprintf(stderr, "baron: %.*s\n", (int) d.error.len, d.error.data);
                 failed = true;
             }
-            else if (rc_file_save_binary(rc_str_from_cstr(out), d.image.view) != RC_FILE_OK) {
+            else if (!check && rc_file_save_binary(rc_str_from_cstr(out), d.image.view) != RC_FILE_OK) {
                 fprintf(stderr, "baron: cannot write '%s'\n", out);
                 failed = true;
             }
