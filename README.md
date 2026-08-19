@@ -34,7 +34,11 @@ Enable unit tests with the CMake variable `BARON_TESTS`. They are compiled into 
 ```
 
 ## Getting started ##
-Let me take you by the hand and lead you through the [streets](https://www.youtube.com/watch?v=NtpTx7dLeYk) of Baron. Go and check out The Baron Guide, [here](docs/guide.md). A more po-faced reference can be found [here](docs/reference.md).
+Let me take you by the hand and lead you through the [streets](https://www.youtube.com/watch?v=NtpTx7dLeYk) of Baron.
+
+Go and check out The Baron Guide, [here](docs/guide.md). A more po-faced reference can be found [here](docs/reference.md).
+
+There is a [Baron BBC Micro Assembler](https://marketplace.visualstudio.com/items?itemName=RichTalbot-Watkins.baron-vsc) extension in Visual Studio Code Marketplace, which is [developed](https://github.com/waitingforvsync/baron-vsc) in parallel with Baron.
 
 ## Why "Baron"? ##
 Since there are breaking changes to syntax and usage compared to current versions of BeebAsm, this no longer feels like a BeebAsm 2.0. So instead, with allusions to that Acorn folklore staple, the Baron of Beef pub in Cambridge, it has been retitled Baron.
