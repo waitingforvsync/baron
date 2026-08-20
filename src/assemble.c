@@ -274,115 +274,115 @@ typedef enum closer_kind {
 // '=' never start a statement, so they live in the operand / assignment tables instead
 // (operand_tokens is in opcodes.c, next to the operand parser).
 static const token statement_token_entries[] = {
-    {RC_STR("adc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_adc}}},
-    {RC_STR("and"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_and}}},
-    {RC_STR("asl"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_asl}}},
-    {RC_STR("bcc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bcc}}},
-    {RC_STR("bcs"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bcs}}},
-    {RC_STR("beq"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_beq}}},
-    {RC_STR("bit"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bit}}},
-    {RC_STR("bmi"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bmi}}},
-    {RC_STR("bne"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bne}}},
-    {RC_STR("bpl"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bpl}}},
-    {RC_STR("brk"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_brk}}},
-    {RC_STR("bvc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bvc}}},
-    {RC_STR("bvs"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bvs}}},
-    {RC_STR("clc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_clc}}},
-    {RC_STR("cld"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cld}}},
-    {RC_STR("cli"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cli}}},
-    {RC_STR("clv"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_clv}}},
-    {RC_STR("cmp"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cmp}}},
-    {RC_STR("cpx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cpx}}},
-    {RC_STR("cpy"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cpy}}},
-    {RC_STR("dec"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dec}}},
-    {RC_STR("dex"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dex}}},
-    {RC_STR("dey"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dey}}},
-    {RC_STR("eor"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_eor}}},
-    {RC_STR("inc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_inc}}},
-    {RC_STR("inx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_inx}}},
-    {RC_STR("iny"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_iny}}},
-    {RC_STR("jmp"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_jmp}}},
-    {RC_STR("jsr"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_jsr}}},
-    {RC_STR("lda"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_lda}}},
-    {RC_STR("ldx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ldx}}},
-    {RC_STR("ldy"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ldy}}},
-    {RC_STR("lsr"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_lsr}}},
-    {RC_STR("nop"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_nop}}},
-    {RC_STR("ora"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ora}}},
-    {RC_STR("pha"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_pha}}},
-    {RC_STR("php"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_php}}},
-    {RC_STR("pla"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_pla}}},
-    {RC_STR("plp"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_plp}}},
-    {RC_STR("rol"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_rol}}},
-    {RC_STR("ror"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ror}}},
-    {RC_STR("rti"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_rti}}},
-    {RC_STR("rts"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_rts}}},
-    {RC_STR("sbc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sbc}}},
-    {RC_STR("sec"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sec}}},
-    {RC_STR("sed"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sed}}},
-    {RC_STR("sei"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sei}}},
-    {RC_STR("sta"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sta}}},
-    {RC_STR("stx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_stx}}},
-    {RC_STR("sty"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sty}}},
-    {RC_STR("tax"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tax}}},
-    {RC_STR("tay"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tay}}},
-    {RC_STR("tsx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tsx}}},
-    {RC_STR("txa"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_txa}}},
-    {RC_STR("txs"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_txs}}},
-    {RC_STR("tya"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tya}}},
-    {RC_STR("bra"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bra}}},
-    {RC_STR("dea"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dea}}},
-    {RC_STR("ina"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ina}}},
-    {RC_STR("phx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_phx}}},
-    {RC_STR("phy"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_phy}}},
-    {RC_STR("plx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_plx}}},
-    {RC_STR("ply"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ply}}},
-    {RC_STR("stz"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_stz}}},
-    {RC_STR("clr"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_stz}}},
-    {RC_STR("trb"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_trb}}},
-    {RC_STR("tsb"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tsb}}},
+    {RC_STR_INIT("adc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_adc}}},
+    {RC_STR_INIT("and"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_and}}},
+    {RC_STR_INIT("asl"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_asl}}},
+    {RC_STR_INIT("bcc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bcc}}},
+    {RC_STR_INIT("bcs"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bcs}}},
+    {RC_STR_INIT("beq"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_beq}}},
+    {RC_STR_INIT("bit"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bit}}},
+    {RC_STR_INIT("bmi"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bmi}}},
+    {RC_STR_INIT("bne"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bne}}},
+    {RC_STR_INIT("bpl"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bpl}}},
+    {RC_STR_INIT("brk"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_brk}}},
+    {RC_STR_INIT("bvc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bvc}}},
+    {RC_STR_INIT("bvs"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bvs}}},
+    {RC_STR_INIT("clc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_clc}}},
+    {RC_STR_INIT("cld"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cld}}},
+    {RC_STR_INIT("cli"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cli}}},
+    {RC_STR_INIT("clv"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_clv}}},
+    {RC_STR_INIT("cmp"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cmp}}},
+    {RC_STR_INIT("cpx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cpx}}},
+    {RC_STR_INIT("cpy"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_cpy}}},
+    {RC_STR_INIT("dec"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dec}}},
+    {RC_STR_INIT("dex"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dex}}},
+    {RC_STR_INIT("dey"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dey}}},
+    {RC_STR_INIT("eor"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_eor}}},
+    {RC_STR_INIT("inc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_inc}}},
+    {RC_STR_INIT("inx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_inx}}},
+    {RC_STR_INIT("iny"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_iny}}},
+    {RC_STR_INIT("jmp"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_jmp}}},
+    {RC_STR_INIT("jsr"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_jsr}}},
+    {RC_STR_INIT("lda"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_lda}}},
+    {RC_STR_INIT("ldx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ldx}}},
+    {RC_STR_INIT("ldy"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ldy}}},
+    {RC_STR_INIT("lsr"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_lsr}}},
+    {RC_STR_INIT("nop"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_nop}}},
+    {RC_STR_INIT("ora"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ora}}},
+    {RC_STR_INIT("pha"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_pha}}},
+    {RC_STR_INIT("php"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_php}}},
+    {RC_STR_INIT("pla"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_pla}}},
+    {RC_STR_INIT("plp"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_plp}}},
+    {RC_STR_INIT("rol"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_rol}}},
+    {RC_STR_INIT("ror"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ror}}},
+    {RC_STR_INIT("rti"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_rti}}},
+    {RC_STR_INIT("rts"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_rts}}},
+    {RC_STR_INIT("sbc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sbc}}},
+    {RC_STR_INIT("sec"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sec}}},
+    {RC_STR_INIT("sed"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sed}}},
+    {RC_STR_INIT("sei"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sei}}},
+    {RC_STR_INIT("sta"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sta}}},
+    {RC_STR_INIT("stx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_stx}}},
+    {RC_STR_INIT("sty"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_sty}}},
+    {RC_STR_INIT("tax"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tax}}},
+    {RC_STR_INIT("tay"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tay}}},
+    {RC_STR_INIT("tsx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tsx}}},
+    {RC_STR_INIT("txa"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_txa}}},
+    {RC_STR_INIT("txs"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_txs}}},
+    {RC_STR_INIT("tya"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tya}}},
+    {RC_STR_INIT("bra"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_bra}}},
+    {RC_STR_INIT("dea"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_dea}}},
+    {RC_STR_INIT("ina"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ina}}},
+    {RC_STR_INIT("phx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_phx}}},
+    {RC_STR_INIT("phy"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_phy}}},
+    {RC_STR_INIT("plx"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_plx}}},
+    {RC_STR_INIT("ply"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_ply}}},
+    {RC_STR_INIT("stz"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_stz}}},
+    {RC_STR_INIT("clr"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_stz}}},
+    {RC_STR_INIT("trb"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_trb}}},
+    {RC_STR_INIT("tsb"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_tsb}}},
 
-    {RC_STR("."),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_label}}},
-    {RC_STR(".@"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_local_label}}},
-    {RC_STR("{"),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_open_brace}}},
-    {RC_STR("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
-    {RC_STR("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
-    {RC_STR("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
-    {RC_STR("section"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_section}}},
-    {RC_STR("zpreserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpreserve}}},
-    {RC_STR("zpauto"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto_n}}},   // ZPAUTO <n>, <names>
-    {RC_STR("zpauto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto1}}},   // 1-byte ZP variable
-    {RC_STR("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
-    {RC_STR("unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_unreachable}}}, // dead fall-through
-    {RC_STR("cancall"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_cancall}}},   // a JSR's real targets
-    {RC_STR("canjump"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_canjump}}},   // a computed JMP's targets
-    {RC_STR("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
-    {RC_STR("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
-    {RC_STR("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
-    {RC_STR("equd"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equd}}},   // 32-bit words
-    {RC_STR("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
-    {RC_STR("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
-    {RC_STR("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
-    {RC_STR("incbin"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incbin}}},
-    {RC_STR("incsection"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incsection}}},
-    {RC_STR("basic"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_basic}}},   // inline BBC BASIC lines
-    {RC_STR("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
-    {RC_STR("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
-    {RC_STR("print"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_print}}},
-    {RC_STR("error"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_error}}},
+    {RC_STR_INIT("."),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_label}}},
+    {RC_STR_INIT(".@"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_local_label}}},
+    {RC_STR_INIT("{"),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_open_brace}}},
+    {RC_STR_INIT("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
+    {RC_STR_INIT("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
+    {RC_STR_INIT("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
+    {RC_STR_INIT("section"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_section}}},
+    {RC_STR_INIT("zpreserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpreserve}}},
+    {RC_STR_INIT("zpauto"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto_n}}},   // ZPAUTO <n>, <names>
+    {RC_STR_INIT("zpauto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto1}}},   // 1-byte ZP variable
+    {RC_STR_INIT("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
+    {RC_STR_INIT("unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_unreachable}}}, // dead fall-through
+    {RC_STR_INIT("cancall"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_cancall}}},   // a JSR's real targets
+    {RC_STR_INIT("canjump"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_canjump}}},   // a computed JMP's targets
+    {RC_STR_INIT("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
+    {RC_STR_INIT("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
+    {RC_STR_INIT("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
+    {RC_STR_INIT("equd"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equd}}},   // 32-bit words
+    {RC_STR_INIT("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
+    {RC_STR_INIT("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
+    {RC_STR_INIT("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
+    {RC_STR_INIT("incbin"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incbin}}},
+    {RC_STR_INIT("incsection"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incsection}}},
+    {RC_STR_INIT("basic"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_basic}}},   // inline BBC BASIC lines
+    {RC_STR_INIT("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
+    {RC_STR_INIT("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
+    {RC_STR_INIT("print"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_print}}},
+    {RC_STR_INIT("error"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_error}}},
     // The pure expression constants are reserved at statement start too, so `pi = 5` is rejected rather than
     // quietly binding a shadowed symbol. Three near-identical rows, but it is only three tokens.
-    {RC_STR("true"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
-    {RC_STR("false"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
-    {RC_STR("pi"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
-    {RC_STR("elif"),   {.type = lexeme_type_closer, .closer = {closer_elif,  error_type_unexpected_elif}}},
-    {RC_STR("else"),   {.type = lexeme_type_closer, .closer = {closer_else,  error_type_unexpected_else}}},
-    {RC_STR("endif"),  {.type = lexeme_type_closer, .closer = {closer_endif, error_type_unexpected_endif}}},
-    {RC_STR("next"),    {.type = lexeme_type_closer, .closer = {closer_next,     error_type_unexpected_next}}},
-    {RC_STR("endmacro"),{.type = lexeme_type_closer, .closer = {closer_endmacro, error_type_unexpected_endmacro}}},
-    {RC_STR("endsection"),{.type = lexeme_type_closer, .closer = {closer_endsection, error_type_unexpected_endsection}}},
-    {RC_STR("endbasic"),{.type = lexeme_type_closer, .closer = {closer_endbasic, error_type_unexpected_endbasic}}},
-    {RC_STR("}"),       {.type = lexeme_type_closer, .closer = {closer_brace,    error_type_unexpected_close_brace}}},
+    {RC_STR_INIT("true"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
+    {RC_STR_INIT("false"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
+    {RC_STR_INIT("pi"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_reserved_constant}}},
+    {RC_STR_INIT("elif"),   {.type = lexeme_type_closer, .closer = {closer_elif,  error_type_unexpected_elif}}},
+    {RC_STR_INIT("else"),   {.type = lexeme_type_closer, .closer = {closer_else,  error_type_unexpected_else}}},
+    {RC_STR_INIT("endif"),  {.type = lexeme_type_closer, .closer = {closer_endif, error_type_unexpected_endif}}},
+    {RC_STR_INIT("next"),    {.type = lexeme_type_closer, .closer = {closer_next,     error_type_unexpected_next}}},
+    {RC_STR_INIT("endmacro"),{.type = lexeme_type_closer, .closer = {closer_endmacro, error_type_unexpected_endmacro}}},
+    {RC_STR_INIT("endsection"),{.type = lexeme_type_closer, .closer = {closer_endsection, error_type_unexpected_endsection}}},
+    {RC_STR_INIT("endbasic"),{.type = lexeme_type_closer, .closer = {closer_endbasic, error_type_unexpected_endbasic}}},
+    {RC_STR_INIT("}"),       {.type = lexeme_type_closer, .closer = {closer_brace,    error_type_unexpected_close_brace}}},
 };
 
 // The STATIC base: mnemonics, directives and closers. Macro-name tokens are appended to a per-pass COPY of
@@ -402,7 +402,7 @@ static token_table statement_tokens(const baron *b)
 // '=' is its own tiny table, lexed after an identifier at statement start (an assignment) and after an
 // attribute name on a SECTION line. Defined here so both the assignment handler and handle_section can reach it.
 static const token assign_token_entries[] = {
-    {RC_STR("="), {.type = lexeme_type_assign}},
+    {RC_STR_INIT("="), {.type = lexeme_type_assign}},
 };
 static const token_table assign_tokens = RC_VIEW(assign_token_entries);
 
@@ -1284,7 +1284,7 @@ static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope
 // The '#' that may introduce a PRINT channel. It is not a statement token ('#' never starts a
 // statement), so PRINT peeks with its own tiny table - the same trick as assign_tokens.
 static const token print_token_entries[] = {
-    {RC_STR("#"), {.type = lexeme_type_hash}},
+    {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
 };
 static const token_table print_tokens = RC_VIEW(print_token_entries);
 
@@ -2155,8 +2155,8 @@ static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scop
 
 // The header parens - not statement tokens, so a small dedicated table (identifiers / commas are intrinsic).
 static const token func_paren_entries[] = {
-    {RC_STR("("), {.type = lexeme_type_open_paren}},
-    {RC_STR(")"), {.type = lexeme_type_close_paren}},
+    {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
+    {RC_STR_INIT(")"), {.type = lexeme_type_close_paren}},
 };
 static const token_table func_paren_tokens = RC_VIEW(func_paren_entries);
 

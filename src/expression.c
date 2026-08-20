@@ -1226,79 +1226,79 @@ static value const_next_local(const expr_env *env) { return scopes_find_local_la
 // open paren). Numbers/strings/identifiers come from the lexer itself, so the table
 // only carries the leading operators, the functions, the constants, and the open paren.
 static const token even_entries[] = {
-    {RC_STR("("),     {.type = lexeme_type_open_paren}},
-    {RC_STR("{"),     {.type = lexeme_type_open_brace}},            // begins a list literal
-    {RC_STR("}"),     {.type = lexeme_type_close_brace}},           // ends one (empty, or after a comma)
+    {RC_STR_INIT("("),     {.type = lexeme_type_open_paren}},
+    {RC_STR_INIT("{"),     {.type = lexeme_type_open_brace}},            // begins a list literal
+    {RC_STR_INIT("}"),     {.type = lexeme_type_close_brace}},           // ends one (empty, or after a comma)
 
-    {RC_STR(".."),    {.type = lexeme_type_range}},                 // start-unbounded range
-    {RC_STR("..<"),   {.type = lexeme_type_range, .range = {.exclusive = true}}},
+    {RC_STR_INIT(".."),    {.type = lexeme_type_range}},                 // start-unbounded range
+    {RC_STR_INIT("..<"),   {.type = lexeme_type_range, .range = {.exclusive = true}}},
 
-    {RC_STR("+"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_pos, .precedence = prec_neg}}},
-    {RC_STR("-"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_neg, .precedence = prec_neg}}},
+    {RC_STR_INIT("+"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_pos, .precedence = prec_neg}}},
+    {RC_STR_INIT("-"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_neg, .precedence = prec_neg}}},
     // Bare low/high-byte operators (6502 style): '<' is the low byte, '>' the high byte. Very
     // low precedence, so they swallow the whole following expression: <start+1 is lo(start+1).
-    {RC_STR("<"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo, .precedence = prec_lohi}}},
-    {RC_STR(">"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi, .precedence = prec_lohi}}},
+    {RC_STR_INIT("<"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo, .precedence = prec_lohi}}},
+    {RC_STR_INIT(">"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi, .precedence = prec_lohi}}},
 
     // Element-wise builtins are parenthesised unary ops: the '(' is part of the token (so
     // the name only reads as a call when followed by '(' - 'lo' is a variable, 'lo(' the op),
     // and precedence is unused (left default) because the argument is closed by ')'.
-    {RC_STR("abs("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_abs}}},
-    {RC_STR("lo("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo}}},
-    {RC_STR("hi("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi}}},
-    {RC_STR("sqrt("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sqrt}}},
-    {RC_STR("rnd("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_rnd}}},   // one random in [0,n); broadcasts
-    {RC_STR("not("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_not}}},
-    {RC_STR("int("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
-    {RC_STR("floor("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
-    {RC_STR("round("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_round}}},
-    {RC_STR("ceil("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ceil}}},
-    {RC_STR("sin("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sin}}},
-    {RC_STR("cos("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_cos}}},
-    {RC_STR("tan("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_tan}}},
-    {RC_STR("asin("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_asin}}},
-    {RC_STR("acos("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_acos}}},
-    {RC_STR("atan("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_atan}}},
-    {RC_STR("log("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_log}}},     // base 10
-    {RC_STR("ln("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ln}}},      // natural
-    {RC_STR("exp("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_exp}}},
+    {RC_STR_INIT("abs("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_abs}}},
+    {RC_STR_INIT("lo("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo}}},
+    {RC_STR_INIT("hi("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi}}},
+    {RC_STR_INIT("sqrt("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sqrt}}},
+    {RC_STR_INIT("rnd("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_rnd}}},   // one random in [0,n); broadcasts
+    {RC_STR_INIT("not("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_not}}},
+    {RC_STR_INIT("int("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
+    {RC_STR_INIT("floor("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
+    {RC_STR_INIT("round("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_round}}},
+    {RC_STR_INIT("ceil("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ceil}}},
+    {RC_STR_INIT("sin("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sin}}},
+    {RC_STR_INIT("cos("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_cos}}},
+    {RC_STR_INIT("tan("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_tan}}},
+    {RC_STR_INIT("asin("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_asin}}},
+    {RC_STR_INIT("acos("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_acos}}},
+    {RC_STR_INIT("atan("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_atan}}},
+    {RC_STR_INIT("log("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_log}}},     // base 10
+    {RC_STR_INIT("ln("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ln}}},      // natural
+    {RC_STR_INIT("exp("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_exp}}},
 
     // Structural/variadic builtins are functions: the handler gets the whole arg list.
-    {RC_STR("shape("),   {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
-    {RC_STR("len("),     {.type = lexeme_type_function, .function = {.apply = fn_len}}},
-    {RC_STR("rank("),    {.type = lexeme_type_function, .function = {.apply = fn_rank}}},
-    {RC_STR("full("),    {.type = lexeme_type_function, .function = {.apply = fn_full}}},
-    {RC_STR("flatten("), {.type = lexeme_type_function, .function = {.apply = fn_flatten}}},
-    {RC_STR("concat("),  {.type = lexeme_type_function, .function = {.apply = fn_concat}}},
-    {RC_STR("zip("),      {.type = lexeme_type_function, .function = {.apply = fn_zip}}},
-    {RC_STR("reverse("), {.type = lexeme_type_function, .function = {.apply = fn_reverse}}},
-    {RC_STR("sort("),    {.type = lexeme_type_function, .function = {.apply = fn_sort}}},
-    {RC_STR("sum("),     {.type = lexeme_type_function, .function = {.apply = fn_sum}}},
-    {RC_STR("product("), {.type = lexeme_type_function, .function = {.apply = fn_product}}},
-    {RC_STR("min("),     {.type = lexeme_type_function, .function = {.apply = fn_min}}},
-    {RC_STR("max("),     {.type = lexeme_type_function, .function = {.apply = fn_max}}},
-    {RC_STR("defined("), {.type = lexeme_type_function, .function = {.apply = fn_defined}}},
+    {RC_STR_INIT("shape("),   {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
+    {RC_STR_INIT("len("),     {.type = lexeme_type_function, .function = {.apply = fn_len}}},
+    {RC_STR_INIT("rank("),    {.type = lexeme_type_function, .function = {.apply = fn_rank}}},
+    {RC_STR_INIT("full("),    {.type = lexeme_type_function, .function = {.apply = fn_full}}},
+    {RC_STR_INIT("flatten("), {.type = lexeme_type_function, .function = {.apply = fn_flatten}}},
+    {RC_STR_INIT("concat("),  {.type = lexeme_type_function, .function = {.apply = fn_concat}}},
+    {RC_STR_INIT("zip("),      {.type = lexeme_type_function, .function = {.apply = fn_zip}}},
+    {RC_STR_INIT("reverse("), {.type = lexeme_type_function, .function = {.apply = fn_reverse}}},
+    {RC_STR_INIT("sort("),    {.type = lexeme_type_function, .function = {.apply = fn_sort}}},
+    {RC_STR_INIT("sum("),     {.type = lexeme_type_function, .function = {.apply = fn_sum}}},
+    {RC_STR_INIT("product("), {.type = lexeme_type_function, .function = {.apply = fn_product}}},
+    {RC_STR_INIT("min("),     {.type = lexeme_type_function, .function = {.apply = fn_min}}},
+    {RC_STR_INIT("max("),     {.type = lexeme_type_function, .function = {.apply = fn_max}}},
+    {RC_STR_INIT("defined("), {.type = lexeme_type_function, .function = {.apply = fn_defined}}},
 
     // Named constants. The bare words behave like the word operators (div / mod / and): a longer identifier
     // still wins, so PI vs PICKLE. The PC constant is '*' in operand position (multiply lives in the odd
     // table, so there is no clash), with P% as the BBC Micro spelling.
-    {RC_STR("true"),  {.type = lexeme_type_constant, .constant = {.handle = const_true}}},
-    {RC_STR("false"), {.type = lexeme_type_constant, .constant = {.handle = const_false}}},
-    {RC_STR("pi"),    {.type = lexeme_type_constant, .constant = {.handle = const_pi}}},
-    {RC_STR("*"),     {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
-    {RC_STR("P%"),    {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
+    {RC_STR_INIT("true"),  {.type = lexeme_type_constant, .constant = {.handle = const_true}}},
+    {RC_STR_INIT("false"), {.type = lexeme_type_constant, .constant = {.handle = const_false}}},
+    {RC_STR_INIT("pi"),    {.type = lexeme_type_constant, .constant = {.handle = const_pi}}},
+    {RC_STR_INIT("*"),     {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
+    {RC_STR_INIT("P%"),    {.type = lexeme_type_constant, .constant = {.handle = const_pc}}},
 
     // Local-label references. '@' is not an identifier character, so these two-char tokens never collide with
     // a name; longest-prefix matching takes '@-' / '@+' whole.
-    {RC_STR("@-"),    {.type = lexeme_type_constant, .constant = {.handle = const_prev_local}}},
-    {RC_STR("@+"),    {.type = lexeme_type_constant, .constant = {.handle = const_next_local}}},
+    {RC_STR_INIT("@-"),    {.type = lexeme_type_constant, .constant = {.handle = const_prev_local}}},
+    {RC_STR_INIT("@+"),    {.type = lexeme_type_constant, .constant = {.handle = const_next_local}}},
 };
 
 // ODD: lexed where a binary operator is expected (after an operand). The close paren
 // lives here, so a parenthesised group is closed from operator position.
 static const token odd_entries[] = {
-    {RC_STR(")"),   {.type = lexeme_type_close_paren}},
-    {RC_STR("}"),   {.type = lexeme_type_close_brace}},         // ends a list (after an element)
+    {RC_STR_INIT(")"),   {.type = lexeme_type_close_paren}},
+    {RC_STR_INIT("}"),   {.type = lexeme_type_close_brace}},         // ends a list (after an element)
     {RC_STR("["),   {.type = lexeme_type_open_bracket}},        // postfix subscript
     {RC_STR("]"),   {.type = lexeme_type_close_bracket}},       // ends a subscript
 
@@ -1343,11 +1343,11 @@ static token_table operand_table(const parser *p) {
 // assignment target, never code. The '=' return marker reuses lexeme_type_assign (statement-start position).
 typedef enum body_keyword { body_if, body_elif, body_else, body_endif } body_keyword;
 static const token function_body_entries[] = {
-    {RC_STR("if"),    {.type = lexeme_type_closer, .closer = {body_if,    error_type_none}}},
-    {RC_STR("elif"),  {.type = lexeme_type_closer, .closer = {body_elif,  error_type_none}}},
-    {RC_STR("else"),  {.type = lexeme_type_closer, .closer = {body_else,  error_type_none}}},
-    {RC_STR("endif"), {.type = lexeme_type_closer, .closer = {body_endif, error_type_none}}},
-    {RC_STR("="),     {.type = lexeme_type_assign}},
+    {RC_STR_INIT("if"),    {.type = lexeme_type_closer, .closer = {body_if,    error_type_none}}},
+    {RC_STR_INIT("elif"),  {.type = lexeme_type_closer, .closer = {body_elif,  error_type_none}}},
+    {RC_STR_INIT("else"),  {.type = lexeme_type_closer, .closer = {body_else,  error_type_none}}},
+    {RC_STR_INIT("endif"), {.type = lexeme_type_closer, .closer = {body_endif, error_type_none}}},
+    {RC_STR_INIT("="),     {.type = lexeme_type_assign}},
 };
 static const token_table function_body_tokens = RC_VIEW(function_body_entries);
 
@@ -1502,7 +1502,7 @@ static body_result body_fail(error_type code, uint32_t at)
 }
 
 // A single-token '=' table, to read the assignment operator after a body statement's target name.
-static const token assign_only_entries[] = { {RC_STR("="), {.type = lexeme_type_assign}} };
+static const token assign_only_entries[] = { {RC_STR_INIT("="), {.type = lexeme_type_assign}} };
 static const token_table assign_only_tokens = RC_VIEW(assign_only_entries);
 
 // A sub-parser for a body expression (a condition, an assignment RHS, the return). It inherits everything

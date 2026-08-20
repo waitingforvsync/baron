@@ -354,9 +354,9 @@ uint16_t opcode_def(mnemonic m, addr_mode mode)
 // recognised only where the grammar expects one (see operand_reg_tokens); everywhere else an identifier
 // wins, and a longer identifier always beats a keyword anyway (a symbol "xyz" is not the X register).
 static const token operand_token_entries[] = {
-    {RC_STR("#"), {.type = lexeme_type_hash}},
-    {RC_STR("("), {.type = lexeme_type_open_paren}},
-    {RC_STR(")"), {.type = lexeme_type_close_paren}},
+    {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
+    {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
+    {RC_STR_INIT(")"), {.type = lexeme_type_close_paren}},
     // '}' closes a scope and so ends a statement: an implied/accumulator opcode may sit right before it
     // (`.routine { RTS }`). We must recognise it here rather than let it fall through as an unexpected char
     // that the no-operand peek would try to evaluate as an operand. It stays a `closer` in the statement
@@ -370,10 +370,10 @@ static const token_table operand_tokens = RC_VIEW(operand_token_entries);
 // (`foo,X` / `(foo,X)` / `(foo),Y`). Kept separate from the default so a bare A/X/Y elsewhere stays a symbol;
 // `ASL A` still resolves as accumulator mode first because we consult this table at the accumulator slot.
 static const token operand_reg_token_entries[] = {
-    {RC_STR("#"), {.type = lexeme_type_hash}},
-    {RC_STR("("), {.type = lexeme_type_open_paren}},
-    {RC_STR(")"), {.type = lexeme_type_close_paren}},
-    {RC_STR("}"), {.type = lexeme_type_close_brace}},
+    {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
+    {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
+    {RC_STR_INIT(")"), {.type = lexeme_type_close_paren}},
+    {RC_STR_INIT("}"), {.type = lexeme_type_close_brace}},
     {RC_STR("A"), {.type = lexeme_type_register, .reg = {.which = reg_a}}},
     {RC_STR("X"), {.type = lexeme_type_register, .reg = {.which = reg_x}}},
     {RC_STR("Y"), {.type = lexeme_type_register, .reg = {.which = reg_y}}},

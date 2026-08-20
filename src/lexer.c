@@ -398,16 +398,16 @@ uint32_t lexer_line_end(rc_str text, uint32_t pos)
 // A small context table for the lexer tests. Handlers are NULL - the lexer never
 // invokes them.
 static const token lexer_test_tokens[] = {
-    { RC_STR("+"),   { .type = lexeme_type_binary_op } },
-    { RC_STR(".."),  { .type = lexeme_type_binary_op } },
-    { RC_STR("."),   { .type = lexeme_type_binary_op } },
-    { RC_STR("and"), { .type = lexeme_type_binary_op } },
-    { RC_STR("("),   { .type = lexeme_type_open_paren } },
-    { RC_STR(")"),   { .type = lexeme_type_close_paren } },
-    { RC_STR("{"),   { .type = lexeme_type_open_brace } },
-    { RC_STR("}"),   { .type = lexeme_type_close_brace } },
-    { RC_STR("["),   { .type = lexeme_type_open_bracket } },
-    { RC_STR("]"),   { .type = lexeme_type_close_bracket } },
+    { RC_STR_INIT("+"),   { .type = lexeme_type_binary_op } },
+    { RC_STR_INIT(".."),  { .type = lexeme_type_binary_op } },
+    { RC_STR_INIT("."),   { .type = lexeme_type_binary_op } },
+    { RC_STR_INIT("and"), { .type = lexeme_type_binary_op } },
+    { RC_STR_INIT("("),   { .type = lexeme_type_open_paren } },
+    { RC_STR_INIT(")"),   { .type = lexeme_type_close_paren } },
+    { RC_STR_INIT("{"),   { .type = lexeme_type_open_brace } },
+    { RC_STR_INIT("}"),   { .type = lexeme_type_close_brace } },
+    { RC_STR_INIT("["),   { .type = lexeme_type_open_bracket } },
+    { RC_STR_INIT("]"),   { .type = lexeme_type_close_bracket } },
 };
 
 static const token_table lexer_tt = RC_VIEW(lexer_test_tokens);

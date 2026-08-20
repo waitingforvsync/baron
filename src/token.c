@@ -23,9 +23,9 @@ uint32_t token_table_find(token_table tt, rc_str text)
 RC_TEST(token, find_longest_match)
 {
     static const token toks[] = {
-        { RC_STR("+"),   { .type = lexeme_type_binary_op } },
-        { RC_STR("++"),  { .type = lexeme_type_unary_op } },
-        { RC_STR("and"), { .type = lexeme_type_binary_op } },
+        { RC_STR_INIT("+"),   { .type = lexeme_type_binary_op } },
+        { RC_STR_INIT("++"),  { .type = lexeme_type_unary_op } },
+        { RC_STR_INIT("and"), { .type = lexeme_type_binary_op } },
     };
     token_table tt = { .data = toks, .num = (uint32_t)(sizeof toks / sizeof toks[0]) };
 
