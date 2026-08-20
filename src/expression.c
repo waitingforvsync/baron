@@ -1299,32 +1299,32 @@ static const token even_entries[] = {
 static const token odd_entries[] = {
     {RC_STR_INIT(")"),   {.type = lexeme_type_close_paren}},
     {RC_STR_INIT("}"),   {.type = lexeme_type_close_brace}},         // ends a list (after an element)
-    {RC_STR("["),   {.type = lexeme_type_open_bracket}},        // postfix subscript
-    {RC_STR("]"),   {.type = lexeme_type_close_bracket}},       // ends a subscript
+    {RC_STR_INIT("["),   {.type = lexeme_type_open_bracket}},        // postfix subscript
+    {RC_STR_INIT("]"),   {.type = lexeme_type_close_bracket}},       // ends a subscript
 
-    {RC_STR(".."),  {.type = lexeme_type_range}},               // range operator (handled specially)
-    {RC_STR("..<"), {.type = lexeme_type_range, .range = {.exclusive = true}}},
+    {RC_STR_INIT(".."),  {.type = lexeme_type_range}},               // range operator (handled specially)
+    {RC_STR_INIT("..<"), {.type = lexeme_type_range, .range = {.exclusive = true}}},
 
-    {RC_STR("^"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_pow,  .precedence = prec_pow, .associativity = assoc_right}}},
-    {RC_STR("*"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mul,  .precedence = prec_mul}}},
-    {RC_STR("/"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_div,  .precedence = prec_mul}}},
-    {RC_STR("div"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_idiv, .precedence = prec_mul}}},
-    {RC_STR("mod"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mod,  .precedence = prec_mul}}},
-    {RC_STR("<<"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shl,  .precedence = prec_mul}}},
-    {RC_STR(">>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shr,  .precedence = prec_mul}}},
-    {RC_STR("+"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_add,  .precedence = prec_add}}},
-    {RC_STR("-"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_sub,  .precedence = prec_add}}},
-    {RC_STR("="),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
-    {RC_STR("=="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
-    {RC_STR("!="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
-    {RC_STR("<>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
-    {RC_STR("<="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_le,   .precedence = prec_cmp}}},
-    {RC_STR(">="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ge,   .precedence = prec_cmp}}},
-    {RC_STR("<"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_lt,   .precedence = prec_cmp}}},
-    {RC_STR(">"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_gt,   .precedence = prec_cmp}}},
-    {RC_STR("and"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_and,  .precedence = prec_and}}},
-    {RC_STR("or"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_or,   .precedence = prec_or}}},
-    {RC_STR("eor"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eor,  .precedence = prec_or}}},
+    {RC_STR_INIT("^"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_pow,  .precedence = prec_pow, .associativity = assoc_right}}},
+    {RC_STR_INIT("*"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mul,  .precedence = prec_mul}}},
+    {RC_STR_INIT("/"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_div,  .precedence = prec_mul}}},
+    {RC_STR_INIT("div"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_idiv, .precedence = prec_mul}}},
+    {RC_STR_INIT("mod"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_mod,  .precedence = prec_mul}}},
+    {RC_STR_INIT("<<"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shl,  .precedence = prec_mul}}},
+    {RC_STR_INIT(">>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_shr,  .precedence = prec_mul}}},
+    {RC_STR_INIT("+"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_add,  .precedence = prec_add}}},
+    {RC_STR_INIT("-"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_sub,  .precedence = prec_add}}},
+    {RC_STR_INIT("="),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
+    {RC_STR_INIT("=="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eq,   .precedence = prec_cmp}}},
+    {RC_STR_INIT("!="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
+    {RC_STR_INIT("<>"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ne,   .precedence = prec_cmp}}},
+    {RC_STR_INIT("<="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_le,   .precedence = prec_cmp}}},
+    {RC_STR_INIT(">="),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_ge,   .precedence = prec_cmp}}},
+    {RC_STR_INIT("<"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_lt,   .precedence = prec_cmp}}},
+    {RC_STR_INIT(">"),   {.type = lexeme_type_binary_op, .binary_op = {.apply = op_gt,   .precedence = prec_cmp}}},
+    {RC_STR_INIT("and"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_and,  .precedence = prec_and}}},
+    {RC_STR_INIT("or"),  {.type = lexeme_type_binary_op, .binary_op = {.apply = op_or,   .precedence = prec_or}}},
+    {RC_STR_INIT("eor"), {.type = lexeme_type_binary_op, .binary_op = {.apply = op_eor,  .precedence = prec_or}}},
 };
 
 static const token_table even_tokens = RC_VIEW(even_entries);

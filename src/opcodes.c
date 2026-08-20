@@ -361,7 +361,7 @@ static const token operand_token_entries[] = {
     // (`.routine { RTS }`). We must recognise it here rather than let it fall through as an unexpected char
     // that the no-operand peek would try to evaluate as an operand. It stays a `closer` in the statement
     // table (parse_block's brace handling relies on that); this operand-table row only lets the peek see it.
-    {RC_STR("}"), {.type = lexeme_type_close_brace}},
+    {RC_STR_INIT("}"), {.type = lexeme_type_close_brace}},
 };
 static const token_table operand_tokens = RC_VIEW(operand_token_entries);
 
@@ -374,9 +374,9 @@ static const token operand_reg_token_entries[] = {
     {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
     {RC_STR_INIT(")"), {.type = lexeme_type_close_paren}},
     {RC_STR_INIT("}"), {.type = lexeme_type_close_brace}},
-    {RC_STR("A"), {.type = lexeme_type_register, .reg = {.which = reg_a}}},
-    {RC_STR("X"), {.type = lexeme_type_register, .reg = {.which = reg_x}}},
-    {RC_STR("Y"), {.type = lexeme_type_register, .reg = {.which = reg_y}}},
+    {RC_STR_INIT("A"), {.type = lexeme_type_register, .reg = {.which = reg_a}}},
+    {RC_STR_INIT("X"), {.type = lexeme_type_register, .reg = {.which = reg_x}}},
+    {RC_STR_INIT("Y"), {.type = lexeme_type_register, .reg = {.which = reg_y}}},
 };
 static const token_table operand_reg_tokens = RC_VIEW(operand_reg_token_entries);
 
