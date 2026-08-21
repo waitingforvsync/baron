@@ -117,18 +117,22 @@ h   = focal*objects[.., 3]/vzc                \ sprite height in pixel rows
 sxc = px/2 + 64                               \ centre column (halved for double width)
 syc = 64 - py                                 \ bottom row
 
-xlc = nearest(clamp(sxc - h/4, 0, 128))         \ left column, clamped to the screen
-xrc = nearest(clamp(sxc + h/4, 0, 128))         \ right column, exclusive
+; precision: every edge is rounded straight from its float position, clamping last,
+; and the height comes from the DIFFERENCE of the rounded rows - never rounded on its
+; own, or the bottom-row fraction and height fraction beat against each other and the
+; top edge wobbles as the camera moves (7x the edge jitter, measured)
+xlc = clamp(nearest(sxc - h/4), 0, 128)       \ left column, clamped to the screen
+xrc = clamp(nearest(sxc + h/4), 0, 128)       \ right column, exclusive
 
 ; vertical clip: with the near plane this close a sprite can poke off the top or
 ; bottom of the screen, and the renderer has no y clip - so clamp the bottom row
-; and the height to rows 0..127 here
+; and the top row to 0..127 here
 
-ybi = nearest(syc)
-hti = nearest(h)
+ybi = nearest(syc)                            \ bottom row, from the float bottom edge
+yti = nearest(syc - h) + 1                    \ top row, from the float top edge
 ybc = MIN({ybi, 127}, 0)                      \ clipped bottom row
-tpc = MAX({ybi - hti + 1, 0}, 0)              \ clipped top row
-hgt = ybc - tpc + 1                           \ clipped height (<= 0 = fully off screen)
+tpc = MAX({yti, 0}, 0)                        \ clipped top row
+hgt = ybc - tpc + 1                           \ height from the rounded rows (<= 0 = fully off)
 
 ; visible = beyond the near plane AND >= one column AND >= one row after clipping -
 ; the renderer sees xr > xl and in-screen extents whenever the height byte is nonzero
