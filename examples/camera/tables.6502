@@ -1,0 +1,195 @@
+\\ Define constants
+
+ncam    = 128                   \\ Number of camera positions around the loop (one table entry each)
+radius  = 375                   \\ World radius of the camera path
+camorig = {600, 32, 600}        \\ Centre of the Lissajous figure (y = camera height)
+objecty = 0                     \\ All objects sit on the ground plane
+focal   = 128                   \\ Perspective scale
+near    = 64                    \\ Near plane distance
+lookahead = 1000                \\ camera aims at the ground this far ahead of it
+
+\\ Define object array: {x, y, z, size, colour}
+
+objects = {
+    {1045, objecty,  130, 64, 1},
+    {  60, objecty,  135, 64, 2},
+    { 510, objecty,  140, 64, 3},
+    { 305, objecty,  165, 64, 1},
+    { 710, objecty,  175, 64, 2},
+    { 850, objecty,  215, 64, 1},
+    { 115, objecty,  250, 64, 1},
+    { 525, objecty,  280, 64, 1},
+    { 935, objecty,  410, 64, 1},
+    { 560, objecty,  460, 64, 1},
+    {  85, objecty,  465, 64, 1},
+    { 830, objecty,  545, 64, 1},
+    { 465, objecty,  590, 64, 1},
+    {1025, objecty,  595, 64, 3},
+    {  45, objecty,  605, 64, 1},
+    {1145, objecty,  720, 64, 2},
+    { 660, objecty,  730, 64, 1},
+    { 140, objecty,  745, 64, 3},
+    { 470, objecty,  875, 64, 1},
+    { 700, objecty,  905, 64, 2},
+    { 840, objecty,  905, 64, 3},
+    {  70, objecty,  915, 64, 3},
+    { 355, objecty,  945, 64, 1},
+    {1145, objecty,  975, 64, 2},
+    { 195, objecty, 1010, 64, 3},
+    { 605, objecty, 1075, 64, 1},
+    { 830, objecty, 1105, 64, 1},
+    {  95, objecty, 1130, 64, 1},
+    { 490, objecty, 1145, 64, 2},
+    { 340, objecty, 1155, 64, 3},
+}
+
+nobj = LEN(objects)             \\ Number of objects
+
+\\ Define user-defined functions
+
+\\ Normalize: list of {x,y,z} -> list of {x,y,z}
+FUNCTION normalise(v) = v / ZIP(SQRT(SUM(v*v, 1)))
+
+\\ Cross-product: {x,y,z} X {x,y,z} -> {x,y,z}
+FUNCTION cross(a, b)
+    x = a[..,1]*b[..,2] - a[..,2]*b[..,1]
+    y = a[..,2]*b[..,0] - a[..,0]*b[..,2]
+    z = a[..,0]*b[..,1] - a[..,1]*b[..,0]
+= ZIP(x, y, z)
+
+\\ Dot product: (list of {x,y,z}).(list of {x,y,z}) -> list of scalars
+FUNCTION viewdot(rel, basis) = SUM(rel * ZIP(basis), 2)
+
+FUNCTION clamp(v, lo, hi) = MIN({MAX({v, lo}, 0), hi}, 0)
+
+\\ Define camera path
+\\ This is a 2:1 Lissajous curve with ncam (128) positions
+\\ campath is a list of 128 {x, y, z} vectors
+
+k = 2*PI / ncam
+t = 0 ..< ncam
+;campath = camorig + ZIP(SIN(2*t*k), FULL(ncam, 0), SIN(1*t*k)) * radius
+campath = camorig + ZIP(COS(t*k)/(1+SIN(t*k)^2), FULL(ncam, 0), SIN(2*t*k)/(2*(1+SIN(t*k)^2))) * radius
+
+\\ Define camera basis for each camera position
+\\ We calculate the heading direction from the derivative of the Lissajous curve
+\\ The forward direction is the heading direction pitched down to look at the horizon
+\\ The rest of the basis is calculated assuming no roll.
+
+;hdg   = normalise(ZIP(2*COS(2*t*k), FULL(ncam, 0), 1*COS(1*t*k)))   \ unit heading, ground plane
+hdg   = normalise(ZIP(SIN(t*k)*(SIN(t*k)^2-3)/(1+SIN(t*k)^2)^2, FULL(ncam, 0), (1-3*SIN(t*k)^2)/(1+SIN(t*k)^2)^2))
+fwd   = normalise(hdg*lookahead + {0, -camorig[1], 0})              \ at the ground, lookahead units on
+right = ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])                 \ horizontal, perp to the heading
+up    = cross(fwd, right)                                           \ tilted back to match fwd
+
+\\ Get camera relative positions, all object positions at once
+
+objpos = objects[.., 0..2]                    \ Extract just object {x,y,z}
+rel    = objpos - ZIP(campath)                \ ncam x 1 x 3 against Nx3 -> ncam x N x 3
+
+\\ Get view space via dot products (each ncam x N)
+
+vx = viewdot(rel, right)
+vy = viewdot(rel, up)
+vz = viewdot(rel, fwd)
+
+\\ Project to the MODE 5 screen
+
+; Projection happens in square-pixel space (256 wide, focal 128 = 90 degree FOV), then x
+; halves onto the 128 double-width columns. Object positions are the bottom-centre of the
+; square: syc is the sprite's bottom row and it extends h rows upward from there.
+; Horizontal extent goes out as clamped left/right(exclusive) columns, so a partially
+; onscreen object still draws - the clamping IS the x clip, done here instead of at
+; render time (sprite width = h/2 columns, half-width h/4).
+
+vzc = MAX({vz, near}, 0)                      \ safe divisor (culled entries masked below)
+px  = focal*vx/vzc                            \ square-pixel projection
+py  = focal*vy/vzc
+h   = focal*objects[.., 3]/vzc                \ sprite height in pixel rows
+sxc = px/2 + 64                               \ centre column (halved for double width)
+syc = 64 - py                                 \ bottom row
+
+xlc = ROUND(clamp(sxc - h/4, 0, 128))         \ left column, clamped to the screen
+xrc = ROUND(clamp(sxc + h/4, 0, 128))         \ right column, exclusive
+
+; vertical clip: with the near plane this close a sprite can poke off the top or
+; bottom of the screen, and the renderer has no y clip - so clamp the bottom row
+; and the height to rows 0..127 here
+
+ybi = ROUND(syc)
+hti = ROUND(h)
+ybc = MIN({ybi, 127}, 0)                      \ clipped bottom row
+tpc = MAX({ybi - hti + 1, 0}, 0)              \ clipped top row
+hgt = ybc - tpc + 1                           \ clipped height (<= 0 = fully off screen)
+
+; visible = beyond the near plane AND >= one column AND >= one row after clipping -
+; the renderer sees xr > xl and in-screen extents whenever the height byte is nonzero
+
+vis = (vz > near) * (xrc > xlc) * (hgt >= 1)
+
+xlb = xlc*vis                                 \ masked: culled entries emit clean zeros
+xrb = xrc*vis
+syb = ybc*vis
+szb = hgt*vis                                 \ height 0 = the renderer's stop marker
+
+\\ Depth-sort the objects per camera position, furthest first
+
+; The tables become slot tables: slot 0 holds whatever object is furthest at that camera
+; index, so the renderer just walks slots 0..N-1 painting far to near. Object identity now
+; varies per slot, so colour rides along as a table too.
+
+; One flat sort does all ncam per-camera sorts at once: flatten everything to ncam*N
+; records and sort by a composite key with the camera index in the high part and the depth
+; in the low part. Ascending key = camera-major groups, each furthest-first (the -vz).
+; Stability doesn't matter - the key totally orders everything we care about. The window
+; just has to be wider than any depth range, and the data itself tells us that.
+
+w    = 2*MAX(ABS(vz)) + 1                     \ group window, no overlap possible
+vzs  = vz*vis                                 \ culled entries sort as depth 0 - behind the near plane
+                                              \ so they land after every visible one and the renderer stops at size=0
+key  = ZIP(t)*w - vzs
+colb = FULL(ncam, objects[.., 4])             \ colour broadcast to ncam x N
+
+recs    = ZIP(FLATTEN(key), FLATTEN(vz), FLATTEN(xlb), FLATTEN(xrb), FLATTEN(syb), FLATTEN(szb), FLATTEN(colb))
+sortedf = SORT(recs, 0)                       \ (ncam*N) x 7, camera-major, far to near
+
+; debug checks for now
+PRINT "campath[32]    = ", campath[32]
+PRINT "fwd[0]         = ", fwd[0]
+PRINT "up[0]          = ", up[0]
+PRINT "shape sortedf  = ", SHAPE(sortedf)
+PRINT "vz    @ cam 102 = ", vz[102]
+PRINT "slots @ cam 102 = ", sortedf[102*nobj ..< 103*nobj, 1]   ; visible ones descending
+PRINT "h     @ cam 102 = ", sortedf[102*nobj ..< 103*nobj, 5]   ; then 0s to the end
+PRINT "xl    @ cam 102 = ", sortedf[102*nobj ..< 103*nobj, 2]
+PRINT "xr    @ cam 102 = ", sortedf[102*nobj ..< 103*nobj, 3]
+PRINT "y     @ cam 102 = ", sortedf[102*nobj ..< 103*nobj, 4]
+PRINT "slot0 colour   = ", sortedf[(0..7)*nobj, 6]
+
+\\ Emit slot tables, ncam bytes each, indexed by camera position
+
+; slot j of camera i sits at flat index i*nobj + j, so each table is a strided gather.
+; Emitted into the including file's section (camera.6502 places this after its code,
+; page aligned).
+
+; Can we do this without FOR? Probably, but I can't figure it out
+.tab_xl
+FOR j = 0 ..< nobj
+    EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
+NEXT
+.tab_xr
+FOR j = 0 ..< nobj
+    EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
+NEXT
+.tab_y
+FOR j = 0 ..< nobj
+    EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
+NEXT
+.tab_h
+FOR j = 0 ..< nobj
+    EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
+NEXT
+.tab_col
+FOR j = 0 ..< nobj
+    EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
+NEXT

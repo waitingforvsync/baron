@@ -1,0 +1,407 @@
+\ **************************************************************************
+\ *
+\ *    Lissajous camera demo - renderer
+\ *
+\ *    A MODE 5-style 2bpp screen with the CRTC narrowed to 32 characters
+\ *    by 16 rows: 128x128 double-width pixels, 4K per screen, double
+\ *    buffered at &6000 and &7000. The vsync interrupt increments a frame
+\ *    counter; the renderer copies it once per loop and shifts it right to
+\ *    get the camera index into the precalculated tables (tables.6502,
+\ *    included at the end of the code section, page aligned).
+\ *
+\ *    Build:  baron boot.6502 camera.6502 --opt 2 -o camera.ssd
+\ *    Run:    SHIFT-BREAK boots it (Esc quits)
+\ *
+\ **************************************************************************
+
+\ Dither bytes for the background. 2bpp: pixel n's colour bits live at byte
+\ bits 7-n (high) and 3-n (low). The checkerboard alternates by scanline,
+\ and a scanline is the low three bits of its address, so bit 0 of the byte
+\ offset is the scanline parity.
+
+skyeven  = &5F                  ; blue/green  checker, even scanlines {1,3,1,3}
+skyodd   = &AF                  ;                     odd scanlines  {3,1,3,1}
+grounde  = &55                  ; black/green checker, even scanlines {0,3,0,3}
+groundo  = &AA                  ;                     odd scanlines  {3,0,3,0}
+
+SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "CAMERA"
+
+framectr = &FD                  ; incremented by the vsync interrupt
+irqchange = &FE
+
+ZPRESERVE &00..&FC
+ZPAUTO2 scr                     ; the one indirect pointer (tables, then screen)
+ZPAUTO1 camidx                  ; this frame's camera index (framectr copy >> 1)
+ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
+ZPAUTO1 tablo                   ; slot table pointer: low byte (0 or &80) and
+ZPAUTO1 tabhi                   ;   page (slots are 128 bytes, tables 8 pages apart)
+ZPAUTO1 slots                   ; slots left this frame (stop there or at height 0)
+ZPAUTO1 sxl                     ; sprite: left column (inclusive)
+ZPAUTO1 sxr                     ;         right column (exclusive)
+ZPAUTO1 syrow                   ;         bottom pixel row
+ZPAUTO1 sht                     ;         height in rows
+ZPAUTO1 solid                   ;         solid 4-pixel colour byte
+ZPAUTO1 lom                     ; xl AND 3: left partial-byte pixel offset
+ZPAUTO1 rom                     ; xr AND 3: right partial-byte pixel count
+ZPAUTO1 firstb                  ; first and last byte columns of the sprite
+ZPAUTO1 lastb
+ZPAUTO1 curb                    ; byte column being drawn
+ZPAUTO1 ys                      ; bottom row's scanline within its char row
+ZPAUTO1 whibase                 ; page of the bottom char row on the hidden screen
+ZPAUTO1 msk                     ; current strip's pixel mask
+
+
+\ ******************************************************************
+\ *    Main loop: clear, draw, show, repeat
+\ ******************************************************************
+
+.mainloop
+{
+    LDA framectr                ; one copy per loop - vsync moves it under us
+    LSR A                       ; 0..255 counter -> 0..127 camera index
+    STA camidx
+
+    JSR clearscreen
+    JSR drawsprites
+    JSR swapbuffers
+
+    LDA #112:STA &FE4F          ; scan Esc
+    LDA &FE4F
+    BPL mainloop
+    JMP (&FFFC)                 ; exit - in the least graceful way possible :)
+}
+
+
+\ ******************************************************************
+\ *    Clear the hidden screen: top 8 character rows dithered
+\ *    blue/green, bottom 8 dithered black/green. Four passes, two
+\ *    per screen half, each keeping its dither byte loaded in A
+\ *    throughout and storing every other scanline: a scanline is
+\ *    the low 3 bits of the offset, so Y steps by 2 through all 8
+\ *    pages of the half at once. The whole body is generated per
+\ *    screen bank, so there is nothing to patch at runtime.
+\ ******************************************************************
+
+MACRO clearbody base
+{
+    LDA #skyeven                ; sky, even scanlines
+    LDY #0
+.@
+FOR pg = 0 ..< 8
+    STA base + pg*256, Y
+NEXT
+    INY:INY
+    BNE @-
+    LDA #skyodd                 ; sky, odd scanlines (Y wrapped to 0)
+.@
+    INY                         ; up to the odd offset...
+FOR pg = 0 ..< 8
+    STA base + pg*256, Y
+NEXT
+    INY                         ; ...and past it, so Y wraps to 0 at the end
+    BNE @-
+    LDA #grounde                ; ground, even scanlines
+    LDY #0
+.@
+FOR pg = 0 ..< 8
+    STA base + &800 + pg*256, Y
+NEXT
+    INY:INY
+    BNE @-
+    LDA #groundo                ; ground, odd scanlines
+    INY
+.@
+FOR pg = 0 ..< 8
+    STA base + &800 + pg*256, Y
+NEXT
+    INY:INY
+    CPY #1
+    BNE @-
+}
+ENDMACRO
+
+.clearscreen                    ; clears the hidden (drawpage) bank
+{
+    LDA drawpage
+    CMP #&70
+    BEQ @+
+    JMP clear6000
+.@
+    JMP clear7000
+}
+
+.clear6000
+    clearbody &6000
+    RTS
+
+.clear7000
+    clearbody &7000
+    RTS
+
+
+\ ******************************************************************
+\ *    Walk the slot tables for this camera index, far to near,
+\ *    stopping at a zero height or after every slot.
+\ *    The five tables are nobj slots of ncam bytes each, laid out
+\ *    consecutively, so one (lo, page) pair addresses a slot in
+\ *    tab_xl and each further table is tabstride pages on.
+\ ******************************************************************
+
+tabstride = nobj * ncam div 256     ; pages per table (nobj must stay even)
+
+.drawsprites
+{
+    LDA #0:STA tablo
+    LDA #HI(tab_xl):STA tabhi
+    LDA #nobj:STA slots
+.slotloop
+    LDY camidx
+    LDA tablo:STA scr
+    LDA tabhi:CLC:ADC #3*tabstride:STA scr+1    ; tab_h
+    LDA (scr),Y
+    BEQ done                            ; height 0 = nothing more to draw
+    STA sht
+    LDA tabhi:STA scr+1                 ; tab_xl
+    LDA (scr),Y:STA sxl
+    LDA scr+1:CLC:ADC #tabstride:STA scr+1      ; tab_xr
+    LDA (scr),Y:STA sxr
+    LDA scr+1:CLC:ADC #tabstride:STA scr+1      ; tab_y
+    LDA (scr),Y:STA syrow
+    LDA scr+1:CLC:ADC #2*tabstride:STA scr+1    ; tab_col (skipping tab_h)
+    LDA (scr),Y:TAY
+    LDA colbytes,Y:STA solid
+
+    JSR drawsprite
+
+    LDA tablo:EOR #&80:STA tablo        ; next slot: +128 bytes
+    BNE @+
+    INC tabhi
+.@
+    DEC slots
+    BNE slotloop
+.done
+    RTS
+}
+
+
+\ ******************************************************************
+\ *    Draw one square: columns sxl..sxr-1, sht rows upward from
+\ *    bottom row syrow, in colour byte solid. Drawn as vertical
+\ *    byte-column strips: whole bytes are plain stores; only a
+\ *    left/right edge byte with partial pixel coverage pays for a
+\ *    read-modify-write under a mask. The tables guarantee
+\ *    sxr > sxl and no vertical overflow, so there is no clipping
+\ *    here at all.
+\ ******************************************************************
+
+.drawsprite
+{
+    LDA sxl:AND #3:STA lom
+    LDA sxr:AND #3:STA rom
+    LDA sxl:LSR A:LSR A:STA firstb:STA curb
+    LDA sxr:SEC:SBC #1:LSR A:LSR A:STA lastb
+    LDA syrow:AND #7:STA ys
+    LDA syrow:LSR A:LSR A:LSR A
+    CLC:ADC drawpage:STA whibase        ; page of the bottom char row
+
+.striploop
+    ; build this strip's pixel mask: full &FF, cut down at the sprite's edges
+    LDA #&FF
+    LDX curb
+    CPX firstb:BNE @+
+    LDX lom:AND leftmasks,X
+.@
+    LDX curb
+    CPX lastb:BNE @+
+    LDX rom:AND rightmasks,X
+.@
+    STA msk
+
+    ; point scr at the strip's bottom byte: page whibase, offset column*8
+    LDA curb:ASL A:ASL A:ASL A:STA scr
+    LDA whibase:STA scr+1
+    LDY ys
+    LDX sht
+    LDA msk
+    CMP #&FF
+    BNE masked
+
+    ; full byte column - store all the way up
+    LDA solid
+.fullrow
+    STA (scr),Y
+    DEY:BPL @+
+    DEC scr+1:LDY #7                    ; up into the previous char row
+.@
+    DEX:BNE fullrow
+    JMP nextstrip
+
+    ; partial byte column - keep the background outside the mask
+.masked
+    EOR #&FF:STA mand+1
+    LDA solid:AND msk:STA mora+1
+.maskrow
+    LDA (scr),Y
+.mand
+    AND #0                              ; self-modified: NOT mask
+.mora
+    ORA #0                              ; self-modified: colour AND mask
+    STA (scr),Y
+    DEY:BPL @+
+    DEC scr+1:LDY #7
+.@
+    DEX:BNE maskrow
+
+.nextstrip
+    LDA curb
+    CMP lastb
+    BEQ done
+    INC curb
+    JMP striploop
+.done
+    RTS
+}
+
+
+\ ******************************************************************
+\ *    Show the buffer just drawn, then draw into the other one:
+\ *    R12 = base/8 (R13 stays 0), and the bank toggles with EOR &10.
+\ ******************************************************************
+
+.swapbuffers
+{
+    LDA framectr:.@ CMP framectr:BEQ @-
+    LDA #12:STA &FE00
+    LDA drawpage:LSR A:LSR A:LSR A      ; &60 -> &0C, &70 -> &0E
+    STA &FE01
+    LDA drawpage:EOR #&10:STA drawpage
+    RTS
+}
+
+
+\ ******************************************************************
+\ *    Vsync interrupt: count frames, 0-255 with natural wrap
+\ ******************************************************************
+
+.irq
+    LDA #&02:STA &FE4D              ; clear the CA1 (vsync) interrupt flag
+    INC framectr
+    LDA &FC
+    RTI
+
+
+\ ******************************************************************
+\ *    Lookup tables for the plotter
+\ ******************************************************************
+
+.colbytes
+    EQUB &00, &0F, &F0, &FF         ; solid 4-pixel bytes for colours 0..3
+
+.leftmasks
+    EQUB &FF, &77, &33, &11         ; pixels o..3 kept, o = xl AND 3
+
+.rightmasks
+    EQUB &FF, &88, &CC, &EE         ; pixels 0..r-1 kept, r = xr AND 3 (0 = whole byte)
+
+
+\ ******************************************************************
+\ *    Entry: take the machine over, set up the screen hardware,
+\ *    clear both banks, hook the vsync interrupt, go.
+\ ******************************************************************
+
+.entry
+{
+    SEI
+    LDX #&FF:TXS                ; reset stack
+    LDA #&7F:STA &FE4E          ; disable all system VIA interrupts
+    STA &FE43                   ; set keyboard data direction
+    LDA #&0F:STA &FE42          ; set addressable latch for writing
+    LDA #3:STA &FE40            ; keyboard write enable
+    LDA #&04:STA &FE4C          ; PCR: CA1 = vsync, the edge the OS uses
+    LDA #&82:STA &FE4E          ; enable only the CA1 (vsync) interrupt
+
+    \\ Set up the CRTC for the reduced MODE 5 window
+
+    LDX #13
+.crtcloop
+    STX &FE00
+    LDA crtcregs,X
+    STA &FE01
+    DEX
+    BPL crtcloop
+
+    \\ Video ULA: MODE 5 control value
+
+    LDA #&C4
+    STA &FE20
+
+    \\ Palette: black, blue, red, green
+
+    LDX #15
+.palloop
+    LDA paldata,X
+    STA &FE21
+    DEX
+    BPL palloop
+
+    \\ Clear both banks so the first shown frame is clean
+
+    JSR clear6000
+    JSR clear7000
+
+    \\ Initialise vars: show &6000 first, so draw at &7000
+
+    LDA #0:STA framectr:STA irqchange
+    LDA #&70:STA drawpage
+
+    \\ Hook the IRQ and go
+
+    LDA #LO(irq):STA &204
+    LDA #HI(irq):STA &205
+    CLI
+    JMP mainloop
+}
+
+
+\ ******************************************************************
+\ *    CRTC values: 1MHz MODE 5 timing, narrowed to 32x16 characters
+\ *    and recentred
+\ ******************************************************************
+
+.crtcregs
+    EQUB 63             ; R0  horizontal total
+    EQUB 32             ; R1  horizontal displayed: 32 chars = 128 pixels
+    EQUB 45             ; R2  horizontal sync position (49 - 8/2 recentres)
+    EQUB &24            ; R3  sync widths
+    EQUB 38             ; R4  vertical total
+    EQUB 0              ; R5  vertical total adjust
+    EQUB 16             ; R6  vertical displayed: 16 rows = 128 scanlines
+    EQUB 26             ; R7  vertical sync position (34 - 16/2 recentres)
+    EQUB 0              ; R8  no interlace
+    EQUB 7              ; R9  8 scanlines per row
+    EQUB 32             ; R10 cursor off
+    EQUB 8              ; R11 cursor end
+    EQUB HI(&6000/8)    ; R12 screen start: show &6000 first
+    EQUB LO(&6000/8)    ; R13
+
+
+\ ******************************************************************
+\ *    Palette: in a 2bpp mode each logical colour occupies four of
+\ *    the 16 entries - its two bits sit at entry bits 3 and 1, and
+\ *    bits 2 and 0 are don't-cares. Register value = entry*16 +
+\ *    (physical EOR 7).
+\ ******************************************************************
+
+physcols = {0, 4, 1, 2}         ; black, blue, red, green
+
+.paldata
+    EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
+
+\ ******************************************************************
+\ *    The precalculated camera tables, page aligned after the code
+\ ******************************************************************
+
+ALIGN &100
+include "tables.6502"
+
+ENDSECTION
