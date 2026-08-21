@@ -1,3 +1,26 @@
+\\ **************************************************************************
+\\ *
+\\ *    Camera / object table generation
+\\ *
+\\ *    Everything here runs at ASSEMBLY time, in baron's expression
+\\ *    language. Values are numbers or LISTS, and lists nest: a list of
+\\ *    numbers is a vector, a list of {x,y,z} rows is a matrix, and so on.
+\\ *    The shapes used here, in the comments below:
+\\ *
+\\ *        number            one value
+\\ *        [ncam]            a list of ncam numbers (one per camera position)
+\\ *        [ncam x 3]        ncam rows, each a {x, y, z} triple
+\\ *        [ncam x N]        ncam rows, each with one number per object
+\\ *        [ncam x N x 3]    ncam rows of N object rows of {x, y, z}
+\\ *
+\\ *    The one big idea is BROADCASTING: any arithmetic between two values
+\\ *    works element-by-element, and if one side is "smaller" (a number
+\\ *    against a list, or a 1-long axis against an N-long one) it is
+\\ *    repeated to match. So [ncam x 1 x 3] - [N x 3] pairs EVERY camera
+\\ *    with EVERY object in one expression, giving [ncam x N x 3].
+\\ *
+\\ **************************************************************************
+
 \\ Define constants
 
 ncam    = 256                   \\ Number of camera positions around the loop (one table entry each)
@@ -45,104 +68,160 @@ objects = {
     { 180, objecty, 1160, 64, 1},
 }
 
-nobj = LEN(objects)             \\ Number of objects
+nobj = LEN(objects)             \\ Number of objects ("N" in the shape comments)
 
 \\ Define user-defined functions
 
-\\ Normalize: list of {x,y,z} -> list of {x,y,z}
-FUNCTION normalise(v) = v / ZIP(SQRT(SUM(v*v, 1)))
+\\ Normalize: [rows x 3] -> [rows x 3], each row scaled to unit length.
+\\ v*v squares every component; SUM(.., 1) adds along axis 1 (the x,y,z axis),
+\\ giving one squared length per row; ZIP wraps each into a 1-long row so the
+\\ divide broadcasts it across that row's three components.
+FUNCTION normalise(v)
+    lensq = SUM(v*v, 1)         \ [rows]      squared length of each row
+    len   = ZIP(SQRT(lensq))    \ [rows x 1]  length, as a column
+= v / len
 
-\\ Cross-product: {x,y,z} X {x,y,z} -> {x,y,z}
+\\ Cross-product: [rows x 3] X [rows x 3] -> [rows x 3], row by row.
+\\ a[.., 1] slices one component from every row (".." = keep the row axis,
+\\ 1 = take that element), so each line below is a whole column of numbers,
+\\ and ZIP stitches the three result columns back into {x,y,z} rows.
 FUNCTION cross(a, b)
     x = a[..,1]*b[..,2] - a[..,2]*b[..,1]
     y = a[..,2]*b[..,0] - a[..,0]*b[..,2]
     z = a[..,0]*b[..,1] - a[..,1]*b[..,0]
 = ZIP(x, y, z)
 
-\\ Dot product: (list of {x,y,z}).(list of {x,y,z}) -> list of scalars
+\\ Dot product of every camera-relative position against that camera's basis
+\\ vector: [ncam x N x 3] . [ncam x 3] -> [ncam x N].
+\\ ZIP(basis) wraps each basis row as [ncam x 1 x 3], so the multiply pairs
+\\ camera i's basis with camera i's N object rows (the 1 stretches to N);
+\\ SUM(.., 2) then adds up each {x,y,z} product - the dot product itself.
 FUNCTION viewdot(rel, basis) = SUM(rel * ZIP(basis), 2)
 
+\\ Element-wise clamp of v into lo..hi, any shape.
+\\ MAX({v, lo}, 0) folds the 2-list {v, lo} pairwise: element-wise max(v, lo).
+\\ (Plain MAX(v, lo) would read lo as an axis number instead.)
 FUNCTION clamp(v, lo, hi) = MIN({MAX({v, lo}, 0), hi}, 0)
 
 ; Round-to-nearest stopgap: baron's ROUND( currently truncates toward zero, so
 ; shift by half away from zero first. Delete once baron's ROUND does this itself.
+; The sign is arithmetic ((v >= 0) is 1 or 0, element-wise) because an IF in a
+; function body needs a single number, and v here is a whole table.
 FUNCTION nearest(v)
-    s = (v >= 0)*2 - 1
+    s = (v >= 0)*2 - 1          \ same shape as v: +1 or -1 per element
 = ROUND(v + s*0.5)
 
 \\ Define camera path
-\\ This is a 2:1 Lissajous curve with ncam (128) positions
-\\ campath is a list of 128 {x, y, z} vectors
+\\ A lemniscate of Bernoulli (figure-of-eight), ncam positions around the loop.
+\\ Everything is derived from t, the list of camera indices - one entry per
+\\ camera position, so every assignment below computes ALL positions at once.
 
-k = 2*PI / ncam
-t = 0 ..< ncam
+k = 2*PI / ncam                 \\ number      angle step per camera position
+t = 0 ..< ncam                  \\ [ncam]      camera indices 0, 1, .. ncam-1
+
+sn  = SIN(t*k)                  \ [ncam]      sin of every camera's angle
+cs  = COS(t*k)                  \ [ncam]      cos of every camera's angle
+den = 1 + sn*sn                 \ [ncam]      the lemniscate's denominator
+
+lemx = cs/den                   \ [ncam]      unit lemniscate, x
+lemz = SIN(2*t*k)/(2*den)       \ [ncam]      unit lemniscate, z
+
 ;campath = camorig + ZIP(SIN(2*t*k), FULL(ncam, 0), SIN(1*t*k)) * radius
-campath = camorig + ZIP(COS(t*k)/(1+SIN(t*k)^2), FULL(ncam, 0), SIN(2*t*k)/(2*(1+SIN(t*k)^2))) * radius
+\\ ZIP stitches three [ncam] columns into [ncam x 3] rows; FULL(ncam, 0) is
+\\ just a column of zeroes (the path stays at ground level - camorig lifts it).
+\\ Adding camorig (a single {x,y,z}) broadcasts it onto every row.
+campath = camorig + ZIP(lemx, FULL(ncam, 0), lemz) * radius   \ [ncam x 3]
 
 \\ Define camera basis for each camera position
-\\ We calculate the heading direction from the derivative of the Lissajous curve
-\\ The forward direction is the heading direction pitched down to look at the horizon
+\\ We calculate the heading direction from the derivative of the curve
+\\ The forward direction is the heading direction pitched down to look at the ground
 \\ The rest of the basis is calculated assuming no roll.
 
+dxdt = sn*(sn*sn - 3)/den^2     \ [ncam]      d/dt of the lemniscate, x
+dzdt = (1 - 3*sn*sn)/den^2      \ [ncam]      d/dt of the lemniscate, z
+
 ;hdg   = normalise(ZIP(2*COS(2*t*k), FULL(ncam, 0), 1*COS(1*t*k)))   \ unit heading, ground plane
-hdg   = normalise(ZIP(SIN(t*k)*(SIN(t*k)^2-3)/(1+SIN(t*k)^2)^2, FULL(ncam, 0), (1-3*SIN(t*k)^2)/(1+SIN(t*k)^2)^2))
-fwd   = normalise(hdg*lookahead + {0, -camorig[1], 0})              \ at the ground, lookahead units on
-right = ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])                 \ horizontal, perp to the heading
-up    = cross(fwd, right)                                           \ tilted back to match fwd
+hdg = normalise(ZIP(dxdt, FULL(ncam, 0), dzdt))   \ [ncam x 3]  unit heading, ground plane
 
-\\ Get camera relative positions, all object positions at once
+\\ Aim at the point on the ground `lookahead` units along the heading: the
+\\ vector to it is (heading * lookahead) sideways and (-camera height) down.
+\\ {0, -camorig[1], 0} is one triple, broadcast onto all ncam rows.
+target = hdg*lookahead + {0, -camorig[1], 0}      \ [ncam x 3]  camera -> aimed point
+fwd    = normalise(target)                        \ [ncam x 3]  unit forward, pitched down
 
-objpos = objects[.., 0..2]                    \ Extract just object {x,y,z}
-rel    = objpos - ZIP(campath)                \ ncam x 1 x 3 against Nx3 -> ncam x N x 3
+\\ Right is the horizontal perpendicular of the heading: (z, 0, -x) per row.
+right = ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])   \ [ncam x 3]
+up    = cross(fwd, right)                             \ [ncam x 3]  tilted back to match fwd
 
-\\ Get view space via dot products (each ncam x N)
+\\ Get camera relative positions, all camera/object pairs at once
 
-vx = viewdot(rel, right)
-vy = viewdot(rel, up)
-vz = viewdot(rel, fwd)
+objpos = objects[.., 0..2]      \ [N x 3]     just the {x,y,z} of every object
+
+\\ ZIP(campath) wraps each camera row in a 1-long list: [ncam x 1 x 3]. The
+\\ subtract then broadcasts that 1 against the N object rows - every object
+\\ position minus every camera position, in one expression.
+rel = objpos - ZIP(campath)     \ [ncam x N x 3]  object positions, camera-relative
+
+\\ Get view space coordinates: each object's position in each camera's frame
+
+vx = viewdot(rel, right)        \ [ncam x N]  sideways offset (screen x direction)
+vy = viewdot(rel, up)           \ [ncam x N]  vertical offset (screen y direction)
+vz = viewdot(rel, fwd)          \ [ncam x N]  depth into the screen
 
 \\ Project to the MODE 5 screen
+\\ Projection happens in square-pixel space (256 wide, focal 128 = 90 degree
+\\ FOV), then x halves onto the 128 double-width columns. Object positions are
+\\ the bottom-centre of the square: syc is the sprite's bottom row and it
+\\ extends h rows upward. From here every value is [ncam x N] - one number per
+\\ camera/object pair - and stays a float until the final edge rounding.
 
-; Projection happens in square-pixel space (256 wide, focal 128 = 90 degree FOV), then x
-; halves onto the 128 double-width columns. Object positions are the bottom-centre of the
-; square: syc is the sprite's bottom row and it extends h rows upward from there.
-; Horizontal extent goes out as clamped left/right(exclusive) columns, so a partially
-; onscreen object still draws - the clamping IS the x clip, done here instead of at
-; render time (sprite width = h/2 columns, half-width h/4).
-
-vzc = MAX({vz, near}, 0)                      \ safe divisor (culled entries masked below)
-px  = focal*vx/vzc                            \ square-pixel projection
+vzc = MAX({vz, near}, 0)        \ [ncam x N]  divisor clamped at the near plane
+                                \             (element-wise max again, so entries
+                                \             behind the camera divide safely -
+                                \             they are culled below anyway)
+px  = focal*vx/vzc              \ [ncam x N]  the perspective divide
 py  = focal*vy/vzc
-h   = focal*objects[.., 3]/vzc                \ sprite height in pixel rows
-sxc = px/2 + 64                               \ centre column (halved for double width)
-syc = 64 - py                                 \ bottom row
+h   = focal*objects[.., 3]/vzc  \ [ncam x N]  sprite height in pixel rows
+                                \             (objects[.., 3] is the [N] sizes,
+                                \             broadcast across the cameras)
+sxc = px/2 + 64                 \ [ncam x N]  centre column (halved: double-width pixels)
+syc = 64 - py                   \ [ncam x N]  bottom row (screen y grows downward)
 
 ; precision: every edge is rounded straight from its float position, clamping last,
 ; and the height comes from the DIFFERENCE of the rounded rows - never rounded on its
 ; own, or the bottom-row fraction and height fraction beat against each other and the
 ; top edge wobbles as the camera moves (7x the edge jitter, measured)
-xlc = clamp(nearest(sxc - h/4), 0, 128)       \ left column, clamped to the screen
-xrc = clamp(nearest(sxc + h/4), 0, 128)       \ right column, exclusive
+
+xlc = clamp(nearest(sxc - h/4), 0, 128)   \ [ncam x N]  left column, on-screen
+xrc = clamp(nearest(sxc + h/4), 0, 128)   \ [ncam x N]  right column, exclusive
+                                          \             (sprite width = h/2 columns,
+                                          \             so half a width is h/4)
 
 ; vertical clip: with the near plane this close a sprite can poke off the top or
 ; bottom of the screen, and the renderer has no y clip - so clamp the bottom row
 ; and the top row to 0..127 here
 
-ybi = nearest(syc)                            \ bottom row, from the float bottom edge
-yti = nearest(syc - h) + 1                    \ top row, from the float top edge
-ybc = MIN({ybi, 127}, 0)                      \ clipped bottom row
-tpc = MAX({yti, 0}, 0)                        \ clipped top row
-hgt = ybc - tpc + 1                           \ height from the rounded rows (<= 0 = fully off)
+ybi = nearest(syc)              \ [ncam x N]  bottom row, from the float bottom edge
+yti = nearest(syc - h) + 1      \ [ncam x N]  top row, from the float top edge
+ybc = MIN({ybi, 127}, 0)        \ [ncam x N]  bottom row clipped to the screen
+tpc = MAX({yti, 0}, 0)          \ [ncam x N]  top row clipped to the screen
+hgt = ybc - tpc + 1             \ [ncam x N]  height from the rounded rows
+                                \             (<= 0 means fully off screen)
 
-; visible = beyond the near plane AND >= one column AND >= one row after clipping -
-; the renderer sees xr > xl and in-screen extents whenever the height byte is nonzero
+\\ Visibility: 1 where the sprite should be drawn, 0 where not.
+\\ Each comparison broadcasts element-wise and yields 1 or 0, and multiplying
+\\ the three masks together is a logical AND. A visible entry is guaranteed to
+\\ give the renderer xr > xl and rows inside 0..127, so it never clips.
 
-vis = (vz > near) * (xrc > xlc) * (hgt >= 1)
+vis = (vz > near) * (xrc > xlc) * (hgt >= 1)   \ [ncam x N]  1 = draw it
 
-xlb = xlc*vis                                 \ masked: culled entries emit clean zeros
-xrb = xrc*vis
-syb = ybc*vis
-szb = hgt*vis                                 \ height 0 = the renderer's stop marker
+\\ The emitted values: multiplying by vis zeroes every culled entry, so they
+\\ emit as clean zero bytes (and a zero height is the renderer's stop marker).
+
+xlb = xlc*vis                   \ [ncam x N]  left column, or 0
+xrb = xrc*vis                   \ [ncam x N]  right column, or 0
+syb = ybc*vis                   \ [ncam x N]  bottom row, or 0
+szb = hgt*vis                   \ [ncam x N]  height, or 0 = stop marker
 
 \\ Depth-sort the objects per camera position, furthest first
 
@@ -156,14 +235,35 @@ szb = hgt*vis                                 \ height 0 = the renderer's stop m
 ; Stability doesn't matter - the key totally orders everything we care about. The window
 ; just has to be wider than any depth range, and the data itself tells us that.
 
-w    = 2*MAX(ABS(vz)) + 1                     \ group window, no overlap possible
-vzs  = vz*vis                                 \ culled entries sort as depth 0 - behind the near plane
-                                              \ so they land after every visible one and the renderer stops at size=0
-key  = ZIP(t)*w - vzs
-colb = FULL(ncam, objects[.., 4])             \ colour broadcast to ncam x N
+w   = 2*MAX(ABS(vz)) + 1        \ number      group window: MAX here folds the whole
+                                \             [ncam x N] table down to one value
+vzs = vz*vis                    \ [ncam x N]  culled entries sort as depth 0 - behind
+                                \             the near plane - so they land after every
+                                \             visible one and the renderer stops at size=0
 
-recs    = ZIP(FLATTEN(key), FLATTEN(vz), FLATTEN(xlb), FLATTEN(xrb), FLATTEN(syb), FLATTEN(szb), FLATTEN(colb))
-sortedf = SORT(recs, 0)                       \ (ncam*N) x 7, camera-major, far to near
+camcol = ZIP(t)                 \ [ncam x 1]  camera index as a column, so the multiply
+                                \             broadcasts it across each row's N objects
+key    = camcol*w - vzs         \ [ncam x N]  sort key: camera-major, furthest-first
+
+colb = FULL(ncam, objects[.., 4])   \ [ncam x N]  the [N] colours, copied ncam times
+
+\\ Flatten each [ncam x N] table into one long [ncam*N] list (row-major, so
+\\ camera-major order), then ZIP the seven lists into one record per entry.
+
+allkey = FLATTEN(key)           \ [ncam*N]
+allvz  = FLATTEN(vz)            \ [ncam*N]  (kept in the record for debugging)
+allxl  = FLATTEN(xlb)           \ [ncam*N]
+allxr  = FLATTEN(xrb)           \ [ncam*N]
+ally   = FLATTEN(syb)           \ [ncam*N]
+allh   = FLATTEN(szb)           \ [ncam*N]
+allcol = FLATTEN(colb)          \ [ncam*N]
+
+recs = ZIP(allkey, allvz, allxl, allxr, ally, allh, allcol)   \ [ncam*N x 7] records
+
+\\ SORT orders the records ascending by field 0 (the composite key), which
+\\ groups them by camera and puts each camera's group furthest-first.
+
+sortedf = SORT(recs, 0)         \ [ncam*N x 7]  camera-major, far to near
 
 ; debug checks for now
 PRINT "campath[32]    = ", campath[32]
@@ -182,19 +282,30 @@ PRINT "slot0 colour   = ", sortedf[(0..7)*nobj, 6]
 
 ; only as many slots as are ever simultaneously visible need emitting - beyond the
 ; busiest camera's count, every slot is zero for every camera position
-maxvis = MAX(SUM(vis, 1))                     ; the busiest camera's visible count
-nslots = maxvis                               ; ncam = 256 keeps tables page-aligned regardless
+
+percam = SUM(vis, 1)            \ [ncam]      how many objects each camera can see
+maxvis = MAX(percam)            \ number      the busiest camera's count
+nslots = maxvis                 \ number      ncam = 256 keeps tables page-aligned regardless
+
 PRINT "max visible    = ", maxvis, " of ", nobj, " objects -> ", nslots, " slots emitted"
-PRINT "path clearance = ", ROUND(SQRT(MIN(SUM(rel[.., .., {0,2}]^2, 2)))), " world units"
+
+relxz = rel[.., .., {0, 2}]     \ [ncam x N x 2]  horizontal components only ({0,2}
+                                \                 gathers just the x and z elements)
+PRINT "path clearance = ", ROUND(SQRT(MIN(SUM(relxz^2, 2)))), " world units"
 
 ; slot j of camera i sits at flat index i*nobj + j, so each table is a strided gather.
 ; Emitted into the including file's section (camera.6502 places this after its code,
 ; page aligned).
 
-; No FOR needed: the slot-major index grid is an outer product - a column of slot
-; offsets (ZIP makes it nslots x 1) broadcast against the camera strides - and
-; FLATTEN turns it into one big gather, emitting a whole table per EQUB.
-slotidx = FLATTEN(ZIP(0 ..< nslots) + (0 ..< ncam)*nobj)
+; No FOR needed: the flat indices of one whole table form a grid, built as an
+; outer product - a column of slot numbers against the camera group offsets -
+; and FLATTEN turns the grid into one long gather, a whole table per EQUB.
+
+slotcol = ZIP(0 ..< nslots)     \ [nslots x 1]     slot numbers, as a column
+camoff  = (0 ..< ncam)*nobj     \ [ncam]           where each camera's group starts
+grid    = slotcol + camoff      \ [nslots x ncam]  flat record index of slot j, camera i
+slotidx = FLATTEN(grid)         \ [nslots*ncam]    slot-major: table 0's bytes, then 1's..
+
 .tab_xl
     EQUB sortedf[slotidx, 2]
 .tab_xr

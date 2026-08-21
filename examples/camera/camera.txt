@@ -28,21 +28,6 @@ irqchange = &FE
 scr = &00 [auto]
 camidx = &02 [auto]
 drawpage = &03 [auto]
-tabhi = &04 [auto]
-slots = &05 [auto]
-sxl = &06 [auto]
-sxr = &07 [auto]
-syrow = &08 [auto]
-sht = &09 [auto]
-solid = &0A [auto]
-lom = &0B [auto]
-rom = &0C [auto]
-firstb = &06 [auto]
-lastb = &07 [auto]
-curb = &0D [auto]
-ys = &0E [auto]
-whibase = &08 [auto]
-msk = &0F [auto]
 .mainloop
 {
   1100  A5 FD           LDA framectr
@@ -187,57 +172,72 @@ msk = &0F [auto]
   1223  D0 E2           BNE @-
 }
   1225  60              RTS
-tabstride = nslots * ncam div 256
+tabstride = nslots * ncam DIV 256
 .drawsprites
 {
+slots = &04 [auto]
+tabhi = &05 [auto]
   1226  A9 14           LDA #HI(tab_xl)
-  1228  85 04           STA tabhi
-  122A  A9 0E           LDA #nslots
-  122C  85 05           STA slots
+  1228  85 05           STA tabhi
+  122A  A9 0F           LDA #nslots
+  122C  85 04           STA slots
 .slotloop
   122E  A4 02           LDY camidx
   1230  A9 00           LDA #0
   1232  85 00           STA scr
-  1234  A5 04           LDA tabhi
+  1234  A5 05           LDA tabhi
   1236  18              CLC
-  1237  69 2A           ADC #3*tabstride
+  1237  69 2D           ADC #3*tabstride
   1239  85 01           STA scr+1
   123B  B1 00           LDA (scr),Y
   123D  F0 38           BEQ done
-  123F  85 09           STA sht
-  1241  A5 04           LDA tabhi
+  123F  85 09           STA drawsprite.sht
+  1241  A5 05           LDA tabhi
   1243  85 01           STA scr+1
   1245  B1 00           LDA (scr),Y
-  1247  85 06           STA sxl
+  1247  85 06           STA drawsprite.sxl
   1249  A5 01           LDA scr+1
   124B  18              CLC
-  124C  69 0E           ADC #tabstride
+  124C  69 0F           ADC #tabstride
   124E  85 01           STA scr+1
   1250  B1 00           LDA (scr),Y
-  1252  85 07           STA sxr
+  1252  85 07           STA drawsprite.sxr
   1254  A5 01           LDA scr+1
   1256  18              CLC
-  1257  69 0E           ADC #tabstride
+  1257  69 0F           ADC #tabstride
   1259  85 01           STA scr+1
   125B  B1 00           LDA (scr),Y
-  125D  85 08           STA syrow
+  125D  85 08           STA drawsprite.syrow
   125F  A5 01           LDA scr+1
   1261  18              CLC
-  1262  69 1C           ADC #2*tabstride
+  1262  69 1E           ADC #2*tabstride
   1264  85 01           STA scr+1
   1266  B1 00           LDA (scr),Y
   1268  A8              TAY
   1269  B9 3B 13        LDA colbytes,Y
-  126C  85 0A           STA solid
+  126C  85 0A           STA drawsprite.solid
   126E  20 78 12        JSR drawsprite
-  1271  E6 04           INC tabhi
-  1273  C6 05           DEC slots
+  1271  E6 05           INC tabhi
+  1273  C6 04           DEC slots
   1275  D0 B7           BNE slotloop
 .done
   1277  60              RTS
 }
 .drawsprite
 {
+sxl = &06 [auto]
+sxr = &07 [auto]
+syrow = &08 [auto]
+sht = &09 [auto]
+solid = &0A [auto]
+lom = &0B [auto]
+rom = &0C [auto]
+firstb = &06 [auto]
+lastb = &07 [auto]
+curb = &0D [auto]
+ys = &0E [auto]
+msk = &08 [auto]
+whibase = &0F [auto]
   1278  A5 06           LDA sxl
   127A  29 03           AND #3
   127C  85 0B           STA lom
@@ -264,7 +264,7 @@ tabstride = nslots * ncam div 256
   129F  4A              LSR A
   12A0  18              CLC
   12A1  65 03           ADC drawpage
-  12A3  85 08           STA whibase
+  12A3  85 0F           STA whibase
 .striploop
   12A5  A9 FF           LDA #&FF
   12A7  A6 0D           LDX curb
@@ -279,17 +279,17 @@ tabstride = nslots * ncam div 256
   12B8  A6 0C           LDX rom
   12BA  3D 43 13        AND rightmasks,X
 .@
-  12BD  85 0F           STA msk
+  12BD  85 08           STA msk
   12BF  A5 0D           LDA curb
   12C1  0A              ASL A
   12C2  0A              ASL A
   12C3  0A              ASL A
   12C4  85 00           STA scr
-  12C6  A5 08           LDA whibase
+  12C6  A5 0F           LDA whibase
   12C8  85 01           STA scr+1
   12CA  A4 0E           LDY ys
   12CC  A6 09           LDX sht
-  12CE  A5 0F           LDA msk
+  12CE  A5 08           LDA msk
   12D0  C9 FF           CMP #&FF
   12D2  D0 11           BNE masked
   12D4  A5 0A           LDA solid
@@ -307,7 +307,7 @@ tabstride = nslots * ncam div 256
   12E5  49 FF           EOR #&FF
   12E7  8D F4 12        STA mand+1
   12EA  A5 0A           LDA solid
-  12EC  25 0F           AND msk
+  12EC  25 08           AND msk
   12EE  8D F6 12        STA mora+1
 .maskrow
   12F1  B1 00           LDA (scr),Y
@@ -443,13 +443,21 @@ objects = {...
 nobj = LEN(objects)
 k = 2*PI / ncam
 t = 0 ..< ncam
-campath = camorig + ZIP(COS(t*k)/(1+SIN(t*k)^2), FULL(ncam, 0), SIN(2*t*k)/(2*(1+SIN(t*k)^2))) * radius
-hdg   = normalise(ZIP(SIN(t*k)*(SIN(t*k)^2-3)/(1+SIN(t*k)^2)^2, FULL(ncam, 0), (1-3*SIN(t*k)^2)/(1+SIN(t*k)^2)^2))
-fwd   = normalise(hdg*lookahead + {0, -camorig[1], 0})
+sn  = SIN(t*k)
+cs  = COS(t*k)
+den = 1 + sn*sn
+lemx = cs/den
+lemz = SIN(2*t*k)/(2*den)
+campath = camorig + ZIP(lemx, FULL(ncam, 0), lemz) * radius
+dxdt = sn*(sn*sn - 3)/den^2
+dzdt = (1 - 3*sn*sn)/den^2
+hdg = normalise(ZIP(dxdt, FULL(ncam, 0), dzdt))
+target = hdg*lookahead + {0, -camorig[1], 0}
+fwd    = normalise(target)
 right = ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])
 up    = cross(fwd, right)
 objpos = objects[.., 0..2]
-rel    = objpos - ZIP(campath)
+rel = objpos - ZIP(campath)
 vx = viewdot(rel, right)
 vy = viewdot(rel, up)
 vz = viewdot(rel, fwd)
@@ -459,49 +467,62 @@ py  = focal*vy/vzc
 h   = focal*objects[.., 3]/vzc
 sxc = px/2 + 64
 syc = 64 - py
-xlc = ROUND(clamp(sxc - h/4, 0, 128))
-xrc = ROUND(clamp(sxc + h/4, 0, 128))
-ybi = ROUND(syc)
-hti = ROUND(h)
+xlc = clamp(nearest(sxc - h/4), 0, 128)
+xrc = clamp(nearest(sxc + h/4), 0, 128)
+ybi = nearest(syc)
+yti = nearest(syc - h) + 1
 ybc = MIN({ybi, 127}, 0)
-tpc = MAX({ybi - hti + 1, 0}, 0)
+tpc = MAX({yti, 0}, 0)
 hgt = ybc - tpc + 1
 vis = (vz > near) * (xrc > xlc) * (hgt >= 1)
 xlb = xlc*vis
 xrb = xrc*vis
 syb = ybc*vis
 szb = hgt*vis
-w    = 2*MAX(ABS(vz)) + 1
-vzs  = vz*vis
-key  = ZIP(t)*w - vzs
+w   = 2*MAX(ABS(vz)) + 1
+vzs = vz*vis
+camcol = ZIP(t)
+key    = camcol*w - vzs
 colb = FULL(ncam, objects[.., 4])
-recs    = ZIP(FLATTEN(key), FLATTEN(vz), FLATTEN(xlb), FLATTEN(xrb), FLATTEN(syb), FLATTEN(szb), FLATTEN(colb))
+allkey = FLATTEN(key)
+allvz  = FLATTEN(vz)
+allxl  = FLATTEN(xlb)
+allxr  = FLATTEN(xrb)
+ally   = FLATTEN(syb)
+allh   = FLATTEN(szb)
+allcol = FLATTEN(colb)
+recs = ZIP(allkey, allvz, allxl, allxr, ally, allh, allcol)
 sortedf = SORT(recs, 0)
 campath[32]    = {776.777, 32, 725}
 fwd[0]         = {0, -0.0319836, 0.999488}
 up[0]          = {-0, 0.999488, 0.0319836}
-shape sortedf  = {7680, 7}
-vz    @ cam 102 = {90.0872, -480.78, 286.952, -15.0981, -300.532, -725.163, -435.759, -155.85, -670.155, -407.354, 91.1525, 304.225, -141.606, 75.6411, -475.458, 211.973, -732.774, 130.117, -745.134, -151.551, 292.439, -611.748, -367.284, -241.552, 60.9904, -109.599, -756.184, 217.091, -498.785, -259.314}
-slots @ cam 102 = {304.225, 211.973, 91.1525, 75.6411, -745.134, -756.184, -109.599, 60.9904, -241.552, -367.284, -611.748, 292.439, -259.314, -151.551, -498.785, 217.091, 130.117, -732.774, 90.0872, -480.78, -15.0981, -300.532, -725.163, 286.952, -155.85, -670.155, -407.354, -141.606, -475.458, -435.759}
-h     @ cam 102 = {26, 38, 89, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-xl    @ cam 102 = {55, 104, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-xr    @ cam 102 = {68, 123, 45, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-y     @ cam 102 = {73, 79, 104, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-slot0 colour   = {2, 2, 2, 2, 1, 1, 1, 1}
-maxvis = MAX(SUM(vis, 1))
-nslots = maxvis + (maxvis MOD 2)
-max visible    = 14 of 30 objects -> 14 slots emitted
-path clearance = 37 world units
-slotidx = FLATTEN(ZIP(0 ..< nslots) + (0 ..< ncam)*nobj)
+shape sortedf  = {8192, 7}
+vz    @ cam 102 = {30.9867, -423.808, 159.993, -600.823, -307.449, -189.862, 241.891, -2.77845, -754.017, -200.585, -555.105, -366.59, -82.5882, 309.218, -695.039, 34.4673, -110.951, -382.837, -734.82, 100.976, 325.468, -574.545, -395.197, -203.325, 214.267, 14.3318, -570.697, -433.955, -778.694, -91.4673, -587.845, 170.106}
+slots @ cam 102 = {325.468, 309.218, 241.891, -395.197, -734.82, 100.976, -574.545, 170.106, -91.4673, 214.267, 14.3318, -570.697, -433.955, -778.694, -587.845, -203.325, -382.837, -200.585, 34.4673, -110.951, 30.9867, -423.808, -600.823, -307.449, -189.862, 159.993, -754.017, -555.105, -366.59, -82.5882, -695.039, -2.77845}
+h     @ cam 102 = {25, 26, 34, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+xl    @ cam 102 = {122, 55, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+xr    @ cam 102 = {128, 69, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+y     @ cam 102 = {72, 73, 77, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+slot0 colour   = {1, 1, 2, 1, 1, 1, 1, 1}
+percam = SUM(vis, 1)
+maxvis = MAX(percam)
+nslots = maxvis
+max visible    = 15 of 32 objects -> 15 slots emitted
+relxz = rel[.., .., {0, 2}]
+path clearance = 67 world units
+slotcol = ZIP(0 ..< nslots)
+camoff  = (0 ..< ncam)*nobj
+grid    = slotcol + camoff
+slotidx = FLATTEN(grid)
 .tab_xl
-  1400  12 18 1E 23...  EQUB sortedf[slotidx, 2]
+  1400  38 3D 06 00...  EQUB sortedf[slotidx, 2]
 .tab_xr
-  2200  19 1F 25 2A...  EQUB sortedf[slotidx, 3]
+  2300  40 44 0E 06...  EQUB sortedf[slotidx, 3]
 .tab_y
-  3000  43 43 42 42...  EQUB sortedf[slotidx, 4]
+  3200  44 44 43 42...  EQUB sortedf[slotidx, 4]
 .tab_h
-  3E00  0E 0E 0D 0D...  EQUB sortedf[slotidx, 5]
+  4100  10 10 0F 0C...  EQUB sortedf[slotidx, 5]
 .tab_col
-  4C00  02 02 02 02...  EQUB sortedf[slotidx, 6]
+  5000  01 01 02 01...  EQUB sortedf[slotidx, 6]
 ENDSECTION
 

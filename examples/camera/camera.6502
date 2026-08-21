@@ -33,21 +33,6 @@ ZPRESERVE &00..&FC
 ZPAUTO2 scr                     ; the one indirect pointer (tables, then screen)
 ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
-ZPAUTO1 tabhi                   ; slot table page (ncam = 256: one page per slot)
-ZPAUTO1 slots                   ; slots left this frame (stop there or at height 0)
-ZPAUTO1 sxl                     ; sprite: left column (inclusive)
-ZPAUTO1 sxr                     ;         right column (exclusive)
-ZPAUTO1 syrow                   ;         bottom pixel row
-ZPAUTO1 sht                     ;         height in rows
-ZPAUTO1 solid                   ;         solid 4-pixel colour byte
-ZPAUTO1 lom                     ; xl AND 3: left partial-byte pixel offset
-ZPAUTO1 rom                     ; xr AND 3: right partial-byte pixel count
-ZPAUTO1 firstb                  ; first and last byte columns of the sprite
-ZPAUTO1 lastb
-ZPAUTO1 curb                    ; byte column being drawn
-ZPAUTO1 ys                      ; bottom row's scanline within its char row
-ZPAUTO1 whibase                 ; page of the bottom char row on the hidden screen
-ZPAUTO1 msk                     ; current strip's pixel mask
 
 
 \ ******************************************************************
@@ -145,10 +130,13 @@ ENDMACRO
 \ *    tab_xl and each further table is tabstride pages on.
 \ ******************************************************************
 
-tabstride = nslots * ncam div 256   ; pages per table (nslots is kept even)
+tabstride = nslots * ncam DIV 256   ; pages per table (nslots is kept even)
 
 .drawsprites
 {
+    ZPAUTO1 slots                   ; slots left this frame (stop there or at height 0)
+    ZPAUTO1 tabhi                   ; slot table page (ncam = 256: one page per slot)
+
     LDA #HI(tab_xl):STA tabhi
     LDA #nslots:STA slots
 .slotloop
@@ -157,16 +145,16 @@ tabstride = nslots * ncam div 256   ; pages per table (nslots is kept even)
     LDA tabhi:CLC:ADC #3*tabstride:STA scr+1    ; tab_h
     LDA (scr),Y
     BEQ done                            ; height 0 = nothing more to draw
-    STA sht
+    STA drawsprite.sht
     LDA tabhi:STA scr+1                 ; tab_xl
-    LDA (scr),Y:STA sxl
+    LDA (scr),Y:STA drawsprite.sxl
     LDA scr+1:CLC:ADC #tabstride:STA scr+1      ; tab_xr
-    LDA (scr),Y:STA sxr
+    LDA (scr),Y:STA drawsprite.sxr
     LDA scr+1:CLC:ADC #tabstride:STA scr+1      ; tab_y
-    LDA (scr),Y:STA syrow
+    LDA (scr),Y:STA drawsprite.syrow
     LDA scr+1:CLC:ADC #2*tabstride:STA scr+1    ; tab_col (skipping tab_h)
     LDA (scr),Y:TAY
-    LDA colbytes,Y:STA solid
+    LDA colbytes,Y:STA drawsprite.solid
 
     JSR drawsprite
 
@@ -190,6 +178,22 @@ tabstride = nslots * ncam div 256   ; pages per table (nslots is kept even)
 
 .drawsprite
 {
+    \\ Inputs
+    ZPAUTO1 sxl                     ; sprite: left column (inclusive)
+    ZPAUTO1 sxr                     ;         right column (exclusive)
+    ZPAUTO1 syrow                   ;         bottom pixel row
+    ZPAUTO1 sht                     ;         height in rows
+    ZPAUTO1 solid                   ;         solid 4-pixel colour byte
+
+    ZPAUTO1 lom                     ; xl AND 3: left partial-byte pixel offset
+    ZPAUTO1 rom                     ; xr AND 3: right partial-byte pixel count
+    ZPAUTO1 firstb                  ; first and last byte columns of the sprite
+    ZPAUTO1 lastb
+    ZPAUTO1 curb                    ; byte column being drawn
+    ZPAUTO1 ys                      ; bottom row's scanline within its char row
+    ZPAUTO1 msk                     ; current strip's pixel mask
+    ZPAUTO1 whibase                 ; page of the bottom char row on the hidden screen
+
     LDA sxl:AND #3:STA lom
     LDA sxr:AND #3:STA rom
     LDA sxl:LSR A:LSR A:STA firstb:STA curb
