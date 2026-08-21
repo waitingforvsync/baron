@@ -1,6 +1,6 @@
 \\ Define constants
 
-ncam    = 128                   \\ Number of camera positions around the loop (one table entry each)
+ncam    = 256                   \\ Number of camera positions around the loop (one table entry each)
 radius  = 375                   \\ World radius of the camera path
 camorig = {600, 32, 600}        \\ Centre of the Lissajous figure (y = camera height)
 objecty = 0                     \\ All objects sit on the ground plane
@@ -11,36 +11,38 @@ lookahead = 1000                \\ camera aims at the ground this far ahead of i
 \\ Define object array: {x, y, z, size, colour}
 
 objects = {
-    {1045, objecty,  130, 64, 1},
-    {  60, objecty,  135, 64, 2},
-    { 510, objecty,  140, 64, 3},
-    { 305, objecty,  165, 64, 1},
-    { 710, objecty,  175, 64, 2},
-    { 850, objecty,  215, 64, 1},
-    { 115, objecty,  250, 64, 1},
-    { 525, objecty,  280, 64, 1},
-    { 935, objecty,  410, 64, 1},
-    { 560, objecty,  460, 64, 1},
-    {  85, objecty,  465, 64, 1},
-    { 830, objecty,  545, 64, 1},
-    { 465, objecty,  590, 64, 1},
-    {1025, objecty,  595, 64, 3},
-    {  45, objecty,  605, 64, 1},
-    {1145, objecty,  720, 64, 2},
-    { 660, objecty,  730, 64, 1},
-    { 140, objecty,  745, 64, 3},
-    { 470, objecty,  875, 64, 1},
-    { 700, objecty,  905, 64, 2},
-    { 840, objecty,  905, 64, 3},
-    {  70, objecty,  915, 64, 3},
-    { 355, objecty,  945, 64, 1},
-    {1145, objecty,  975, 64, 2},
-    { 195, objecty, 1010, 64, 3},
-    { 605, objecty, 1075, 64, 1},
-    { 830, objecty, 1105, 64, 1},
-    {  95, objecty, 1130, 64, 1},
-    { 490, objecty, 1145, 64, 2},
-    { 340, objecty, 1155, 64, 3},
+    { 365, objecty,   45, 64, 2},
+    { 820, objecty,   55, 64, 1},
+    { 235, objecty,   65, 64, 1},
+    { 995, objecty,  110, 64, 2},
+    { 700, objecty,  140, 64, 1},
+    { 580, objecty,  195, 64, 1},
+    { 145, objecty,  260, 64, 3},
+    { 390, objecty,  260, 64, 2},
+    {1140, objecty,  315, 64, 3},
+    { 585, objecty,  335, 64, 1},
+    { 940, objecty,  335, 64, 1},
+    { 750, objecty,  365, 64, 3},
+    { 465, objecty,  380, 64, 2},
+    {  70, objecty,  445, 64, 3},
+    {1075, objecty,  460, 64, 1},
+    { 340, objecty,  570, 64, 3},
+    { 485, objecty,  585, 64, 1},
+    { 755, objecty,  640, 64, 2},
+    {1105, objecty,  700, 64, 1},
+    { 265, objecty,  775, 64, 2},
+    {  40, objecty,  780, 64, 1},
+    { 940, objecty,  810, 64, 2},
+    { 760, objecty,  820, 64, 1},
+    { 565, objecty,  890, 64, 2},
+    { 145, objecty,  935, 64, 3},
+    { 345, objecty,  940, 64, 3},
+    { 930, objecty,  960, 64, 1},
+    { 790, objecty, 1035, 64, 1},
+    {1135, objecty, 1040, 64, 2},
+    { 445, objecty, 1085, 64, 2},
+    { 940, objecty, 1135, 64, 1},
+    { 180, objecty, 1160, 64, 1},
 }
 
 nobj = LEN(objects)             \\ Number of objects
@@ -61,6 +63,12 @@ FUNCTION cross(a, b)
 FUNCTION viewdot(rel, basis) = SUM(rel * ZIP(basis), 2)
 
 FUNCTION clamp(v, lo, hi) = MIN({MAX({v, lo}, 0), hi}, 0)
+
+; Round-to-nearest stopgap: baron's ROUND( currently truncates toward zero, so
+; shift by half away from zero first. Delete once baron's ROUND does this itself.
+FUNCTION nearest(v)
+    s = (v >= 0)*2 - 1
+= ROUND(v + s*0.5)
 
 \\ Define camera path
 \\ This is a 2:1 Lissajous curve with ncam (128) positions
@@ -109,15 +117,15 @@ h   = focal*objects[.., 3]/vzc                \ sprite height in pixel rows
 sxc = px/2 + 64                               \ centre column (halved for double width)
 syc = 64 - py                                 \ bottom row
 
-xlc = ROUND(clamp(sxc - h/4, 0, 128))         \ left column, clamped to the screen
-xrc = ROUND(clamp(sxc + h/4, 0, 128))         \ right column, exclusive
+xlc = nearest(clamp(sxc - h/4, 0, 128))         \ left column, clamped to the screen
+xrc = nearest(clamp(sxc + h/4, 0, 128))         \ right column, exclusive
 
 ; vertical clip: with the near plane this close a sprite can poke off the top or
 ; bottom of the screen, and the renderer has no y clip - so clamp the bottom row
 ; and the height to rows 0..127 here
 
-ybi = ROUND(syc)
-hti = ROUND(h)
+ybi = nearest(syc)
+hti = nearest(h)
 ybc = MIN({ybi, 127}, 0)                      \ clipped bottom row
 tpc = MAX({ybi - hti + 1, 0}, 0)              \ clipped top row
 hgt = ybc - tpc + 1                           \ clipped height (<= 0 = fully off screen)
@@ -168,28 +176,28 @@ PRINT "slot0 colour   = ", sortedf[(0..7)*nobj, 6]
 
 \\ Emit slot tables, ncam bytes each, indexed by camera position
 
+; only as many slots as are ever simultaneously visible need emitting - beyond the
+; busiest camera's count, every slot is zero for every camera position
+maxvis = MAX(SUM(vis, 1))                     ; the busiest camera's visible count
+nslots = maxvis                               ; ncam = 256 keeps tables page-aligned regardless
+PRINT "max visible    = ", maxvis, " of ", nobj, " objects -> ", nslots, " slots emitted"
+PRINT "path clearance = ", ROUND(SQRT(MIN(SUM(rel[.., .., {0,2}]^2, 2)))), " world units"
+
 ; slot j of camera i sits at flat index i*nobj + j, so each table is a strided gather.
 ; Emitted into the including file's section (camera.6502 places this after its code,
 ; page aligned).
 
-; Can we do this without FOR? Probably, but I can't figure it out
+; No FOR needed: the slot-major index grid is an outer product - a column of slot
+; offsets (ZIP makes it nslots x 1) broadcast against the camera strides - and
+; FLATTEN turns it into one big gather, emitting a whole table per EQUB.
+slotidx = FLATTEN(ZIP(0 ..< nslots) + (0 ..< ncam)*nobj)
 .tab_xl
-FOR j = 0 ..< nobj
-    EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-NEXT
+    EQUB sortedf[slotidx, 2]
 .tab_xr
-FOR j = 0 ..< nobj
-    EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-NEXT
+    EQUB sortedf[slotidx, 3]
 .tab_y
-FOR j = 0 ..< nobj
-    EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-NEXT
+    EQUB sortedf[slotidx, 4]
 .tab_h
-FOR j = 0 ..< nobj
-    EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-NEXT
+    EQUB sortedf[slotidx, 5]
 .tab_col
-FOR j = 0 ..< nobj
-    EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-NEXT
+    EQUB sortedf[slotidx, 6]

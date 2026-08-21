@@ -22,421 +22,417 @@ skyeven  = &5F
 skyodd   = &AF
 grounde  = &55
 groundo  = &AA
-SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "CAMERA"
+SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "CAMERA", guard = &6000
 framectr = &FD
 irqchange = &FE
 scr = &00 [auto]
 camidx = &02 [auto]
 drawpage = &03 [auto]
-tablo = &04 [auto]
-tabhi = &05 [auto]
-slots = &06 [auto]
-sxl = &07 [auto]
-sxr = &08 [auto]
-syrow = &09 [auto]
-sht = &0A [auto]
-solid = &0B [auto]
-lom = &0C [auto]
-rom = &0D [auto]
-firstb = &07 [auto]
-lastb = &08 [auto]
-curb = &0E [auto]
-ys = &0F [auto]
-whibase = &09 [auto]
-msk = &10 [auto]
+tabhi = &04 [auto]
+slots = &05 [auto]
+sxl = &06 [auto]
+sxr = &07 [auto]
+syrow = &08 [auto]
+sht = &09 [auto]
+solid = &0A [auto]
+lom = &0B [auto]
+rom = &0C [auto]
+firstb = &06 [auto]
+lastb = &07 [auto]
+curb = &0D [auto]
+ys = &0E [auto]
+whibase = &08 [auto]
+msk = &0F [auto]
 .mainloop
 {
   1100  A5 FD           LDA framectr
-  1102  4A              LSR A
-  1103  85 02           STA camidx
-  1105  20 1B 11        JSR clearscreen
-  1108  20 27 12        JSR drawsprites
-  110B  20 1C 13        JSR swapbuffers
-  110E  A9 70           LDA #112
-  1110  8D 4F FE        STA &FE4F
-  1113  AD 4F FE        LDA &FE4F
-  1116  10 E8           BPL mainloop
-  1118  6C FC FF        JMP (&FFFC)
+  1102  85 02           STA camidx
+  1104  20 1A 11        JSR clearscreen
+  1107  20 26 12        JSR drawsprites
+  110A  20 0F 13        JSR swapbuffers
+  110D  A9 70           LDA #112
+  110F  8D 4F FE        STA &FE4F
+  1112  AD 4F FE        LDA &FE4F
+  1115  10 E9           BPL mainloop
+  1117  6C FC FF        JMP (&FFFC)
 }
 .clearscreen
 {
-  111B  A5 03           LDA drawpage
-  111D  C9 70           CMP #&70
-  111F  F0 03           BEQ @+
-  1121  4C 27 11        JMP clear6000
+  111A  A5 03           LDA drawpage
+  111C  C9 70           CMP #&70
+  111E  F0 03           BEQ @+
+  1120  4C 26 11        JMP clear6000
 .@
-  1124  4C A7 11        JMP clear7000
+  1123  4C A6 11        JMP clear7000
 }
 .clear6000
-  1127                  clearbody &6000
+  1126                  clearbody &6000
 {
-  1127  A9 5F           LDA #skyeven
-  1129  A0 00           LDY #0
+  1126  A9 5F           LDA #skyeven
+  1128  A0 00           LDY #0
 .@
-  112B  99 00 60        STA base + pg*256, Y
-  112E  99 00 61        STA base + pg*256, Y
-  1131  99 00 62        STA base + pg*256, Y
-  1134  99 00 63        STA base + pg*256, Y
-  1137  99 00 64        STA base + pg*256, Y
-  113A  99 00 65        STA base + pg*256, Y
-  113D  99 00 66        STA base + pg*256, Y
-  1140  99 00 67        STA base + pg*256, Y
+  112A  99 00 60        STA base + pg*256, Y
+  112D  99 00 61        STA base + pg*256, Y
+  1130  99 00 62        STA base + pg*256, Y
+  1133  99 00 63        STA base + pg*256, Y
+  1136  99 00 64        STA base + pg*256, Y
+  1139  99 00 65        STA base + pg*256, Y
+  113C  99 00 66        STA base + pg*256, Y
+  113F  99 00 67        STA base + pg*256, Y
+  1142  C8              INY
   1143  C8              INY
-  1144  C8              INY
-  1145  D0 E4           BNE @-
-  1147  A9 AF           LDA #skyodd
+  1144  D0 E4           BNE @-
+  1146  A9 AF           LDA #skyodd
 .@
-  1149  C8              INY
-  114A  99 00 60        STA base + pg*256, Y
-  114D  99 00 61        STA base + pg*256, Y
-  1150  99 00 62        STA base + pg*256, Y
-  1153  99 00 63        STA base + pg*256, Y
-  1156  99 00 64        STA base + pg*256, Y
-  1159  99 00 65        STA base + pg*256, Y
-  115C  99 00 66        STA base + pg*256, Y
-  115F  99 00 67        STA base + pg*256, Y
-  1162  C8              INY
-  1163  D0 E4           BNE @-
-  1165  A9 55           LDA #grounde
-  1167  A0 00           LDY #0
+  1148  C8              INY
+  1149  99 00 60        STA base + pg*256, Y
+  114C  99 00 61        STA base + pg*256, Y
+  114F  99 00 62        STA base + pg*256, Y
+  1152  99 00 63        STA base + pg*256, Y
+  1155  99 00 64        STA base + pg*256, Y
+  1158  99 00 65        STA base + pg*256, Y
+  115B  99 00 66        STA base + pg*256, Y
+  115E  99 00 67        STA base + pg*256, Y
+  1161  C8              INY
+  1162  D0 E4           BNE @-
+  1164  A9 55           LDA #grounde
+  1166  A0 00           LDY #0
 .@
-  1169  99 00 68        STA base + &800 + pg*256, Y
-  116C  99 00 69        STA base + &800 + pg*256, Y
-  116F  99 00 6A        STA base + &800 + pg*256, Y
-  1172  99 00 6B        STA base + &800 + pg*256, Y
-  1175  99 00 6C        STA base + &800 + pg*256, Y
-  1178  99 00 6D        STA base + &800 + pg*256, Y
-  117B  99 00 6E        STA base + &800 + pg*256, Y
-  117E  99 00 6F        STA base + &800 + pg*256, Y
+  1168  99 00 68        STA base + &800 + pg*256, Y
+  116B  99 00 69        STA base + &800 + pg*256, Y
+  116E  99 00 6A        STA base + &800 + pg*256, Y
+  1171  99 00 6B        STA base + &800 + pg*256, Y
+  1174  99 00 6C        STA base + &800 + pg*256, Y
+  1177  99 00 6D        STA base + &800 + pg*256, Y
+  117A  99 00 6E        STA base + &800 + pg*256, Y
+  117D  99 00 6F        STA base + &800 + pg*256, Y
+  1180  C8              INY
   1181  C8              INY
-  1182  C8              INY
-  1183  D0 E4           BNE @-
-  1185  A9 AA           LDA #groundo
-  1187  C8              INY
+  1182  D0 E4           BNE @-
+  1184  A9 AA           LDA #groundo
+  1186  C8              INY
 .@
-  1188  99 00 68        STA base + &800 + pg*256, Y
-  118B  99 00 69        STA base + &800 + pg*256, Y
-  118E  99 00 6A        STA base + &800 + pg*256, Y
-  1191  99 00 6B        STA base + &800 + pg*256, Y
-  1194  99 00 6C        STA base + &800 + pg*256, Y
-  1197  99 00 6D        STA base + &800 + pg*256, Y
-  119A  99 00 6E        STA base + &800 + pg*256, Y
-  119D  99 00 6F        STA base + &800 + pg*256, Y
+  1187  99 00 68        STA base + &800 + pg*256, Y
+  118A  99 00 69        STA base + &800 + pg*256, Y
+  118D  99 00 6A        STA base + &800 + pg*256, Y
+  1190  99 00 6B        STA base + &800 + pg*256, Y
+  1193  99 00 6C        STA base + &800 + pg*256, Y
+  1196  99 00 6D        STA base + &800 + pg*256, Y
+  1199  99 00 6E        STA base + &800 + pg*256, Y
+  119C  99 00 6F        STA base + &800 + pg*256, Y
+  119F  C8              INY
   11A0  C8              INY
-  11A1  C8              INY
-  11A2  C0 01           CPY #1
-  11A4  D0 E2           BNE @-
+  11A1  C0 01           CPY #1
+  11A3  D0 E2           BNE @-
 }
-  11A6  60              RTS
+  11A5  60              RTS
 .clear7000
-  11A7                  clearbody &7000
+  11A6                  clearbody &7000
 {
-  11A7  A9 5F           LDA #skyeven
-  11A9  A0 00           LDY #0
+  11A6  A9 5F           LDA #skyeven
+  11A8  A0 00           LDY #0
 .@
-  11AB  99 00 70        STA base + pg*256, Y
-  11AE  99 00 71        STA base + pg*256, Y
-  11B1  99 00 72        STA base + pg*256, Y
-  11B4  99 00 73        STA base + pg*256, Y
-  11B7  99 00 74        STA base + pg*256, Y
-  11BA  99 00 75        STA base + pg*256, Y
-  11BD  99 00 76        STA base + pg*256, Y
-  11C0  99 00 77        STA base + pg*256, Y
+  11AA  99 00 70        STA base + pg*256, Y
+  11AD  99 00 71        STA base + pg*256, Y
+  11B0  99 00 72        STA base + pg*256, Y
+  11B3  99 00 73        STA base + pg*256, Y
+  11B6  99 00 74        STA base + pg*256, Y
+  11B9  99 00 75        STA base + pg*256, Y
+  11BC  99 00 76        STA base + pg*256, Y
+  11BF  99 00 77        STA base + pg*256, Y
+  11C2  C8              INY
   11C3  C8              INY
-  11C4  C8              INY
-  11C5  D0 E4           BNE @-
-  11C7  A9 AF           LDA #skyodd
+  11C4  D0 E4           BNE @-
+  11C6  A9 AF           LDA #skyodd
 .@
-  11C9  C8              INY
-  11CA  99 00 70        STA base + pg*256, Y
-  11CD  99 00 71        STA base + pg*256, Y
-  11D0  99 00 72        STA base + pg*256, Y
-  11D3  99 00 73        STA base + pg*256, Y
-  11D6  99 00 74        STA base + pg*256, Y
-  11D9  99 00 75        STA base + pg*256, Y
-  11DC  99 00 76        STA base + pg*256, Y
-  11DF  99 00 77        STA base + pg*256, Y
-  11E2  C8              INY
-  11E3  D0 E4           BNE @-
-  11E5  A9 55           LDA #grounde
-  11E7  A0 00           LDY #0
+  11C8  C8              INY
+  11C9  99 00 70        STA base + pg*256, Y
+  11CC  99 00 71        STA base + pg*256, Y
+  11CF  99 00 72        STA base + pg*256, Y
+  11D2  99 00 73        STA base + pg*256, Y
+  11D5  99 00 74        STA base + pg*256, Y
+  11D8  99 00 75        STA base + pg*256, Y
+  11DB  99 00 76        STA base + pg*256, Y
+  11DE  99 00 77        STA base + pg*256, Y
+  11E1  C8              INY
+  11E2  D0 E4           BNE @-
+  11E4  A9 55           LDA #grounde
+  11E6  A0 00           LDY #0
 .@
-  11E9  99 00 78        STA base + &800 + pg*256, Y
-  11EC  99 00 79        STA base + &800 + pg*256, Y
-  11EF  99 00 7A        STA base + &800 + pg*256, Y
-  11F2  99 00 7B        STA base + &800 + pg*256, Y
-  11F5  99 00 7C        STA base + &800 + pg*256, Y
-  11F8  99 00 7D        STA base + &800 + pg*256, Y
-  11FB  99 00 7E        STA base + &800 + pg*256, Y
-  11FE  99 00 7F        STA base + &800 + pg*256, Y
+  11E8  99 00 78        STA base + &800 + pg*256, Y
+  11EB  99 00 79        STA base + &800 + pg*256, Y
+  11EE  99 00 7A        STA base + &800 + pg*256, Y
+  11F1  99 00 7B        STA base + &800 + pg*256, Y
+  11F4  99 00 7C        STA base + &800 + pg*256, Y
+  11F7  99 00 7D        STA base + &800 + pg*256, Y
+  11FA  99 00 7E        STA base + &800 + pg*256, Y
+  11FD  99 00 7F        STA base + &800 + pg*256, Y
+  1200  C8              INY
   1201  C8              INY
-  1202  C8              INY
-  1203  D0 E4           BNE @-
-  1205  A9 AA           LDA #groundo
-  1207  C8              INY
+  1202  D0 E4           BNE @-
+  1204  A9 AA           LDA #groundo
+  1206  C8              INY
 .@
-  1208  99 00 78        STA base + &800 + pg*256, Y
-  120B  99 00 79        STA base + &800 + pg*256, Y
-  120E  99 00 7A        STA base + &800 + pg*256, Y
-  1211  99 00 7B        STA base + &800 + pg*256, Y
-  1214  99 00 7C        STA base + &800 + pg*256, Y
-  1217  99 00 7D        STA base + &800 + pg*256, Y
-  121A  99 00 7E        STA base + &800 + pg*256, Y
-  121D  99 00 7F        STA base + &800 + pg*256, Y
+  1207  99 00 78        STA base + &800 + pg*256, Y
+  120A  99 00 79        STA base + &800 + pg*256, Y
+  120D  99 00 7A        STA base + &800 + pg*256, Y
+  1210  99 00 7B        STA base + &800 + pg*256, Y
+  1213  99 00 7C        STA base + &800 + pg*256, Y
+  1216  99 00 7D        STA base + &800 + pg*256, Y
+  1219  99 00 7E        STA base + &800 + pg*256, Y
+  121C  99 00 7F        STA base + &800 + pg*256, Y
+  121F  C8              INY
   1220  C8              INY
-  1221  C8              INY
-  1222  C0 01           CPY #1
-  1224  D0 E2           BNE @-
+  1221  C0 01           CPY #1
+  1223  D0 E2           BNE @-
 }
-  1226  60              RTS
-tabstride = nobj * ncam div 256
+  1225  60              RTS
+tabstride = nslots * ncam div 256
 .drawsprites
 {
-  1227  A9 00           LDA #0
-  1229  85 04           STA tablo
-  122B  A9 14           LDA #HI(tab_xl)
-  122D  85 05           STA tabhi
-  122F  A9 1E           LDA #nobj
-  1231  85 06           STA slots
+  1226  A9 14           LDA #HI(tab_xl)
+  1228  85 04           STA tabhi
+  122A  A9 0E           LDA #nslots
+  122C  85 05           STA slots
 .slotloop
-  1233  A4 02           LDY camidx
-  1235  A5 04           LDA tablo
-  1237  85 00           STA scr
-  1239  A5 05           LDA tabhi
-  123B  18              CLC
-  123C  69 2D           ADC #3*tabstride
-  123E  85 01           STA scr+1
-  1240  B1 00           LDA (scr),Y
-  1242  F0 40           BEQ done
-  1244  85 0A           STA sht
-  1246  A5 05           LDA tabhi
-  1248  85 01           STA scr+1
-  124A  B1 00           LDA (scr),Y
-  124C  85 07           STA sxl
-  124E  A5 01           LDA scr+1
-  1250  18              CLC
-  1251  69 0F           ADC #tabstride
-  1253  85 01           STA scr+1
-  1255  B1 00           LDA (scr),Y
-  1257  85 08           STA sxr
-  1259  A5 01           LDA scr+1
-  125B  18              CLC
-  125C  69 0F           ADC #tabstride
-  125E  85 01           STA scr+1
-  1260  B1 00           LDA (scr),Y
-  1262  85 09           STA syrow
-  1264  A5 01           LDA scr+1
-  1266  18              CLC
-  1267  69 1E           ADC #2*tabstride
-  1269  85 01           STA scr+1
-  126B  B1 00           LDA (scr),Y
-  126D  A8              TAY
-  126E  B9 40 13        LDA colbytes,Y
-  1271  85 0B           STA solid
-  1273  20 85 12        JSR drawsprite
-  1276  A5 04           LDA tablo
-  1278  49 80           EOR #&80
-  127A  85 04           STA tablo
-  127C  D0 02           BNE @+
-  127E  E6 05           INC tabhi
-.@
-  1280  C6 06           DEC slots
-  1282  D0 AF           BNE slotloop
+  122E  A4 02           LDY camidx
+  1230  A9 00           LDA #0
+  1232  85 00           STA scr
+  1234  A5 04           LDA tabhi
+  1236  18              CLC
+  1237  69 2A           ADC #3*tabstride
+  1239  85 01           STA scr+1
+  123B  B1 00           LDA (scr),Y
+  123D  F0 38           BEQ done
+  123F  85 09           STA sht
+  1241  A5 04           LDA tabhi
+  1243  85 01           STA scr+1
+  1245  B1 00           LDA (scr),Y
+  1247  85 06           STA sxl
+  1249  A5 01           LDA scr+1
+  124B  18              CLC
+  124C  69 0E           ADC #tabstride
+  124E  85 01           STA scr+1
+  1250  B1 00           LDA (scr),Y
+  1252  85 07           STA sxr
+  1254  A5 01           LDA scr+1
+  1256  18              CLC
+  1257  69 0E           ADC #tabstride
+  1259  85 01           STA scr+1
+  125B  B1 00           LDA (scr),Y
+  125D  85 08           STA syrow
+  125F  A5 01           LDA scr+1
+  1261  18              CLC
+  1262  69 1C           ADC #2*tabstride
+  1264  85 01           STA scr+1
+  1266  B1 00           LDA (scr),Y
+  1268  A8              TAY
+  1269  B9 3B 13        LDA colbytes,Y
+  126C  85 0A           STA solid
+  126E  20 78 12        JSR drawsprite
+  1271  E6 04           INC tabhi
+  1273  C6 05           DEC slots
+  1275  D0 B7           BNE slotloop
 .done
-  1284  60              RTS
+  1277  60              RTS
 }
 .drawsprite
 {
-  1285  A5 07           LDA sxl
-  1287  29 03           AND #3
-  1289  85 0C           STA lom
-  128B  A5 08           LDA sxr
-  128D  29 03           AND #3
-  128F  85 0D           STA rom
-  1291  A5 07           LDA sxl
-  1293  4A              LSR A
-  1294  4A              LSR A
-  1295  85 07           STA firstb
-  1297  85 0E           STA curb
-  1299  A5 08           LDA sxr
-  129B  38              SEC
-  129C  E9 01           SBC #1
+  1278  A5 06           LDA sxl
+  127A  29 03           AND #3
+  127C  85 0B           STA lom
+  127E  A5 07           LDA sxr
+  1280  29 03           AND #3
+  1282  85 0C           STA rom
+  1284  A5 06           LDA sxl
+  1286  4A              LSR A
+  1287  4A              LSR A
+  1288  85 06           STA firstb
+  128A  85 0D           STA curb
+  128C  A5 07           LDA sxr
+  128E  38              SEC
+  128F  E9 01           SBC #1
+  1291  4A              LSR A
+  1292  4A              LSR A
+  1293  85 07           STA lastb
+  1295  A5 08           LDA syrow
+  1297  29 07           AND #7
+  1299  85 0E           STA ys
+  129B  A5 08           LDA syrow
+  129D  4A              LSR A
   129E  4A              LSR A
   129F  4A              LSR A
-  12A0  85 08           STA lastb
-  12A2  A5 09           LDA syrow
-  12A4  29 07           AND #7
-  12A6  85 0F           STA ys
-  12A8  A5 09           LDA syrow
-  12AA  4A              LSR A
-  12AB  4A              LSR A
-  12AC  4A              LSR A
-  12AD  18              CLC
-  12AE  65 03           ADC drawpage
-  12B0  85 09           STA whibase
+  12A0  18              CLC
+  12A1  65 03           ADC drawpage
+  12A3  85 08           STA whibase
 .striploop
-  12B2  A9 FF           LDA #&FF
-  12B4  A6 0E           LDX curb
-  12B6  E4 07           CPX firstb
-  12B8  D0 05           BNE @+
-  12BA  A6 0C           LDX lom
-  12BC  3D 44 13        AND leftmasks,X
+  12A5  A9 FF           LDA #&FF
+  12A7  A6 0D           LDX curb
+  12A9  E4 06           CPX firstb
+  12AB  D0 05           BNE @+
+  12AD  A6 0B           LDX lom
+  12AF  3D 3F 13        AND leftmasks,X
 .@
-  12BF  A6 0E           LDX curb
-  12C1  E4 08           CPX lastb
-  12C3  D0 05           BNE @+
-  12C5  A6 0D           LDX rom
-  12C7  3D 48 13        AND rightmasks,X
+  12B2  A6 0D           LDX curb
+  12B4  E4 07           CPX lastb
+  12B6  D0 05           BNE @+
+  12B8  A6 0C           LDX rom
+  12BA  3D 43 13        AND rightmasks,X
 .@
-  12CA  85 10           STA msk
-  12CC  A5 0E           LDA curb
-  12CE  0A              ASL A
-  12CF  0A              ASL A
-  12D0  0A              ASL A
-  12D1  85 00           STA scr
-  12D3  A5 09           LDA whibase
-  12D5  85 01           STA scr+1
-  12D7  A4 0F           LDY ys
-  12D9  A6 0A           LDX sht
-  12DB  A5 10           LDA msk
-  12DD  C9 FF           CMP #&FF
-  12DF  D0 11           BNE masked
-  12E1  A5 0B           LDA solid
+  12BD  85 0F           STA msk
+  12BF  A5 0D           LDA curb
+  12C1  0A              ASL A
+  12C2  0A              ASL A
+  12C3  0A              ASL A
+  12C4  85 00           STA scr
+  12C6  A5 08           LDA whibase
+  12C8  85 01           STA scr+1
+  12CA  A4 0E           LDY ys
+  12CC  A6 09           LDX sht
+  12CE  A5 0F           LDA msk
+  12D0  C9 FF           CMP #&FF
+  12D2  D0 11           BNE masked
+  12D4  A5 0A           LDA solid
 .fullrow
-  12E3  91 00           STA (scr),Y
-  12E5  88              DEY
-  12E6  10 04           BPL @+
-  12E8  C6 01           DEC scr+1
-  12EA  A0 07           LDY #7
+  12D6  91 00           STA (scr),Y
+  12D8  88              DEY
+  12D9  10 04           BPL @+
+  12DB  C6 01           DEC scr+1
+  12DD  A0 07           LDY #7
 .@
-  12EC  CA              DEX
-  12ED  D0 F4           BNE fullrow
-  12EF  4C 10 13        JMP nextstrip
+  12DF  CA              DEX
+  12E0  D0 F4           BNE fullrow
+  12E2  4C 03 13        JMP nextstrip
 .masked
-  12F2  49 FF           EOR #&FF
-  12F4  8D 01 13        STA mand+1
-  12F7  A5 0B           LDA solid
-  12F9  25 10           AND msk
-  12FB  8D 03 13        STA mora+1
+  12E5  49 FF           EOR #&FF
+  12E7  8D F4 12        STA mand+1
+  12EA  A5 0A           LDA solid
+  12EC  25 0F           AND msk
+  12EE  8D F6 12        STA mora+1
 .maskrow
-  12FE  B1 00           LDA (scr),Y
+  12F1  B1 00           LDA (scr),Y
 .mand
-  1300  29 00           AND #0
+  12F3  29 00           AND #0
 .mora
-  1302  09 00           ORA #0
-  1304  91 00           STA (scr),Y
-  1306  88              DEY
-  1307  10 04           BPL @+
-  1309  C6 01           DEC scr+1
-  130B  A0 07           LDY #7
+  12F5  09 00           ORA #0
+  12F7  91 00           STA (scr),Y
+  12F9  88              DEY
+  12FA  10 04           BPL @+
+  12FC  C6 01           DEC scr+1
+  12FE  A0 07           LDY #7
 .@
-  130D  CA              DEX
-  130E  D0 EE           BNE maskrow
+  1300  CA              DEX
+  1301  D0 EE           BNE maskrow
 .nextstrip
-  1310  A5 0E           LDA curb
-  1312  C5 08           CMP lastb
-  1314  F0 05           BEQ done
-  1316  E6 0E           INC curb
-  1318  4C B2 12        JMP striploop
+  1303  A5 0D           LDA curb
+  1305  C5 07           CMP lastb
+  1307  F0 05           BEQ done
+  1309  E6 0D           INC curb
+  130B  4C A5 12        JMP striploop
 .done
-  131B  60              RTS
+  130E  60              RTS
 }
 .swapbuffers
 {
-  131C  A5 FD           LDA framectr
+  130F  A5 FE           LDA irqchange
 .@
-  131E  C5 FD           CMP framectr
-  1320  F0 FC           BEQ @-
-  1322  A9 0C           LDA #12
-  1324  8D 00 FE        STA &FE00
-  1327  A5 03           LDA drawpage
-  1329  4A              LSR A
-  132A  4A              LSR A
-  132B  4A              LSR A
-  132C  8D 01 FE        STA &FE01
-  132F  A5 03           LDA drawpage
-  1331  49 10           EOR #&10
-  1333  85 03           STA drawpage
-  1335  60              RTS
+  1311  C5 FE           CMP irqchange
+  1313  F0 FC           BEQ @-
+  1315  A9 0C           LDA #12
+  1317  8D 00 FE        STA &FE00
+  131A  A5 03           LDA drawpage
+  131C  4A              LSR A
+  131D  4A              LSR A
+  131E  4A              LSR A
+  131F  8D 01 FE        STA &FE01
+  1322  A5 03           LDA drawpage
+  1324  49 10           EOR #&10
+  1326  85 03           STA drawpage
+  1328  60              RTS
 }
 .irq
-  1336  A9 02           LDA #&02
-  1338  8D 4D FE        STA &FE4D
-  133B  E6 FD           INC framectr
-  133D  A5 FC           LDA &FC
-  133F  40              RTI
+  1329  A9 02           LDA #&02
+  132B  8D 4D FE        STA &FE4D
+  132E  A5 FE           LDA irqchange
+  1330  49 01           EOR #1
+  1332  85 FE           STA irqchange
+  1334  F0 02           BEQ @+
+  1336  E6 FD           INC framectr
+.@
+  1338  A5 FC           LDA &FC
+  133A  40              RTI
 .colbytes
-  1340  00 0F F0 FF     EQUB &00, &0F, &F0, &FF
+  133B  00 0F F0 FF     EQUB &00, &0F, &F0, &FF
 .leftmasks
-  1344  FF 77 33 11     EQUB &FF, &77, &33, &11
+  133F  FF 77 33 11     EQUB &FF, &77, &33, &11
 .rightmasks
-  1348  FF 88 CC EE     EQUB &FF, &88, &CC, &EE
+  1343  FF 88 CC EE     EQUB &FF, &88, &CC, &EE
 .entry
 {
-  134C  78              SEI
-  134D  A2 FF           LDX #&FF
-  134F  9A              TXS
-  1350  A9 7F           LDA #&7F
-  1352  8D 4E FE        STA &FE4E
-  1355  8D 43 FE        STA &FE43
-  1358  A9 0F           LDA #&0F
-  135A  8D 42 FE        STA &FE42
-  135D  A9 03           LDA #3
-  135F  8D 40 FE        STA &FE40
-  1362  A9 04           LDA #&04
-  1364  8D 4C FE        STA &FE4C
-  1367  A9 82           LDA #&82
-  1369  8D 4E FE        STA &FE4E
-  136C  A2 0D           LDX #13
+  1347  78              SEI
+  1348  A2 FF           LDX #&FF
+  134A  9A              TXS
+  134B  A9 7F           LDA #&7F
+  134D  8D 4E FE        STA &FE4E
+  1350  8D 43 FE        STA &FE43
+  1353  A9 0F           LDA #&0F
+  1355  8D 42 FE        STA &FE42
+  1358  A9 03           LDA #3
+  135A  8D 40 FE        STA &FE40
+  135D  A9 04           LDA #&04
+  135F  8D 4C FE        STA &FE4C
+  1362  A9 82           LDA #&82
+  1364  8D 4E FE        STA &FE4E
+  1367  A2 0D           LDX #13
 .crtcloop
-  136E  8E 00 FE        STX &FE00
-  1371  BD A8 13        LDA crtcregs,X
-  1374  8D 01 FE        STA &FE01
-  1377  CA              DEX
-  1378  10 F4           BPL crtcloop
-  137A  A9 C4           LDA #&C4
-  137C  8D 20 FE        STA &FE20
-  137F  A2 0F           LDX #15
+  1369  8E 00 FE        STX &FE00
+  136C  BD A3 13        LDA crtcregs,X
+  136F  8D 01 FE        STA &FE01
+  1372  CA              DEX
+  1373  10 F4           BPL crtcloop
+  1375  A9 C4           LDA #&C4
+  1377  8D 20 FE        STA &FE20
+  137A  A2 0F           LDX #15
 .palloop
-  1381  BD B6 13        LDA paldata,X
-  1384  8D 21 FE        STA &FE21
-  1387  CA              DEX
-  1388  10 F7           BPL palloop
-  138A  20 27 11        JSR clear6000
-  138D  20 A7 11        JSR clear7000
-  1390  A9 00           LDA #0
-  1392  85 FD           STA framectr
-  1394  85 FE           STA irqchange
-  1396  A9 70           LDA #&70
-  1398  85 03           STA drawpage
-  139A  A9 36           LDA #LO(irq)
-  139C  8D 04 02        STA &204
-  139F  A9 13           LDA #HI(irq)
-  13A1  8D 05 02        STA &205
-  13A4  58              CLI
-  13A5  4C 00 11        JMP mainloop
+  137C  BD B1 13        LDA paldata,X
+  137F  8D 21 FE        STA &FE21
+  1382  CA              DEX
+  1383  10 F7           BPL palloop
+  1385  20 26 11        JSR clear6000
+  1388  20 A6 11        JSR clear7000
+  138B  A9 00           LDA #0
+  138D  85 FD           STA framectr
+  138F  85 FE           STA irqchange
+  1391  A9 70           LDA #&70
+  1393  85 03           STA drawpage
+  1395  A9 29           LDA #LO(irq)
+  1397  8D 04 02        STA &204
+  139A  A9 13           LDA #HI(irq)
+  139C  8D 05 02        STA &205
+  139F  58              CLI
+  13A0  4C 00 11        JMP mainloop
 }
 .crtcregs
-  13A8  3F              EQUB 63
-  13A9  20              EQUB 32
-  13AA  2D              EQUB 45
-  13AB  24              EQUB &24
-  13AC  26              EQUB 38
-  13AD  00              EQUB 0
-  13AE  10              EQUB 16
-  13AF  1A              EQUB 26
-  13B0  00              EQUB 0
-  13B1  07              EQUB 7
-  13B2  20              EQUB 32
-  13B3  08              EQUB 8
-  13B4  0C              EQUB HI(&6000/8)
-  13B5  00              EQUB LO(&6000/8)
+  13A3  3F              EQUB 63
+  13A4  20              EQUB 32
+  13A5  2D              EQUB 45
+  13A6  24              EQUB &24
+  13A7  26              EQUB 38
+  13A8  00              EQUB 0
+  13A9  10              EQUB 16
+  13AA  1A              EQUB 26
+  13AB  00              EQUB 0
+  13AC  07              EQUB 7
+  13AD  20              EQUB 32
+  13AE  08              EQUB 8
+  13AF  0C              EQUB HI(&6000/8)
+  13B0  00              EQUB LO(&6000/8)
 physcols = {0, 4, 1, 2}
 .paldata
-  13B6  07 17 23 33...  EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
-  13C6  00 00 00 00...  ALIGN &100
+  13B1  07 17 23 33...  EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
+  13C1  00 00 00 00...  ALIGN &100
   1400                  include "tables.6502"
-ncam    = 128
+ncam    = 256
 radius  = 375
 camorig = {600, 32, 600}
 objecty = 0
@@ -481,171 +477,31 @@ key  = ZIP(t)*w - vzs
 colb = FULL(ncam, objects[.., 4])
 recs    = ZIP(FLATTEN(key), FLATTEN(vz), FLATTEN(xlb), FLATTEN(xrb), FLATTEN(syb), FLATTEN(szb), FLATTEN(colb))
 sortedf = SORT(recs, 0)
-campath[32]    = {600, 32, 600}
+campath[32]    = {776.777, 32, 725}
 fwd[0]         = {0, -0.0319836, 0.999488}
 up[0]          = {-0, 0.999488, 0.0319836}
-shape sortedf  = {3840, 7}
-vz    @ cam 102 = {566.59, -177.243, 157.782, -12.8056, 285.095, 364.005, -211.632, 76.8559, 299.484, -15.3776, -375.784, 131.633, -172.418, 245.307, -498.06, 253.201, -118.016, -518.841, -356.358, -203.198, -97.9434, -683.429, -488.919, 85.2593, -652.018, -386.582, -237.181, -806.231, -519.142, -638.501}
-slots @ cam 102 = {566.59, 364.005, 299.484, 285.095, 131.633, -488.919, -203.198, -97.9434, -683.429, -806.231, -652.018, -386.582, -237.181, -519.142, -638.501, 85.2593, -518.841, -356.358, 253.201, -177.243, 157.782, -12.8056, -211.632, 76.8559, -118.016, -375.784, -172.418, 245.307, -498.06, -15.3776}
-h     @ cam 102 = {14, 22, 27, 28, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-xl    @ cam 102 = {66, 79, 39, 111, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-xr    @ cam 102 = {74, 90, 53, 125, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-y     @ cam 102 = {67, 71, 73, 74, 91, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-slot0 colour   = {2, 3, 1, 1, 1, 1, 1, 1}
+shape sortedf  = {7680, 7}
+vz    @ cam 102 = {90.0872, -480.78, 286.952, -15.0981, -300.532, -725.163, -435.759, -155.85, -670.155, -407.354, 91.1525, 304.225, -141.606, 75.6411, -475.458, 211.973, -732.774, 130.117, -745.134, -151.551, 292.439, -611.748, -367.284, -241.552, 60.9904, -109.599, -756.184, 217.091, -498.785, -259.314}
+slots @ cam 102 = {304.225, 211.973, 91.1525, 75.6411, -745.134, -756.184, -109.599, 60.9904, -241.552, -367.284, -611.748, 292.439, -259.314, -151.551, -498.785, 217.091, 130.117, -732.774, 90.0872, -480.78, -15.0981, -300.532, -725.163, 286.952, -155.85, -670.155, -407.354, -141.606, -475.458, -435.759}
+h     @ cam 102 = {26, 38, 89, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+xl    @ cam 102 = {55, 104, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+xr    @ cam 102 = {68, 123, 45, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+y     @ cam 102 = {73, 79, 104, 114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+slot0 colour   = {2, 2, 2, 2, 1, 1, 1, 1}
+maxvis = MAX(SUM(vis, 1))
+nslots = maxvis + (maxvis MOD 2)
+max visible    = 14 of 30 objects -> 14 slots emitted
+path clearance = 37 world units
+slotidx = FLATTEN(ZIP(0 ..< nslots) + (0 ..< ncam)*nobj)
 .tab_xl
-  1400  03 04 00 0E...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1480  29 11 12 1D...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1500  09 16 1C 07...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1580  57 32 21 27...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1600  1D 64 3C 2A...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1680  00 0C 17 07...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1700  00 26 2F 45...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1780  00 00 76 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1800  00 00 00 21...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1880  00 00 00 37...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1900  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1980  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1A00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1A80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1B00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1B80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1C00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1C80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1D00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1D80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1E00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1E80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1F00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  1F80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  2000  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  2080  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  2100  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  2180  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  2200  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
-  2280  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 2]
+  1400  12 18 1E 23...  EQUB sortedf[slotidx, 2]
 .tab_xr
-  2300  0A 0B 05 13...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2380  31 18 18 23...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2400  12 1E 23 0D...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2480  62 3B 28 2D...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2500  2A 71 44 32...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2580  0D 19 23 0F...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2600  00 33 3C 4E...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2680  00 00 80 0D...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2700  00 00 00 2D...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2780  00 00 00 46...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2800  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2880  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2900  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2980  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2A00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2A80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2B00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2B80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2C00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2C80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2D00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2D80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2E00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2E80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2F00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  2F80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  3000  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  3080  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  3100  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
-  3180  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 3]
+  2200  19 1F 25 2A...  EQUB sortedf[slotidx, 3]
 .tab_y
-  3200  43 42 41 41...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3280  44 42 41 41...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3300  44 43 42 42...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3380  46 44 43 42...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3400  49 48 44 43...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3480  49 48 48 43...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3500  00 49 49 44...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3580  00 00 4A 45...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3600  00 00 00 47...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3680  00 00 00 4A...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3700  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3780  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3800  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3880  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3900  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3980  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3A00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3A80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3B00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3B80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3C00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3C80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3D00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3D80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3E00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3E80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3F00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  3F80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  4000  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
-  4080  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 4]
+  3000  43 43 42 42...  EQUB sortedf[slotidx, 4]
 .tab_h
-  4100  0F 0D 0B 0A...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4180  10 0D 0C 0B...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4200  11 10 0D 0C...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4280  15 10 0F 0C...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4300  1A 18 10 0F...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4380  1A 19 18 0F...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4400  00 1A 1B 11...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4480  00 00 1D 13...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4500  00 00 00 18...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4580  00 00 00 1D...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4600  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4680  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4700  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4780  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4800  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4880  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4900  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4980  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4A00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4A80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4B00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4B80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4C00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4C80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4D00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4D80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4E00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4E80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4F00  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
-  4F80  00 00 00 00...  EQUB sortedf[(0 ..< ncam)*nobj + j, 5]
+  3E00  0E 0E 0D 0D...  EQUB sortedf[slotidx, 5]
 .tab_col
-  5000  02 03 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5080  01 02 03 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5100  01 01 02 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5180  02 01 01 02...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5200  03 02 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5280  02 02 02 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5300  01 03 03 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5380  03 01 02 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5400  01 03 01 02...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5480  03 01 03 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5500  03 03 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5580  01 01 03 02...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5600  03 03 01 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5680  01 01 03 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5700  02 02 02 02...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5780  01 01 01 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5800  03 03 03 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5880  01 01 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5900  01 01 02 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5980  01 01 03 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5A00  01 01 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5A80  01 01 02 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5B00  01 01 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5B80  01 01 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5C00  01 02 01 02...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5C80  01 01 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5D00  02 03 01 03...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5D80  01 02 01 02...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5E00  03 01 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
-  5E80  02 01 01 01...  EQUB sortedf[(0 ..< ncam)*nobj + j, 6]
+  4C00  02 02 02 02...  EQUB sortedf[slotidx, 6]
 ENDSECTION
 
