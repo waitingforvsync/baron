@@ -1,0 +1,24 @@
+SECTION Boot, filename="!BOOT", org=&1200
+
+    ; silence the beep
+    LDA #15:LDX #0:JSR &FFF4
+
+    ; print the title
+    LDX #0
+.@  LDA message,X
+    JSR &FFE3
+    INX
+    CMP #13
+    BNE @-
+
+    ; execute
+    LDX #LO(cmd)
+    LDY #HI(cmd)
+    JMP &FFF7
+
+.cmd
+    EQUS "/"
+.message
+    EQUS "SPRITE", 13
+
+ENDSECTION

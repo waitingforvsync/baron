@@ -1,0 +1,714 @@
+\ **************************************************************************
+\ *
+\ *    Scaled sprite demo - first sketch of the plotter
+\ *
+\ *    A MODE 5-style 2bpp screen narrowed to 32 characters by 16 rows
+\ *    (128x128 double-width pixels, one 256-byte page per character row,
+\ *    so a byte column is a fixed low byte and moving up a row is DEC of
+\ *    the page), double buffered at &6000 and &7000. The vsync interrupt
+\ *    counts frames; the renderer uses the count as a scale index.
+\ *
+\ *    Sprite format (see the "sprite" macro at the end):
+\ *        width N, height H, N column data offsets from the sprite base,
+\ *        then per column bottom-up runs of  colour:3 (low) | (end-1):5
+\ *    where "end" is the run's CUMULATIVE end row (1..H), so a run is
+\ *    located by a single table lookup and zero-length runs (shrinking)
+\ *    fall out as "end == current position". Colour 0 is transparent;
+\ *    1..7 index the palette the plot is given, each entry being a pair
+\ *    of the four screen colours dithered in a checkerboard.
+\ *
+\ *    The screen is treated as half height: the vertical unit is a PAIR
+\ *    of scanlines (a sprite pixel is 2 scanlines tall), y positions and
+\ *    heights are in pairs, and the checkerboard phase is absolute - the
+\ *    top line of every pair is an even scanline.
+\ *
+\ *    Scale is 8.8 fixed point, screen units per source unit (&100 = 1x),
+\ *    the same for both axes. A plot is two calls: plot_setup builds the boundary
+\ *    tables PX[0..N] / PY[0..H] (source edge k -> screen offset) from
+\ *    the scales and subpixel phases; plot_draw then walks the screen byte
+\ *    columns ("strips"), tracking the 1..4 source columns that land in
+\ *    each, merging their runs into vertical segments of constant bytes.
+\ *
+\ *    Build:  baron boot.6502 spritescale.6502 --opt 2 -o spritescale.ssd
+\ *    Run:    SHIFT-BREAK boots it (Esc quits)
+\ *
+\ **************************************************************************
+
+\ Screen colours (logical 0..3) and the ten checkerboard pairs made from
+\ them, as {even-pixel colour, odd-pixel colour} on an even scanline.
+
+black     = {0, 0}
+darkblue  = {0, 1}
+brown     = {0, 2}
+darkgreen = {0, 3}
+blue      = {1, 1}
+magenta   = {1, 2}
+teal      = {1, 3}
+red       = {2, 2}
+olive     = {2, 3}
+green     = {3, 3}
+
+\ 2bpp: pixel n's colour bits live at byte bits 7-n (high) and 3-n (low).
+FUNCTION pixbits(n, c) = ((c DIV 2) << (7-n)) OR ((c AND 1) << (3-n))
+FUNCTION pateven(p) = pixbits(0, p[0]) OR pixbits(1, p[1]) OR pixbits(2, p[0]) OR pixbits(3, p[1])
+FUNCTION patodd(p)  = pixbits(0, p[1]) OR pixbits(1, p[0]) OR pixbits(2, p[1]) OR pixbits(3, p[0])
+
+\ Background dither bytes for the clear.
+skyeven  = pateven(teal)
+skyodd   = patodd(teal)
+grounde  = pateven(darkgreen)
+groundo  = patodd(darkgreen)
+
+SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "SPRITE", guard = &6000
+
+framectr = &FD                  ; incremented by the vsync interrupt
+irqchange = &FE
+
+ZPRESERVE &00..&FC
+ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
+
+
+\ ******************************************************************
+\ *    Main loop: clear, plot the sprite at this frame's scale, show
+\ ******************************************************************
+
+.mainloop
+{
+    JSR clearscreen
+
+    LDX framectr                ; scale index: one table entry per frame
+    LDA scalelo,X:STA plot_setup.scale
+    LDA scalehi,X:STA plot_setup.scale+1
+    LDA #LO(creature):STA plot_setup.spr
+    LDA #HI(creature):STA plot_setup.spr+1
+    LDA #LO(pal_creature):STA plot_draw.pal
+    LDA #HI(pal_creature):STA plot_draw.pal+1
+    JSR plot_setup
+
+    ; centre it: x = 64 - width/2, y = 32 - height/2 (pairs)
+    LDA plot_setup.pw:LSR A:STA plot_draw.sprx
+    LDA #64:SEC:SBC plot_draw.sprx:STA plot_draw.sprx
+    LDA plot_setup.ph:LSR A:STA plot_draw.spry
+    LDA #32:SEC:SBC plot_draw.spry:STA plot_draw.spry
+    JSR plot_draw
+
+    JSR swapbuffers
+
+    LDA #112:STA &FE4F          ; scan Esc
+    LDA &FE4F
+    BPL mainloop
+    JMP (&FFFC)
+}
+
+
+\ ******************************************************************
+\ *    plot_setup: build the vertical boundary table for a sprite at a
+\ *    scale (>= 1x).
+\ *
+\ *    In:  spr (sprite), scale (8.8, both axes).
+\ *    Out: PY[0..H] = screen pair offset of each source row edge;
+\ *         pw/ph = plotted width (pixels) and height (pairs). PY is the
+\ *         high bytes of a running accumulator, so any row count works.
+\ *         There is no horizontal table: plot_draw steps the same
+\ *         accumulator across the columns as it goes.
+\ ******************************************************************
+
+.plot_setup
+{
+    \\ Inputs
+    ZPAUTO2 spr                     ; sprite base
+    ZPAUTO2 scale                   ; 8.8: screen pixels per source column = pairs per row
+    \\ Outputs
+    ZPAUTO1 wid                     ; source columns N
+    ZPAUTO1 hgt                     ; source rows H
+    ZPAUTO1 pw                      ; plotted width in pixels
+    ZPAUTO1 ph                      ; plotted height in pairs = PY[H]
+
+    ZPAUTO2 acc
+
+    LDY #0:LDA (spr),Y:STA wid
+    INY:LDA (spr),Y:STA hgt
+
+    \\ PY[k] for k = 0..H; the accumulator starts at 0.5 so each
+    \\ boundary is round(k * scale): quantisation error is centred
+    \\ instead of always truncating down
+    LDA #128:STA acc
+    LDA #0:STA acc+1
+    LDX #0
+.@
+    LDA acc+1:STA PY,X
+    CPX hgt:BEQ @+
+    LDA acc:CLC:ADC scale:STA acc
+    LDA acc+1:ADC scale+1:STA acc+1
+    INX
+    BNE @-
+.@
+    STA ph
+
+    \\ pw = high byte after N steps, same half-step start
+    LDA #128:STA acc
+    LDA #0:STA acc+1
+    LDX wid
+.@
+    LDA acc:CLC:ADC scale:STA acc
+    LDA acc+1:ADC scale+1:STA acc+1
+    DEX:BNE @-
+    STA pw
+    RTS
+}
+
+
+\ ******************************************************************
+\ *    plot_draw: plot the set-up sprite with its bottom-left pixel
+\ *    at (sprx, spry) - x in pixels, y in pairs from the bottom of
+\ *    the screen. No clipping: the sprite must fit.
+\ *
+\ *    The sprite is drawn as vertical byte-column strips. A strip
+\ *    holds up to four source columns (at >= 1x a column covers at
+\ *    least one pixel; a column wider than the strip spills into the
+\ *    next). Each tracked column k has:
+\ *        colmask+k  the pixel slots it covers in the byte
+\ *        idx+k      its next run byte in the sprite
+\ *        cp+k       the pair at which its current run ends
+\ *    and the strip keeps ONE composed state: mask (background kept),
+\ *    data_even / data_odd (the two dither bytes). A run change
+\ *    rewrites only that column's slots with the bit-merge
+\ *        x = x EOR ((x EOR new) AND colmask).
+\ *    An unused column parks cp at &FF so it never fires.
+\ *
+\ *    The pair loop between changes is the hot path: read-mask-or-
+\ *    write the odd then the even scanline, DEY twice, count down. It
+\ *    runs to the nearest change position (the minimum cp), so the
+\ *    per-column checks only happen at change events. A stretch with
+\ *    every slot opaque takes the plain-store loop instead, and one
+\ *    with nothing visible just steps the pointer past. Each strip
+\ *    dispatches change events to a handler specialised for its
+\ *    tracked-column count (changes1..4): fewer columns, fewer checks,
+\ *    and a single column has no checks or min at all.
+\ ******************************************************************
+
+\ Fetch tracked column k's next run and merge it into the composed
+\ state (k is a constant; expanded once per column per handler). The
+\ palette interleaves even/odd bytes (entry = colour*2), so the odd
+\ byte is one INY on. Clobbers A, X, Y.
+MACRO changecol k
+    LDY plot_draw.idx+k
+    LDA (plot_setup.spr),Y
+    INC plot_draw.idx+k
+    TAX
+    AND #7
+    BEQ transparent
+    ASL A:TAY                       ; colour*2
+    LDA (plot_draw.pal),Y           ; even-line pattern
+    EOR plot_draw.data_even:AND plot_draw.colmask+k:EOR plot_draw.data_even:STA plot_draw.data_even
+    INY
+    LDA (plot_draw.pal),Y           ; odd-line pattern
+    EOR plot_draw.data_odd:AND plot_draw.colmask+k:EOR plot_draw.data_odd:STA plot_draw.data_odd
+    LDA plot_draw.mask              ; clear the column's mask slots: drawn over
+    ORA plot_draw.colmask+k:EOR plot_draw.colmask+k:STA plot_draw.mask
+    JMP endrun
+.transparent
+    LDA plot_draw.data_even         ; clear the column's data slots...
+    ORA plot_draw.colmask+k:EOR plot_draw.colmask+k:STA plot_draw.data_even
+    LDA plot_draw.data_odd
+    ORA plot_draw.colmask+k:EOR plot_draw.colmask+k:STA plot_draw.data_odd
+    LDA plot_draw.mask              ; ...and set its mask slots: background kept
+    ORA plot_draw.colmask+k:STA plot_draw.mask
+.endrun
+    LDA shr3,X:TAY                  ; run end row - 1
+    LDA PY+1,Y:STA plot_draw.cp+k   ; -> the pair it ends at
+ENDMACRO
+
+\ One change handler, specialised for a strip tracking n columns: apply
+\ every column whose run ends at cnt, take the min of the n change
+\ positions in the same pass, and hand X = pairs-to-emit to the stretch
+\ code. With one column there is nothing to check or minimise - the
+\ only possible event is its own.
+MACRO changesbody n
+    STY plot_draw.ysave
+    IF n = 1
+        \ One column: nothing else's bits to preserve, so no merges.
+        \ data = pattern under the column's mask; mask = &FF for a
+        \ transparent run, else just the strip's uncovered slots.
+        LDY plot_draw.idx+0
+        LDA (plot_setup.spr),Y
+        INC plot_draw.idx+0
+        TAX
+        AND #7
+        BEQ transparent
+        ASL A:TAY                       ; colour*2
+        LDA (plot_draw.pal),Y
+        AND plot_draw.colmask+0:STA plot_draw.data_even
+        INY
+        LDA (plot_draw.pal),Y
+        AND plot_draw.colmask+0:STA plot_draw.data_odd
+        LDA plot_draw.ucm:STA plot_draw.mask
+        JMP endrun
+    .transparent
+        LDA #&FF:STA plot_draw.mask     ; whole byte kept: the stretch just skips
+    .endrun
+        LDA shr3,X:TAY
+        LDA PY+1,Y:STA plot_draw.cp+0
+    ELSE
+        LDA plot_draw.cnt
+        FOR k = 0 ..< n
+            CMP plot_draw.cp+k:BNE @+
+            changecol k
+            IF k < n-1
+                LDA plot_draw.cnt
+            ENDIF
+        .@
+        NEXT
+        LDA plot_draw.cp+0
+        FOR k = 1 ..< n
+            CMP plot_draw.cp+k:BCC @+
+            LDA plot_draw.cp+k
+        .@
+        NEXT
+    ENDIF
+    TAY                             ; the stretch's end position
+    SEC:SBC plot_draw.cnt:TAX       ; pairs to emit before the next change
+    STY plot_draw.cnt               ; becomes the position once emitted
+    LDY plot_draw.ysave
+    JMP plot_draw.stretch
+ENDMACRO
+
+.plot_draw
+{
+    \\ Inputs
+    ZPAUTO1 sprx                    ; left pixel column
+    ZPAUTO1 spry                    ; bottom pair
+    ZPAUTO2 pal                     ; palette: even,odd byte pairs for colours 0..7
+
+    ZPAUTO1 ystart                  ; bottom pair's odd scanline within its row
+    ZPAUTO1 pagestart               ; and that row's page
+    ZPAUTO2 scr                     ; screen pointer: low = column*8 (fixed per strip)
+    ZPAUTO2 sproff                  ; -> the sprite's column offset table
+    ZPAUTO1 c                       ; source column being assigned to slots
+    ZPAUTO1 rem                     ; its pixels not yet assigned
+    ZPAUTO2 xacc                    ; column edge accumulator (8.8)
+    ZPAUTO1 tmp                     ; colwidth scratch at fill time, skip scratch at emit time
+    ZPAUTO1 slot                    ; slot being filled, 0..3 (pixel bit = slotbits[slot])
+    ZPAUTO 4, colmask
+    ZPAUTO 4, idx
+    ZPAUTO 4, cp
+    ZPAUTO2 chvec                   ; the strip's change handler (by tracked count)
+    ZPAUTO1 ucm                     ; the strip's uncovered slots (kept background)
+    ZPAUTO1 cnt                     ; position in the strip: set to the stretch end
+                                    ; by the change handler, so it is current once
+                                    ; the stretch has been emitted
+    ZPAUTO1 mask
+    ZPAUTO1 data_even
+    ZPAUTO1 data_odd
+    ZPAUTO1 ysave
+
+    \\ where the bottom pair lives: scanline 127 - 2*spry
+
+    LDA spry:ASL A
+    EOR #&FF:CLC:ADC #128
+    TAX
+    AND #7:STA ystart
+    TXA:LSR A:LSR A:LSR A
+    CLC:ADC drawpage:STA pagestart
+    LDA sprx:AND #&FC:ASL A:STA scr ; byte column * 8
+
+    \\ horizontal stepping: column 0's width, and the first slot
+
+    LDA plot_setup.spr:CLC:ADC #2:STA sproff
+    LDA plot_setup.spr+1:ADC #0:STA sproff+1
+    LDA #0:STA c:STA xacc+1
+    LDA #128:STA xacc               ; the same half-step start as the tables
+    JSR colwidth
+    LDA sprx:AND #3:STA slot        ; the first strip starts at the sprite's pixel offset
+
+.striploop
+    \\ assign slots to columns; X = tracked index. Only entries 0..X
+    \\ are ever read again, so there is nothing to pre-initialise: a
+    \\ new column plain-stores its first slot bit.
+
+    LDX #&FF
+.newcol
+    INX
+    LDY c
+    LDA (sproff),Y:STA idx,X
+    LDA #0:STA cp,X                 ; fires at cnt 0: fetches the first run
+    LDY slot
+    LDA slotbits,Y:STA colmask,X    ; the column's first slot
+    BNE advance                     ; always: slot bits are non-zero
+    UNREACHABLE
+.slotloop
+    LDY slot
+    LDA slotbits,Y:ORA colmask,X:STA colmask,X
+.advance
+    DEC rem
+    BNE samecol
+    INC c                           ; column used up
+    LDA c:CMP plot_setup.wid:BEQ filled     ; no more columns: the rest stay unused
+    JSR colwidth
+    INC slot
+    LDA slot:CMP #4:BNE newcol      ; not 4: more slots to fill
+    BEQ filled
+    UNREACHABLE
+.samecol
+    INC slot
+    LDA slot:CMP #4:BNE slotloop
+.filled
+    LDA #0:STA slot
+
+    \\ plot the strip: X = tracked count - 1 picks the change handler
+
+    CPX #0:BNE @+                   ; only the one-column handler uses ucm
+    LDA colmask+0:EOR #&FF:STA ucm
+.@
+    LDA changes_lo,X:STA chvec
+    LDA changes_hi,X:STA chvec+1
+    LDA #0:STA cnt:STA data_even:STA data_odd
+    LDA #&FF:STA mask
+    LDY ystart
+    LDA pagestart:STA scr+1
+    JMP (chvec)
+    CANJUMP changes1, changes2, changes3, changes4
+
+.stretch
+    LDA mask
+    BEQ solidloop                   ; every slot opaque: no need to read the screen
+    CMP #&FF
+    BEQ skiploop                    ; nothing visible: just step past
+
+.pairloop
+    LDA (scr),Y:AND mask:ORA data_odd:STA (scr),Y
+    DEY
+    LDA (scr),Y:AND mask:ORA data_even:STA (scr),Y
+    DEY
+    BMI adjustrow
+.back
+    DEX:BNE pairloop
+    BEQ stretchdone
+    UNREACHABLE
+
+.adjustrow
+    DEC scr+1:LDY #7
+    BNE back
+    UNREACHABLE
+
+.skiploop
+    \\ a fully transparent stretch is consumed in one go: with
+    \\ s = 2X + (7 - Y), always 0..134, the rows crossed are shr3[s]
+    \\ and the new Y is the low bits of s flipped - no signed maths.
+    \\ ASL guarantees the carry clear (X <= 64), so no CLC either.
+    TYA:EOR #7:STA tmp              ; 7 - Y
+    TXA:ASL A                       ; lines to step (2X, at most 128)
+    ADC tmp                         ; s
+    TAX
+    AND #7:EOR #7:TAY               ; the new line within its row
+    LDA shr3,X                      ; rows crossed...
+    EOR #&FF:SEC:ADC scr+1          ; ...subtracted without a store
+    STA scr+1
+    BNE stretchdone                 ; always: screen pages are never zero
+    UNREACHABLE
+
+.solidloop                          ; the most common stretch: falls into stretchdone
+    LDA data_odd:STA (scr),Y
+    DEY
+    LDA data_even:STA (scr),Y
+    DEY
+    BMI solidadjust
+.solidback
+    DEX:BNE solidloop
+
+.stretchdone
+    LDA cnt
+    CMP plot_setup.ph:BEQ nextstrip
+    JMP (chvec)
+    CANJUMP changes1, changes2, changes3, changes4
+
+.solidadjust
+    DEC scr+1:LDY #7
+    BNE solidback
+    UNREACHABLE
+
+.nextstrip
+    LDA scr:ADC #7:STA scr          ; carry set by the CMP that got us here
+    LDA c:CMP plot_setup.wid
+    BEQ done
+    JMP striploop
+.done
+    RTS
+
+    \\ The four change handlers and their dispatch table
+
+.changes1
+    changesbody 1
+.changes2
+    changesbody 2
+.changes3
+    changesbody 3
+.changes4
+    changesbody 4
+
+.changes_lo
+    EQUB LO(changes1), LO(changes2), LO(changes3), LO(changes4)
+.changes_hi
+    EQUB HI(changes1), HI(changes2), HI(changes3), HI(changes4)
+
+    \\ Step the edge accumulator one column: rem = the new edge's
+    \\ pixel minus the old one, i.e. column c's width. Preserves X.
+.colwidth
+    LDA xacc+1:STA tmp
+    LDA xacc:CLC:ADC plot_setup.scale:STA xacc
+    LDA xacc+1:ADC plot_setup.scale+1:STA xacc+1
+    SEC:SBC tmp:STA rem
+    RTS
+}
+
+
+
+
+
+\ ******************************************************************
+\ *    Clear the hidden screen: top half dithered teal, bottom half
+\ *    dark green (lifted from the camera demo).
+\ ******************************************************************
+
+MACRO clearbody base
+{
+    LDA #skyeven
+    LDY #0
+.@
+FOR pg = 0 ..< 8
+    STA base + pg*256, Y
+NEXT
+    INY:INY
+    BNE @-
+    LDA #skyodd
+.@
+    INY
+FOR pg = 0 ..< 8
+    STA base + pg*256, Y
+NEXT
+    INY
+    BNE @-
+    LDA #grounde
+    LDY #0
+.@
+FOR pg = 0 ..< 8
+    STA base + &800 + pg*256, Y
+NEXT
+    INY:INY
+    BNE @-
+    LDA #groundo
+    INY
+.@
+FOR pg = 0 ..< 8
+    STA base + &800 + pg*256, Y
+NEXT
+    INY:INY
+    CPY #1
+    BNE @-
+}
+ENDMACRO
+
+.clearscreen
+{
+    LDA drawpage
+    CMP #&70
+    BEQ @+
+    JMP clear6000
+.@
+    JMP clear7000
+}
+
+.clear6000
+    clearbody &6000
+    RTS
+
+.clear7000
+    clearbody &7000
+    RTS
+
+
+\ ******************************************************************
+\ *    Show the buffer just drawn, then draw into the other one
+\ ******************************************************************
+
+.swapbuffers
+{
+    LDA irqchange:.@ CMP irqchange:BEQ @-
+    LDA #12:STA &FE00
+    LDA drawpage:LSR A:LSR A:LSR A
+    STA &FE01
+    LDA drawpage:EOR #&10:STA drawpage
+    RTS
+}
+
+
+\ ******************************************************************
+\ *    Vsync interrupt: count frames
+\ ******************************************************************
+
+.irq
+    LDA #&02:STA &FE4D
+    LDA irqchange:EOR #1:STA irqchange
+    BEQ @+
+    INC framectr
+.@  LDA &FC
+    RTI
+
+
+\ ******************************************************************
+\ *    Entry: take the machine over, set up the screen, go
+\ ******************************************************************
+
+.entry
+{
+    SEI
+    LDX #&FF:TXS
+    LDA #&7F:STA &FE4E
+    STA &FE43
+    LDA #&0F:STA &FE42
+    LDA #3:STA &FE40
+    LDA #&04:STA &FE4C
+    LDA #&82:STA &FE4E
+
+    LDX #13
+.crtcloop
+    STX &FE00
+    LDA crtcregs,X
+    STA &FE01
+    DEX
+    BPL crtcloop
+
+    LDA #&C4
+    STA &FE20
+
+    LDX #15
+.palloop
+    LDA paldata,X
+    STA &FE21
+    DEX
+    BPL palloop
+
+    JSR clear6000
+    JSR clear7000
+
+    LDA #0:STA framectr:STA irqchange
+    LDA #&70:STA drawpage
+
+    LDA #LO(irq):STA &204
+    LDA #HI(irq):STA &205
+    CLI
+    JMP mainloop
+}
+
+.crtcregs
+    EQUB 63, 32, 45, &24, 38, 0, 16, 26, 0, 7, 32, 8, HI(&6000/8), LO(&6000/8)
+
+physcols = {0, 4, 1, 2}         ; black, blue, red, green
+
+.paldata
+    EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
+
+
+\ ******************************************************************
+\ *    Scale table: 256 frames of 8.8 scale, 1x to 3x and back (cosine)
+\ ******************************************************************
+
+scaletab = INT(256 * (1 + (1 - COS((0..255) * 2 * PI / 256))))
+
+.scalelo
+    EQUB scaletab AND 255
+.scalehi
+    EQUB scaletab DIV 256
+
+
+\ ******************************************************************
+\ *    Sprite palettes: entry 0 is transparent, 1..7 are dither
+\ *    pairs; interleaved even,odd scanline bytes per entry.
+\ ******************************************************************
+
+MACRO palette cols
+    EQUB 0, 0
+    FOR i = 0 ..< 7
+        EQUB pateven(cols[i]), patodd(cols[i])
+    NEXT
+ENDMACRO
+
+.pal_creature
+    palette {black, brown, red, olive, green, blue, magenta}
+
+
+\ ******************************************************************
+\ *    Sprite encoder: "pic" is a list of rows (top first) of palette
+\ *    indices. Emits the header, the column offsets and each column's
+\ *    runs bottom-up. With end positions in the data, encoding a
+\ *    column is just "emit at every row where the colour changes" -
+\ *    no running length to carry between iterations.
+\ ******************************************************************
+
+FUNCTION nruns(col) = 1 + SUM(col[1..] != col[..LEN(col)-2])
+
+FUNCTION coloff(pic, c)
+    IF c = 0
+        o = 0
+    ELSE
+        o = coloff(pic, c-1) + nruns(pic[.., c-1])
+    ENDIF
+= o
+
+MACRO sprite pic
+    n = LEN(pic[0])
+    h = LEN(pic)
+    EQUB n, h
+    FOR c = 0 ..< n
+        EQUB 2 + n + coloff(pic, c)
+    NEXT
+    FOR c = 0 ..< n
+        col = REVERSE(pic[.., c])
+        FOR i = 0 ..< h
+            IF i = h-1
+                EQUB col[i] + i*8
+            ELIF col[i] != col[i+1]
+                EQUB col[i] + i*8
+            ENDIF
+        NEXT
+    NEXT
+ENDMACRO
+
+\ A 12x20 creature. 0 transparent, 1 black, 2 brown, 3 red, 4 olive,
+\ 5 green, 6 blue, 7 magenta.
+
+.creature
+    sprite {{0,0,0,0,1,1,1,1,0,0,0,0},
+            {0,0,0,1,5,5,5,5,1,0,0,0},
+            {0,0,1,5,5,6,6,5,5,1,0,0},
+            {0,0,1,5,6,1,1,6,5,1,0,0},
+            {0,0,1,5,6,1,1,6,5,1,0,0},
+            {0,0,1,5,5,6,6,5,5,1,0,0},
+            {0,0,0,1,5,5,5,5,1,0,0,0},
+            {0,0,0,1,4,4,4,4,1,0,0,0},
+            {0,1,1,4,4,4,4,4,4,1,1,0},
+            {1,3,3,1,4,4,4,4,1,3,3,1},
+            {1,3,1,4,4,4,4,4,4,1,3,1},
+            {1,1,1,4,4,7,7,4,4,1,1,1},
+            {0,0,1,4,4,7,7,4,4,1,0,0},
+            {0,0,1,4,4,4,4,4,4,1,0,0},
+            {0,0,0,1,4,4,4,4,1,0,0,0},
+            {0,0,0,1,2,1,1,2,1,0,0,0},
+            {0,0,0,1,2,1,1,2,1,0,0,0},
+            {0,0,1,2,2,1,1,2,2,1,0,0},
+            {0,0,1,1,1,0,0,1,1,1,0,0},
+            {0,0,0,0,0,0,0,0,0,0,0,0}}
+
+
+\ ******************************************************************
+\ *    Plotter tables (RAM)
+\ ******************************************************************
+
+.PY     SKIP 33                 ; source row edge -> screen pair offset
+
+.slotbits
+    EQUB &88, &44, &22, &11     ; pixel bit of slot 0..3
+.shr3
+    EQUB (0..255) DIV 8         ; run byte -> end row - 1
+
+ENDSECTION
