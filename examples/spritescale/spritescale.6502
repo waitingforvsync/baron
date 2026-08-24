@@ -1,36 +1,17 @@
 \ **************************************************************************
 \ *
-\ *    Scaled sprite demo - first sketch of the plotter
+\ *    Scaled sprite demo
 \ *
-\ *    A MODE 5-style 2bpp screen narrowed to 32 characters by 16 rows
-\ *    (128x128 double-width pixels, one 256-byte page per character row,
-\ *    so a byte column is a fixed low byte and moving up a row is DEC of
-\ *    the page), double buffered at &6000 and &7000. The vsync interrupt
-\ *    counts frames; the renderer uses the count as a scale index.
-\ *
-\ *    Sprite format (see the "sprite" macro at the end):
-\ *        width N, height H, N column data offsets from the sprite base,
-\ *        then per column bottom-up runs of  colour:3 (low) | (end-1):5
-\ *    where "end" is the run's CUMULATIVE end row (1..H), so a run is
-\ *    located by a single table lookup and zero-length runs (shrinking)
-\ *    fall out as "end == current position". Colour 0 is transparent;
-\ *    1..7 index the palette the plot is given, each entry being a pair
-\ *    of the four screen colours dithered in a checkerboard.
-\ *
-\ *    The screen is treated as half height: the vertical unit is a PAIR
-\ *    of scanlines (a sprite pixel is 2 scanlines tall), y positions and
-\ *    heights are in pairs, and the checkerboard phase is absolute - the
-\ *    top line of every pair is an even scanline.
-\ *
-\ *    Scale is 8.8 fixed point, screen units per source unit (&100 = 1x),
-\ *    the same for both axes. A plot is two calls: plot_setup builds the boundary
-\ *    tables PX[0..N] / PY[0..H] (source edge k -> screen offset) from
-\ *    the scales and subpixel phases; plot_draw then walks the screen byte
-\ *    columns ("strips"), tracking the 1..4 source columns that land in
-\ *    each, merging their runs into vertical segments of constant bytes.
+\ *    Sprites are run-length encoded columns, drawn bottom up at any
+\ *    8.8 scale (same in x and y) on a reduced MODE 5 screen. Two
+\ *    plotters share the format: a stretch engine that merges runs
+\ *    into constant vertical bytes (best when zoomed), and a per-pair
+\ *    rebuild (best when shrunk). Each sprite carries its own
+\ *    crossover scale, worked out by the encoder, and we pick the
+\ *    plotter per plot. Pixels are vertically doubled, so everything
+\ *    vertical is counted in scanline pairs.
 \ *
 \ *    Build:  baron boot.6502 spritescale.6502 --opt 2 -o spritescale.ssd
-\ *    Run:    SHIFT-BREAK boots it (Esc quits)
 \ *
 \ **************************************************************************
 
@@ -51,6 +32,7 @@ green     = {3, 3}
 \ 2bpp: pixel n's colour bits live at byte bits 7-n (high) and 3-n (low).
 FUNCTION pixbits(n, c) = ((c DIV 2) << (7-n)) OR ((c AND 1) << (3-n))
 FUNCTION pateven(p) = pixbits(0, p[0]) OR pixbits(1, p[1]) OR pixbits(2, p[0]) OR pixbits(3, p[1])
+FUNCTION slotmask(n) = {&88, &44, &22, &11}[n]
 FUNCTION patodd(p)  = pixbits(0, p[1]) OR pixbits(1, p[0]) OR pixbits(2, p[1]) OR pixbits(3, p[0])
 
 \ Background dither bytes for the clear.
@@ -76,27 +58,53 @@ ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
 {
     JSR clearscreen
 
+    ; the creature, still at 1x on the left
+    LDA #0:STA plot_setup.scale
+    LDA #1:STA plot_setup.scale+1
+    LDA #LO(creature):STA plot_setup.spr
+    LDA #HI(creature):STA plot_setup.spr+1
+    JSR plot_setup
+    LDA #LO(pal_creature):STA plot_draw.pal
+    LDA #HI(pal_creature):STA plot_draw.pal+1
+    LDA #6:STA plot_draw.sprx
+    LDA #8:STA plot_draw.spry
+    JSR plot_draw
+
+    ; the boulder, breathing through the scale table, centred
     LDX framectr                ; scale index: one table entry per frame
     LDA scalelo,X:STA plot_setup.scale
     LDA scalehi,X:STA plot_setup.scale+1
-    LDA #LO(creature):STA plot_setup.spr
-    LDA #HI(creature):STA plot_setup.spr+1
-    LDA #LO(pal_creature):STA plot_draw.pal
-    LDA #HI(pal_creature):STA plot_draw.pal+1
+    LDA #LO(boulder):STA plot_setup.spr
+    LDA #HI(boulder):STA plot_setup.spr+1
     JSR plot_setup
+    LDA #LO(pal_boulder):STA plot_draw.pal
+    LDA #HI(pal_boulder):STA plot_draw.pal+1
 
     ; centre it: x = 64 - width/2, y = 32 - height/2 (pairs)
     LDA plot_setup.pw:LSR A:STA plot_draw.sprx
     LDA #64:SEC:SBC plot_draw.sprx:STA plot_draw.sprx
     LDA plot_setup.ph:LSR A:STA plot_draw.spry
     LDA #32:SEC:SBC plot_draw.spry:STA plot_draw.spry
+    LDA plot_setup.scale+1
+    BNE useengine                   ; 1x and up: always the stretch engine
+    LDY #2
+    LDA plot_setup.scale
+    CMP (plot_setup.spr),Y          ; below the sprite's own crossover the
+    BCC userebuild                  ; per-pair rebuild wins
+.useengine
     JSR plot_draw
+    JMP plotted
+.userebuild
+    JSR plot_draw_a
+.plotted
 
     JSR swapbuffers
 
     LDA #112:STA &FE4F          ; scan Esc
     LDA &FE4F
-    BPL mainloop
+    BMI @+
+    JMP mainloop
+.@
     JMP (&FFFC)
 }
 
@@ -325,7 +333,7 @@ ENDMACRO
 
     \\ horizontal stepping: column 0's width, and the first slot
 
-    LDA plot_setup.spr:CLC:ADC #2:STA sproff
+    LDA plot_setup.spr:CLC:ADC #3:STA sproff
     LDA plot_setup.spr+1:ADC #0:STA sproff+1
     LDX #0                          ; pick the handler set: swallowing below 1x
     LDA plot_setup.scale+1
@@ -515,6 +523,205 @@ ENDMACRO
 
 
 \ ******************************************************************
+\ *    plot_draw_a: the shrink plotter (scale < 1x only). Same inputs
+\ *    as plot_draw (plot_setup outputs + sprx/spry/pal), same output
+\ *    bytes. Where the stretch engine merges runs into stretches,
+\ *    this REBUILDS THE WHOLE BYTE EVERY PAIR: four fixed slots, each
+\ *    holding a surviving source column (or a transparent dummy for
+\ *    lead padding / past the sprite), with the current run's
+\ *    pre-masked even/odd patterns and mask contribution in zp. A
+\ *    pair is then three OR chains and a write. Below 1x every column
+\ *    is at most one pixel wide and runs collapse toward one pair, so
+\ *    stretch bookkeeping has nothing to amortise - this is the
+\ *    regime where per-pair rebuild should win.
+\ ******************************************************************
+
+\ Fetch slot n's next run: end first (swallowing shrunk-away runs),
+\ then the pre-masked patterns from the palette's slot tables.
+MACRO afetch n
+    STX plot_draw_a.acnt
+    STY plot_draw_a.ysave
+.fetch
+    LDY plot_draw_a.aidx+n
+    LDA (plot_setup.spr),Y
+    INC plot_draw_a.aidx+n
+    TAY                             ; raw run byte
+    LDA shr3,Y:TAX                  ; end row - 1
+    LDA PY+1,X:STA plot_draw_a.aend+n
+    CMP plot_draw_a.acnt
+    BEQ fetch                       ; shrunk away: take the next one
+    TYA:AND #7
+    BEQ transp
+    ORA #16+n*8:TAY                 ; -> the slot's pre-masked even entry
+    LDA (plot_draw.pal),Y:STA plot_draw_a.ce+n
+    TYA:EOR #(16+n*8) EOR (48+n*8):TAY
+    LDA (plot_draw.pal),Y:STA plot_draw_a.co+n
+    LDA #0:STA plot_draw_a.cm+n
+    JMP fdone
+.transp
+    LDA #0:STA plot_draw_a.ce+n:STA plot_draw_a.co+n
+    LDA #slotmask(n):STA plot_draw_a.cm+n
+.fdone
+    LDX plot_draw_a.acnt
+    LDY plot_draw_a.ysave
+ENDMACRO
+
+.plot_draw_a
+{
+    ZPAUTO1 acnt                    ; the pair being built (X mirrored for fetches)
+    ZPAUTO1 ysave
+    ZPAUTO1 ystart                  ; bottom pair's odd scanline within its row
+    ZPAUTO1 pagestart               ; and that row's page
+    ZPAUTO2 scr                     ; screen pointer: low = column*8 (fixed per strip)
+    ZPAUTO2 sproff                  ; -> the sprite's column offset table
+    ZPAUTO1 c                       ; source column being assigned
+    ZPAUTO2 xacc                    ; column edge accumulator (8.8)
+    ZPAUTO1 rem
+    ZPAUTO1 tmp
+    ZPAUTO1 alead                   ; first-strip padding slots still owed
+    ZPAUTO1 aexh                    ; ran out of source columns: last strip
+    ZPAUTO1 mtmp
+    ZPAUTO1 otmp
+    ZPAUTO1 etmp
+    ZPAUTO 4, aidx                  ; per slot: next run byte in the sprite
+    ZPAUTO 4, aend                  ;   current run's end (&FF on a dummy)
+    ZPAUTO 4, ce                    ;   pre-masked even pattern
+    ZPAUTO 4, co                    ;   pre-masked odd pattern
+    ZPAUTO 4, cm                    ;   mask contribution (slot bits if transparent)
+
+    LDA plot_draw.spry:ASL A
+    EOR #&FF:CLC:ADC #128
+    TAX
+    AND #7:STA ystart
+    TXA:LSR A:LSR A:LSR A
+    CLC:ADC drawpage:STA pagestart
+    LDA plot_draw.sprx:AND #&FC:ASL A:STA scr
+    LDA plot_setup.spr:CLC:ADC #3:STA sproff
+    LDA plot_setup.spr+1:ADC #0:STA sproff+1
+    LDA plot_setup.ph
+    BEQ tovanished
+    LDA #0:STA c:STA xacc+1:STA aexh
+    LDA #128:STA xacc
+    JSR findcol
+    BNE @+
+.tovanished
+    JMP vanished
+.@
+    LDA plot_draw.sprx:AND #3:STA alead
+
+.striploop
+    \\ fill the four slots: lead padding and past-the-end are dummies
+
+    LDX #0
+.fillslot
+    LDA alead:BEQ @+
+    DEC alead
+    JMP dummy
+.@
+    LDA aexh:BNE dummy
+    LDY c
+    LDA (sproff),Y:STA aidx,X
+    LDA #0:STA aend,X               ; fetches at pair 0
+    INC c
+    JSR findcol                     ; position on the next survivor
+    BNE nextslot
+    INC aexh                        ; none left: this is the last strip
+    BNE nextslot
+    UNREACHABLE
+.dummy
+    LDA #&FF:STA aend,X             ; never fetches
+    LDA #0:STA ce,X:STA co,X
+    LDA slotbits,X:STA cm,X
+.nextslot
+    INX:CPX #4:BNE fillslot
+
+    \\ emit the strip, one rebuilt pair at a time, bottom up
+
+    LDY ystart
+    LDA pagestart:STA scr+1
+    LDX #0
+.pairloop
+    CPX aend+0:BNE @+
+    afetch 0
+.@
+    CPX aend+1:BNE @+
+    afetch 1
+.@
+    CPX aend+2:BNE @+
+    afetch 2
+.@
+    CPX aend+3:BNE @+
+    afetch 3
+.@
+    LDA cm+0:ORA cm+1:ORA cm+2:ORA cm+3
+    BEQ solidpair                   ; all four slots opaque
+    CMP #&FF:BEQ skippair           ; nothing visible
+    STA mtmp
+    LDA co+0:ORA co+1:ORA co+2:ORA co+3:STA otmp
+    LDA ce+0:ORA ce+1:ORA ce+2:ORA ce+3:STA etmp
+    LDA (scr),Y:AND mtmp:ORA otmp:STA (scr),Y
+    DEY
+    LDA (scr),Y:AND mtmp:ORA etmp:STA (scr),Y
+    DEY
+    BMI adjust
+.resume
+    INX
+    CPX plot_setup.ph
+    BEQ stripdone
+    JMP pairloop
+
+.adjust
+    DEC scr+1:LDY #7
+    BNE resume
+    UNREACHABLE
+
+.solidpair
+    LDA co+0:ORA co+1:ORA co+2:ORA co+3
+    STA (scr),Y
+    DEY
+    LDA ce+0:ORA ce+1:ORA ce+2:ORA ce+3
+    STA (scr),Y
+    DEY
+    BMI adjust
+    JMP resume
+
+.skippair
+    DEY:DEY
+    BMI adjust
+    JMP resume
+
+.stripdone
+    LDA scr:CLC:ADC #8:STA scr
+    LDA aexh
+    BNE done
+    JMP striploop
+.done
+.vanished
+    RTS
+
+    \\ Find column c's width from the edge accumulator, skipping the
+    \\ shrunk-away. Z=1 when the sprite ran out of columns. (A copy of
+    \\ plot_draw's: this plotter is self-contained by design so the
+    \\ two can be compared and evolved independently.)
+.findcol
+    LDA c:CMP plot_setup.wid
+    BEQ exhausted
+    LDA xacc+1:STA tmp
+    LDA xacc:CLC:ADC plot_setup.scale:STA xacc
+    LDA xacc+1:ADC plot_setup.scale+1:STA xacc+1
+    SEC:SBC tmp:STA rem
+    BEQ nextc
+    RTS
+.nextc
+    INC c
+    BNE findcol
+    UNREACHABLE
+.exhausted
+    RTS
+}
+
+
+\ ******************************************************************
 \ *    Clear the hidden screen: top half dithered teal, bottom half
 \ *    dark green (lifted from the camera demo).
 \ ******************************************************************
@@ -680,10 +887,27 @@ MACRO palette cols
     FOR i = 0 ..< 7
         EQUB pateven(cols[i]), patodd(cols[i])
     NEXT
+    \ plotter A's per-slot pre-masked patterns: even at +16, odd at +48,
+    \ 8 bytes per slot, all computed here at assembly time
+    FOR n = 0 ..< 4
+        EQUB 0
+        FOR i = 0 ..< 7
+            EQUB pateven(cols[i]) AND slotmask(n)
+        NEXT
+    NEXT
+    FOR n = 0 ..< 4
+        EQUB 0
+        FOR i = 0 ..< 7
+            EQUB patodd(cols[i]) AND slotmask(n)
+        NEXT
+    NEXT
 ENDMACRO
 
 .pal_creature
     palette {black, brown, red, olive, green, blue, magenta}
+
+.pal_boulder
+    palette {black, brown, red, olive, black, black, black}
 
 
 \ ******************************************************************
@@ -696,6 +920,37 @@ ENDMACRO
 
 FUNCTION nruns(col) = 1 + SUM(col[1..] != col[..LEN(col)-2])
 
+\ Engine-vs-rebuild dispatch threshold: the stretch engine's cost is
+\ driven by the DENSITY of distinct run-end rows across each group of
+\ four columns (aligned features share change events; scattered ones
+\ don't), where the per-pair rebuild's cost is structure-blind. The
+\ crossover scale tracks ~1.25 x density (calibrated on the creature,
+\ measured 0.78x at d=0.63, and the boulder, ~1x at d=0.78).
+
+FUNCTION endflags(pic, c)
+    col = REVERSE(pic[.., c])
+= CONCAT(col[0 .. LEN(col)-2] != col[1..], {1})
+
+FUNCTION groupflags(pic, g, w)
+    IF w = 1
+        f = endflags(pic, g)
+    ELSE
+        f = MAX({groupflags(pic, g, w-1), endflags(pic, g+w-1)}, 0)
+    ENDIF
+= f
+
+FUNCTION runion(pic, g)
+    n = LEN(pic[0])
+    w = MIN({4, n - g})
+    IF g + w >= n
+        u = SUM(groupflags(pic, g, w))
+    ELSE
+        u = SUM(groupflags(pic, g, w)) + runion(pic, g + 4)
+    ENDIF
+= u
+
+FUNCTION threshold(pic) = MIN({255, 320 * runion(pic, 0) DIV (((LEN(pic[0]) + 3) DIV 4) * LEN(pic))})
+
 FUNCTION coloff(pic, c)
     IF c = 0
         o = 0
@@ -707,9 +962,9 @@ FUNCTION coloff(pic, c)
 MACRO sprite pic
     n = LEN(pic[0])
     h = LEN(pic)
-    EQUB n, h
+    EQUB n, h, threshold(pic)
     FOR c = 0 ..< n
-        EQUB 2 + n + coloff(pic, c)
+        EQUB 3 + n + coloff(pic, c)
     NEXT
     FOR c = 0 ..< n
         col = REVERSE(pic[.., c])
@@ -747,6 +1002,30 @@ ENDMACRO
             {0,0,1,2,2,1,1,2,2,1,0,0},
             {0,0,1,1,1,0,0,1,1,1,0,0},
             {0,0,0,0,0,0,0,0,0,0,0,0}}
+
+
+\ A 14x16 boulder, no outline: red body, brown dimples and lower-left
+\ shading, olive highlights upper right, and an elliptical black
+\ shadow in the bottom two rows (the rock sits two rows up).
+\ 0 transparent, 1 black, 2 brown, 3 red, 4 olive.
+
+.boulder
+    sprite {{0,0,0,0,3,3,3,3,4,0,0,0,0,0}, \
+            {0,0,3,3,3,3,4,4,4,4,0,0,0,0}, \
+            {0,3,3,3,3,3,4,4,4,4,4,3,0,0}, \
+            {0,3,3,2,3,3,3,4,4,4,4,3,0,0}, \
+            {3,3,3,3,3,3,3,3,4,3,4,4,3,0}, \
+            {3,3,3,2,2,3,3,3,3,4,4,3,3,0}, \
+            {3,3,2,3,3,3,2,3,3,3,4,4,3,3}, \
+            {2,3,3,3,3,2,2,3,3,3,3,3,3,3}, \
+            {2,2,3,3,3,3,3,3,2,3,3,4,3,3}, \
+            {2,2,3,3,2,3,3,3,2,2,3,3,3,0}, \
+            {2,2,2,3,3,3,2,3,3,3,3,3,3,0}, \
+            {0,2,2,2,3,3,3,3,2,3,3,3,0,0}, \
+            {0,2,2,2,2,3,3,3,3,3,3,0,0,0}, \
+            {0,0,2,2,2,2,2,3,3,3,0,0,0,0}, \
+            {0,1,1,1,1,1,1,1,1,1,1,1,1,0}, \
+            {0,0,0,1,1,1,1,1,1,1,1,0,0,0}}
 
 
 \ ******************************************************************
