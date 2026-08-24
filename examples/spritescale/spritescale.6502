@@ -191,7 +191,8 @@ ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
 \ state (k is a constant; expanded once per column per handler). The
 \ palette interleaves even/odd bytes (entry = colour*2), so the odd
 \ byte is one INY on. Clobbers A, X, Y.
-MACRO changecol k
+MACRO changecol k, swallow
+.fetch
     LDY plot_draw.idx+k
     LDA (plot_setup.spr),Y
     INC plot_draw.idx+k
@@ -217,6 +218,10 @@ MACRO changecol k
 .endrun
     LDA shr3,X:TAY                  ; run end row - 1
     LDA PY+1,Y:STA plot_draw.cp+k   ; -> the pair it ends at
+    IF swallow
+        CMP plot_draw.cnt           ; a shrunk-away run: take the next one
+        BEQ fetch
+    ENDIF
 ENDMACRO
 
 \ One change handler, specialised for a strip tracking n columns: apply
@@ -224,12 +229,13 @@ ENDMACRO
 \ positions in the same pass, and hand X = pairs-to-emit to the stretch
 \ code. With one column there is nothing to check or minimise - the
 \ only possible event is its own.
-MACRO changesbody n
+MACRO changesbody n, swallow
     STY plot_draw.ysave
     IF n = 1
         \ One column: nothing else's bits to preserve, so no merges.
         \ data = pattern under the column's mask; mask = &FF for a
         \ transparent run, else just the strip's uncovered slots.
+    .fetch
         LDY plot_draw.idx+0
         LDA (plot_setup.spr),Y
         INC plot_draw.idx+0
@@ -249,11 +255,15 @@ MACRO changesbody n
     .endrun
         LDA shr3,X:TAY
         LDA PY+1,Y:STA plot_draw.cp+0
+        IF swallow
+            CMP plot_draw.cnt       ; a shrunk-away run: take the next one
+            BEQ fetch
+        ENDIF
     ELSE
         LDA plot_draw.cnt
         FOR k = 0 ..< n
             CMP plot_draw.cp+k:BNE @+
-            changecol k
+            changecol k, swallow
             IF k < n-1
                 LDA plot_draw.cnt
             ENDIF
@@ -293,6 +303,7 @@ ENDMACRO
     ZPAUTO 4, idx
     ZPAUTO 4, cp
     ZPAUTO2 chvec                   ; the strip's change handler (by tracked count)
+    ZPAUTO1 hoffs                   ; handler set: 0 zoom, 4 shrink (swallow)
     ZPAUTO1 ucm                     ; the strip's uncovered slots (kept background)
     ZPAUTO1 cnt                     ; position in the strip: set to the stretch end
                                     ; by the change handler, so it is current once
@@ -316,9 +327,21 @@ ENDMACRO
 
     LDA plot_setup.spr:CLC:ADC #2:STA sproff
     LDA plot_setup.spr+1:ADC #0:STA sproff+1
+    LDX #0                          ; pick the handler set: swallowing below 1x
+    LDA plot_setup.scale+1
+    BNE @+
+    LDX #4
+.@
+    STX hoffs
+    LDA plot_setup.ph
+    BEQ tovanished                  ; nothing survives the scale: no strips at all
     LDA #0:STA c:STA xacc+1
     LDA #128:STA xacc               ; the same half-step start as the tables
-    JSR colwidth
+    JSR findcol
+    BNE @+
+.tovanished
+    JMP vanished
+.@
     LDA sprx:AND #3:STA slot        ; the first strip starts at the sprite's pixel offset
 
 .striploop
@@ -343,8 +366,8 @@ ENDMACRO
     DEC rem
     BNE samecol
     INC c                           ; column used up
-    LDA c:CMP plot_setup.wid:BEQ filled     ; no more columns: the rest stay unused
-    JSR colwidth
+    JSR findcol                     ; next SURVIVING column (shrink drops some)
+    BEQ filled                      ; no more columns: the rest stay unused
     INC slot
     LDA slot:CMP #4:BNE newcol      ; not 4: more slots to fill
     BEQ filled
@@ -357,9 +380,10 @@ ENDMACRO
 
     \\ plot the strip: X = tracked count - 1 picks the change handler
 
-    CPX #0:BNE @+                   ; only the one-column handler uses ucm
+    CPX #0:BNE @+                   ; only the one-column handlers use ucm
     LDA colmask+0:EOR #&FF:STA ucm
 .@
+    TXA:ORA hoffs:TAX
     LDA changes_lo,X:STA chvec
     LDA changes_hi,X:STA chvec+1
     LDA #0:STA cnt:STA data_even:STA data_odd
@@ -367,7 +391,7 @@ ENDMACRO
     LDY ystart
     LDA pagestart:STA scr+1
     JMP (chvec)
-    CANJUMP changes1, changes2, changes3, changes4
+    CANJUMP changes1, changes2, changes3, changes4, schanges1, schanges2, schanges3, schanges4
 
 .stretch
     LDA mask
@@ -420,7 +444,7 @@ ENDMACRO
     LDA cnt
     CMP plot_setup.ph:BEQ nextstrip
     JMP (chvec)
-    CANJUMP changes1, changes2, changes3, changes4
+    CANJUMP changes1, changes2, changes3, changes4, schanges1, schanges2, schanges3, schanges4
 
 .solidadjust
     DEC scr+1:LDY #7
@@ -433,31 +457,56 @@ ENDMACRO
     BEQ done
     JMP striploop
 .done
+.vanished
     RTS
 
     \\ The four change handlers and their dispatch table
 
 .changes1
-    changesbody 1
+    changesbody 1, FALSE
 .changes2
-    changesbody 2
+    changesbody 2, FALSE
 .changes3
-    changesbody 3
+    changesbody 3, FALSE
 .changes4
-    changesbody 4
+    changesbody 4, FALSE
+
+    \\ the same four again with the zero-length-run swallow, for
+    \\ scales below 1x - the zoom handlers stay untouched
+
+.schanges1
+    changesbody 1, TRUE
+.schanges2
+    changesbody 2, TRUE
+.schanges3
+    changesbody 3, TRUE
+.schanges4
+    changesbody 4, TRUE
 
 .changes_lo
     EQUB LO(changes1), LO(changes2), LO(changes3), LO(changes4)
+    EQUB LO(schanges1), LO(schanges2), LO(schanges3), LO(schanges4)
 .changes_hi
     EQUB HI(changes1), HI(changes2), HI(changes3), HI(changes4)
+    EQUB HI(schanges1), HI(schanges2), HI(schanges3), HI(schanges4)
 
-    \\ Step the edge accumulator one column: rem = the new edge's
-    \\ pixel minus the old one, i.e. column c's width. Preserves X.
-.colwidth
+    \\ Find column c's width from the edge accumulator; a zero-width
+    \\ column (shrunk away) advances to the next survivor. Returns
+    \\ Z=1 when the sprite ran out of columns first. Preserves X.
+.findcol
+    LDA c:CMP plot_setup.wid
+    BEQ exhausted
     LDA xacc+1:STA tmp
     LDA xacc:CLC:ADC plot_setup.scale:STA xacc
     LDA xacc+1:ADC plot_setup.scale+1:STA xacc+1
     SEC:SBC tmp:STA rem
+    BEQ nextc                       ; width 0: try the next column
+    RTS                             ; Z=0: rem is non-zero
+.nextc
+    INC c
+    BNE findcol
+    UNREACHABLE
+.exhausted
     RTS
 }
 
@@ -610,10 +659,10 @@ physcols = {0, 4, 1, 2}         ; black, blue, red, green
 
 
 \ ******************************************************************
-\ *    Scale table: 256 frames of 8.8 scale, 1x to 3x and back (cosine)
+\ *    Scale table: 256 frames of 8.8 scale, 0.25x to 3x and back (cosine)
 \ ******************************************************************
 
-scaletab = INT(256 * (1 + (1 - COS((0..255) * 2 * PI / 256))))
+scaletab = INT(256 * (0.25 + 1.375 * (1 - COS((0..255) * 2 * PI / 256))))
 
 .scalelo
     EQUB scaletab AND 255
