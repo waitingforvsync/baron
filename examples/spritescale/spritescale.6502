@@ -77,7 +77,8 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 \ *    Walk the slot tables for this camera index, far to near,
 \ *    stopping at size 0. Each table is nslots pages (ncam = 256:
 \ *    one page per slot), tabstride pages apart. The tables only
-\ *    hold fully-visible sprites, so no clipping anywhere.
+\ *    hold sprites that fit vertically; left/right clipping is the
+\ *    plotters' business now.
 \ ******************************************************************
 
 .drawsprites
@@ -102,7 +103,7 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
     LDA normlo,X:STA plot_setup.scale
     LDA normhi,X:STA plot_setup.scale+1
     LDA tabhi:STA tptr+1                        ; tab_x
-    LDA (tptr),Y:STA plot_draw.sprx
+    LDA (tptr),Y:STA plot_setup.sprx
     LDA tabhi:CLC:ADC #tabstride:STA tptr+1     ; tab_y
     LDA (tptr),Y:STA plot_draw.spry
     JSR plot_sprite
@@ -122,6 +123,8 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 .plot_sprite
 {
     JSR plot_setup
+    LDA plot_setup.strips
+    BEQ nothing                     ; clipped or scaled away entirely
     LDA plot_setup.scale+1
     BNE useengine                   ; 1x and up: always the stretch engine
     LDY #2
@@ -132,6 +135,8 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
     JMP plot_draw
 .userebuild
     JMP plot_draw_a
+.nothing
+    RTS
 }
 
 
@@ -152,11 +157,22 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
     \\ Inputs
     ZPAUTO2 spr                     ; sprite base
     ZPAUTO2 scale                   ; 8.8: screen pixels per source column = pairs per row
+    ZPAUTO1 sprx                    ; left pixel column, SIGNED: negative = left-clipped
     \\ Outputs
     ZPAUTO1 wid                     ; source columns N
     ZPAUTO1 hgt                     ; source rows H
     ZPAUTO1 pw                      ; plotted width in pixels
     ZPAUTO1 ph                      ; plotted height in pairs = PY[H]
+    ZPAUTO1 sx0                     ; the on-screen left edge (0 when left-clipped)
+    ZPAUTO1 strips                  ; strip budget: byte columns up to the right
+                                    ; edge (counted down by the plotters); 0 =
+                                    ; nothing visible, don't call a plotter at all
+    ZPAUTO1 c0                      ; the plotters' starting column walk state:
+    ZPAUTO1 rem0                    ;   first visible column, its on-screen pixels,
+    ZPAUTO2 xacc0                   ;   and the edge accumulator to continue from
+
+    ZPAUTO1 lclip                   ; pixels hanging off the left (internal)
+    ZPAUTO1 tmp
 
     ZPAUTO2 acc
 
@@ -188,14 +204,71 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
     LDA acc+1:ADC scale+1:STA acc+1
     DEX:BNE @-
     STA pw
+
+    \\ the horizontal window: a left-clipped sprite starts at screen
+    \\ x = 0 (byte aligned, so no lead padding); the strip budget
+    \\ stops the walk at the right edge (also byte aligned), and an
+    \\ unclipped sprite runs out of columns before ever reaching it
+
+    LDA sprx
+    BPL onscreen
+    EOR #&FF:CLC:ADC #1:STA lclip   ; -sprx pixels hang off the left
+    LDA #0:STA sx0
+    BEQ @+
+    UNREACHABLE
+.onscreen
+    STA sx0
+    LDA #0:STA lclip
+.@
+    LDA sx0:LSR A:LSR A
+    EOR #&FF:SEC:ADC #32:STA strips ; 32 - first byte column
+
+    \\ position the column walk for the plotters: find the first
+    \\ column with pixels ON SCREEN - skipping the shrunk-away, and
+    \\ consuming any hanging off the left (whole columns, then part
+    \\ of the straddler) - so plot_draw starts from ready state and
+    \\ never sees clipping at all
+
+    LDA ph
+    BEQ nothing                     ; nothing survives the scale
+    LDA #0:STA c0:STA acc+1
+    LDA #128:STA acc
+.poscol
+    LDA c0:CMP wid
+    BEQ nothing                     ; every column skipped or clipped away
+    LDX acc+1
+    LDA acc:CLC:ADC scale:STA acc
+    LDA acc+1:ADC scale+1:STA acc+1
+    STX tmp
+    SEC:SBC tmp:STA rem0            ; this column's width in pixels
+    BEQ nextcol                     ; shrunk away
+    LDA lclip
+    BEQ positioned                  ; nothing (left) to consume: start here
+    CMP rem0
+    BCC partial                     ; the clip ends inside this column
+    SBC rem0:STA lclip              ; carry set by the CMP
+.nextcol
+    INC c0
+    BNE poscol
+    UNREACHABLE
+.partial
+    EOR #&FF:SEC:ADC rem0:STA rem0  ; the pixels of it that are on screen
+    LDA #0:STA lclip
+.positioned
+    LDA acc:STA xacc0
+    LDA acc+1:STA xacc0+1
+    RTS
+.nothing
+    LDA #0:STA strips
     RTS
 }
 
 
 \ ******************************************************************
-\ *    plot_draw: plot the set-up sprite with its bottom-left pixel
-\ *    at (sprx, spry) - x in pixels, y in pairs from the bottom of
-\ *    the screen. No clipping: the sprite must fit.
+\ *    plot_draw: plot the set-up sprite with its bottom pair at spry
+\ *    (from the bottom of the screen); the horizontal window (from
+\ *    plot_setup's signed sprx) may be clipped either side. No
+\ *    vertical clipping: the sprite must fit top and bottom.
 \ *
 \ *    The sprite is drawn as vertical byte-column strips. A strip
 \ *    holds up to four source columns (at >= 1x a column covers at
@@ -320,7 +393,6 @@ ENDMACRO
 .plot_draw
 {
     \\ Inputs
-    ZPAUTO1 sprx                    ; left pixel column
     ZPAUTO1 spry                    ; bottom pair
     ZPAUTO2 pal                     ; palette: even,odd byte pairs for colours 0..7
 
@@ -331,7 +403,9 @@ ENDMACRO
     ZPAUTO1 c                       ; source column being assigned to slots
     ZPAUTO1 rem                     ; its pixels not yet assigned
     ZPAUTO2 xacc                    ; column edge accumulator (8.8)
-    ZPAUTO1 tmp                     ; colwidth scratch at fill time, skip scratch at emit time
+    ZPAUTO1 tmp                     ; findcol scratch
+    ZPAUTO1 skiptmp                 ; skiploop scratch (the allocator merges these
+                                    ; if their lives allow - never share by hand)
     ZPAUTO1 slot                    ; slot being filled, 0..3 (pixel bit = slotbits[slot])
     ZPAUTO 4, colmask
     ZPAUTO 4, idx
@@ -355,7 +429,7 @@ ENDMACRO
     AND #7:STA ystart
     TXA:LSR A:LSR A:LSR A
     CLC:ADC drawpage:STA pagestart
-    LDA sprx:AND #&FC:ASL A:STA scr ; byte column * 8
+    LDA plot_setup.sx0:AND #&FC:ASL A:STA scr   ; byte column * 8
 
     \\ horizontal stepping: column 0's width, and the first slot
 
@@ -367,16 +441,15 @@ ENDMACRO
     LDX #4
 .@
     STX hoffs
-    LDA plot_setup.ph
-    BEQ tovanished                  ; nothing survives the scale: no strips at all
-    LDA #0:STA c:STA xacc+1
-    LDA #128:STA xacc               ; the same half-step start as the tables
-    JSR findcol
-    BNE @+
-.tovanished
-    JMP vanished
-.@
-    LDA sprx:AND #3:STA slot        ; the first strip starts at the sprite's pixel offset
+
+    \\ the column walk starts from plot_setup's ready-made state:
+    \\ first visible column, its on-screen pixels, the accumulator
+
+    LDA plot_setup.c0:STA c
+    LDA plot_setup.rem0:STA rem
+    LDA plot_setup.xacc0:STA xacc
+    LDA plot_setup.xacc0+1:STA xacc+1
+    LDA plot_setup.sx0:AND #3:STA slot  ; the first strip's pixel offset
 
 .striploop
     \\ assign slots to columns; X = tracked index. Only entries 0..X
@@ -454,9 +527,9 @@ ENDMACRO
     \\ s = 2X + (7 - Y), always 0..134, the rows crossed are shr3[s]
     \\ and the new Y is the low bits of s flipped - no signed maths.
     \\ ASL guarantees the carry clear (X <= 64), so no CLC either.
-    TYA:EOR #7:STA tmp              ; 7 - Y
+    TYA:EOR #7:STA skiptmp          ; 7 - Y
     TXA:ASL A                       ; lines to step (2X, at most 128)
-    ADC tmp                         ; s
+    ADC skiptmp                     ; s
     TAX
     AND #7:EOR #7:TAY               ; the new line within its row
     LDA shr3,X                      ; rows crossed...
@@ -487,11 +560,12 @@ ENDMACRO
 
 .nextstrip
     LDA scr:ADC #7:STA scr          ; carry set by the CMP that got us here
+    DEC plot_setup.strips
+    BEQ done                        ; walked off the right edge of the screen
     LDA c:CMP plot_setup.wid
     BEQ done
     JMP striploop
 .done
-.vanished
     RTS
 
     \\ The four change handlers and their dispatch table
@@ -621,19 +695,18 @@ ENDMACRO
     AND #7:STA ystart
     TXA:LSR A:LSR A:LSR A
     CLC:ADC drawpage:STA pagestart
-    LDA plot_draw.sprx:AND #&FC:ASL A:STA scr
+    LDA plot_setup.sx0:AND #&FC:ASL A:STA scr
     LDA plot_setup.spr:CLC:ADC #3:STA sproff
     LDA plot_setup.spr+1:ADC #0:STA sproff+1
-    LDA plot_setup.ph
-    BEQ tovanished
-    LDA #0:STA c:STA xacc+1:STA aexh
-    LDA #128:STA xacc
-    JSR findcol
-    BNE @+
-.tovanished
-    JMP vanished
-.@
-    LDA plot_draw.sprx:AND #3:STA alead
+    LDA #0:STA aexh
+
+    \\ the column walk starts from plot_setup's ready-made state
+
+    LDA plot_setup.c0:STA c
+    LDA plot_setup.rem0:STA rem
+    LDA plot_setup.xacc0:STA xacc
+    LDA plot_setup.xacc0+1:STA xacc+1
+    LDA plot_setup.sx0:AND #3:STA alead
 
 .striploop
     \\ fill the four slots: lead padding and past-the-end are dummies
@@ -718,11 +791,12 @@ ENDMACRO
 
 .stripdone
     LDA scr:CLC:ADC #8:STA scr
+    DEC plot_setup.strips
+    BEQ done                        ; walked off the right edge of the screen
     LDA aexh
     BNE done
     JMP striploop
 .done
-.vanished
     RTS
 
     \\ Find column c's width from the edge accumulator, skipping the
@@ -891,13 +965,25 @@ physcols = {0, 4, 1, 2}         ; black, blue, red, green
     EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
 
 
+\ Indexed tables and (ptr),Y data pay a cycle per page crossing, so
+\ anything indexed keeps to one page: aligned only when it would
+\ straddle, so small tables still pack.
+
+MACRO fitpage size
+    IF (P% AND &FF) + size > 256
+        ALIGN &100
+    ENDIF
+ENDMACRO
+
 \ ******************************************************************
 \ *    Size normalisation: plotted width in pixels -> 8.8 scale for
 \ *    the 14-wide boulder
 \ ******************************************************************
 
+    fitpage 64
 .normlo
     EQUB ((0..63)*256 DIV 14) AND 255
+    fitpage 64
 .normhi
     EQUB ((0..63)*256 DIV 14) DIV 256
 
@@ -928,9 +1014,11 @@ MACRO palette cols
     NEXT
 ENDMACRO
 
+    fitpage 80                  ; before the label: labels bind before macros expand
 .pal_creature
     palette {black, brown, red, olive, green, blue, magenta}
 
+    fitpage 80
 .pal_boulder
     palette {black, brown, red, olive, black, black, black}
 ;    palette {black, darkblue, blue, magenta, black, black, black}
@@ -1007,6 +1095,7 @@ ENDMACRO
 \ A 12x20 creature. 0 transparent, 1 black, 2 brown, 3 red, 4 olive,
 \ 5 green, 6 blue, 7 magenta.
 
+    fitpage 128                 ; sprites stay under 128 bytes encoded
 .creature
     sprite {{0,0,0,0,1,1,1,1,0,0,0,0},
             {0,0,0,1,5,5,5,5,1,0,0,0},
@@ -1033,6 +1122,7 @@ ENDMACRO
 \ A 14x16 boulder.
 \ 0 transparent, 1 black, 2 brown, 3 red, 4 olive.
 
+    fitpage 128
 .boulder
     sprite {{0,0,0,0,3,3,3,3,4,0,0,0,0,0},
             {0,0,3,3,3,3,4,4,4,4,0,0,0,0},
@@ -1056,10 +1146,13 @@ ENDMACRO
 \ *    Plotter tables (RAM)
 \ ******************************************************************
 
+    fitpage 33
 .PY     SKIP 33                 ; source row edge -> screen pair offset
 
+    fitpage 4
 .slotbits
     EQUB &88, &44, &22, &11     ; pixel bit of slot 0..3
+    fitpage 256                 ; indexed by a whole byte: page aligned
 .shr3
     EQUB (0..255) DIV 8         ; run byte -> end row - 1
 

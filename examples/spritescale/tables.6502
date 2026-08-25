@@ -11,10 +11,10 @@
 \ *        tab_y   bottom pair (from the bottom of the screen)
 \ *        tab_sz  plotted width in pixels; 0 = no more sprites
 \ *
-\ *    far to near per camera index. There is no clipping in the
-\ *    plotters, so anything that would poke off ANY screen edge is
-\ *    simply culled here - using the same integer maths the runtime
-\ *    will use, so the fit test is exact, not a margin.
+\ *    far to near per camera index. The plotters clip left/right (x
+\ *    is a signed byte), but not top/bottom - anything poking off
+\ *    vertically is culled here, using the same integer maths the
+\ *    runtime will use, so the fit test is exact, not a margin.
 \ *
 \ **************************************************************************
 
@@ -129,7 +129,11 @@ scale8 = sizeb*256 DIV sprw
 pwx    = (sprw*scale8 + 128) DIV 256
 phpx    = (sprh*scale8 + 128) DIV 256
 
-vis = (vz > near) * (sizeb >= 1) * (xlb >= 0) * (xlb + pwx <= 128) * (syb >= 0) * (syb + phpx <= 64)
+\ Horizontal: the plotters clip left/right now, so only the FULLY
+\ off-screen are culled (x emits as a signed byte). Vertical: no
+\ clipping support yet, so the exact fit test stays.
+
+vis = (vz > near) * (sizeb >= 1) * (xlb + pwx > 0) * (xlb < 128) * (syb >= 0) * (syb + phpx <= 64)
 
 \ Depth-sort into slot tables, far to near, culled entries last
 \ (they carry size 0, the renderer's stop marker)
