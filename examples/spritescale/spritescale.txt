@@ -137,7 +137,7 @@ acc = &20 [auto]
   1196  A2 00           LDX #0
 .@
   1198  A5 21           LDA acc+1
-  119A  9D 1D 20        STA PY,X
+  119A  9D 1C 20        STA PY,X
   119D  E4 28           CPX hgt
   119F  F0 10           BEQ @+
   11A1  A5 20           LDA acc
@@ -251,12 +251,12 @@ ysave = &39 [auto]
   1229  A9 00           LDA #0
   122B  95 08           STA cp,X
   122D  A4 3A           LDY slot
-  122F  B9 3E 20        LDA slotbits,Y
+  122F  B9 3D 20        LDA slotbits,Y
   1232  95 00           STA colmask,X
   1234  D0 09           BNE advance
 .slotloop
   1236  A4 3A           LDY slot
-  1238  B9 3E 20        LDA slotbits,Y
+  1238  B9 3D 20        LDA slotbits,Y
   123B  15 00           ORA colmask,X
   123D  95 00           STA colmask,X
 .advance
@@ -337,7 +337,7 @@ ysave = &39 [auto]
   12BE  29 07           AND #7
   12C0  49 07           EOR #7
   12C2  A8              TAY
-  12C3  BD 42 20        LDA shr3,X
+  12C3  BD 41 20        LDA shr3,X
   12C6  49 FF           EOR #&FF
   12C8  38              SEC
   12C9  65 21           ADC scr+1
@@ -400,9 +400,9 @@ ysave = &39 [auto]
   1320  A9 FF           LDA #&FF
   1322  85 3E           STA plot_draw.mask
 .endrun
-  1324  BD 42 20        LDA shr3,X
+  1324  BD 41 20        LDA shr3,X
   1327  A8              TAY
-  1328  B9 1E 20        LDA PY+1,Y
+  1328  B9 1D 20        LDA PY+1,Y
   132B  85 08           STA plot_draw.cp+0
   132D  A8              TAY
   132E  38              SEC
@@ -456,9 +456,9 @@ ysave = &39 [auto]
   1380  05 00           ORA plot_draw.colmask+k
   1382  85 3E           STA plot_draw.mask
 .endrun
-  1384  BD 42 20        LDA shr3,X
+  1384  BD 41 20        LDA shr3,X
   1387  A8              TAY
-  1388  B9 1E 20        LDA PY+1,Y
+  1388  B9 1D 20        LDA PY+1,Y
   138B  85 08           STA plot_draw.cp+k
   138D  A5 3D           LDA plot_draw.cnt
 .@
@@ -503,9 +503,9 @@ ysave = &39 [auto]
   13D2  05 01           ORA plot_draw.colmask+k
   13D4  85 3E           STA plot_draw.mask
 .endrun
-  13D6  BD 42 20        LDA shr3,X
+  13D6  BD 41 20        LDA shr3,X
   13D9  A8              TAY
-  13DA  B9 1E 20        LDA PY+1,Y
+  13DA  B9 1D 20        LDA PY+1,Y
   13DD  85 09           STA plot_draw.cp+k
 .@
   13DF  A5 08           LDA plot_draw.cp+0
@@ -565,9 +565,9 @@ ysave = &39 [auto]
   143A  05 00           ORA plot_draw.colmask+k
   143C  85 3E           STA plot_draw.mask
 .endrun
-  143E  BD 42 20        LDA shr3,X
+  143E  BD 41 20        LDA shr3,X
   1441  A8              TAY
-  1442  B9 1E 20        LDA PY+1,Y
+  1442  B9 1D 20        LDA PY+1,Y
   1445  85 08           STA plot_draw.cp+k
   1447  A5 3D           LDA plot_draw.cnt
 .@
@@ -612,9 +612,9 @@ ysave = &39 [auto]
   148C  05 01           ORA plot_draw.colmask+k
   148E  85 3E           STA plot_draw.mask
 .endrun
-  1490  BD 42 20        LDA shr3,X
+  1490  BD 41 20        LDA shr3,X
   1493  A8              TAY
-  1494  B9 1E 20        LDA PY+1,Y
+  1494  B9 1D 20        LDA PY+1,Y
   1497  85 09           STA plot_draw.cp+k
   1499  A5 3D           LDA plot_draw.cnt
 .@
@@ -659,9 +659,9 @@ ysave = &39 [auto]
   14DE  05 02           ORA plot_draw.colmask+k
   14E0  85 3E           STA plot_draw.mask
 .endrun
-  14E2  BD 42 20        LDA shr3,X
+  14E2  BD 41 20        LDA shr3,X
   14E5  A8              TAY
-  14E6  B9 1E 20        LDA PY+1,Y
+  14E6  B9 1D 20        LDA PY+1,Y
   14E9  85 0A           STA plot_draw.cp+k
 .@
   14EB  A5 08           LDA plot_draw.cp+0
@@ -725,9 +725,9 @@ ysave = &39 [auto]
   154C  05 00           ORA plot_draw.colmask+k
   154E  85 3E           STA plot_draw.mask
 .endrun
-  1550  BD 42 20        LDA shr3,X
+  1550  BD 41 20        LDA shr3,X
   1553  A8              TAY
-  1554  B9 1E 20        LDA PY+1,Y
+  1554  B9 1D 20        LDA PY+1,Y
   1557  85 08           STA plot_draw.cp+k
   1559  A5 3D           LDA plot_draw.cnt
 .@
@@ -772,9 +772,9 @@ ysave = &39 [auto]
   159E  05 01           ORA plot_draw.colmask+k
   15A0  85 3E           STA plot_draw.mask
 .endrun
-  15A2  BD 42 20        LDA shr3,X
+  15A2  BD 41 20        LDA shr3,X
   15A5  A8              TAY
-  15A6  B9 1E 20        LDA PY+1,Y
+  15A6  B9 1D 20        LDA PY+1,Y
   15A9  85 09           STA plot_draw.cp+k
   15AB  A5 3D           LDA plot_draw.cnt
 .@
@@ -819,9 +819,9 @@ ysave = &39 [auto]
   15F0  05 02           ORA plot_draw.colmask+k
   15F2  85 3E           STA plot_draw.mask
 .endrun
-  15F4  BD 42 20        LDA shr3,X
+  15F4  BD 41 20        LDA shr3,X
   15F7  A8              TAY
-  15F8  B9 1E 20        LDA PY+1,Y
+  15F8  B9 1D 20        LDA PY+1,Y
   15FB  85 0A           STA plot_draw.cp+k
   15FD  A5 3D           LDA plot_draw.cnt
 .@
@@ -866,9 +866,9 @@ ysave = &39 [auto]
   1642  05 03           ORA plot_draw.colmask+k
   1644  85 3E           STA plot_draw.mask
 .endrun
-  1646  BD 42 20        LDA shr3,X
+  1646  BD 41 20        LDA shr3,X
   1649  A8              TAY
-  164A  B9 1E 20        LDA PY+1,Y
+  164A  B9 1D 20        LDA PY+1,Y
   164D  85 0B           STA plot_draw.cp+k
 .@
   164F  A5 08           LDA plot_draw.cp+0
@@ -917,9 +917,9 @@ ysave = &39 [auto]
   1692  A9 FF           LDA #&FF
   1694  85 3E           STA plot_draw.mask
 .endrun
-  1696  BD 42 20        LDA shr3,X
+  1696  BD 41 20        LDA shr3,X
   1699  A8              TAY
-  169A  B9 1E 20        LDA PY+1,Y
+  169A  B9 1D 20        LDA PY+1,Y
   169D  85 08           STA plot_draw.cp+0
   169F  C5 3D           CMP plot_draw.cnt
   16A1  F0 CE           BEQ fetch
@@ -975,9 +975,9 @@ ysave = &39 [auto]
   16F6  05 00           ORA plot_draw.colmask+k
   16F8  85 3E           STA plot_draw.mask
 .endrun
-  16FA  BD 42 20        LDA shr3,X
+  16FA  BD 41 20        LDA shr3,X
   16FD  A8              TAY
-  16FE  B9 1E 20        LDA PY+1,Y
+  16FE  B9 1D 20        LDA PY+1,Y
   1701  85 08           STA plot_draw.cp+k
   1703  C5 3D           CMP plot_draw.cnt
   1705  F0 B0           BEQ fetch
@@ -1024,9 +1024,9 @@ ysave = &39 [auto]
   174C  05 01           ORA plot_draw.colmask+k
   174E  85 3E           STA plot_draw.mask
 .endrun
-  1750  BD 42 20        LDA shr3,X
+  1750  BD 41 20        LDA shr3,X
   1753  A8              TAY
-  1754  B9 1E 20        LDA PY+1,Y
+  1754  B9 1D 20        LDA PY+1,Y
   1757  85 09           STA plot_draw.cp+k
   1759  C5 3D           CMP plot_draw.cnt
   175B  F0 B0           BEQ fetch
@@ -1088,9 +1088,9 @@ ysave = &39 [auto]
   17B8  05 00           ORA plot_draw.colmask+k
   17BA  85 3E           STA plot_draw.mask
 .endrun
-  17BC  BD 42 20        LDA shr3,X
+  17BC  BD 41 20        LDA shr3,X
   17BF  A8              TAY
-  17C0  B9 1E 20        LDA PY+1,Y
+  17C0  B9 1D 20        LDA PY+1,Y
   17C3  85 08           STA plot_draw.cp+k
   17C5  C5 3D           CMP plot_draw.cnt
   17C7  F0 B0           BEQ fetch
@@ -1137,9 +1137,9 @@ ysave = &39 [auto]
   180E  05 01           ORA plot_draw.colmask+k
   1810  85 3E           STA plot_draw.mask
 .endrun
-  1812  BD 42 20        LDA shr3,X
+  1812  BD 41 20        LDA shr3,X
   1815  A8              TAY
-  1816  B9 1E 20        LDA PY+1,Y
+  1816  B9 1D 20        LDA PY+1,Y
   1819  85 09           STA plot_draw.cp+k
   181B  C5 3D           CMP plot_draw.cnt
   181D  F0 B0           BEQ fetch
@@ -1186,9 +1186,9 @@ ysave = &39 [auto]
   1864  05 02           ORA plot_draw.colmask+k
   1866  85 3E           STA plot_draw.mask
 .endrun
-  1868  BD 42 20        LDA shr3,X
+  1868  BD 41 20        LDA shr3,X
   186B  A8              TAY
-  186C  B9 1E 20        LDA PY+1,Y
+  186C  B9 1D 20        LDA PY+1,Y
   186F  85 0A           STA plot_draw.cp+k
   1871  C5 3D           CMP plot_draw.cnt
   1873  F0 B0           BEQ fetch
@@ -1254,9 +1254,9 @@ ysave = &39 [auto]
   18D6  05 00           ORA plot_draw.colmask+k
   18D8  85 3E           STA plot_draw.mask
 .endrun
-  18DA  BD 42 20        LDA shr3,X
+  18DA  BD 41 20        LDA shr3,X
   18DD  A8              TAY
-  18DE  B9 1E 20        LDA PY+1,Y
+  18DE  B9 1D 20        LDA PY+1,Y
   18E1  85 08           STA plot_draw.cp+k
   18E3  C5 3D           CMP plot_draw.cnt
   18E5  F0 B0           BEQ fetch
@@ -1303,9 +1303,9 @@ ysave = &39 [auto]
   192C  05 01           ORA plot_draw.colmask+k
   192E  85 3E           STA plot_draw.mask
 .endrun
-  1930  BD 42 20        LDA shr3,X
+  1930  BD 41 20        LDA shr3,X
   1933  A8              TAY
-  1934  B9 1E 20        LDA PY+1,Y
+  1934  B9 1D 20        LDA PY+1,Y
   1937  85 09           STA plot_draw.cp+k
   1939  C5 3D           CMP plot_draw.cnt
   193B  F0 B0           BEQ fetch
@@ -1352,9 +1352,9 @@ ysave = &39 [auto]
   1982  05 02           ORA plot_draw.colmask+k
   1984  85 3E           STA plot_draw.mask
 .endrun
-  1986  BD 42 20        LDA shr3,X
+  1986  BD 41 20        LDA shr3,X
   1989  A8              TAY
-  198A  B9 1E 20        LDA PY+1,Y
+  198A  B9 1D 20        LDA PY+1,Y
   198D  85 0A           STA plot_draw.cp+k
   198F  C5 3D           CMP plot_draw.cnt
   1991  F0 B0           BEQ fetch
@@ -1401,9 +1401,9 @@ ysave = &39 [auto]
   19D8  05 03           ORA plot_draw.colmask+k
   19DA  85 3E           STA plot_draw.mask
 .endrun
-  19DC  BD 42 20        LDA shr3,X
+  19DC  BD 41 20        LDA shr3,X
   19DF  A8              TAY
-  19E0  B9 1E 20        LDA PY+1,Y
+  19E0  B9 1D 20        LDA PY+1,Y
   19E3  85 0B           STA plot_draw.cp+k
   19E5  C5 3D           CMP plot_draw.cnt
   19E7  F0 B0           BEQ fetch
@@ -1548,7 +1548,7 @@ cm = &1C [auto]
   1AAD  A9 00           LDA #0
   1AAF  95 14           STA ce,X
   1AB1  95 18           STA co,X
-  1AB3  BD 3E 20        LDA slotbits,X
+  1AB3  BD 3D 20        LDA slotbits,X
   1AB6  95 1C           STA cm,X
 .nextslot
   1AB8  E8              INX
@@ -1569,9 +1569,9 @@ cm = &1C [auto]
   1ACF  B1 22           LDA (plot_setup.spr),Y
   1AD1  E6 0C           INC plot_draw_a.aidx+n
   1AD3  A8              TAY
-  1AD4  B9 42 20        LDA shr3,Y
+  1AD4  B9 41 20        LDA shr3,Y
   1AD7  AA              TAX
-  1AD8  BD 1E 20        LDA PY+1,X
+  1AD8  BD 1D 20        LDA PY+1,X
   1ADB  85 10           STA plot_draw_a.aend+n
   1ADD  C5 2C           CMP plot_draw_a.acnt
   1ADF  F0 EC           BEQ fetch
@@ -1610,9 +1610,9 @@ cm = &1C [auto]
   1B14  B1 22           LDA (plot_setup.spr),Y
   1B16  E6 0D           INC plot_draw_a.aidx+n
   1B18  A8              TAY
-  1B19  B9 42 20        LDA shr3,Y
+  1B19  B9 41 20        LDA shr3,Y
   1B1C  AA              TAX
-  1B1D  BD 1E 20        LDA PY+1,X
+  1B1D  BD 1D 20        LDA PY+1,X
   1B20  85 11           STA plot_draw_a.aend+n
   1B22  C5 2C           CMP plot_draw_a.acnt
   1B24  F0 EC           BEQ fetch
@@ -1651,9 +1651,9 @@ cm = &1C [auto]
   1B59  B1 22           LDA (plot_setup.spr),Y
   1B5B  E6 0E           INC plot_draw_a.aidx+n
   1B5D  A8              TAY
-  1B5E  B9 42 20        LDA shr3,Y
+  1B5E  B9 41 20        LDA shr3,Y
   1B61  AA              TAX
-  1B62  BD 1E 20        LDA PY+1,X
+  1B62  BD 1D 20        LDA PY+1,X
   1B65  85 12           STA plot_draw_a.aend+n
   1B67  C5 2C           CMP plot_draw_a.acnt
   1B69  F0 EC           BEQ fetch
@@ -1692,9 +1692,9 @@ cm = &1C [auto]
   1B9E  B1 22           LDA (plot_setup.spr),Y
   1BA0  E6 0F           INC plot_draw_a.aidx+n
   1BA2  A8              TAY
-  1BA3  B9 42 20        LDA shr3,Y
+  1BA3  B9 41 20        LDA shr3,Y
   1BA6  AA              TAX
-  1BA7  BD 1E 20        LDA PY+1,X
+  1BA7  BD 1D 20        LDA PY+1,X
   1BAA  85 13           STA plot_draw_a.aend+n
   1BAC  C5 2C           CMP plot_draw_a.acnt
   1BAE  F0 EC           BEQ fetch
@@ -2302,7 +2302,7 @@ col = REVERSE(pic[.., c])
   1FB1  51              EQUB col[i] + i*8
   1FB2  98              EQUB col[i] + i*8
 .boulder
-  1FB3                  sprite {{0,0,0,0,3,3,3,3,4,0,0,0,0,0}, \...
+  1FB3                  sprite {{0,0,0,0,3,3,3,3,4,0,0,0,0,0},...
 n = LEN(pic[0])
 h = LEN(pic)
   1FB3  0E 10 FA        EQUB n, h, threshold(pic)
@@ -2317,9 +2317,9 @@ h = LEN(pic)
   1FBE  43              EQUB 3 + n + coloff(pic, c)
   1FBF  4A              EQUB 3 + n + coloff(pic, c)
   1FC0  52              EQUB 3 + n + coloff(pic, c)
-  1FC1  57              EQUB 3 + n + coloff(pic, c)
-  1FC2  62              EQUB 3 + n + coloff(pic, c)
-  1FC3  67              EQUB 3 + n + coloff(pic, c)
+  1FC1  56              EQUB 3 + n + coloff(pic, c)
+  1FC2  61              EQUB 3 + n + coloff(pic, c)
+  1FC3  66              EQUB 3 + n + coloff(pic, c)
 col = REVERSE(pic[.., c])
   1FC4  20              EQUB col[i] + i*8
   1FC5  42              EQUB col[i] + i*8
@@ -2396,40 +2396,39 @@ col = REVERSE(pic[.., c])
   2003  74              EQUB col[i] + i*8
   2004  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2005  09              EQUB col[i] + i*8
-  2006  10              EQUB col[i] + i*8
-  2007  43              EQUB col[i] + i*8
-  2008  6C              EQUB col[i] + i*8
-  2009  78              EQUB col[i] + i*8
+  2005  11              EQUB col[i] + i*8
+  2006  43              EQUB col[i] + i*8
+  2007  6C              EQUB col[i] + i*8
+  2008  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  200A  00              EQUB col[i] + i*8
-  200B  09              EQUB col[i] + i*8
-  200C  18              EQUB col[i] + i*8
-  200D  33              EQUB col[i] + i*8
-  200E  3C              EQUB col[i] + i*8
-  200F  43              EQUB col[i] + i*8
-  2010  4C              EQUB col[i] + i*8
-  2011  53              EQUB col[i] + i*8
-  2012  5C              EQUB col[i] + i*8
-  2013  6B              EQUB col[i] + i*8
-  2014  78              EQUB col[i] + i*8
+  2009  00              EQUB col[i] + i*8
+  200A  11              EQUB col[i] + i*8
+  200B  18              EQUB col[i] + i*8
+  200C  33              EQUB col[i] + i*8
+  200D  3C              EQUB col[i] + i*8
+  200E  43              EQUB col[i] + i*8
+  200F  4C              EQUB col[i] + i*8
+  2010  53              EQUB col[i] + i*8
+  2011  5C              EQUB col[i] + i*8
+  2012  6B              EQUB col[i] + i*8
+  2013  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2015  00              EQUB col[i] + i*8
-  2016  09              EQUB col[i] + i*8
-  2017  20              EQUB col[i] + i*8
-  2018  5B              EQUB col[i] + i*8
-  2019  78              EQUB col[i] + i*8
+  2014  00              EQUB col[i] + i*8
+  2015  09              EQUB col[i] + i*8
+  2016  20              EQUB col[i] + i*8
+  2017  5B              EQUB col[i] + i*8
+  2018  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  201A  30              EQUB col[i] + i*8
-  201B  4B              EQUB col[i] + i*8
-  201C  78              EQUB col[i] + i*8
+  2019  30              EQUB col[i] + i*8
+  201A  4B              EQUB col[i] + i*8
+  201B  78              EQUB col[i] + i*8
 .PY
-  201D  00 00 00 00...  SKIP 33
+  201C  00 00 00 00...  SKIP 33
 .slotbits
-  203E  88 44 22 11     EQUB &88, &44, &22, &11
+  203D  88 44 22 11     EQUB &88, &44, &22, &11
 .shr3
-  2042  00 00 00 00...  EQUB (0..255) DIV 8
-  2142  00 00 00 00...  ALIGN &100
+  2041  00 00 00 00...  EQUB (0..255) DIV 8
+  2141  00 00 00 00...  ALIGN &100
   2200                  include "tables.6502"
 ncam    = 256
 radius  = 375
