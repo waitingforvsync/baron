@@ -36,2390 +36,2456 @@ SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = 
 framectr = &FD
 irqchange = &FE
 drawpage = &2E [auto]
+camidx = &2F [auto]
 .mainloop
 {
-  1100  20 79 1C        JSR clearscreen
-  1103  A9 00           LDA #0
-  1105  85 22           STA plot_setup.scale
-  1107  A9 01           LDA #1
-  1109  85 23           STA plot_setup.scale+1
-  110B  A9 CB           LDA #LO(creature)
-  110D  85 20           STA plot_setup.spr
-  110F  A9 20           LDA #HI(creature)
-  1111  85 21           STA plot_setup.spr+1
-  1113  20 88 11        JSR plot_setup
-  1116  A9 2B           LDA #LO(pal_creature)
-  1118  85 24           STA plot_draw.pal
-  111A  A9 20           LDA #HI(pal_creature)
-  111C  85 25           STA plot_draw.pal+1
-  111E  A9 06           LDA #6
-  1120  85 31           STA plot_draw.sprx
-  1122  A9 08           LDA #8
-  1124  85 26           STA plot_draw.spry
-  1126  20 D5 11        JSR plot_draw
-  1129  A6 FD           LDX framectr
-  112B  BD 2B 1E        LDA scalelo,X
-  112E  85 22           STA plot_setup.scale
-  1130  BD 2B 1F        LDA scalehi,X
-  1133  85 23           STA plot_setup.scale+1
-  1135  A9 38           LDA #LO(boulder)
-  1137  85 20           STA plot_setup.spr
-  1139  A9 21           LDA #HI(boulder)
-  113B  85 21           STA plot_setup.spr+1
-  113D  20 88 11        JSR plot_setup
-  1140  A9 7B           LDA #LO(pal_boulder)
-  1142  85 24           STA plot_draw.pal
-  1144  A9 20           LDA #HI(pal_boulder)
-  1146  85 25           STA plot_draw.pal+1
-  1148  A5 26           LDA plot_setup.pw
-  114A  4A              LSR A
-  114B  85 31           STA plot_draw.sprx
-  114D  A9 40           LDA #64
-  114F  38              SEC
-  1150  E5 31           SBC plot_draw.sprx
-  1152  85 31           STA plot_draw.sprx
-  1154  A5 30           LDA plot_setup.ph
-  1156  4A              LSR A
-  1157  85 26           STA plot_draw.spry
-  1159  A9 20           LDA #32
-  115B  38              SEC
-  115C  E5 26           SBC plot_draw.spry
-  115E  85 26           STA plot_draw.spry
-  1160  A5 23           LDA plot_setup.scale+1
-  1162  D0 08           BNE useengine
-  1164  A0 02           LDY #2
-  1166  A5 22           LDA plot_setup.scale
-  1168  D1 20           CMP (plot_setup.spr),Y
-  116A  90 06           BCC userebuild
-.useengine
-  116C  20 D5 11        JSR plot_draw
-  116F  4C 75 11        JMP plotted
-.userebuild
-  1172  20 42 1A        JSR plot_draw_a
-.plotted
-  1175  20 85 1D        JSR swapbuffers
-  1178  A9 70           LDA #112
-  117A  8D 4F FE        STA &FE4F
-  117D  AD 4F FE        LDA &FE4F
-  1180  30 03           BMI @+
-  1182  4C 00 11        JMP mainloop
+  1100  20 74 1C        JSR clearscreen
+  1103  A5 FD           LDA framectr
+  1105  85 2F           STA camidx
+  1107  20 1D 11        JSR drawsprites
+  110A  20 80 1D        JSR swapbuffers
+  110D  A9 70           LDA #112
+  110F  8D 4F FE        STA &FE4F
+  1112  AD 4F FE        LDA &FE4F
+  1115  30 03           BMI @+
+  1117  4C 00 11        JMP mainloop
 .@
-  1185  6C FC FF        JMP (&FFFC)
+  111A  6C FC FF        JMP (&FFFC)
+}
+.drawsprites
+{
+slots = &30 [auto]
+tabhi = &31 [auto]
+tptr = &20 [auto]
+  111D  A9 B3           LDA #LO(boulder)
+  111F  85 22           STA plot_setup.spr
+  1121  A9 1F           LDA #HI(boulder)
+  1123  85 23           STA plot_setup.spr+1
+  1125  A9 F6           LDA #LO(pal_boulder)
+  1127  85 26           STA plot_draw.pal
+  1129  A9 1E           LDA #HI(pal_boulder)
+  112B  85 27           STA plot_draw.pal+1
+  112D  A9 22           LDA #HI(tab_x)
+  112F  85 31           STA tabhi
+  1131  A9 0D           LDA #nslots
+  1133  85 30           STA slots
+.slotloop
+  1135  A4 2F           LDY camidx
+  1137  A9 00           LDA #0
+  1139  85 20           STA tptr
+  113B  A5 31           LDA tabhi
+  113D  18              CLC
+  113E  69 1A           ADC #2*tabstride
+  1140  85 21           STA tptr+1
+  1142  B1 20           LDA (tptr),Y
+  1144  F0 27           BEQ done
+  1146  AA              TAX
+  1147  BD 26 1E        LDA normlo,X
+  114A  85 24           STA plot_setup.scale
+  114C  BD 66 1E        LDA normhi,X
+  114F  85 25           STA plot_setup.scale+1
+  1151  A5 31           LDA tabhi
+  1153  85 21           STA tptr+1
+  1155  B1 20           LDA (tptr),Y
+  1157  85 34           STA plot_draw.sprx
+  1159  A5 31           LDA tabhi
+  115B  18              CLC
+  115C  69 0D           ADC #tabstride
+  115E  85 21           STA tptr+1
+  1160  B1 20           LDA (tptr),Y
+  1162  85 29           STA plot_draw.spry
+  1164  20 6E 11        JSR plot_sprite
+  1167  E6 31           INC tabhi
+  1169  C6 30           DEC slots
+  116B  D0 C8           BNE slotloop
+.done
+  116D  60              RTS
+}
+.plot_sprite
+{
+  116E  20 83 11        JSR plot_setup
+  1171  A5 25           LDA plot_setup.scale+1
+  1173  D0 08           BNE useengine
+  1175  A0 02           LDY #2
+  1177  A5 24           LDA plot_setup.scale
+  1179  D1 22           CMP (plot_setup.spr),Y
+  117B  90 03           BCC userebuild
+.useengine
+  117D  4C D0 11        JMP plot_draw
+.userebuild
+  1180  4C 3D 1A        JMP plot_draw_a
 }
 .plot_setup
 {
-spr = &20 [auto]
-scale = &22 [auto]
-wid = &2F [auto]
-hgt = &26 [auto]
-pw = &26 [auto]
-ph = &30 [auto]
-acc = &24 [auto]
-  1188  A0 00           LDY #0
-  118A  B1 20           LDA (spr),Y
-  118C  85 2F           STA wid
-  118E  C8              INY
-  118F  B1 20           LDA (spr),Y
-  1191  85 26           STA hgt
-  1193  A9 80           LDA #128
-  1195  85 24           STA acc
-  1197  A9 00           LDA #0
-  1199  85 25           STA acc+1
-  119B  A2 00           LDX #0
+spr = &22 [auto]
+scale = &24 [auto]
+wid = &32 [auto]
+hgt = &28 [auto]
+pw = &20 [auto]
+ph = &33 [auto]
+acc = &20 [auto]
+  1183  A0 00           LDY #0
+  1185  B1 22           LDA (spr),Y
+  1187  85 32           STA wid
+  1189  C8              INY
+  118A  B1 22           LDA (spr),Y
+  118C  85 28           STA hgt
+  118E  A9 80           LDA #128
+  1190  85 20           STA acc
+  1192  A9 00           LDA #0
+  1194  85 21           STA acc+1
+  1196  A2 00           LDX #0
 .@
-  119D  A5 25           LDA acc+1
-  119F  9D A2 21        STA PY,X
-  11A2  E4 26           CPX hgt
-  11A4  F0 10           BEQ @+
-  11A6  A5 24           LDA acc
-  11A8  18              CLC
-  11A9  65 22           ADC scale
-  11AB  85 24           STA acc
-  11AD  A5 25           LDA acc+1
-  11AF  65 23           ADC scale+1
-  11B1  85 25           STA acc+1
-  11B3  E8              INX
-  11B4  D0 E7           BNE @-
+  1198  A5 21           LDA acc+1
+  119A  9D 1D 20        STA PY,X
+  119D  E4 28           CPX hgt
+  119F  F0 10           BEQ @+
+  11A1  A5 20           LDA acc
+  11A3  18              CLC
+  11A4  65 24           ADC scale
+  11A6  85 20           STA acc
+  11A8  A5 21           LDA acc+1
+  11AA  65 25           ADC scale+1
+  11AC  85 21           STA acc+1
+  11AE  E8              INX
+  11AF  D0 E7           BNE @-
 .@
-  11B6  85 30           STA ph
-  11B8  A9 80           LDA #128
-  11BA  85 24           STA acc
-  11BC  A9 00           LDA #0
-  11BE  85 25           STA acc+1
-  11C0  A6 2F           LDX wid
+  11B1  85 33           STA ph
+  11B3  A9 80           LDA #128
+  11B5  85 20           STA acc
+  11B7  A9 00           LDA #0
+  11B9  85 21           STA acc+1
+  11BB  A6 32           LDX wid
 .@
-  11C2  A5 24           LDA acc
-  11C4  18              CLC
-  11C5  65 22           ADC scale
-  11C7  85 24           STA acc
-  11C9  A5 25           LDA acc+1
-  11CB  65 23           ADC scale+1
-  11CD  85 25           STA acc+1
-  11CF  CA              DEX
-  11D0  D0 F0           BNE @-
-  11D2  85 26           STA pw
-  11D4  60              RTS
+  11BD  A5 20           LDA acc
+  11BF  18              CLC
+  11C0  65 24           ADC scale
+  11C2  85 20           STA acc
+  11C4  A5 21           LDA acc+1
+  11C6  65 25           ADC scale+1
+  11C8  85 21           STA acc+1
+  11CA  CA              DEX
+  11CB  D0 F0           BNE @-
+  11CD  85 20           STA pw
+  11CF  60              RTS
 }
 .plot_draw
 {
-sprx = &31 [auto]
-spry = &26 [auto]
-pal = &24 [auto]
-ystart = &32 [auto]
-pagestart = &33 [auto]
-scr = &26 [auto]
+sprx = &34 [auto]
+spry = &29 [auto]
+pal = &26 [auto]
+ystart = &35 [auto]
+pagestart = &36 [auto]
+scr = &20 [auto]
 sproff = &28 [auto]
-c = &34 [auto]
-rem = &35 [auto]
+c = &37 [auto]
+rem = &38 [auto]
 xacc = &2A [auto]
-tmp = &36 [auto]
-slot = &37 [auto]
+tmp = &39 [auto]
+slot = &3A [auto]
 colmask = &00 [auto]
 idx = &04 [auto]
 cp = &08 [auto]
 chvec = &2C [auto]
-hoffs = &38 [auto]
-ucm = &39 [auto]
-cnt = &3A [auto]
-mask = &3B [auto]
-data_even = &3C [auto]
-data_odd = &3D [auto]
-ysave = &36 [auto]
-  11D5  A5 26           LDA spry
-  11D7  0A              ASL A
-  11D8  49 FF           EOR #&FF
-  11DA  18              CLC
-  11DB  69 80           ADC #128
-  11DD  AA              TAX
-  11DE  29 07           AND #7
-  11E0  85 32           STA ystart
-  11E2  8A              TXA
-  11E3  4A              LSR A
-  11E4  4A              LSR A
-  11E5  4A              LSR A
-  11E6  18              CLC
-  11E7  65 2E           ADC drawpage
-  11E9  85 33           STA pagestart
-  11EB  A5 31           LDA sprx
-  11ED  29 FC           AND #&FC
-  11EF  0A              ASL A
-  11F0  85 26           STA scr
-  11F2  A5 20           LDA plot_setup.spr
-  11F4  18              CLC
-  11F5  69 03           ADC #3
-  11F7  85 28           STA sproff
-  11F9  A5 21           LDA plot_setup.spr+1
-  11FB  69 00           ADC #0
-  11FD  85 29           STA sproff+1
-  11FF  A2 00           LDX #0
-  1201  A5 23           LDA plot_setup.scale+1
-  1203  D0 02           BNE @+
-  1205  A2 04           LDX #4
+hoffs = &3B [auto]
+ucm = &3C [auto]
+cnt = &3D [auto]
+mask = &3E [auto]
+data_even = &3F [auto]
+data_odd = &40 [auto]
+ysave = &39 [auto]
+  11D0  A5 29           LDA spry
+  11D2  0A              ASL A
+  11D3  49 FF           EOR #&FF
+  11D5  18              CLC
+  11D6  69 80           ADC #128
+  11D8  AA              TAX
+  11D9  29 07           AND #7
+  11DB  85 35           STA ystart
+  11DD  8A              TXA
+  11DE  4A              LSR A
+  11DF  4A              LSR A
+  11E0  4A              LSR A
+  11E1  18              CLC
+  11E2  65 2E           ADC drawpage
+  11E4  85 36           STA pagestart
+  11E6  A5 34           LDA sprx
+  11E8  29 FC           AND #&FC
+  11EA  0A              ASL A
+  11EB  85 20           STA scr
+  11ED  A5 22           LDA plot_setup.spr
+  11EF  18              CLC
+  11F0  69 03           ADC #3
+  11F2  85 28           STA sproff
+  11F4  A5 23           LDA plot_setup.spr+1
+  11F6  69 00           ADC #0
+  11F8  85 29           STA sproff+1
+  11FA  A2 00           LDX #0
+  11FC  A5 25           LDA plot_setup.scale+1
+  11FE  D0 02           BNE @+
+  1200  A2 04           LDX #4
 .@
-  1207  86 38           STX hoffs
-  1209  A5 30           LDA plot_setup.ph
-  120B  F0 0F           BEQ tovanished
-  120D  A9 00           LDA #0
-  120F  85 34           STA c
-  1211  85 2B           STA xacc+1
-  1213  A9 80           LDA #128
-  1215  85 2A           STA xacc
-  1217  20 1E 1A        JSR findcol
-  121A  D0 03           BNE @+
+  1202  86 3B           STX hoffs
+  1204  A5 33           LDA plot_setup.ph
+  1206  F0 0F           BEQ tovanished
+  1208  A9 00           LDA #0
+  120A  85 37           STA c
+  120C  85 2B           STA xacc+1
+  120E  A9 80           LDA #128
+  1210  85 2A           STA xacc
+  1212  20 19 1A        JSR findcol
+  1215  D0 03           BNE @+
 .tovanished
-  121C  4C 01 13        JMP vanished
+  1217  4C FC 12        JMP vanished
 .@
-  121F  A5 31           LDA sprx
-  1221  29 03           AND #3
-  1223  85 37           STA slot
+  121A  A5 34           LDA sprx
+  121C  29 03           AND #3
+  121E  85 3A           STA slot
 .striploop
-  1225  A2 FF           LDX #&FF
+  1220  A2 FF           LDX #&FF
 .newcol
-  1227  E8              INX
-  1228  A4 34           LDY c
-  122A  B1 28           LDA (sproff),Y
-  122C  95 04           STA idx,X
-  122E  A9 00           LDA #0
-  1230  95 08           STA cp,X
-  1232  A4 37           LDY slot
-  1234  B9 C3 21        LDA slotbits,Y
-  1237  95 00           STA colmask,X
-  1239  D0 09           BNE advance
+  1222  E8              INX
+  1223  A4 37           LDY c
+  1225  B1 28           LDA (sproff),Y
+  1227  95 04           STA idx,X
+  1229  A9 00           LDA #0
+  122B  95 08           STA cp,X
+  122D  A4 3A           LDY slot
+  122F  B9 3E 20        LDA slotbits,Y
+  1232  95 00           STA colmask,X
+  1234  D0 09           BNE advance
 .slotloop
-  123B  A4 37           LDY slot
-  123D  B9 C3 21        LDA slotbits,Y
-  1240  15 00           ORA colmask,X
-  1242  95 00           STA colmask,X
+  1236  A4 3A           LDY slot
+  1238  B9 3E 20        LDA slotbits,Y
+  123B  15 00           ORA colmask,X
+  123D  95 00           STA colmask,X
 .advance
-  1244  C6 35           DEC rem
-  1246  D0 11           BNE samecol
-  1248  E6 34           INC c
-  124A  20 1E 1A        JSR findcol
-  124D  F0 12           BEQ filled
-  124F  E6 37           INC slot
-  1251  A5 37           LDA slot
-  1253  C9 04           CMP #4
-  1255  D0 D0           BNE newcol
-  1257  F0 08           BEQ filled
+  123F  C6 38           DEC rem
+  1241  D0 11           BNE samecol
+  1243  E6 37           INC c
+  1245  20 19 1A        JSR findcol
+  1248  F0 12           BEQ filled
+  124A  E6 3A           INC slot
+  124C  A5 3A           LDA slot
+  124E  C9 04           CMP #4
+  1250  D0 D0           BNE newcol
+  1252  F0 08           BEQ filled
 .samecol
-  1259  E6 37           INC slot
-  125B  A5 37           LDA slot
-  125D  C9 04           CMP #4
-  125F  D0 DA           BNE slotloop
+  1254  E6 3A           INC slot
+  1256  A5 3A           LDA slot
+  1258  C9 04           CMP #4
+  125A  D0 DA           BNE slotloop
 .filled
-  1261  A9 00           LDA #0
-  1263  85 37           STA slot
-  1265  E0 00           CPX #0
-  1267  D0 06           BNE @+
-  1269  A5 00           LDA colmask+0
-  126B  49 FF           EOR #&FF
-  126D  85 39           STA ucm
+  125C  A9 00           LDA #0
+  125E  85 3A           STA slot
+  1260  E0 00           CPX #0
+  1262  D0 06           BNE @+
+  1264  A5 00           LDA colmask+0
+  1266  49 FF           EOR #&FF
+  1268  85 3C           STA ucm
 .@
-  126F  8A              TXA
-  1270  05 38           ORA hoffs
-  1272  AA              TAX
-  1273  BD 0E 1A        LDA changes_lo,X
-  1276  85 2C           STA chvec
-  1278  BD 16 1A        LDA changes_hi,X
-  127B  85 2D           STA chvec+1
-  127D  A9 00           LDA #0
-  127F  85 3A           STA cnt
-  1281  85 3C           STA data_even
-  1283  85 3D           STA data_odd
-  1285  A9 FF           LDA #&FF
-  1287  85 3B           STA mask
-  1289  A4 32           LDY ystart
-  128B  A5 33           LDA pagestart
-  128D  85 27           STA scr+1
-  128F  6C 2C 00        JMP (chvec)
+  126A  8A              TXA
+  126B  05 3B           ORA hoffs
+  126D  AA              TAX
+  126E  BD 09 1A        LDA changes_lo,X
+  1271  85 2C           STA chvec
+  1273  BD 11 1A        LDA changes_hi,X
+  1276  85 2D           STA chvec+1
+  1278  A9 00           LDA #0
+  127A  85 3D           STA cnt
+  127C  85 3F           STA data_even
+  127E  85 40           STA data_odd
+  1280  A9 FF           LDA #&FF
+  1282  85 3E           STA mask
+  1284  A4 35           LDY ystart
+  1286  A5 36           LDA pagestart
+  1288  85 21           STA scr+1
+  128A  6C 2C 00        JMP (chvec)
 .stretch
-  1292  A5 3B           LDA mask
-  1294  F0 3E           BEQ solidloop
-  1296  C9 FF           CMP #&FF
-  1298  F0 1F           BEQ skiploop
+  128D  A5 3E           LDA mask
+  128F  F0 3E           BEQ solidloop
+  1291  C9 FF           CMP #&FF
+  1293  F0 1F           BEQ skiploop
 .pairloop
-  129A  B1 26           LDA (scr),Y
-  129C  25 3B           AND mask
-  129E  05 3D           ORA data_odd
-  12A0  91 26           STA (scr),Y
-  12A2  88              DEY
-  12A3  B1 26           LDA (scr),Y
-  12A5  25 3B           AND mask
-  12A7  05 3C           ORA data_even
-  12A9  91 26           STA (scr),Y
-  12AB  88              DEY
-  12AC  30 05           BMI adjustrow
+  1295  B1 20           LDA (scr),Y
+  1297  25 3E           AND mask
+  1299  05 40           ORA data_odd
+  129B  91 20           STA (scr),Y
+  129D  88              DEY
+  129E  B1 20           LDA (scr),Y
+  12A0  25 3E           AND mask
+  12A2  05 3F           ORA data_even
+  12A4  91 20           STA (scr),Y
+  12A6  88              DEY
+  12A7  30 05           BMI adjustrow
 .back
-  12AE  CA              DEX
-  12AF  D0 E9           BNE pairloop
-  12B1  F0 30           BEQ stretchdone
+  12A9  CA              DEX
+  12AA  D0 E9           BNE pairloop
+  12AC  F0 30           BEQ stretchdone
 .adjustrow
-  12B3  C6 27           DEC scr+1
-  12B5  A0 07           LDY #7
-  12B7  D0 F5           BNE back
+  12AE  C6 21           DEC scr+1
+  12B0  A0 07           LDY #7
+  12B2  D0 F5           BNE back
 .skiploop
-  12B9  98              TYA
-  12BA  49 07           EOR #7
-  12BC  85 36           STA tmp
-  12BE  8A              TXA
-  12BF  0A              ASL A
-  12C0  65 36           ADC tmp
-  12C2  AA              TAX
-  12C3  29 07           AND #7
-  12C5  49 07           EOR #7
-  12C7  A8              TAY
-  12C8  BD C7 21        LDA shr3,X
-  12CB  49 FF           EOR #&FF
-  12CD  38              SEC
-  12CE  65 27           ADC scr+1
-  12D0  85 27           STA scr+1
-  12D2  D0 0F           BNE stretchdone
+  12B4  98              TYA
+  12B5  49 07           EOR #7
+  12B7  85 39           STA tmp
+  12B9  8A              TXA
+  12BA  0A              ASL A
+  12BB  65 39           ADC tmp
+  12BD  AA              TAX
+  12BE  29 07           AND #7
+  12C0  49 07           EOR #7
+  12C2  A8              TAY
+  12C3  BD 42 20        LDA shr3,X
+  12C6  49 FF           EOR #&FF
+  12C8  38              SEC
+  12C9  65 21           ADC scr+1
+  12CB  85 21           STA scr+1
+  12CD  D0 0F           BNE stretchdone
 .solidloop
-  12D4  A5 3D           LDA data_odd
-  12D6  91 26           STA (scr),Y
+  12CF  A5 40           LDA data_odd
+  12D1  91 20           STA (scr),Y
+  12D3  88              DEY
+  12D4  A5 3F           LDA data_even
+  12D6  91 20           STA (scr),Y
   12D8  88              DEY
-  12D9  A5 3C           LDA data_even
-  12DB  91 26           STA (scr),Y
-  12DD  88              DEY
-  12DE  30 0C           BMI solidadjust
+  12D9  30 0C           BMI solidadjust
 .solidback
-  12E0  CA              DEX
-  12E1  D0 F1           BNE solidloop
+  12DB  CA              DEX
+  12DC  D0 F1           BNE solidloop
 .stretchdone
-  12E3  A5 3A           LDA cnt
-  12E5  C5 30           CMP plot_setup.ph
-  12E7  F0 09           BEQ nextstrip
-  12E9  6C 2C 00        JMP (chvec)
+  12DE  A5 3D           LDA cnt
+  12E0  C5 33           CMP plot_setup.ph
+  12E2  F0 09           BEQ nextstrip
+  12E4  6C 2C 00        JMP (chvec)
 .solidadjust
-  12EC  C6 27           DEC scr+1
-  12EE  A0 07           LDY #7
-  12F0  D0 EE           BNE solidback
+  12E7  C6 21           DEC scr+1
+  12E9  A0 07           LDY #7
+  12EB  D0 EE           BNE solidback
 .nextstrip
-  12F2  A5 26           LDA scr
-  12F4  69 07           ADC #7
-  12F6  85 26           STA scr
-  12F8  A5 34           LDA c
-  12FA  C5 2F           CMP plot_setup.wid
-  12FC  F0 03           BEQ done
-  12FE  4C 25 12        JMP striploop
+  12ED  A5 20           LDA scr
+  12EF  69 07           ADC #7
+  12F1  85 20           STA scr
+  12F3  A5 37           LDA c
+  12F5  C5 32           CMP plot_setup.wid
+  12F7  F0 03           BEQ done
+  12F9  4C 20 12        JMP striploop
 .done
 .vanished
-  1301  60              RTS
+  12FC  60              RTS
 .changes1
-  1302                  changesbody 1, FALSE
-  1302  84 36           STY plot_draw.ysave
+  12FD                  changesbody 1, FALSE
+  12FD  84 39           STY plot_draw.ysave
 .fetch
-  1304  A4 04           LDY plot_draw.idx+0
-  1306  B1 20           LDA (plot_setup.spr),Y
-  1308  E6 04           INC plot_draw.idx+0
-  130A  AA              TAX
-  130B  29 07           AND #7
-  130D  F0 16           BEQ transparent
-  130F  0A              ASL A
-  1310  A8              TAY
-  1311  B1 24           LDA (plot_draw.pal),Y
-  1313  25 00           AND plot_draw.colmask+0
-  1315  85 3C           STA plot_draw.data_even
-  1317  C8              INY
-  1318  B1 24           LDA (plot_draw.pal),Y
-  131A  25 00           AND plot_draw.colmask+0
-  131C  85 3D           STA plot_draw.data_odd
-  131E  A5 39           LDA plot_draw.ucm
-  1320  85 3B           STA plot_draw.mask
-  1322  4C 29 13        JMP endrun
+  12FF  A4 04           LDY plot_draw.idx+0
+  1301  B1 22           LDA (plot_setup.spr),Y
+  1303  E6 04           INC plot_draw.idx+0
+  1305  AA              TAX
+  1306  29 07           AND #7
+  1308  F0 16           BEQ transparent
+  130A  0A              ASL A
+  130B  A8              TAY
+  130C  B1 26           LDA (plot_draw.pal),Y
+  130E  25 00           AND plot_draw.colmask+0
+  1310  85 3F           STA plot_draw.data_even
+  1312  C8              INY
+  1313  B1 26           LDA (plot_draw.pal),Y
+  1315  25 00           AND plot_draw.colmask+0
+  1317  85 40           STA plot_draw.data_odd
+  1319  A5 3C           LDA plot_draw.ucm
+  131B  85 3E           STA plot_draw.mask
+  131D  4C 24 13        JMP endrun
 .transparent
-  1325  A9 FF           LDA #&FF
-  1327  85 3B           STA plot_draw.mask
+  1320  A9 FF           LDA #&FF
+  1322  85 3E           STA plot_draw.mask
 .endrun
-  1329  BD C7 21        LDA shr3,X
-  132C  A8              TAY
-  132D  B9 A3 21        LDA PY+1,Y
-  1330  85 08           STA plot_draw.cp+0
-  1332  A8              TAY
-  1333  38              SEC
-  1334  E5 3A           SBC plot_draw.cnt
-  1336  AA              TAX
-  1337  84 3A           STY plot_draw.cnt
-  1339  A4 36           LDY plot_draw.ysave
-  133B  4C 92 12        JMP plot_draw.stretch
+  1324  BD 42 20        LDA shr3,X
+  1327  A8              TAY
+  1328  B9 1E 20        LDA PY+1,Y
+  132B  85 08           STA plot_draw.cp+0
+  132D  A8              TAY
+  132E  38              SEC
+  132F  E5 3D           SBC plot_draw.cnt
+  1331  AA              TAX
+  1332  84 3D           STY plot_draw.cnt
+  1334  A4 39           LDY plot_draw.ysave
+  1336  4C 8D 12        JMP plot_draw.stretch
 .changes2
-  133E                  changesbody 2, FALSE
-  133E  84 36           STY plot_draw.ysave
-  1340  A5 3A           LDA plot_draw.cnt
-  1342  C5 08           CMP plot_draw.cp+k
-  1344  D0 4E           BNE @+
-  1346                  changecol k, swallow
+  1339                  changesbody 2, FALSE
+  1339  84 39           STY plot_draw.ysave
+  133B  A5 3D           LDA plot_draw.cnt
+  133D  C5 08           CMP plot_draw.cp+k
+  133F  D0 4E           BNE @+
+  1341                  changecol k, swallow
 .fetch
-  1346  A4 04           LDY plot_draw.idx+k
-  1348  B1 20           LDA (plot_setup.spr),Y
-  134A  E6 04           INC plot_draw.idx+k
-  134C  AA              TAX
-  134D  29 07           AND #7
-  134F  F0 22           BEQ transparent
-  1351  0A              ASL A
-  1352  A8              TAY
-  1353  B1 24           LDA (plot_draw.pal),Y
-  1355  45 3C           EOR plot_draw.data_even
-  1357  25 00           AND plot_draw.colmask+k
-  1359  45 3C           EOR plot_draw.data_even
-  135B  85 3C           STA plot_draw.data_even
-  135D  C8              INY
-  135E  B1 24           LDA (plot_draw.pal),Y
-  1360  45 3D           EOR plot_draw.data_odd
-  1362  25 00           AND plot_draw.colmask+k
-  1364  45 3D           EOR plot_draw.data_odd
-  1366  85 3D           STA plot_draw.data_odd
-  1368  A5 3B           LDA plot_draw.mask
-  136A  05 00           ORA plot_draw.colmask+k
-  136C  45 00           EOR plot_draw.colmask+k
-  136E  85 3B           STA plot_draw.mask
-  1370  4C 89 13        JMP endrun
+  1341  A4 04           LDY plot_draw.idx+k
+  1343  B1 22           LDA (plot_setup.spr),Y
+  1345  E6 04           INC plot_draw.idx+k
+  1347  AA              TAX
+  1348  29 07           AND #7
+  134A  F0 22           BEQ transparent
+  134C  0A              ASL A
+  134D  A8              TAY
+  134E  B1 26           LDA (plot_draw.pal),Y
+  1350  45 3F           EOR plot_draw.data_even
+  1352  25 00           AND plot_draw.colmask+k
+  1354  45 3F           EOR plot_draw.data_even
+  1356  85 3F           STA plot_draw.data_even
+  1358  C8              INY
+  1359  B1 26           LDA (plot_draw.pal),Y
+  135B  45 40           EOR plot_draw.data_odd
+  135D  25 00           AND plot_draw.colmask+k
+  135F  45 40           EOR plot_draw.data_odd
+  1361  85 40           STA plot_draw.data_odd
+  1363  A5 3E           LDA plot_draw.mask
+  1365  05 00           ORA plot_draw.colmask+k
+  1367  45 00           EOR plot_draw.colmask+k
+  1369  85 3E           STA plot_draw.mask
+  136B  4C 84 13        JMP endrun
 .transparent
-  1373  A5 3C           LDA plot_draw.data_even
-  1375  05 00           ORA plot_draw.colmask+k
-  1377  45 00           EOR plot_draw.colmask+k
-  1379  85 3C           STA plot_draw.data_even
-  137B  A5 3D           LDA plot_draw.data_odd
-  137D  05 00           ORA plot_draw.colmask+k
-  137F  45 00           EOR plot_draw.colmask+k
-  1381  85 3D           STA plot_draw.data_odd
-  1383  A5 3B           LDA plot_draw.mask
-  1385  05 00           ORA plot_draw.colmask+k
-  1387  85 3B           STA plot_draw.mask
+  136E  A5 3F           LDA plot_draw.data_even
+  1370  05 00           ORA plot_draw.colmask+k
+  1372  45 00           EOR plot_draw.colmask+k
+  1374  85 3F           STA plot_draw.data_even
+  1376  A5 40           LDA plot_draw.data_odd
+  1378  05 00           ORA plot_draw.colmask+k
+  137A  45 00           EOR plot_draw.colmask+k
+  137C  85 40           STA plot_draw.data_odd
+  137E  A5 3E           LDA plot_draw.mask
+  1380  05 00           ORA plot_draw.colmask+k
+  1382  85 3E           STA plot_draw.mask
 .endrun
-  1389  BD C7 21        LDA shr3,X
-  138C  A8              TAY
-  138D  B9 A3 21        LDA PY+1,Y
-  1390  85 08           STA plot_draw.cp+k
-  1392  A5 3A           LDA plot_draw.cnt
+  1384  BD 42 20        LDA shr3,X
+  1387  A8              TAY
+  1388  B9 1E 20        LDA PY+1,Y
+  138B  85 08           STA plot_draw.cp+k
+  138D  A5 3D           LDA plot_draw.cnt
 .@
-  1394  C5 09           CMP plot_draw.cp+k
-  1396  D0 4C           BNE @+
-  1398                  changecol k, swallow
+  138F  C5 09           CMP plot_draw.cp+k
+  1391  D0 4C           BNE @+
+  1393                  changecol k, swallow
 .fetch
-  1398  A4 05           LDY plot_draw.idx+k
-  139A  B1 20           LDA (plot_setup.spr),Y
-  139C  E6 05           INC plot_draw.idx+k
-  139E  AA              TAX
-  139F  29 07           AND #7
-  13A1  F0 22           BEQ transparent
-  13A3  0A              ASL A
-  13A4  A8              TAY
-  13A5  B1 24           LDA (plot_draw.pal),Y
-  13A7  45 3C           EOR plot_draw.data_even
-  13A9  25 01           AND plot_draw.colmask+k
-  13AB  45 3C           EOR plot_draw.data_even
-  13AD  85 3C           STA plot_draw.data_even
-  13AF  C8              INY
-  13B0  B1 24           LDA (plot_draw.pal),Y
-  13B2  45 3D           EOR plot_draw.data_odd
-  13B4  25 01           AND plot_draw.colmask+k
-  13B6  45 3D           EOR plot_draw.data_odd
-  13B8  85 3D           STA plot_draw.data_odd
-  13BA  A5 3B           LDA plot_draw.mask
-  13BC  05 01           ORA plot_draw.colmask+k
-  13BE  45 01           EOR plot_draw.colmask+k
-  13C0  85 3B           STA plot_draw.mask
-  13C2  4C DB 13        JMP endrun
+  1393  A4 05           LDY plot_draw.idx+k
+  1395  B1 22           LDA (plot_setup.spr),Y
+  1397  E6 05           INC plot_draw.idx+k
+  1399  AA              TAX
+  139A  29 07           AND #7
+  139C  F0 22           BEQ transparent
+  139E  0A              ASL A
+  139F  A8              TAY
+  13A0  B1 26           LDA (plot_draw.pal),Y
+  13A2  45 3F           EOR plot_draw.data_even
+  13A4  25 01           AND plot_draw.colmask+k
+  13A6  45 3F           EOR plot_draw.data_even
+  13A8  85 3F           STA plot_draw.data_even
+  13AA  C8              INY
+  13AB  B1 26           LDA (plot_draw.pal),Y
+  13AD  45 40           EOR plot_draw.data_odd
+  13AF  25 01           AND plot_draw.colmask+k
+  13B1  45 40           EOR plot_draw.data_odd
+  13B3  85 40           STA plot_draw.data_odd
+  13B5  A5 3E           LDA plot_draw.mask
+  13B7  05 01           ORA plot_draw.colmask+k
+  13B9  45 01           EOR plot_draw.colmask+k
+  13BB  85 3E           STA plot_draw.mask
+  13BD  4C D6 13        JMP endrun
 .transparent
-  13C5  A5 3C           LDA plot_draw.data_even
-  13C7  05 01           ORA plot_draw.colmask+k
-  13C9  45 01           EOR plot_draw.colmask+k
-  13CB  85 3C           STA plot_draw.data_even
-  13CD  A5 3D           LDA plot_draw.data_odd
-  13CF  05 01           ORA plot_draw.colmask+k
-  13D1  45 01           EOR plot_draw.colmask+k
-  13D3  85 3D           STA plot_draw.data_odd
-  13D5  A5 3B           LDA plot_draw.mask
-  13D7  05 01           ORA plot_draw.colmask+k
-  13D9  85 3B           STA plot_draw.mask
+  13C0  A5 3F           LDA plot_draw.data_even
+  13C2  05 01           ORA plot_draw.colmask+k
+  13C4  45 01           EOR plot_draw.colmask+k
+  13C6  85 3F           STA plot_draw.data_even
+  13C8  A5 40           LDA plot_draw.data_odd
+  13CA  05 01           ORA plot_draw.colmask+k
+  13CC  45 01           EOR plot_draw.colmask+k
+  13CE  85 40           STA plot_draw.data_odd
+  13D0  A5 3E           LDA plot_draw.mask
+  13D2  05 01           ORA plot_draw.colmask+k
+  13D4  85 3E           STA plot_draw.mask
 .endrun
-  13DB  BD C7 21        LDA shr3,X
-  13DE  A8              TAY
-  13DF  B9 A3 21        LDA PY+1,Y
-  13E2  85 09           STA plot_draw.cp+k
+  13D6  BD 42 20        LDA shr3,X
+  13D9  A8              TAY
+  13DA  B9 1E 20        LDA PY+1,Y
+  13DD  85 09           STA plot_draw.cp+k
 .@
-  13E4  A5 08           LDA plot_draw.cp+0
-  13E6  C5 09           CMP plot_draw.cp+k
-  13E8  90 02           BCC @+
-  13EA  A5 09           LDA plot_draw.cp+k
+  13DF  A5 08           LDA plot_draw.cp+0
+  13E1  C5 09           CMP plot_draw.cp+k
+  13E3  90 02           BCC @+
+  13E5  A5 09           LDA plot_draw.cp+k
 .@
-  13EC  A8              TAY
-  13ED  38              SEC
-  13EE  E5 3A           SBC plot_draw.cnt
-  13F0  AA              TAX
-  13F1  84 3A           STY plot_draw.cnt
-  13F3  A4 36           LDY plot_draw.ysave
-  13F5  4C 92 12        JMP plot_draw.stretch
+  13E7  A8              TAY
+  13E8  38              SEC
+  13E9  E5 3D           SBC plot_draw.cnt
+  13EB  AA              TAX
+  13EC  84 3D           STY plot_draw.cnt
+  13EE  A4 39           LDY plot_draw.ysave
+  13F0  4C 8D 12        JMP plot_draw.stretch
 .changes3
-  13F8                  changesbody 3, FALSE
-  13F8  84 36           STY plot_draw.ysave
-  13FA  A5 3A           LDA plot_draw.cnt
-  13FC  C5 08           CMP plot_draw.cp+k
-  13FE  D0 4E           BNE @+
-  1400                  changecol k, swallow
+  13F3                  changesbody 3, FALSE
+  13F3  84 39           STY plot_draw.ysave
+  13F5  A5 3D           LDA plot_draw.cnt
+  13F7  C5 08           CMP plot_draw.cp+k
+  13F9  D0 4E           BNE @+
+  13FB                  changecol k, swallow
 .fetch
-  1400  A4 04           LDY plot_draw.idx+k
-  1402  B1 20           LDA (plot_setup.spr),Y
-  1404  E6 04           INC plot_draw.idx+k
-  1406  AA              TAX
-  1407  29 07           AND #7
-  1409  F0 22           BEQ transparent
-  140B  0A              ASL A
-  140C  A8              TAY
-  140D  B1 24           LDA (plot_draw.pal),Y
-  140F  45 3C           EOR plot_draw.data_even
-  1411  25 00           AND plot_draw.colmask+k
-  1413  45 3C           EOR plot_draw.data_even
-  1415  85 3C           STA plot_draw.data_even
-  1417  C8              INY
-  1418  B1 24           LDA (plot_draw.pal),Y
-  141A  45 3D           EOR plot_draw.data_odd
-  141C  25 00           AND plot_draw.colmask+k
-  141E  45 3D           EOR plot_draw.data_odd
-  1420  85 3D           STA plot_draw.data_odd
-  1422  A5 3B           LDA plot_draw.mask
-  1424  05 00           ORA plot_draw.colmask+k
-  1426  45 00           EOR plot_draw.colmask+k
-  1428  85 3B           STA plot_draw.mask
-  142A  4C 43 14        JMP endrun
+  13FB  A4 04           LDY plot_draw.idx+k
+  13FD  B1 22           LDA (plot_setup.spr),Y
+  13FF  E6 04           INC plot_draw.idx+k
+  1401  AA              TAX
+  1402  29 07           AND #7
+  1404  F0 22           BEQ transparent
+  1406  0A              ASL A
+  1407  A8              TAY
+  1408  B1 26           LDA (plot_draw.pal),Y
+  140A  45 3F           EOR plot_draw.data_even
+  140C  25 00           AND plot_draw.colmask+k
+  140E  45 3F           EOR plot_draw.data_even
+  1410  85 3F           STA plot_draw.data_even
+  1412  C8              INY
+  1413  B1 26           LDA (plot_draw.pal),Y
+  1415  45 40           EOR plot_draw.data_odd
+  1417  25 00           AND plot_draw.colmask+k
+  1419  45 40           EOR plot_draw.data_odd
+  141B  85 40           STA plot_draw.data_odd
+  141D  A5 3E           LDA plot_draw.mask
+  141F  05 00           ORA plot_draw.colmask+k
+  1421  45 00           EOR plot_draw.colmask+k
+  1423  85 3E           STA plot_draw.mask
+  1425  4C 3E 14        JMP endrun
 .transparent
-  142D  A5 3C           LDA plot_draw.data_even
-  142F  05 00           ORA plot_draw.colmask+k
-  1431  45 00           EOR plot_draw.colmask+k
-  1433  85 3C           STA plot_draw.data_even
-  1435  A5 3D           LDA plot_draw.data_odd
-  1437  05 00           ORA plot_draw.colmask+k
-  1439  45 00           EOR plot_draw.colmask+k
-  143B  85 3D           STA plot_draw.data_odd
-  143D  A5 3B           LDA plot_draw.mask
-  143F  05 00           ORA plot_draw.colmask+k
-  1441  85 3B           STA plot_draw.mask
+  1428  A5 3F           LDA plot_draw.data_even
+  142A  05 00           ORA plot_draw.colmask+k
+  142C  45 00           EOR plot_draw.colmask+k
+  142E  85 3F           STA plot_draw.data_even
+  1430  A5 40           LDA plot_draw.data_odd
+  1432  05 00           ORA plot_draw.colmask+k
+  1434  45 00           EOR plot_draw.colmask+k
+  1436  85 40           STA plot_draw.data_odd
+  1438  A5 3E           LDA plot_draw.mask
+  143A  05 00           ORA plot_draw.colmask+k
+  143C  85 3E           STA plot_draw.mask
 .endrun
-  1443  BD C7 21        LDA shr3,X
-  1446  A8              TAY
-  1447  B9 A3 21        LDA PY+1,Y
-  144A  85 08           STA plot_draw.cp+k
-  144C  A5 3A           LDA plot_draw.cnt
+  143E  BD 42 20        LDA shr3,X
+  1441  A8              TAY
+  1442  B9 1E 20        LDA PY+1,Y
+  1445  85 08           STA plot_draw.cp+k
+  1447  A5 3D           LDA plot_draw.cnt
 .@
-  144E  C5 09           CMP plot_draw.cp+k
-  1450  D0 4E           BNE @+
-  1452                  changecol k, swallow
+  1449  C5 09           CMP plot_draw.cp+k
+  144B  D0 4E           BNE @+
+  144D                  changecol k, swallow
 .fetch
-  1452  A4 05           LDY plot_draw.idx+k
-  1454  B1 20           LDA (plot_setup.spr),Y
-  1456  E6 05           INC plot_draw.idx+k
-  1458  AA              TAX
-  1459  29 07           AND #7
-  145B  F0 22           BEQ transparent
-  145D  0A              ASL A
-  145E  A8              TAY
-  145F  B1 24           LDA (plot_draw.pal),Y
-  1461  45 3C           EOR plot_draw.data_even
-  1463  25 01           AND plot_draw.colmask+k
-  1465  45 3C           EOR plot_draw.data_even
-  1467  85 3C           STA plot_draw.data_even
-  1469  C8              INY
-  146A  B1 24           LDA (plot_draw.pal),Y
-  146C  45 3D           EOR plot_draw.data_odd
-  146E  25 01           AND plot_draw.colmask+k
-  1470  45 3D           EOR plot_draw.data_odd
-  1472  85 3D           STA plot_draw.data_odd
-  1474  A5 3B           LDA plot_draw.mask
-  1476  05 01           ORA plot_draw.colmask+k
-  1478  45 01           EOR plot_draw.colmask+k
-  147A  85 3B           STA plot_draw.mask
-  147C  4C 95 14        JMP endrun
+  144D  A4 05           LDY plot_draw.idx+k
+  144F  B1 22           LDA (plot_setup.spr),Y
+  1451  E6 05           INC plot_draw.idx+k
+  1453  AA              TAX
+  1454  29 07           AND #7
+  1456  F0 22           BEQ transparent
+  1458  0A              ASL A
+  1459  A8              TAY
+  145A  B1 26           LDA (plot_draw.pal),Y
+  145C  45 3F           EOR plot_draw.data_even
+  145E  25 01           AND plot_draw.colmask+k
+  1460  45 3F           EOR plot_draw.data_even
+  1462  85 3F           STA plot_draw.data_even
+  1464  C8              INY
+  1465  B1 26           LDA (plot_draw.pal),Y
+  1467  45 40           EOR plot_draw.data_odd
+  1469  25 01           AND plot_draw.colmask+k
+  146B  45 40           EOR plot_draw.data_odd
+  146D  85 40           STA plot_draw.data_odd
+  146F  A5 3E           LDA plot_draw.mask
+  1471  05 01           ORA plot_draw.colmask+k
+  1473  45 01           EOR plot_draw.colmask+k
+  1475  85 3E           STA plot_draw.mask
+  1477  4C 90 14        JMP endrun
 .transparent
-  147F  A5 3C           LDA plot_draw.data_even
-  1481  05 01           ORA plot_draw.colmask+k
-  1483  45 01           EOR plot_draw.colmask+k
-  1485  85 3C           STA plot_draw.data_even
-  1487  A5 3D           LDA plot_draw.data_odd
-  1489  05 01           ORA plot_draw.colmask+k
-  148B  45 01           EOR plot_draw.colmask+k
-  148D  85 3D           STA plot_draw.data_odd
-  148F  A5 3B           LDA plot_draw.mask
-  1491  05 01           ORA plot_draw.colmask+k
-  1493  85 3B           STA plot_draw.mask
+  147A  A5 3F           LDA plot_draw.data_even
+  147C  05 01           ORA plot_draw.colmask+k
+  147E  45 01           EOR plot_draw.colmask+k
+  1480  85 3F           STA plot_draw.data_even
+  1482  A5 40           LDA plot_draw.data_odd
+  1484  05 01           ORA plot_draw.colmask+k
+  1486  45 01           EOR plot_draw.colmask+k
+  1488  85 40           STA plot_draw.data_odd
+  148A  A5 3E           LDA plot_draw.mask
+  148C  05 01           ORA plot_draw.colmask+k
+  148E  85 3E           STA plot_draw.mask
 .endrun
-  1495  BD C7 21        LDA shr3,X
-  1498  A8              TAY
-  1499  B9 A3 21        LDA PY+1,Y
-  149C  85 09           STA plot_draw.cp+k
-  149E  A5 3A           LDA plot_draw.cnt
+  1490  BD 42 20        LDA shr3,X
+  1493  A8              TAY
+  1494  B9 1E 20        LDA PY+1,Y
+  1497  85 09           STA plot_draw.cp+k
+  1499  A5 3D           LDA plot_draw.cnt
 .@
-  14A0  C5 0A           CMP plot_draw.cp+k
-  14A2  D0 4C           BNE @+
-  14A4                  changecol k, swallow
+  149B  C5 0A           CMP plot_draw.cp+k
+  149D  D0 4C           BNE @+
+  149F                  changecol k, swallow
 .fetch
-  14A4  A4 06           LDY plot_draw.idx+k
-  14A6  B1 20           LDA (plot_setup.spr),Y
-  14A8  E6 06           INC plot_draw.idx+k
-  14AA  AA              TAX
-  14AB  29 07           AND #7
-  14AD  F0 22           BEQ transparent
-  14AF  0A              ASL A
-  14B0  A8              TAY
-  14B1  B1 24           LDA (plot_draw.pal),Y
-  14B3  45 3C           EOR plot_draw.data_even
-  14B5  25 02           AND plot_draw.colmask+k
-  14B7  45 3C           EOR plot_draw.data_even
-  14B9  85 3C           STA plot_draw.data_even
-  14BB  C8              INY
-  14BC  B1 24           LDA (plot_draw.pal),Y
-  14BE  45 3D           EOR plot_draw.data_odd
-  14C0  25 02           AND plot_draw.colmask+k
-  14C2  45 3D           EOR plot_draw.data_odd
-  14C4  85 3D           STA plot_draw.data_odd
-  14C6  A5 3B           LDA plot_draw.mask
-  14C8  05 02           ORA plot_draw.colmask+k
-  14CA  45 02           EOR plot_draw.colmask+k
-  14CC  85 3B           STA plot_draw.mask
-  14CE  4C E7 14        JMP endrun
+  149F  A4 06           LDY plot_draw.idx+k
+  14A1  B1 22           LDA (plot_setup.spr),Y
+  14A3  E6 06           INC plot_draw.idx+k
+  14A5  AA              TAX
+  14A6  29 07           AND #7
+  14A8  F0 22           BEQ transparent
+  14AA  0A              ASL A
+  14AB  A8              TAY
+  14AC  B1 26           LDA (plot_draw.pal),Y
+  14AE  45 3F           EOR plot_draw.data_even
+  14B0  25 02           AND plot_draw.colmask+k
+  14B2  45 3F           EOR plot_draw.data_even
+  14B4  85 3F           STA plot_draw.data_even
+  14B6  C8              INY
+  14B7  B1 26           LDA (plot_draw.pal),Y
+  14B9  45 40           EOR plot_draw.data_odd
+  14BB  25 02           AND plot_draw.colmask+k
+  14BD  45 40           EOR plot_draw.data_odd
+  14BF  85 40           STA plot_draw.data_odd
+  14C1  A5 3E           LDA plot_draw.mask
+  14C3  05 02           ORA plot_draw.colmask+k
+  14C5  45 02           EOR plot_draw.colmask+k
+  14C7  85 3E           STA plot_draw.mask
+  14C9  4C E2 14        JMP endrun
 .transparent
-  14D1  A5 3C           LDA plot_draw.data_even
-  14D3  05 02           ORA plot_draw.colmask+k
-  14D5  45 02           EOR plot_draw.colmask+k
-  14D7  85 3C           STA plot_draw.data_even
-  14D9  A5 3D           LDA plot_draw.data_odd
-  14DB  05 02           ORA plot_draw.colmask+k
-  14DD  45 02           EOR plot_draw.colmask+k
-  14DF  85 3D           STA plot_draw.data_odd
-  14E1  A5 3B           LDA plot_draw.mask
-  14E3  05 02           ORA plot_draw.colmask+k
-  14E5  85 3B           STA plot_draw.mask
+  14CC  A5 3F           LDA plot_draw.data_even
+  14CE  05 02           ORA plot_draw.colmask+k
+  14D0  45 02           EOR plot_draw.colmask+k
+  14D2  85 3F           STA plot_draw.data_even
+  14D4  A5 40           LDA plot_draw.data_odd
+  14D6  05 02           ORA plot_draw.colmask+k
+  14D8  45 02           EOR plot_draw.colmask+k
+  14DA  85 40           STA plot_draw.data_odd
+  14DC  A5 3E           LDA plot_draw.mask
+  14DE  05 02           ORA plot_draw.colmask+k
+  14E0  85 3E           STA plot_draw.mask
 .endrun
-  14E7  BD C7 21        LDA shr3,X
-  14EA  A8              TAY
-  14EB  B9 A3 21        LDA PY+1,Y
-  14EE  85 0A           STA plot_draw.cp+k
+  14E2  BD 42 20        LDA shr3,X
+  14E5  A8              TAY
+  14E6  B9 1E 20        LDA PY+1,Y
+  14E9  85 0A           STA plot_draw.cp+k
 .@
-  14F0  A5 08           LDA plot_draw.cp+0
-  14F2  C5 09           CMP plot_draw.cp+k
-  14F4  90 02           BCC @+
-  14F6  A5 09           LDA plot_draw.cp+k
+  14EB  A5 08           LDA plot_draw.cp+0
+  14ED  C5 09           CMP plot_draw.cp+k
+  14EF  90 02           BCC @+
+  14F1  A5 09           LDA plot_draw.cp+k
 .@
-  14F8  C5 0A           CMP plot_draw.cp+k
-  14FA  90 02           BCC @+
-  14FC  A5 0A           LDA plot_draw.cp+k
+  14F3  C5 0A           CMP plot_draw.cp+k
+  14F5  90 02           BCC @+
+  14F7  A5 0A           LDA plot_draw.cp+k
 .@
-  14FE  A8              TAY
-  14FF  38              SEC
-  1500  E5 3A           SBC plot_draw.cnt
-  1502  AA              TAX
-  1503  84 3A           STY plot_draw.cnt
-  1505  A4 36           LDY plot_draw.ysave
-  1507  4C 92 12        JMP plot_draw.stretch
+  14F9  A8              TAY
+  14FA  38              SEC
+  14FB  E5 3D           SBC plot_draw.cnt
+  14FD  AA              TAX
+  14FE  84 3D           STY plot_draw.cnt
+  1500  A4 39           LDY plot_draw.ysave
+  1502  4C 8D 12        JMP plot_draw.stretch
 .changes4
-  150A                  changesbody 4, FALSE
-  150A  84 36           STY plot_draw.ysave
-  150C  A5 3A           LDA plot_draw.cnt
-  150E  C5 08           CMP plot_draw.cp+k
-  1510  D0 4E           BNE @+
-  1512                  changecol k, swallow
+  1505                  changesbody 4, FALSE
+  1505  84 39           STY plot_draw.ysave
+  1507  A5 3D           LDA plot_draw.cnt
+  1509  C5 08           CMP plot_draw.cp+k
+  150B  D0 4E           BNE @+
+  150D                  changecol k, swallow
 .fetch
-  1512  A4 04           LDY plot_draw.idx+k
-  1514  B1 20           LDA (plot_setup.spr),Y
-  1516  E6 04           INC plot_draw.idx+k
-  1518  AA              TAX
-  1519  29 07           AND #7
-  151B  F0 22           BEQ transparent
-  151D  0A              ASL A
-  151E  A8              TAY
-  151F  B1 24           LDA (plot_draw.pal),Y
-  1521  45 3C           EOR plot_draw.data_even
-  1523  25 00           AND plot_draw.colmask+k
-  1525  45 3C           EOR plot_draw.data_even
-  1527  85 3C           STA plot_draw.data_even
-  1529  C8              INY
-  152A  B1 24           LDA (plot_draw.pal),Y
-  152C  45 3D           EOR plot_draw.data_odd
-  152E  25 00           AND plot_draw.colmask+k
-  1530  45 3D           EOR plot_draw.data_odd
-  1532  85 3D           STA plot_draw.data_odd
-  1534  A5 3B           LDA plot_draw.mask
-  1536  05 00           ORA plot_draw.colmask+k
-  1538  45 00           EOR plot_draw.colmask+k
-  153A  85 3B           STA plot_draw.mask
-  153C  4C 55 15        JMP endrun
+  150D  A4 04           LDY plot_draw.idx+k
+  150F  B1 22           LDA (plot_setup.spr),Y
+  1511  E6 04           INC plot_draw.idx+k
+  1513  AA              TAX
+  1514  29 07           AND #7
+  1516  F0 22           BEQ transparent
+  1518  0A              ASL A
+  1519  A8              TAY
+  151A  B1 26           LDA (plot_draw.pal),Y
+  151C  45 3F           EOR plot_draw.data_even
+  151E  25 00           AND plot_draw.colmask+k
+  1520  45 3F           EOR plot_draw.data_even
+  1522  85 3F           STA plot_draw.data_even
+  1524  C8              INY
+  1525  B1 26           LDA (plot_draw.pal),Y
+  1527  45 40           EOR plot_draw.data_odd
+  1529  25 00           AND plot_draw.colmask+k
+  152B  45 40           EOR plot_draw.data_odd
+  152D  85 40           STA plot_draw.data_odd
+  152F  A5 3E           LDA plot_draw.mask
+  1531  05 00           ORA plot_draw.colmask+k
+  1533  45 00           EOR plot_draw.colmask+k
+  1535  85 3E           STA plot_draw.mask
+  1537  4C 50 15        JMP endrun
 .transparent
-  153F  A5 3C           LDA plot_draw.data_even
-  1541  05 00           ORA plot_draw.colmask+k
-  1543  45 00           EOR plot_draw.colmask+k
-  1545  85 3C           STA plot_draw.data_even
-  1547  A5 3D           LDA plot_draw.data_odd
-  1549  05 00           ORA plot_draw.colmask+k
-  154B  45 00           EOR plot_draw.colmask+k
-  154D  85 3D           STA plot_draw.data_odd
-  154F  A5 3B           LDA plot_draw.mask
-  1551  05 00           ORA plot_draw.colmask+k
-  1553  85 3B           STA plot_draw.mask
+  153A  A5 3F           LDA plot_draw.data_even
+  153C  05 00           ORA plot_draw.colmask+k
+  153E  45 00           EOR plot_draw.colmask+k
+  1540  85 3F           STA plot_draw.data_even
+  1542  A5 40           LDA plot_draw.data_odd
+  1544  05 00           ORA plot_draw.colmask+k
+  1546  45 00           EOR plot_draw.colmask+k
+  1548  85 40           STA plot_draw.data_odd
+  154A  A5 3E           LDA plot_draw.mask
+  154C  05 00           ORA plot_draw.colmask+k
+  154E  85 3E           STA plot_draw.mask
 .endrun
-  1555  BD C7 21        LDA shr3,X
-  1558  A8              TAY
-  1559  B9 A3 21        LDA PY+1,Y
-  155C  85 08           STA plot_draw.cp+k
-  155E  A5 3A           LDA plot_draw.cnt
+  1550  BD 42 20        LDA shr3,X
+  1553  A8              TAY
+  1554  B9 1E 20        LDA PY+1,Y
+  1557  85 08           STA plot_draw.cp+k
+  1559  A5 3D           LDA plot_draw.cnt
 .@
-  1560  C5 09           CMP plot_draw.cp+k
-  1562  D0 4E           BNE @+
-  1564                  changecol k, swallow
+  155B  C5 09           CMP plot_draw.cp+k
+  155D  D0 4E           BNE @+
+  155F                  changecol k, swallow
 .fetch
-  1564  A4 05           LDY plot_draw.idx+k
-  1566  B1 20           LDA (plot_setup.spr),Y
-  1568  E6 05           INC plot_draw.idx+k
-  156A  AA              TAX
-  156B  29 07           AND #7
-  156D  F0 22           BEQ transparent
-  156F  0A              ASL A
-  1570  A8              TAY
-  1571  B1 24           LDA (plot_draw.pal),Y
-  1573  45 3C           EOR plot_draw.data_even
-  1575  25 01           AND plot_draw.colmask+k
-  1577  45 3C           EOR plot_draw.data_even
-  1579  85 3C           STA plot_draw.data_even
-  157B  C8              INY
-  157C  B1 24           LDA (plot_draw.pal),Y
-  157E  45 3D           EOR plot_draw.data_odd
-  1580  25 01           AND plot_draw.colmask+k
-  1582  45 3D           EOR plot_draw.data_odd
-  1584  85 3D           STA plot_draw.data_odd
-  1586  A5 3B           LDA plot_draw.mask
-  1588  05 01           ORA plot_draw.colmask+k
-  158A  45 01           EOR plot_draw.colmask+k
-  158C  85 3B           STA plot_draw.mask
-  158E  4C A7 15        JMP endrun
+  155F  A4 05           LDY plot_draw.idx+k
+  1561  B1 22           LDA (plot_setup.spr),Y
+  1563  E6 05           INC plot_draw.idx+k
+  1565  AA              TAX
+  1566  29 07           AND #7
+  1568  F0 22           BEQ transparent
+  156A  0A              ASL A
+  156B  A8              TAY
+  156C  B1 26           LDA (plot_draw.pal),Y
+  156E  45 3F           EOR plot_draw.data_even
+  1570  25 01           AND plot_draw.colmask+k
+  1572  45 3F           EOR plot_draw.data_even
+  1574  85 3F           STA plot_draw.data_even
+  1576  C8              INY
+  1577  B1 26           LDA (plot_draw.pal),Y
+  1579  45 40           EOR plot_draw.data_odd
+  157B  25 01           AND plot_draw.colmask+k
+  157D  45 40           EOR plot_draw.data_odd
+  157F  85 40           STA plot_draw.data_odd
+  1581  A5 3E           LDA plot_draw.mask
+  1583  05 01           ORA plot_draw.colmask+k
+  1585  45 01           EOR plot_draw.colmask+k
+  1587  85 3E           STA plot_draw.mask
+  1589  4C A2 15        JMP endrun
 .transparent
-  1591  A5 3C           LDA plot_draw.data_even
-  1593  05 01           ORA plot_draw.colmask+k
-  1595  45 01           EOR plot_draw.colmask+k
-  1597  85 3C           STA plot_draw.data_even
-  1599  A5 3D           LDA plot_draw.data_odd
-  159B  05 01           ORA plot_draw.colmask+k
-  159D  45 01           EOR plot_draw.colmask+k
-  159F  85 3D           STA plot_draw.data_odd
-  15A1  A5 3B           LDA plot_draw.mask
-  15A3  05 01           ORA plot_draw.colmask+k
-  15A5  85 3B           STA plot_draw.mask
+  158C  A5 3F           LDA plot_draw.data_even
+  158E  05 01           ORA plot_draw.colmask+k
+  1590  45 01           EOR plot_draw.colmask+k
+  1592  85 3F           STA plot_draw.data_even
+  1594  A5 40           LDA plot_draw.data_odd
+  1596  05 01           ORA plot_draw.colmask+k
+  1598  45 01           EOR plot_draw.colmask+k
+  159A  85 40           STA plot_draw.data_odd
+  159C  A5 3E           LDA plot_draw.mask
+  159E  05 01           ORA plot_draw.colmask+k
+  15A0  85 3E           STA plot_draw.mask
 .endrun
-  15A7  BD C7 21        LDA shr3,X
-  15AA  A8              TAY
-  15AB  B9 A3 21        LDA PY+1,Y
-  15AE  85 09           STA plot_draw.cp+k
-  15B0  A5 3A           LDA plot_draw.cnt
+  15A2  BD 42 20        LDA shr3,X
+  15A5  A8              TAY
+  15A6  B9 1E 20        LDA PY+1,Y
+  15A9  85 09           STA plot_draw.cp+k
+  15AB  A5 3D           LDA plot_draw.cnt
 .@
-  15B2  C5 0A           CMP plot_draw.cp+k
-  15B4  D0 4E           BNE @+
-  15B6                  changecol k, swallow
+  15AD  C5 0A           CMP plot_draw.cp+k
+  15AF  D0 4E           BNE @+
+  15B1                  changecol k, swallow
 .fetch
-  15B6  A4 06           LDY plot_draw.idx+k
-  15B8  B1 20           LDA (plot_setup.spr),Y
-  15BA  E6 06           INC plot_draw.idx+k
-  15BC  AA              TAX
-  15BD  29 07           AND #7
-  15BF  F0 22           BEQ transparent
-  15C1  0A              ASL A
-  15C2  A8              TAY
-  15C3  B1 24           LDA (plot_draw.pal),Y
-  15C5  45 3C           EOR plot_draw.data_even
-  15C7  25 02           AND plot_draw.colmask+k
-  15C9  45 3C           EOR plot_draw.data_even
-  15CB  85 3C           STA plot_draw.data_even
-  15CD  C8              INY
-  15CE  B1 24           LDA (plot_draw.pal),Y
-  15D0  45 3D           EOR plot_draw.data_odd
-  15D2  25 02           AND plot_draw.colmask+k
-  15D4  45 3D           EOR plot_draw.data_odd
-  15D6  85 3D           STA plot_draw.data_odd
-  15D8  A5 3B           LDA plot_draw.mask
-  15DA  05 02           ORA plot_draw.colmask+k
-  15DC  45 02           EOR plot_draw.colmask+k
-  15DE  85 3B           STA plot_draw.mask
-  15E0  4C F9 15        JMP endrun
+  15B1  A4 06           LDY plot_draw.idx+k
+  15B3  B1 22           LDA (plot_setup.spr),Y
+  15B5  E6 06           INC plot_draw.idx+k
+  15B7  AA              TAX
+  15B8  29 07           AND #7
+  15BA  F0 22           BEQ transparent
+  15BC  0A              ASL A
+  15BD  A8              TAY
+  15BE  B1 26           LDA (plot_draw.pal),Y
+  15C0  45 3F           EOR plot_draw.data_even
+  15C2  25 02           AND plot_draw.colmask+k
+  15C4  45 3F           EOR plot_draw.data_even
+  15C6  85 3F           STA plot_draw.data_even
+  15C8  C8              INY
+  15C9  B1 26           LDA (plot_draw.pal),Y
+  15CB  45 40           EOR plot_draw.data_odd
+  15CD  25 02           AND plot_draw.colmask+k
+  15CF  45 40           EOR plot_draw.data_odd
+  15D1  85 40           STA plot_draw.data_odd
+  15D3  A5 3E           LDA plot_draw.mask
+  15D5  05 02           ORA plot_draw.colmask+k
+  15D7  45 02           EOR plot_draw.colmask+k
+  15D9  85 3E           STA plot_draw.mask
+  15DB  4C F4 15        JMP endrun
 .transparent
-  15E3  A5 3C           LDA plot_draw.data_even
-  15E5  05 02           ORA plot_draw.colmask+k
-  15E7  45 02           EOR plot_draw.colmask+k
-  15E9  85 3C           STA plot_draw.data_even
-  15EB  A5 3D           LDA plot_draw.data_odd
-  15ED  05 02           ORA plot_draw.colmask+k
-  15EF  45 02           EOR plot_draw.colmask+k
-  15F1  85 3D           STA plot_draw.data_odd
-  15F3  A5 3B           LDA plot_draw.mask
-  15F5  05 02           ORA plot_draw.colmask+k
-  15F7  85 3B           STA plot_draw.mask
+  15DE  A5 3F           LDA plot_draw.data_even
+  15E0  05 02           ORA plot_draw.colmask+k
+  15E2  45 02           EOR plot_draw.colmask+k
+  15E4  85 3F           STA plot_draw.data_even
+  15E6  A5 40           LDA plot_draw.data_odd
+  15E8  05 02           ORA plot_draw.colmask+k
+  15EA  45 02           EOR plot_draw.colmask+k
+  15EC  85 40           STA plot_draw.data_odd
+  15EE  A5 3E           LDA plot_draw.mask
+  15F0  05 02           ORA plot_draw.colmask+k
+  15F2  85 3E           STA plot_draw.mask
 .endrun
-  15F9  BD C7 21        LDA shr3,X
-  15FC  A8              TAY
-  15FD  B9 A3 21        LDA PY+1,Y
-  1600  85 0A           STA plot_draw.cp+k
-  1602  A5 3A           LDA plot_draw.cnt
+  15F4  BD 42 20        LDA shr3,X
+  15F7  A8              TAY
+  15F8  B9 1E 20        LDA PY+1,Y
+  15FB  85 0A           STA plot_draw.cp+k
+  15FD  A5 3D           LDA plot_draw.cnt
 .@
-  1604  C5 0B           CMP plot_draw.cp+k
-  1606  D0 4C           BNE @+
-  1608                  changecol k, swallow
+  15FF  C5 0B           CMP plot_draw.cp+k
+  1601  D0 4C           BNE @+
+  1603                  changecol k, swallow
 .fetch
-  1608  A4 07           LDY plot_draw.idx+k
-  160A  B1 20           LDA (plot_setup.spr),Y
-  160C  E6 07           INC plot_draw.idx+k
-  160E  AA              TAX
-  160F  29 07           AND #7
-  1611  F0 22           BEQ transparent
-  1613  0A              ASL A
-  1614  A8              TAY
-  1615  B1 24           LDA (plot_draw.pal),Y
-  1617  45 3C           EOR plot_draw.data_even
-  1619  25 03           AND plot_draw.colmask+k
-  161B  45 3C           EOR plot_draw.data_even
-  161D  85 3C           STA plot_draw.data_even
-  161F  C8              INY
-  1620  B1 24           LDA (plot_draw.pal),Y
-  1622  45 3D           EOR plot_draw.data_odd
-  1624  25 03           AND plot_draw.colmask+k
-  1626  45 3D           EOR plot_draw.data_odd
-  1628  85 3D           STA plot_draw.data_odd
-  162A  A5 3B           LDA plot_draw.mask
-  162C  05 03           ORA plot_draw.colmask+k
-  162E  45 03           EOR plot_draw.colmask+k
-  1630  85 3B           STA plot_draw.mask
-  1632  4C 4B 16        JMP endrun
+  1603  A4 07           LDY plot_draw.idx+k
+  1605  B1 22           LDA (plot_setup.spr),Y
+  1607  E6 07           INC plot_draw.idx+k
+  1609  AA              TAX
+  160A  29 07           AND #7
+  160C  F0 22           BEQ transparent
+  160E  0A              ASL A
+  160F  A8              TAY
+  1610  B1 26           LDA (plot_draw.pal),Y
+  1612  45 3F           EOR plot_draw.data_even
+  1614  25 03           AND plot_draw.colmask+k
+  1616  45 3F           EOR plot_draw.data_even
+  1618  85 3F           STA plot_draw.data_even
+  161A  C8              INY
+  161B  B1 26           LDA (plot_draw.pal),Y
+  161D  45 40           EOR plot_draw.data_odd
+  161F  25 03           AND plot_draw.colmask+k
+  1621  45 40           EOR plot_draw.data_odd
+  1623  85 40           STA plot_draw.data_odd
+  1625  A5 3E           LDA plot_draw.mask
+  1627  05 03           ORA plot_draw.colmask+k
+  1629  45 03           EOR plot_draw.colmask+k
+  162B  85 3E           STA plot_draw.mask
+  162D  4C 46 16        JMP endrun
 .transparent
-  1635  A5 3C           LDA plot_draw.data_even
-  1637  05 03           ORA plot_draw.colmask+k
-  1639  45 03           EOR plot_draw.colmask+k
-  163B  85 3C           STA plot_draw.data_even
-  163D  A5 3D           LDA plot_draw.data_odd
-  163F  05 03           ORA plot_draw.colmask+k
-  1641  45 03           EOR plot_draw.colmask+k
-  1643  85 3D           STA plot_draw.data_odd
-  1645  A5 3B           LDA plot_draw.mask
-  1647  05 03           ORA plot_draw.colmask+k
-  1649  85 3B           STA plot_draw.mask
+  1630  A5 3F           LDA plot_draw.data_even
+  1632  05 03           ORA plot_draw.colmask+k
+  1634  45 03           EOR plot_draw.colmask+k
+  1636  85 3F           STA plot_draw.data_even
+  1638  A5 40           LDA plot_draw.data_odd
+  163A  05 03           ORA plot_draw.colmask+k
+  163C  45 03           EOR plot_draw.colmask+k
+  163E  85 40           STA plot_draw.data_odd
+  1640  A5 3E           LDA plot_draw.mask
+  1642  05 03           ORA plot_draw.colmask+k
+  1644  85 3E           STA plot_draw.mask
 .endrun
-  164B  BD C7 21        LDA shr3,X
-  164E  A8              TAY
-  164F  B9 A3 21        LDA PY+1,Y
-  1652  85 0B           STA plot_draw.cp+k
+  1646  BD 42 20        LDA shr3,X
+  1649  A8              TAY
+  164A  B9 1E 20        LDA PY+1,Y
+  164D  85 0B           STA plot_draw.cp+k
 .@
-  1654  A5 08           LDA plot_draw.cp+0
-  1656  C5 09           CMP plot_draw.cp+k
-  1658  90 02           BCC @+
-  165A  A5 09           LDA plot_draw.cp+k
+  164F  A5 08           LDA plot_draw.cp+0
+  1651  C5 09           CMP plot_draw.cp+k
+  1653  90 02           BCC @+
+  1655  A5 09           LDA plot_draw.cp+k
 .@
-  165C  C5 0A           CMP plot_draw.cp+k
-  165E  90 02           BCC @+
-  1660  A5 0A           LDA plot_draw.cp+k
+  1657  C5 0A           CMP plot_draw.cp+k
+  1659  90 02           BCC @+
+  165B  A5 0A           LDA plot_draw.cp+k
 .@
-  1662  C5 0B           CMP plot_draw.cp+k
-  1664  90 02           BCC @+
-  1666  A5 0B           LDA plot_draw.cp+k
+  165D  C5 0B           CMP plot_draw.cp+k
+  165F  90 02           BCC @+
+  1661  A5 0B           LDA plot_draw.cp+k
 .@
-  1668  A8              TAY
-  1669  38              SEC
-  166A  E5 3A           SBC plot_draw.cnt
-  166C  AA              TAX
-  166D  84 3A           STY plot_draw.cnt
-  166F  A4 36           LDY plot_draw.ysave
-  1671  4C 92 12        JMP plot_draw.stretch
+  1663  A8              TAY
+  1664  38              SEC
+  1665  E5 3D           SBC plot_draw.cnt
+  1667  AA              TAX
+  1668  84 3D           STY plot_draw.cnt
+  166A  A4 39           LDY plot_draw.ysave
+  166C  4C 8D 12        JMP plot_draw.stretch
 .schanges1
-  1674                  changesbody 1, TRUE
-  1674  84 36           STY plot_draw.ysave
+  166F                  changesbody 1, TRUE
+  166F  84 39           STY plot_draw.ysave
 .fetch
-  1676  A4 04           LDY plot_draw.idx+0
-  1678  B1 20           LDA (plot_setup.spr),Y
-  167A  E6 04           INC plot_draw.idx+0
-  167C  AA              TAX
-  167D  29 07           AND #7
-  167F  F0 16           BEQ transparent
-  1681  0A              ASL A
-  1682  A8              TAY
-  1683  B1 24           LDA (plot_draw.pal),Y
-  1685  25 00           AND plot_draw.colmask+0
-  1687  85 3C           STA plot_draw.data_even
-  1689  C8              INY
-  168A  B1 24           LDA (plot_draw.pal),Y
-  168C  25 00           AND plot_draw.colmask+0
-  168E  85 3D           STA plot_draw.data_odd
-  1690  A5 39           LDA plot_draw.ucm
-  1692  85 3B           STA plot_draw.mask
-  1694  4C 9B 16        JMP endrun
+  1671  A4 04           LDY plot_draw.idx+0
+  1673  B1 22           LDA (plot_setup.spr),Y
+  1675  E6 04           INC plot_draw.idx+0
+  1677  AA              TAX
+  1678  29 07           AND #7
+  167A  F0 16           BEQ transparent
+  167C  0A              ASL A
+  167D  A8              TAY
+  167E  B1 26           LDA (plot_draw.pal),Y
+  1680  25 00           AND plot_draw.colmask+0
+  1682  85 3F           STA plot_draw.data_even
+  1684  C8              INY
+  1685  B1 26           LDA (plot_draw.pal),Y
+  1687  25 00           AND plot_draw.colmask+0
+  1689  85 40           STA plot_draw.data_odd
+  168B  A5 3C           LDA plot_draw.ucm
+  168D  85 3E           STA plot_draw.mask
+  168F  4C 96 16        JMP endrun
 .transparent
-  1697  A9 FF           LDA #&FF
-  1699  85 3B           STA plot_draw.mask
+  1692  A9 FF           LDA #&FF
+  1694  85 3E           STA plot_draw.mask
 .endrun
-  169B  BD C7 21        LDA shr3,X
-  169E  A8              TAY
-  169F  B9 A3 21        LDA PY+1,Y
-  16A2  85 08           STA plot_draw.cp+0
-  16A4  C5 3A           CMP plot_draw.cnt
-  16A6  F0 CE           BEQ fetch
-  16A8  A8              TAY
-  16A9  38              SEC
-  16AA  E5 3A           SBC plot_draw.cnt
-  16AC  AA              TAX
-  16AD  84 3A           STY plot_draw.cnt
-  16AF  A4 36           LDY plot_draw.ysave
-  16B1  4C 92 12        JMP plot_draw.stretch
+  1696  BD 42 20        LDA shr3,X
+  1699  A8              TAY
+  169A  B9 1E 20        LDA PY+1,Y
+  169D  85 08           STA plot_draw.cp+0
+  169F  C5 3D           CMP plot_draw.cnt
+  16A1  F0 CE           BEQ fetch
+  16A3  A8              TAY
+  16A4  38              SEC
+  16A5  E5 3D           SBC plot_draw.cnt
+  16A7  AA              TAX
+  16A8  84 3D           STY plot_draw.cnt
+  16AA  A4 39           LDY plot_draw.ysave
+  16AC  4C 8D 12        JMP plot_draw.stretch
 .schanges2
-  16B4                  changesbody 2, TRUE
-  16B4  84 36           STY plot_draw.ysave
-  16B6  A5 3A           LDA plot_draw.cnt
-  16B8  C5 08           CMP plot_draw.cp+k
-  16BA  D0 52           BNE @+
-  16BC                  changecol k, swallow
+  16AF                  changesbody 2, TRUE
+  16AF  84 39           STY plot_draw.ysave
+  16B1  A5 3D           LDA plot_draw.cnt
+  16B3  C5 08           CMP plot_draw.cp+k
+  16B5  D0 52           BNE @+
+  16B7                  changecol k, swallow
 .fetch
-  16BC  A4 04           LDY plot_draw.idx+k
-  16BE  B1 20           LDA (plot_setup.spr),Y
-  16C0  E6 04           INC plot_draw.idx+k
-  16C2  AA              TAX
-  16C3  29 07           AND #7
-  16C5  F0 22           BEQ transparent
-  16C7  0A              ASL A
-  16C8  A8              TAY
-  16C9  B1 24           LDA (plot_draw.pal),Y
-  16CB  45 3C           EOR plot_draw.data_even
-  16CD  25 00           AND plot_draw.colmask+k
-  16CF  45 3C           EOR plot_draw.data_even
-  16D1  85 3C           STA plot_draw.data_even
-  16D3  C8              INY
-  16D4  B1 24           LDA (plot_draw.pal),Y
-  16D6  45 3D           EOR plot_draw.data_odd
-  16D8  25 00           AND plot_draw.colmask+k
-  16DA  45 3D           EOR plot_draw.data_odd
-  16DC  85 3D           STA plot_draw.data_odd
-  16DE  A5 3B           LDA plot_draw.mask
-  16E0  05 00           ORA plot_draw.colmask+k
-  16E2  45 00           EOR plot_draw.colmask+k
-  16E4  85 3B           STA plot_draw.mask
-  16E6  4C FF 16        JMP endrun
+  16B7  A4 04           LDY plot_draw.idx+k
+  16B9  B1 22           LDA (plot_setup.spr),Y
+  16BB  E6 04           INC plot_draw.idx+k
+  16BD  AA              TAX
+  16BE  29 07           AND #7
+  16C0  F0 22           BEQ transparent
+  16C2  0A              ASL A
+  16C3  A8              TAY
+  16C4  B1 26           LDA (plot_draw.pal),Y
+  16C6  45 3F           EOR plot_draw.data_even
+  16C8  25 00           AND plot_draw.colmask+k
+  16CA  45 3F           EOR plot_draw.data_even
+  16CC  85 3F           STA plot_draw.data_even
+  16CE  C8              INY
+  16CF  B1 26           LDA (plot_draw.pal),Y
+  16D1  45 40           EOR plot_draw.data_odd
+  16D3  25 00           AND plot_draw.colmask+k
+  16D5  45 40           EOR plot_draw.data_odd
+  16D7  85 40           STA plot_draw.data_odd
+  16D9  A5 3E           LDA plot_draw.mask
+  16DB  05 00           ORA plot_draw.colmask+k
+  16DD  45 00           EOR plot_draw.colmask+k
+  16DF  85 3E           STA plot_draw.mask
+  16E1  4C FA 16        JMP endrun
 .transparent
-  16E9  A5 3C           LDA plot_draw.data_even
-  16EB  05 00           ORA plot_draw.colmask+k
-  16ED  45 00           EOR plot_draw.colmask+k
-  16EF  85 3C           STA plot_draw.data_even
-  16F1  A5 3D           LDA plot_draw.data_odd
-  16F3  05 00           ORA plot_draw.colmask+k
-  16F5  45 00           EOR plot_draw.colmask+k
-  16F7  85 3D           STA plot_draw.data_odd
-  16F9  A5 3B           LDA plot_draw.mask
-  16FB  05 00           ORA plot_draw.colmask+k
-  16FD  85 3B           STA plot_draw.mask
+  16E4  A5 3F           LDA plot_draw.data_even
+  16E6  05 00           ORA plot_draw.colmask+k
+  16E8  45 00           EOR plot_draw.colmask+k
+  16EA  85 3F           STA plot_draw.data_even
+  16EC  A5 40           LDA plot_draw.data_odd
+  16EE  05 00           ORA plot_draw.colmask+k
+  16F0  45 00           EOR plot_draw.colmask+k
+  16F2  85 40           STA plot_draw.data_odd
+  16F4  A5 3E           LDA plot_draw.mask
+  16F6  05 00           ORA plot_draw.colmask+k
+  16F8  85 3E           STA plot_draw.mask
 .endrun
-  16FF  BD C7 21        LDA shr3,X
-  1702  A8              TAY
-  1703  B9 A3 21        LDA PY+1,Y
-  1706  85 08           STA plot_draw.cp+k
-  1708  C5 3A           CMP plot_draw.cnt
-  170A  F0 B0           BEQ fetch
-  170C  A5 3A           LDA plot_draw.cnt
+  16FA  BD 42 20        LDA shr3,X
+  16FD  A8              TAY
+  16FE  B9 1E 20        LDA PY+1,Y
+  1701  85 08           STA plot_draw.cp+k
+  1703  C5 3D           CMP plot_draw.cnt
+  1705  F0 B0           BEQ fetch
+  1707  A5 3D           LDA plot_draw.cnt
 .@
-  170E  C5 09           CMP plot_draw.cp+k
-  1710  D0 50           BNE @+
-  1712                  changecol k, swallow
+  1709  C5 09           CMP plot_draw.cp+k
+  170B  D0 50           BNE @+
+  170D                  changecol k, swallow
 .fetch
-  1712  A4 05           LDY plot_draw.idx+k
-  1714  B1 20           LDA (plot_setup.spr),Y
-  1716  E6 05           INC plot_draw.idx+k
-  1718  AA              TAX
-  1719  29 07           AND #7
-  171B  F0 22           BEQ transparent
-  171D  0A              ASL A
-  171E  A8              TAY
-  171F  B1 24           LDA (plot_draw.pal),Y
-  1721  45 3C           EOR plot_draw.data_even
-  1723  25 01           AND plot_draw.colmask+k
-  1725  45 3C           EOR plot_draw.data_even
-  1727  85 3C           STA plot_draw.data_even
-  1729  C8              INY
-  172A  B1 24           LDA (plot_draw.pal),Y
-  172C  45 3D           EOR plot_draw.data_odd
-  172E  25 01           AND plot_draw.colmask+k
-  1730  45 3D           EOR plot_draw.data_odd
-  1732  85 3D           STA plot_draw.data_odd
-  1734  A5 3B           LDA plot_draw.mask
-  1736  05 01           ORA plot_draw.colmask+k
-  1738  45 01           EOR plot_draw.colmask+k
-  173A  85 3B           STA plot_draw.mask
-  173C  4C 55 17        JMP endrun
+  170D  A4 05           LDY plot_draw.idx+k
+  170F  B1 22           LDA (plot_setup.spr),Y
+  1711  E6 05           INC plot_draw.idx+k
+  1713  AA              TAX
+  1714  29 07           AND #7
+  1716  F0 22           BEQ transparent
+  1718  0A              ASL A
+  1719  A8              TAY
+  171A  B1 26           LDA (plot_draw.pal),Y
+  171C  45 3F           EOR plot_draw.data_even
+  171E  25 01           AND plot_draw.colmask+k
+  1720  45 3F           EOR plot_draw.data_even
+  1722  85 3F           STA plot_draw.data_even
+  1724  C8              INY
+  1725  B1 26           LDA (plot_draw.pal),Y
+  1727  45 40           EOR plot_draw.data_odd
+  1729  25 01           AND plot_draw.colmask+k
+  172B  45 40           EOR plot_draw.data_odd
+  172D  85 40           STA plot_draw.data_odd
+  172F  A5 3E           LDA plot_draw.mask
+  1731  05 01           ORA plot_draw.colmask+k
+  1733  45 01           EOR plot_draw.colmask+k
+  1735  85 3E           STA plot_draw.mask
+  1737  4C 50 17        JMP endrun
 .transparent
-  173F  A5 3C           LDA plot_draw.data_even
-  1741  05 01           ORA plot_draw.colmask+k
-  1743  45 01           EOR plot_draw.colmask+k
-  1745  85 3C           STA plot_draw.data_even
-  1747  A5 3D           LDA plot_draw.data_odd
-  1749  05 01           ORA plot_draw.colmask+k
-  174B  45 01           EOR plot_draw.colmask+k
-  174D  85 3D           STA plot_draw.data_odd
-  174F  A5 3B           LDA plot_draw.mask
-  1751  05 01           ORA plot_draw.colmask+k
-  1753  85 3B           STA plot_draw.mask
+  173A  A5 3F           LDA plot_draw.data_even
+  173C  05 01           ORA plot_draw.colmask+k
+  173E  45 01           EOR plot_draw.colmask+k
+  1740  85 3F           STA plot_draw.data_even
+  1742  A5 40           LDA plot_draw.data_odd
+  1744  05 01           ORA plot_draw.colmask+k
+  1746  45 01           EOR plot_draw.colmask+k
+  1748  85 40           STA plot_draw.data_odd
+  174A  A5 3E           LDA plot_draw.mask
+  174C  05 01           ORA plot_draw.colmask+k
+  174E  85 3E           STA plot_draw.mask
 .endrun
-  1755  BD C7 21        LDA shr3,X
-  1758  A8              TAY
-  1759  B9 A3 21        LDA PY+1,Y
-  175C  85 09           STA plot_draw.cp+k
-  175E  C5 3A           CMP plot_draw.cnt
-  1760  F0 B0           BEQ fetch
+  1750  BD 42 20        LDA shr3,X
+  1753  A8              TAY
+  1754  B9 1E 20        LDA PY+1,Y
+  1757  85 09           STA plot_draw.cp+k
+  1759  C5 3D           CMP plot_draw.cnt
+  175B  F0 B0           BEQ fetch
 .@
-  1762  A5 08           LDA plot_draw.cp+0
-  1764  C5 09           CMP plot_draw.cp+k
-  1766  90 02           BCC @+
-  1768  A5 09           LDA plot_draw.cp+k
+  175D  A5 08           LDA plot_draw.cp+0
+  175F  C5 09           CMP plot_draw.cp+k
+  1761  90 02           BCC @+
+  1763  A5 09           LDA plot_draw.cp+k
 .@
-  176A  A8              TAY
-  176B  38              SEC
-  176C  E5 3A           SBC plot_draw.cnt
-  176E  AA              TAX
-  176F  84 3A           STY plot_draw.cnt
-  1771  A4 36           LDY plot_draw.ysave
-  1773  4C 92 12        JMP plot_draw.stretch
+  1765  A8              TAY
+  1766  38              SEC
+  1767  E5 3D           SBC plot_draw.cnt
+  1769  AA              TAX
+  176A  84 3D           STY plot_draw.cnt
+  176C  A4 39           LDY plot_draw.ysave
+  176E  4C 8D 12        JMP plot_draw.stretch
 .schanges3
-  1776                  changesbody 3, TRUE
-  1776  84 36           STY plot_draw.ysave
-  1778  A5 3A           LDA plot_draw.cnt
-  177A  C5 08           CMP plot_draw.cp+k
-  177C  D0 52           BNE @+
-  177E                  changecol k, swallow
+  1771                  changesbody 3, TRUE
+  1771  84 39           STY plot_draw.ysave
+  1773  A5 3D           LDA plot_draw.cnt
+  1775  C5 08           CMP plot_draw.cp+k
+  1777  D0 52           BNE @+
+  1779                  changecol k, swallow
 .fetch
-  177E  A4 04           LDY plot_draw.idx+k
-  1780  B1 20           LDA (plot_setup.spr),Y
-  1782  E6 04           INC plot_draw.idx+k
-  1784  AA              TAX
-  1785  29 07           AND #7
-  1787  F0 22           BEQ transparent
-  1789  0A              ASL A
-  178A  A8              TAY
-  178B  B1 24           LDA (plot_draw.pal),Y
-  178D  45 3C           EOR plot_draw.data_even
-  178F  25 00           AND plot_draw.colmask+k
-  1791  45 3C           EOR plot_draw.data_even
-  1793  85 3C           STA plot_draw.data_even
-  1795  C8              INY
-  1796  B1 24           LDA (plot_draw.pal),Y
-  1798  45 3D           EOR plot_draw.data_odd
-  179A  25 00           AND plot_draw.colmask+k
-  179C  45 3D           EOR plot_draw.data_odd
-  179E  85 3D           STA plot_draw.data_odd
-  17A0  A5 3B           LDA plot_draw.mask
-  17A2  05 00           ORA plot_draw.colmask+k
-  17A4  45 00           EOR plot_draw.colmask+k
-  17A6  85 3B           STA plot_draw.mask
-  17A8  4C C1 17        JMP endrun
+  1779  A4 04           LDY plot_draw.idx+k
+  177B  B1 22           LDA (plot_setup.spr),Y
+  177D  E6 04           INC plot_draw.idx+k
+  177F  AA              TAX
+  1780  29 07           AND #7
+  1782  F0 22           BEQ transparent
+  1784  0A              ASL A
+  1785  A8              TAY
+  1786  B1 26           LDA (plot_draw.pal),Y
+  1788  45 3F           EOR plot_draw.data_even
+  178A  25 00           AND plot_draw.colmask+k
+  178C  45 3F           EOR plot_draw.data_even
+  178E  85 3F           STA plot_draw.data_even
+  1790  C8              INY
+  1791  B1 26           LDA (plot_draw.pal),Y
+  1793  45 40           EOR plot_draw.data_odd
+  1795  25 00           AND plot_draw.colmask+k
+  1797  45 40           EOR plot_draw.data_odd
+  1799  85 40           STA plot_draw.data_odd
+  179B  A5 3E           LDA plot_draw.mask
+  179D  05 00           ORA plot_draw.colmask+k
+  179F  45 00           EOR plot_draw.colmask+k
+  17A1  85 3E           STA plot_draw.mask
+  17A3  4C BC 17        JMP endrun
 .transparent
-  17AB  A5 3C           LDA plot_draw.data_even
-  17AD  05 00           ORA plot_draw.colmask+k
-  17AF  45 00           EOR plot_draw.colmask+k
-  17B1  85 3C           STA plot_draw.data_even
-  17B3  A5 3D           LDA plot_draw.data_odd
-  17B5  05 00           ORA plot_draw.colmask+k
-  17B7  45 00           EOR plot_draw.colmask+k
-  17B9  85 3D           STA plot_draw.data_odd
-  17BB  A5 3B           LDA plot_draw.mask
-  17BD  05 00           ORA plot_draw.colmask+k
-  17BF  85 3B           STA plot_draw.mask
+  17A6  A5 3F           LDA plot_draw.data_even
+  17A8  05 00           ORA plot_draw.colmask+k
+  17AA  45 00           EOR plot_draw.colmask+k
+  17AC  85 3F           STA plot_draw.data_even
+  17AE  A5 40           LDA plot_draw.data_odd
+  17B0  05 00           ORA plot_draw.colmask+k
+  17B2  45 00           EOR plot_draw.colmask+k
+  17B4  85 40           STA plot_draw.data_odd
+  17B6  A5 3E           LDA plot_draw.mask
+  17B8  05 00           ORA plot_draw.colmask+k
+  17BA  85 3E           STA plot_draw.mask
 .endrun
-  17C1  BD C7 21        LDA shr3,X
-  17C4  A8              TAY
-  17C5  B9 A3 21        LDA PY+1,Y
-  17C8  85 08           STA plot_draw.cp+k
-  17CA  C5 3A           CMP plot_draw.cnt
-  17CC  F0 B0           BEQ fetch
-  17CE  A5 3A           LDA plot_draw.cnt
+  17BC  BD 42 20        LDA shr3,X
+  17BF  A8              TAY
+  17C0  B9 1E 20        LDA PY+1,Y
+  17C3  85 08           STA plot_draw.cp+k
+  17C5  C5 3D           CMP plot_draw.cnt
+  17C7  F0 B0           BEQ fetch
+  17C9  A5 3D           LDA plot_draw.cnt
 .@
-  17D0  C5 09           CMP plot_draw.cp+k
-  17D2  D0 52           BNE @+
-  17D4                  changecol k, swallow
+  17CB  C5 09           CMP plot_draw.cp+k
+  17CD  D0 52           BNE @+
+  17CF                  changecol k, swallow
 .fetch
-  17D4  A4 05           LDY plot_draw.idx+k
-  17D6  B1 20           LDA (plot_setup.spr),Y
-  17D8  E6 05           INC plot_draw.idx+k
-  17DA  AA              TAX
-  17DB  29 07           AND #7
-  17DD  F0 22           BEQ transparent
-  17DF  0A              ASL A
-  17E0  A8              TAY
-  17E1  B1 24           LDA (plot_draw.pal),Y
-  17E3  45 3C           EOR plot_draw.data_even
-  17E5  25 01           AND plot_draw.colmask+k
-  17E7  45 3C           EOR plot_draw.data_even
-  17E9  85 3C           STA plot_draw.data_even
-  17EB  C8              INY
-  17EC  B1 24           LDA (plot_draw.pal),Y
-  17EE  45 3D           EOR plot_draw.data_odd
-  17F0  25 01           AND plot_draw.colmask+k
-  17F2  45 3D           EOR plot_draw.data_odd
-  17F4  85 3D           STA plot_draw.data_odd
-  17F6  A5 3B           LDA plot_draw.mask
-  17F8  05 01           ORA plot_draw.colmask+k
-  17FA  45 01           EOR plot_draw.colmask+k
-  17FC  85 3B           STA plot_draw.mask
-  17FE  4C 17 18        JMP endrun
+  17CF  A4 05           LDY plot_draw.idx+k
+  17D1  B1 22           LDA (plot_setup.spr),Y
+  17D3  E6 05           INC plot_draw.idx+k
+  17D5  AA              TAX
+  17D6  29 07           AND #7
+  17D8  F0 22           BEQ transparent
+  17DA  0A              ASL A
+  17DB  A8              TAY
+  17DC  B1 26           LDA (plot_draw.pal),Y
+  17DE  45 3F           EOR plot_draw.data_even
+  17E0  25 01           AND plot_draw.colmask+k
+  17E2  45 3F           EOR plot_draw.data_even
+  17E4  85 3F           STA plot_draw.data_even
+  17E6  C8              INY
+  17E7  B1 26           LDA (plot_draw.pal),Y
+  17E9  45 40           EOR plot_draw.data_odd
+  17EB  25 01           AND plot_draw.colmask+k
+  17ED  45 40           EOR plot_draw.data_odd
+  17EF  85 40           STA plot_draw.data_odd
+  17F1  A5 3E           LDA plot_draw.mask
+  17F3  05 01           ORA plot_draw.colmask+k
+  17F5  45 01           EOR plot_draw.colmask+k
+  17F7  85 3E           STA plot_draw.mask
+  17F9  4C 12 18        JMP endrun
 .transparent
-  1801  A5 3C           LDA plot_draw.data_even
-  1803  05 01           ORA plot_draw.colmask+k
-  1805  45 01           EOR plot_draw.colmask+k
-  1807  85 3C           STA plot_draw.data_even
-  1809  A5 3D           LDA plot_draw.data_odd
-  180B  05 01           ORA plot_draw.colmask+k
-  180D  45 01           EOR plot_draw.colmask+k
-  180F  85 3D           STA plot_draw.data_odd
-  1811  A5 3B           LDA plot_draw.mask
-  1813  05 01           ORA plot_draw.colmask+k
-  1815  85 3B           STA plot_draw.mask
+  17FC  A5 3F           LDA plot_draw.data_even
+  17FE  05 01           ORA plot_draw.colmask+k
+  1800  45 01           EOR plot_draw.colmask+k
+  1802  85 3F           STA plot_draw.data_even
+  1804  A5 40           LDA plot_draw.data_odd
+  1806  05 01           ORA plot_draw.colmask+k
+  1808  45 01           EOR plot_draw.colmask+k
+  180A  85 40           STA plot_draw.data_odd
+  180C  A5 3E           LDA plot_draw.mask
+  180E  05 01           ORA plot_draw.colmask+k
+  1810  85 3E           STA plot_draw.mask
 .endrun
-  1817  BD C7 21        LDA shr3,X
-  181A  A8              TAY
-  181B  B9 A3 21        LDA PY+1,Y
-  181E  85 09           STA plot_draw.cp+k
-  1820  C5 3A           CMP plot_draw.cnt
-  1822  F0 B0           BEQ fetch
-  1824  A5 3A           LDA plot_draw.cnt
+  1812  BD 42 20        LDA shr3,X
+  1815  A8              TAY
+  1816  B9 1E 20        LDA PY+1,Y
+  1819  85 09           STA plot_draw.cp+k
+  181B  C5 3D           CMP plot_draw.cnt
+  181D  F0 B0           BEQ fetch
+  181F  A5 3D           LDA plot_draw.cnt
 .@
-  1826  C5 0A           CMP plot_draw.cp+k
-  1828  D0 50           BNE @+
-  182A                  changecol k, swallow
+  1821  C5 0A           CMP plot_draw.cp+k
+  1823  D0 50           BNE @+
+  1825                  changecol k, swallow
 .fetch
-  182A  A4 06           LDY plot_draw.idx+k
-  182C  B1 20           LDA (plot_setup.spr),Y
-  182E  E6 06           INC plot_draw.idx+k
-  1830  AA              TAX
-  1831  29 07           AND #7
-  1833  F0 22           BEQ transparent
-  1835  0A              ASL A
-  1836  A8              TAY
-  1837  B1 24           LDA (plot_draw.pal),Y
-  1839  45 3C           EOR plot_draw.data_even
-  183B  25 02           AND plot_draw.colmask+k
-  183D  45 3C           EOR plot_draw.data_even
-  183F  85 3C           STA plot_draw.data_even
-  1841  C8              INY
-  1842  B1 24           LDA (plot_draw.pal),Y
-  1844  45 3D           EOR plot_draw.data_odd
-  1846  25 02           AND plot_draw.colmask+k
-  1848  45 3D           EOR plot_draw.data_odd
-  184A  85 3D           STA plot_draw.data_odd
-  184C  A5 3B           LDA plot_draw.mask
-  184E  05 02           ORA plot_draw.colmask+k
-  1850  45 02           EOR plot_draw.colmask+k
-  1852  85 3B           STA plot_draw.mask
-  1854  4C 6D 18        JMP endrun
+  1825  A4 06           LDY plot_draw.idx+k
+  1827  B1 22           LDA (plot_setup.spr),Y
+  1829  E6 06           INC plot_draw.idx+k
+  182B  AA              TAX
+  182C  29 07           AND #7
+  182E  F0 22           BEQ transparent
+  1830  0A              ASL A
+  1831  A8              TAY
+  1832  B1 26           LDA (plot_draw.pal),Y
+  1834  45 3F           EOR plot_draw.data_even
+  1836  25 02           AND plot_draw.colmask+k
+  1838  45 3F           EOR plot_draw.data_even
+  183A  85 3F           STA plot_draw.data_even
+  183C  C8              INY
+  183D  B1 26           LDA (plot_draw.pal),Y
+  183F  45 40           EOR plot_draw.data_odd
+  1841  25 02           AND plot_draw.colmask+k
+  1843  45 40           EOR plot_draw.data_odd
+  1845  85 40           STA plot_draw.data_odd
+  1847  A5 3E           LDA plot_draw.mask
+  1849  05 02           ORA plot_draw.colmask+k
+  184B  45 02           EOR plot_draw.colmask+k
+  184D  85 3E           STA plot_draw.mask
+  184F  4C 68 18        JMP endrun
 .transparent
-  1857  A5 3C           LDA plot_draw.data_even
-  1859  05 02           ORA plot_draw.colmask+k
-  185B  45 02           EOR plot_draw.colmask+k
-  185D  85 3C           STA plot_draw.data_even
-  185F  A5 3D           LDA plot_draw.data_odd
-  1861  05 02           ORA plot_draw.colmask+k
-  1863  45 02           EOR plot_draw.colmask+k
-  1865  85 3D           STA plot_draw.data_odd
-  1867  A5 3B           LDA plot_draw.mask
-  1869  05 02           ORA plot_draw.colmask+k
-  186B  85 3B           STA plot_draw.mask
+  1852  A5 3F           LDA plot_draw.data_even
+  1854  05 02           ORA plot_draw.colmask+k
+  1856  45 02           EOR plot_draw.colmask+k
+  1858  85 3F           STA plot_draw.data_even
+  185A  A5 40           LDA plot_draw.data_odd
+  185C  05 02           ORA plot_draw.colmask+k
+  185E  45 02           EOR plot_draw.colmask+k
+  1860  85 40           STA plot_draw.data_odd
+  1862  A5 3E           LDA plot_draw.mask
+  1864  05 02           ORA plot_draw.colmask+k
+  1866  85 3E           STA plot_draw.mask
 .endrun
-  186D  BD C7 21        LDA shr3,X
-  1870  A8              TAY
-  1871  B9 A3 21        LDA PY+1,Y
-  1874  85 0A           STA plot_draw.cp+k
-  1876  C5 3A           CMP plot_draw.cnt
-  1878  F0 B0           BEQ fetch
+  1868  BD 42 20        LDA shr3,X
+  186B  A8              TAY
+  186C  B9 1E 20        LDA PY+1,Y
+  186F  85 0A           STA plot_draw.cp+k
+  1871  C5 3D           CMP plot_draw.cnt
+  1873  F0 B0           BEQ fetch
 .@
-  187A  A5 08           LDA plot_draw.cp+0
-  187C  C5 09           CMP plot_draw.cp+k
-  187E  90 02           BCC @+
-  1880  A5 09           LDA plot_draw.cp+k
+  1875  A5 08           LDA plot_draw.cp+0
+  1877  C5 09           CMP plot_draw.cp+k
+  1879  90 02           BCC @+
+  187B  A5 09           LDA plot_draw.cp+k
 .@
-  1882  C5 0A           CMP plot_draw.cp+k
-  1884  90 02           BCC @+
-  1886  A5 0A           LDA plot_draw.cp+k
+  187D  C5 0A           CMP plot_draw.cp+k
+  187F  90 02           BCC @+
+  1881  A5 0A           LDA plot_draw.cp+k
 .@
-  1888  A8              TAY
-  1889  38              SEC
-  188A  E5 3A           SBC plot_draw.cnt
-  188C  AA              TAX
-  188D  84 3A           STY plot_draw.cnt
-  188F  A4 36           LDY plot_draw.ysave
-  1891  4C 92 12        JMP plot_draw.stretch
+  1883  A8              TAY
+  1884  38              SEC
+  1885  E5 3D           SBC plot_draw.cnt
+  1887  AA              TAX
+  1888  84 3D           STY plot_draw.cnt
+  188A  A4 39           LDY plot_draw.ysave
+  188C  4C 8D 12        JMP plot_draw.stretch
 .schanges4
-  1894                  changesbody 4, TRUE
-  1894  84 36           STY plot_draw.ysave
-  1896  A5 3A           LDA plot_draw.cnt
-  1898  C5 08           CMP plot_draw.cp+k
-  189A  D0 52           BNE @+
-  189C                  changecol k, swallow
+  188F                  changesbody 4, TRUE
+  188F  84 39           STY plot_draw.ysave
+  1891  A5 3D           LDA plot_draw.cnt
+  1893  C5 08           CMP plot_draw.cp+k
+  1895  D0 52           BNE @+
+  1897                  changecol k, swallow
 .fetch
-  189C  A4 04           LDY plot_draw.idx+k
-  189E  B1 20           LDA (plot_setup.spr),Y
-  18A0  E6 04           INC plot_draw.idx+k
-  18A2  AA              TAX
-  18A3  29 07           AND #7
-  18A5  F0 22           BEQ transparent
-  18A7  0A              ASL A
-  18A8  A8              TAY
-  18A9  B1 24           LDA (plot_draw.pal),Y
-  18AB  45 3C           EOR plot_draw.data_even
-  18AD  25 00           AND plot_draw.colmask+k
-  18AF  45 3C           EOR plot_draw.data_even
-  18B1  85 3C           STA plot_draw.data_even
-  18B3  C8              INY
-  18B4  B1 24           LDA (plot_draw.pal),Y
-  18B6  45 3D           EOR plot_draw.data_odd
-  18B8  25 00           AND plot_draw.colmask+k
-  18BA  45 3D           EOR plot_draw.data_odd
-  18BC  85 3D           STA plot_draw.data_odd
-  18BE  A5 3B           LDA plot_draw.mask
-  18C0  05 00           ORA plot_draw.colmask+k
-  18C2  45 00           EOR plot_draw.colmask+k
-  18C4  85 3B           STA plot_draw.mask
-  18C6  4C DF 18        JMP endrun
+  1897  A4 04           LDY plot_draw.idx+k
+  1899  B1 22           LDA (plot_setup.spr),Y
+  189B  E6 04           INC plot_draw.idx+k
+  189D  AA              TAX
+  189E  29 07           AND #7
+  18A0  F0 22           BEQ transparent
+  18A2  0A              ASL A
+  18A3  A8              TAY
+  18A4  B1 26           LDA (plot_draw.pal),Y
+  18A6  45 3F           EOR plot_draw.data_even
+  18A8  25 00           AND plot_draw.colmask+k
+  18AA  45 3F           EOR plot_draw.data_even
+  18AC  85 3F           STA plot_draw.data_even
+  18AE  C8              INY
+  18AF  B1 26           LDA (plot_draw.pal),Y
+  18B1  45 40           EOR plot_draw.data_odd
+  18B3  25 00           AND plot_draw.colmask+k
+  18B5  45 40           EOR plot_draw.data_odd
+  18B7  85 40           STA plot_draw.data_odd
+  18B9  A5 3E           LDA plot_draw.mask
+  18BB  05 00           ORA plot_draw.colmask+k
+  18BD  45 00           EOR plot_draw.colmask+k
+  18BF  85 3E           STA plot_draw.mask
+  18C1  4C DA 18        JMP endrun
 .transparent
-  18C9  A5 3C           LDA plot_draw.data_even
-  18CB  05 00           ORA plot_draw.colmask+k
-  18CD  45 00           EOR plot_draw.colmask+k
-  18CF  85 3C           STA plot_draw.data_even
-  18D1  A5 3D           LDA plot_draw.data_odd
-  18D3  05 00           ORA plot_draw.colmask+k
-  18D5  45 00           EOR plot_draw.colmask+k
-  18D7  85 3D           STA plot_draw.data_odd
-  18D9  A5 3B           LDA plot_draw.mask
-  18DB  05 00           ORA plot_draw.colmask+k
-  18DD  85 3B           STA plot_draw.mask
+  18C4  A5 3F           LDA plot_draw.data_even
+  18C6  05 00           ORA plot_draw.colmask+k
+  18C8  45 00           EOR plot_draw.colmask+k
+  18CA  85 3F           STA plot_draw.data_even
+  18CC  A5 40           LDA plot_draw.data_odd
+  18CE  05 00           ORA plot_draw.colmask+k
+  18D0  45 00           EOR plot_draw.colmask+k
+  18D2  85 40           STA plot_draw.data_odd
+  18D4  A5 3E           LDA plot_draw.mask
+  18D6  05 00           ORA plot_draw.colmask+k
+  18D8  85 3E           STA plot_draw.mask
 .endrun
-  18DF  BD C7 21        LDA shr3,X
-  18E2  A8              TAY
-  18E3  B9 A3 21        LDA PY+1,Y
-  18E6  85 08           STA plot_draw.cp+k
-  18E8  C5 3A           CMP plot_draw.cnt
-  18EA  F0 B0           BEQ fetch
-  18EC  A5 3A           LDA plot_draw.cnt
+  18DA  BD 42 20        LDA shr3,X
+  18DD  A8              TAY
+  18DE  B9 1E 20        LDA PY+1,Y
+  18E1  85 08           STA plot_draw.cp+k
+  18E3  C5 3D           CMP plot_draw.cnt
+  18E5  F0 B0           BEQ fetch
+  18E7  A5 3D           LDA plot_draw.cnt
 .@
-  18EE  C5 09           CMP plot_draw.cp+k
-  18F0  D0 52           BNE @+
-  18F2                  changecol k, swallow
+  18E9  C5 09           CMP plot_draw.cp+k
+  18EB  D0 52           BNE @+
+  18ED                  changecol k, swallow
 .fetch
-  18F2  A4 05           LDY plot_draw.idx+k
-  18F4  B1 20           LDA (plot_setup.spr),Y
-  18F6  E6 05           INC plot_draw.idx+k
-  18F8  AA              TAX
-  18F9  29 07           AND #7
-  18FB  F0 22           BEQ transparent
-  18FD  0A              ASL A
-  18FE  A8              TAY
-  18FF  B1 24           LDA (plot_draw.pal),Y
-  1901  45 3C           EOR plot_draw.data_even
-  1903  25 01           AND plot_draw.colmask+k
-  1905  45 3C           EOR plot_draw.data_even
-  1907  85 3C           STA plot_draw.data_even
-  1909  C8              INY
-  190A  B1 24           LDA (plot_draw.pal),Y
-  190C  45 3D           EOR plot_draw.data_odd
-  190E  25 01           AND plot_draw.colmask+k
-  1910  45 3D           EOR plot_draw.data_odd
-  1912  85 3D           STA plot_draw.data_odd
-  1914  A5 3B           LDA plot_draw.mask
-  1916  05 01           ORA plot_draw.colmask+k
-  1918  45 01           EOR plot_draw.colmask+k
-  191A  85 3B           STA plot_draw.mask
-  191C  4C 35 19        JMP endrun
+  18ED  A4 05           LDY plot_draw.idx+k
+  18EF  B1 22           LDA (plot_setup.spr),Y
+  18F1  E6 05           INC plot_draw.idx+k
+  18F3  AA              TAX
+  18F4  29 07           AND #7
+  18F6  F0 22           BEQ transparent
+  18F8  0A              ASL A
+  18F9  A8              TAY
+  18FA  B1 26           LDA (plot_draw.pal),Y
+  18FC  45 3F           EOR plot_draw.data_even
+  18FE  25 01           AND plot_draw.colmask+k
+  1900  45 3F           EOR plot_draw.data_even
+  1902  85 3F           STA plot_draw.data_even
+  1904  C8              INY
+  1905  B1 26           LDA (plot_draw.pal),Y
+  1907  45 40           EOR plot_draw.data_odd
+  1909  25 01           AND plot_draw.colmask+k
+  190B  45 40           EOR plot_draw.data_odd
+  190D  85 40           STA plot_draw.data_odd
+  190F  A5 3E           LDA plot_draw.mask
+  1911  05 01           ORA plot_draw.colmask+k
+  1913  45 01           EOR plot_draw.colmask+k
+  1915  85 3E           STA plot_draw.mask
+  1917  4C 30 19        JMP endrun
 .transparent
-  191F  A5 3C           LDA plot_draw.data_even
-  1921  05 01           ORA plot_draw.colmask+k
-  1923  45 01           EOR plot_draw.colmask+k
-  1925  85 3C           STA plot_draw.data_even
-  1927  A5 3D           LDA plot_draw.data_odd
-  1929  05 01           ORA plot_draw.colmask+k
-  192B  45 01           EOR plot_draw.colmask+k
-  192D  85 3D           STA plot_draw.data_odd
-  192F  A5 3B           LDA plot_draw.mask
-  1931  05 01           ORA plot_draw.colmask+k
-  1933  85 3B           STA plot_draw.mask
+  191A  A5 3F           LDA plot_draw.data_even
+  191C  05 01           ORA plot_draw.colmask+k
+  191E  45 01           EOR plot_draw.colmask+k
+  1920  85 3F           STA plot_draw.data_even
+  1922  A5 40           LDA plot_draw.data_odd
+  1924  05 01           ORA plot_draw.colmask+k
+  1926  45 01           EOR plot_draw.colmask+k
+  1928  85 40           STA plot_draw.data_odd
+  192A  A5 3E           LDA plot_draw.mask
+  192C  05 01           ORA plot_draw.colmask+k
+  192E  85 3E           STA plot_draw.mask
 .endrun
-  1935  BD C7 21        LDA shr3,X
-  1938  A8              TAY
-  1939  B9 A3 21        LDA PY+1,Y
-  193C  85 09           STA plot_draw.cp+k
-  193E  C5 3A           CMP plot_draw.cnt
-  1940  F0 B0           BEQ fetch
-  1942  A5 3A           LDA plot_draw.cnt
+  1930  BD 42 20        LDA shr3,X
+  1933  A8              TAY
+  1934  B9 1E 20        LDA PY+1,Y
+  1937  85 09           STA plot_draw.cp+k
+  1939  C5 3D           CMP plot_draw.cnt
+  193B  F0 B0           BEQ fetch
+  193D  A5 3D           LDA plot_draw.cnt
 .@
-  1944  C5 0A           CMP plot_draw.cp+k
-  1946  D0 52           BNE @+
-  1948                  changecol k, swallow
+  193F  C5 0A           CMP plot_draw.cp+k
+  1941  D0 52           BNE @+
+  1943                  changecol k, swallow
 .fetch
-  1948  A4 06           LDY plot_draw.idx+k
-  194A  B1 20           LDA (plot_setup.spr),Y
-  194C  E6 06           INC plot_draw.idx+k
-  194E  AA              TAX
-  194F  29 07           AND #7
-  1951  F0 22           BEQ transparent
-  1953  0A              ASL A
-  1954  A8              TAY
-  1955  B1 24           LDA (plot_draw.pal),Y
-  1957  45 3C           EOR plot_draw.data_even
-  1959  25 02           AND plot_draw.colmask+k
-  195B  45 3C           EOR plot_draw.data_even
-  195D  85 3C           STA plot_draw.data_even
-  195F  C8              INY
-  1960  B1 24           LDA (plot_draw.pal),Y
-  1962  45 3D           EOR plot_draw.data_odd
-  1964  25 02           AND plot_draw.colmask+k
-  1966  45 3D           EOR plot_draw.data_odd
-  1968  85 3D           STA plot_draw.data_odd
-  196A  A5 3B           LDA plot_draw.mask
-  196C  05 02           ORA plot_draw.colmask+k
-  196E  45 02           EOR plot_draw.colmask+k
-  1970  85 3B           STA plot_draw.mask
-  1972  4C 8B 19        JMP endrun
+  1943  A4 06           LDY plot_draw.idx+k
+  1945  B1 22           LDA (plot_setup.spr),Y
+  1947  E6 06           INC plot_draw.idx+k
+  1949  AA              TAX
+  194A  29 07           AND #7
+  194C  F0 22           BEQ transparent
+  194E  0A              ASL A
+  194F  A8              TAY
+  1950  B1 26           LDA (plot_draw.pal),Y
+  1952  45 3F           EOR plot_draw.data_even
+  1954  25 02           AND plot_draw.colmask+k
+  1956  45 3F           EOR plot_draw.data_even
+  1958  85 3F           STA plot_draw.data_even
+  195A  C8              INY
+  195B  B1 26           LDA (plot_draw.pal),Y
+  195D  45 40           EOR plot_draw.data_odd
+  195F  25 02           AND plot_draw.colmask+k
+  1961  45 40           EOR plot_draw.data_odd
+  1963  85 40           STA plot_draw.data_odd
+  1965  A5 3E           LDA plot_draw.mask
+  1967  05 02           ORA plot_draw.colmask+k
+  1969  45 02           EOR plot_draw.colmask+k
+  196B  85 3E           STA plot_draw.mask
+  196D  4C 86 19        JMP endrun
 .transparent
-  1975  A5 3C           LDA plot_draw.data_even
-  1977  05 02           ORA plot_draw.colmask+k
-  1979  45 02           EOR plot_draw.colmask+k
-  197B  85 3C           STA plot_draw.data_even
-  197D  A5 3D           LDA plot_draw.data_odd
-  197F  05 02           ORA plot_draw.colmask+k
-  1981  45 02           EOR plot_draw.colmask+k
-  1983  85 3D           STA plot_draw.data_odd
-  1985  A5 3B           LDA plot_draw.mask
-  1987  05 02           ORA plot_draw.colmask+k
-  1989  85 3B           STA plot_draw.mask
+  1970  A5 3F           LDA plot_draw.data_even
+  1972  05 02           ORA plot_draw.colmask+k
+  1974  45 02           EOR plot_draw.colmask+k
+  1976  85 3F           STA plot_draw.data_even
+  1978  A5 40           LDA plot_draw.data_odd
+  197A  05 02           ORA plot_draw.colmask+k
+  197C  45 02           EOR plot_draw.colmask+k
+  197E  85 40           STA plot_draw.data_odd
+  1980  A5 3E           LDA plot_draw.mask
+  1982  05 02           ORA plot_draw.colmask+k
+  1984  85 3E           STA plot_draw.mask
 .endrun
-  198B  BD C7 21        LDA shr3,X
-  198E  A8              TAY
-  198F  B9 A3 21        LDA PY+1,Y
-  1992  85 0A           STA plot_draw.cp+k
-  1994  C5 3A           CMP plot_draw.cnt
-  1996  F0 B0           BEQ fetch
-  1998  A5 3A           LDA plot_draw.cnt
+  1986  BD 42 20        LDA shr3,X
+  1989  A8              TAY
+  198A  B9 1E 20        LDA PY+1,Y
+  198D  85 0A           STA plot_draw.cp+k
+  198F  C5 3D           CMP plot_draw.cnt
+  1991  F0 B0           BEQ fetch
+  1993  A5 3D           LDA plot_draw.cnt
 .@
-  199A  C5 0B           CMP plot_draw.cp+k
-  199C  D0 50           BNE @+
-  199E                  changecol k, swallow
+  1995  C5 0B           CMP plot_draw.cp+k
+  1997  D0 50           BNE @+
+  1999                  changecol k, swallow
 .fetch
-  199E  A4 07           LDY plot_draw.idx+k
-  19A0  B1 20           LDA (plot_setup.spr),Y
-  19A2  E6 07           INC plot_draw.idx+k
-  19A4  AA              TAX
-  19A5  29 07           AND #7
-  19A7  F0 22           BEQ transparent
-  19A9  0A              ASL A
-  19AA  A8              TAY
-  19AB  B1 24           LDA (plot_draw.pal),Y
-  19AD  45 3C           EOR plot_draw.data_even
-  19AF  25 03           AND plot_draw.colmask+k
-  19B1  45 3C           EOR plot_draw.data_even
-  19B3  85 3C           STA plot_draw.data_even
-  19B5  C8              INY
-  19B6  B1 24           LDA (plot_draw.pal),Y
-  19B8  45 3D           EOR plot_draw.data_odd
-  19BA  25 03           AND plot_draw.colmask+k
-  19BC  45 3D           EOR plot_draw.data_odd
-  19BE  85 3D           STA plot_draw.data_odd
-  19C0  A5 3B           LDA plot_draw.mask
-  19C2  05 03           ORA plot_draw.colmask+k
-  19C4  45 03           EOR plot_draw.colmask+k
-  19C6  85 3B           STA plot_draw.mask
-  19C8  4C E1 19        JMP endrun
+  1999  A4 07           LDY plot_draw.idx+k
+  199B  B1 22           LDA (plot_setup.spr),Y
+  199D  E6 07           INC plot_draw.idx+k
+  199F  AA              TAX
+  19A0  29 07           AND #7
+  19A2  F0 22           BEQ transparent
+  19A4  0A              ASL A
+  19A5  A8              TAY
+  19A6  B1 26           LDA (plot_draw.pal),Y
+  19A8  45 3F           EOR plot_draw.data_even
+  19AA  25 03           AND plot_draw.colmask+k
+  19AC  45 3F           EOR plot_draw.data_even
+  19AE  85 3F           STA plot_draw.data_even
+  19B0  C8              INY
+  19B1  B1 26           LDA (plot_draw.pal),Y
+  19B3  45 40           EOR plot_draw.data_odd
+  19B5  25 03           AND plot_draw.colmask+k
+  19B7  45 40           EOR plot_draw.data_odd
+  19B9  85 40           STA plot_draw.data_odd
+  19BB  A5 3E           LDA plot_draw.mask
+  19BD  05 03           ORA plot_draw.colmask+k
+  19BF  45 03           EOR plot_draw.colmask+k
+  19C1  85 3E           STA plot_draw.mask
+  19C3  4C DC 19        JMP endrun
 .transparent
-  19CB  A5 3C           LDA plot_draw.data_even
-  19CD  05 03           ORA plot_draw.colmask+k
-  19CF  45 03           EOR plot_draw.colmask+k
-  19D1  85 3C           STA plot_draw.data_even
-  19D3  A5 3D           LDA plot_draw.data_odd
-  19D5  05 03           ORA plot_draw.colmask+k
-  19D7  45 03           EOR plot_draw.colmask+k
-  19D9  85 3D           STA plot_draw.data_odd
-  19DB  A5 3B           LDA plot_draw.mask
-  19DD  05 03           ORA plot_draw.colmask+k
-  19DF  85 3B           STA plot_draw.mask
+  19C6  A5 3F           LDA plot_draw.data_even
+  19C8  05 03           ORA plot_draw.colmask+k
+  19CA  45 03           EOR plot_draw.colmask+k
+  19CC  85 3F           STA plot_draw.data_even
+  19CE  A5 40           LDA plot_draw.data_odd
+  19D0  05 03           ORA plot_draw.colmask+k
+  19D2  45 03           EOR plot_draw.colmask+k
+  19D4  85 40           STA plot_draw.data_odd
+  19D6  A5 3E           LDA plot_draw.mask
+  19D8  05 03           ORA plot_draw.colmask+k
+  19DA  85 3E           STA plot_draw.mask
 .endrun
-  19E1  BD C7 21        LDA shr3,X
-  19E4  A8              TAY
-  19E5  B9 A3 21        LDA PY+1,Y
-  19E8  85 0B           STA plot_draw.cp+k
-  19EA  C5 3A           CMP plot_draw.cnt
-  19EC  F0 B0           BEQ fetch
+  19DC  BD 42 20        LDA shr3,X
+  19DF  A8              TAY
+  19E0  B9 1E 20        LDA PY+1,Y
+  19E3  85 0B           STA plot_draw.cp+k
+  19E5  C5 3D           CMP plot_draw.cnt
+  19E7  F0 B0           BEQ fetch
 .@
-  19EE  A5 08           LDA plot_draw.cp+0
-  19F0  C5 09           CMP plot_draw.cp+k
-  19F2  90 02           BCC @+
-  19F4  A5 09           LDA plot_draw.cp+k
+  19E9  A5 08           LDA plot_draw.cp+0
+  19EB  C5 09           CMP plot_draw.cp+k
+  19ED  90 02           BCC @+
+  19EF  A5 09           LDA plot_draw.cp+k
 .@
-  19F6  C5 0A           CMP plot_draw.cp+k
-  19F8  90 02           BCC @+
-  19FA  A5 0A           LDA plot_draw.cp+k
+  19F1  C5 0A           CMP plot_draw.cp+k
+  19F3  90 02           BCC @+
+  19F5  A5 0A           LDA plot_draw.cp+k
 .@
-  19FC  C5 0B           CMP plot_draw.cp+k
-  19FE  90 02           BCC @+
-  1A00  A5 0B           LDA plot_draw.cp+k
+  19F7  C5 0B           CMP plot_draw.cp+k
+  19F9  90 02           BCC @+
+  19FB  A5 0B           LDA plot_draw.cp+k
 .@
-  1A02  A8              TAY
-  1A03  38              SEC
-  1A04  E5 3A           SBC plot_draw.cnt
-  1A06  AA              TAX
-  1A07  84 3A           STY plot_draw.cnt
-  1A09  A4 36           LDY plot_draw.ysave
-  1A0B  4C 92 12        JMP plot_draw.stretch
+  19FD  A8              TAY
+  19FE  38              SEC
+  19FF  E5 3D           SBC plot_draw.cnt
+  1A01  AA              TAX
+  1A02  84 3D           STY plot_draw.cnt
+  1A04  A4 39           LDY plot_draw.ysave
+  1A06  4C 8D 12        JMP plot_draw.stretch
 .changes_lo
-  1A0E  02 3E F8 0A     EQUB LO(changes1), LO(changes2), LO(changes3), LO(changes4)
-  1A12  74 B4 76 94     EQUB LO(schanges1), LO(schanges2), LO(schanges3), LO(schanges4)
+  1A09  FD 39 F3 05     EQUB LO(changes1), LO(changes2), LO(changes3), LO(changes4)
+  1A0D  6F AF 71 8F     EQUB LO(schanges1), LO(schanges2), LO(schanges3), LO(schanges4)
 .changes_hi
-  1A16  13 13 13 15     EQUB HI(changes1), HI(changes2), HI(changes3), HI(changes4)
-  1A1A  16 16 17 18     EQUB HI(schanges1), HI(schanges2), HI(schanges3), HI(schanges4)
+  1A11  12 13 13 15     EQUB HI(changes1), HI(changes2), HI(changes3), HI(changes4)
+  1A15  16 16 17 18     EQUB HI(schanges1), HI(schanges2), HI(schanges3), HI(schanges4)
 .findcol
-  1A1E  A5 34           LDA c
-  1A20  C5 2F           CMP plot_setup.wid
-  1A22  F0 1D           BEQ exhausted
-  1A24  A5 2B           LDA xacc+1
-  1A26  85 36           STA tmp
-  1A28  A5 2A           LDA xacc
-  1A2A  18              CLC
-  1A2B  65 22           ADC plot_setup.scale
-  1A2D  85 2A           STA xacc
-  1A2F  A5 2B           LDA xacc+1
-  1A31  65 23           ADC plot_setup.scale+1
-  1A33  85 2B           STA xacc+1
-  1A35  38              SEC
-  1A36  E5 36           SBC tmp
-  1A38  85 35           STA rem
-  1A3A  F0 01           BEQ nextc
-  1A3C  60              RTS
+  1A19  A5 37           LDA c
+  1A1B  C5 32           CMP plot_setup.wid
+  1A1D  F0 1D           BEQ exhausted
+  1A1F  A5 2B           LDA xacc+1
+  1A21  85 39           STA tmp
+  1A23  A5 2A           LDA xacc
+  1A25  18              CLC
+  1A26  65 24           ADC plot_setup.scale
+  1A28  85 2A           STA xacc
+  1A2A  A5 2B           LDA xacc+1
+  1A2C  65 25           ADC plot_setup.scale+1
+  1A2E  85 2B           STA xacc+1
+  1A30  38              SEC
+  1A31  E5 39           SBC tmp
+  1A33  85 38           STA rem
+  1A35  F0 01           BEQ nextc
+  1A37  60              RTS
 .nextc
-  1A3D  E6 34           INC c
-  1A3F  D0 DD           BNE findcol
+  1A38  E6 37           INC c
+  1A3A  D0 DD           BNE findcol
 .exhausted
-  1A41  60              RTS
+  1A3C  60              RTS
 }
 .plot_draw_a
 {
 acnt = &2C [auto]
 ysave = &2D [auto]
-ystart = &32 [auto]
-pagestart = &33 [auto]
-scr = &26 [auto]
+ystart = &35 [auto]
+pagestart = &36 [auto]
+scr = &20 [auto]
 sproff = &28 [auto]
-c = &34 [auto]
+c = &37 [auto]
 xacc = &2A [auto]
 rem = &2C [auto]
 tmp = &2C [auto]
-alead = &3E [auto]
-aexh = &36 [auto]
+alead = &41 [auto]
+aexh = &39 [auto]
 mtmp = &2C [auto]
 otmp = &2D [auto]
-etmp = &38 [auto]
+etmp = &3B [auto]
 aidx = &0C [auto]
 aend = &10 [auto]
 ce = &14 [auto]
 co = &18 [auto]
 cm = &1C [auto]
-  1A42  A5 26           LDA plot_draw.spry
-  1A44  0A              ASL A
-  1A45  49 FF           EOR #&FF
-  1A47  18              CLC
-  1A48  69 80           ADC #128
-  1A4A  AA              TAX
-  1A4B  29 07           AND #7
-  1A4D  85 32           STA ystart
-  1A4F  8A              TXA
-  1A50  4A              LSR A
-  1A51  4A              LSR A
-  1A52  4A              LSR A
-  1A53  18              CLC
-  1A54  65 2E           ADC drawpage
-  1A56  85 33           STA pagestart
-  1A58  A5 31           LDA plot_draw.sprx
-  1A5A  29 FC           AND #&FC
-  1A5C  0A              ASL A
-  1A5D  85 26           STA scr
-  1A5F  A5 20           LDA plot_setup.spr
-  1A61  18              CLC
-  1A62  69 03           ADC #3
-  1A64  85 28           STA sproff
-  1A66  A5 21           LDA plot_setup.spr+1
-  1A68  69 00           ADC #0
-  1A6A  85 29           STA sproff+1
-  1A6C  A5 30           LDA plot_setup.ph
-  1A6E  F0 11           BEQ tovanished
-  1A70  A9 00           LDA #0
-  1A72  85 34           STA c
-  1A74  85 2B           STA xacc+1
-  1A76  85 36           STA aexh
-  1A78  A9 80           LDA #128
-  1A7A  85 2A           STA xacc
-  1A7C  20 55 1C        JSR findcol
-  1A7F  D0 03           BNE @+
+  1A3D  A5 29           LDA plot_draw.spry
+  1A3F  0A              ASL A
+  1A40  49 FF           EOR #&FF
+  1A42  18              CLC
+  1A43  69 80           ADC #128
+  1A45  AA              TAX
+  1A46  29 07           AND #7
+  1A48  85 35           STA ystart
+  1A4A  8A              TXA
+  1A4B  4A              LSR A
+  1A4C  4A              LSR A
+  1A4D  4A              LSR A
+  1A4E  18              CLC
+  1A4F  65 2E           ADC drawpage
+  1A51  85 36           STA pagestart
+  1A53  A5 34           LDA plot_draw.sprx
+  1A55  29 FC           AND #&FC
+  1A57  0A              ASL A
+  1A58  85 20           STA scr
+  1A5A  A5 22           LDA plot_setup.spr
+  1A5C  18              CLC
+  1A5D  69 03           ADC #3
+  1A5F  85 28           STA sproff
+  1A61  A5 23           LDA plot_setup.spr+1
+  1A63  69 00           ADC #0
+  1A65  85 29           STA sproff+1
+  1A67  A5 33           LDA plot_setup.ph
+  1A69  F0 11           BEQ tovanished
+  1A6B  A9 00           LDA #0
+  1A6D  85 37           STA c
+  1A6F  85 2B           STA xacc+1
+  1A71  85 39           STA aexh
+  1A73  A9 80           LDA #128
+  1A75  85 2A           STA xacc
+  1A77  20 50 1C        JSR findcol
+  1A7A  D0 03           BNE @+
 .tovanished
-  1A81  4C 54 1C        JMP vanished
+  1A7C  4C 4F 1C        JMP vanished
 .@
-  1A84  A5 31           LDA plot_draw.sprx
-  1A86  29 03           AND #3
-  1A88  85 3E           STA alead
+  1A7F  A5 34           LDA plot_draw.sprx
+  1A81  29 03           AND #3
+  1A83  85 41           STA alead
 .striploop
-  1A8A  A2 00           LDX #0
+  1A85  A2 00           LDX #0
 .fillslot
-  1A8C  A5 3E           LDA alead
-  1A8E  F0 05           BEQ @+
-  1A90  C6 3E           DEC alead
-  1A92  4C AE 1A        JMP dummy
+  1A87  A5 41           LDA alead
+  1A89  F0 05           BEQ @+
+  1A8B  C6 41           DEC alead
+  1A8D  4C A9 1A        JMP dummy
 .@
-  1A95  A5 36           LDA aexh
-  1A97  D0 15           BNE dummy
-  1A99  A4 34           LDY c
-  1A9B  B1 28           LDA (sproff),Y
-  1A9D  95 0C           STA aidx,X
-  1A9F  A9 00           LDA #0
-  1AA1  95 10           STA aend,X
-  1AA3  E6 34           INC c
-  1AA5  20 55 1C        JSR findcol
-  1AA8  D0 13           BNE nextslot
-  1AAA  E6 36           INC aexh
-  1AAC  D0 0F           BNE nextslot
+  1A90  A5 39           LDA aexh
+  1A92  D0 15           BNE dummy
+  1A94  A4 37           LDY c
+  1A96  B1 28           LDA (sproff),Y
+  1A98  95 0C           STA aidx,X
+  1A9A  A9 00           LDA #0
+  1A9C  95 10           STA aend,X
+  1A9E  E6 37           INC c
+  1AA0  20 50 1C        JSR findcol
+  1AA3  D0 13           BNE nextslot
+  1AA5  E6 39           INC aexh
+  1AA7  D0 0F           BNE nextslot
 .dummy
-  1AAE  A9 FF           LDA #&FF
-  1AB0  95 10           STA aend,X
-  1AB2  A9 00           LDA #0
-  1AB4  95 14           STA ce,X
-  1AB6  95 18           STA co,X
-  1AB8  BD C3 21        LDA slotbits,X
-  1ABB  95 1C           STA cm,X
+  1AA9  A9 FF           LDA #&FF
+  1AAB  95 10           STA aend,X
+  1AAD  A9 00           LDA #0
+  1AAF  95 14           STA ce,X
+  1AB1  95 18           STA co,X
+  1AB3  BD 3E 20        LDA slotbits,X
+  1AB6  95 1C           STA cm,X
 .nextslot
-  1ABD  E8              INX
-  1ABE  E0 04           CPX #4
-  1AC0  D0 CA           BNE fillslot
-  1AC2  A4 32           LDY ystart
-  1AC4  A5 33           LDA pagestart
-  1AC6  85 27           STA scr+1
-  1AC8  A2 00           LDX #0
+  1AB8  E8              INX
+  1AB9  E0 04           CPX #4
+  1ABB  D0 CA           BNE fillslot
+  1ABD  A4 35           LDY ystart
+  1ABF  A5 36           LDA pagestart
+  1AC1  85 21           STA scr+1
+  1AC3  A2 00           LDX #0
 .pairloop
-  1ACA  E4 10           CPX aend+0
-  1ACC  D0 41           BNE @+
-  1ACE                  afetch 0
-  1ACE  86 2C           STX plot_draw_a.acnt
-  1AD0  84 2D           STY plot_draw_a.ysave
+  1AC5  E4 10           CPX aend+0
+  1AC7  D0 41           BNE @+
+  1AC9                  afetch 0
+  1AC9  86 2C           STX plot_draw_a.acnt
+  1ACB  84 2D           STY plot_draw_a.ysave
 .fetch
-  1AD2  A4 0C           LDY plot_draw_a.aidx+n
-  1AD4  B1 20           LDA (plot_setup.spr),Y
-  1AD6  E6 0C           INC plot_draw_a.aidx+n
-  1AD8  A8              TAY
-  1AD9  B9 C7 21        LDA shr3,Y
-  1ADC  AA              TAX
-  1ADD  BD A3 21        LDA PY+1,X
-  1AE0  85 10           STA plot_draw_a.aend+n
-  1AE2  C5 2C           CMP plot_draw_a.acnt
-  1AE4  F0 EC           BEQ fetch
-  1AE6  98              TYA
-  1AE7  29 07           AND #7
-  1AE9  F0 16           BEQ transp
-  1AEB  09 10           ORA #16+n*8
-  1AED  A8              TAY
-  1AEE  B1 24           LDA (plot_draw.pal),Y
-  1AF0  85 14           STA plot_draw_a.ce+n
-  1AF2  98              TYA
-  1AF3  49 20           EOR #(16+n*8) EOR (48+n*8)
-  1AF5  A8              TAY
-  1AF6  B1 24           LDA (plot_draw.pal),Y
-  1AF8  85 18           STA plot_draw_a.co+n
-  1AFA  A9 00           LDA #0
-  1AFC  85 1C           STA plot_draw_a.cm+n
-  1AFE  4C 0B 1B        JMP fdone
+  1ACD  A4 0C           LDY plot_draw_a.aidx+n
+  1ACF  B1 22           LDA (plot_setup.spr),Y
+  1AD1  E6 0C           INC plot_draw_a.aidx+n
+  1AD3  A8              TAY
+  1AD4  B9 42 20        LDA shr3,Y
+  1AD7  AA              TAX
+  1AD8  BD 1E 20        LDA PY+1,X
+  1ADB  85 10           STA plot_draw_a.aend+n
+  1ADD  C5 2C           CMP plot_draw_a.acnt
+  1ADF  F0 EC           BEQ fetch
+  1AE1  98              TYA
+  1AE2  29 07           AND #7
+  1AE4  F0 16           BEQ transp
+  1AE6  09 10           ORA #16+n*8
+  1AE8  A8              TAY
+  1AE9  B1 26           LDA (plot_draw.pal),Y
+  1AEB  85 14           STA plot_draw_a.ce+n
+  1AED  98              TYA
+  1AEE  49 20           EOR #(16+n*8) EOR (48+n*8)
+  1AF0  A8              TAY
+  1AF1  B1 26           LDA (plot_draw.pal),Y
+  1AF3  85 18           STA plot_draw_a.co+n
+  1AF5  A9 00           LDA #0
+  1AF7  85 1C           STA plot_draw_a.cm+n
+  1AF9  4C 06 1B        JMP fdone
 .transp
-  1B01  A9 00           LDA #0
-  1B03  85 14           STA plot_draw_a.ce+n
-  1B05  85 18           STA plot_draw_a.co+n
-  1B07  A9 88           LDA #slotmask(n)
-  1B09  85 1C           STA plot_draw_a.cm+n
+  1AFC  A9 00           LDA #0
+  1AFE  85 14           STA plot_draw_a.ce+n
+  1B00  85 18           STA plot_draw_a.co+n
+  1B02  A9 88           LDA #slotmask(n)
+  1B04  85 1C           STA plot_draw_a.cm+n
 .fdone
-  1B0B  A6 2C           LDX plot_draw_a.acnt
-  1B0D  A4 2D           LDY plot_draw_a.ysave
+  1B06  A6 2C           LDX plot_draw_a.acnt
+  1B08  A4 2D           LDY plot_draw_a.ysave
 .@
-  1B0F  E4 11           CPX aend+1
-  1B11  D0 41           BNE @+
-  1B13                  afetch 1
-  1B13  86 2C           STX plot_draw_a.acnt
-  1B15  84 2D           STY plot_draw_a.ysave
+  1B0A  E4 11           CPX aend+1
+  1B0C  D0 41           BNE @+
+  1B0E                  afetch 1
+  1B0E  86 2C           STX plot_draw_a.acnt
+  1B10  84 2D           STY plot_draw_a.ysave
 .fetch
-  1B17  A4 0D           LDY plot_draw_a.aidx+n
-  1B19  B1 20           LDA (plot_setup.spr),Y
-  1B1B  E6 0D           INC plot_draw_a.aidx+n
-  1B1D  A8              TAY
-  1B1E  B9 C7 21        LDA shr3,Y
-  1B21  AA              TAX
-  1B22  BD A3 21        LDA PY+1,X
-  1B25  85 11           STA plot_draw_a.aend+n
-  1B27  C5 2C           CMP plot_draw_a.acnt
-  1B29  F0 EC           BEQ fetch
-  1B2B  98              TYA
-  1B2C  29 07           AND #7
-  1B2E  F0 16           BEQ transp
-  1B30  09 18           ORA #16+n*8
-  1B32  A8              TAY
-  1B33  B1 24           LDA (plot_draw.pal),Y
-  1B35  85 15           STA plot_draw_a.ce+n
-  1B37  98              TYA
-  1B38  49 20           EOR #(16+n*8) EOR (48+n*8)
-  1B3A  A8              TAY
-  1B3B  B1 24           LDA (plot_draw.pal),Y
-  1B3D  85 19           STA plot_draw_a.co+n
-  1B3F  A9 00           LDA #0
-  1B41  85 1D           STA plot_draw_a.cm+n
-  1B43  4C 50 1B        JMP fdone
+  1B12  A4 0D           LDY plot_draw_a.aidx+n
+  1B14  B1 22           LDA (plot_setup.spr),Y
+  1B16  E6 0D           INC plot_draw_a.aidx+n
+  1B18  A8              TAY
+  1B19  B9 42 20        LDA shr3,Y
+  1B1C  AA              TAX
+  1B1D  BD 1E 20        LDA PY+1,X
+  1B20  85 11           STA plot_draw_a.aend+n
+  1B22  C5 2C           CMP plot_draw_a.acnt
+  1B24  F0 EC           BEQ fetch
+  1B26  98              TYA
+  1B27  29 07           AND #7
+  1B29  F0 16           BEQ transp
+  1B2B  09 18           ORA #16+n*8
+  1B2D  A8              TAY
+  1B2E  B1 26           LDA (plot_draw.pal),Y
+  1B30  85 15           STA plot_draw_a.ce+n
+  1B32  98              TYA
+  1B33  49 20           EOR #(16+n*8) EOR (48+n*8)
+  1B35  A8              TAY
+  1B36  B1 26           LDA (plot_draw.pal),Y
+  1B38  85 19           STA plot_draw_a.co+n
+  1B3A  A9 00           LDA #0
+  1B3C  85 1D           STA plot_draw_a.cm+n
+  1B3E  4C 4B 1B        JMP fdone
 .transp
-  1B46  A9 00           LDA #0
-  1B48  85 15           STA plot_draw_a.ce+n
-  1B4A  85 19           STA plot_draw_a.co+n
-  1B4C  A9 44           LDA #slotmask(n)
-  1B4E  85 1D           STA plot_draw_a.cm+n
+  1B41  A9 00           LDA #0
+  1B43  85 15           STA plot_draw_a.ce+n
+  1B45  85 19           STA plot_draw_a.co+n
+  1B47  A9 44           LDA #slotmask(n)
+  1B49  85 1D           STA plot_draw_a.cm+n
 .fdone
-  1B50  A6 2C           LDX plot_draw_a.acnt
-  1B52  A4 2D           LDY plot_draw_a.ysave
+  1B4B  A6 2C           LDX plot_draw_a.acnt
+  1B4D  A4 2D           LDY plot_draw_a.ysave
 .@
-  1B54  E4 12           CPX aend+2
-  1B56  D0 41           BNE @+
-  1B58                  afetch 2
-  1B58  86 2C           STX plot_draw_a.acnt
-  1B5A  84 2D           STY plot_draw_a.ysave
+  1B4F  E4 12           CPX aend+2
+  1B51  D0 41           BNE @+
+  1B53                  afetch 2
+  1B53  86 2C           STX plot_draw_a.acnt
+  1B55  84 2D           STY plot_draw_a.ysave
 .fetch
-  1B5C  A4 0E           LDY plot_draw_a.aidx+n
-  1B5E  B1 20           LDA (plot_setup.spr),Y
-  1B60  E6 0E           INC plot_draw_a.aidx+n
-  1B62  A8              TAY
-  1B63  B9 C7 21        LDA shr3,Y
-  1B66  AA              TAX
-  1B67  BD A3 21        LDA PY+1,X
-  1B6A  85 12           STA plot_draw_a.aend+n
-  1B6C  C5 2C           CMP plot_draw_a.acnt
-  1B6E  F0 EC           BEQ fetch
-  1B70  98              TYA
-  1B71  29 07           AND #7
-  1B73  F0 16           BEQ transp
-  1B75  09 20           ORA #16+n*8
-  1B77  A8              TAY
-  1B78  B1 24           LDA (plot_draw.pal),Y
-  1B7A  85 16           STA plot_draw_a.ce+n
-  1B7C  98              TYA
-  1B7D  49 60           EOR #(16+n*8) EOR (48+n*8)
-  1B7F  A8              TAY
-  1B80  B1 24           LDA (plot_draw.pal),Y
-  1B82  85 1A           STA plot_draw_a.co+n
-  1B84  A9 00           LDA #0
-  1B86  85 1E           STA plot_draw_a.cm+n
-  1B88  4C 95 1B        JMP fdone
+  1B57  A4 0E           LDY plot_draw_a.aidx+n
+  1B59  B1 22           LDA (plot_setup.spr),Y
+  1B5B  E6 0E           INC plot_draw_a.aidx+n
+  1B5D  A8              TAY
+  1B5E  B9 42 20        LDA shr3,Y
+  1B61  AA              TAX
+  1B62  BD 1E 20        LDA PY+1,X
+  1B65  85 12           STA plot_draw_a.aend+n
+  1B67  C5 2C           CMP plot_draw_a.acnt
+  1B69  F0 EC           BEQ fetch
+  1B6B  98              TYA
+  1B6C  29 07           AND #7
+  1B6E  F0 16           BEQ transp
+  1B70  09 20           ORA #16+n*8
+  1B72  A8              TAY
+  1B73  B1 26           LDA (plot_draw.pal),Y
+  1B75  85 16           STA plot_draw_a.ce+n
+  1B77  98              TYA
+  1B78  49 60           EOR #(16+n*8) EOR (48+n*8)
+  1B7A  A8              TAY
+  1B7B  B1 26           LDA (plot_draw.pal),Y
+  1B7D  85 1A           STA plot_draw_a.co+n
+  1B7F  A9 00           LDA #0
+  1B81  85 1E           STA plot_draw_a.cm+n
+  1B83  4C 90 1B        JMP fdone
 .transp
-  1B8B  A9 00           LDA #0
-  1B8D  85 16           STA plot_draw_a.ce+n
-  1B8F  85 1A           STA plot_draw_a.co+n
-  1B91  A9 22           LDA #slotmask(n)
-  1B93  85 1E           STA plot_draw_a.cm+n
+  1B86  A9 00           LDA #0
+  1B88  85 16           STA plot_draw_a.ce+n
+  1B8A  85 1A           STA plot_draw_a.co+n
+  1B8C  A9 22           LDA #slotmask(n)
+  1B8E  85 1E           STA plot_draw_a.cm+n
 .fdone
-  1B95  A6 2C           LDX plot_draw_a.acnt
-  1B97  A4 2D           LDY plot_draw_a.ysave
+  1B90  A6 2C           LDX plot_draw_a.acnt
+  1B92  A4 2D           LDY plot_draw_a.ysave
 .@
-  1B99  E4 13           CPX aend+3
-  1B9B  D0 41           BNE @+
-  1B9D                  afetch 3
-  1B9D  86 2C           STX plot_draw_a.acnt
-  1B9F  84 2D           STY plot_draw_a.ysave
+  1B94  E4 13           CPX aend+3
+  1B96  D0 41           BNE @+
+  1B98                  afetch 3
+  1B98  86 2C           STX plot_draw_a.acnt
+  1B9A  84 2D           STY plot_draw_a.ysave
 .fetch
-  1BA1  A4 0F           LDY plot_draw_a.aidx+n
-  1BA3  B1 20           LDA (plot_setup.spr),Y
-  1BA5  E6 0F           INC plot_draw_a.aidx+n
-  1BA7  A8              TAY
-  1BA8  B9 C7 21        LDA shr3,Y
-  1BAB  AA              TAX
-  1BAC  BD A3 21        LDA PY+1,X
-  1BAF  85 13           STA plot_draw_a.aend+n
-  1BB1  C5 2C           CMP plot_draw_a.acnt
-  1BB3  F0 EC           BEQ fetch
-  1BB5  98              TYA
-  1BB6  29 07           AND #7
-  1BB8  F0 16           BEQ transp
-  1BBA  09 28           ORA #16+n*8
-  1BBC  A8              TAY
-  1BBD  B1 24           LDA (plot_draw.pal),Y
-  1BBF  85 17           STA plot_draw_a.ce+n
-  1BC1  98              TYA
-  1BC2  49 60           EOR #(16+n*8) EOR (48+n*8)
-  1BC4  A8              TAY
-  1BC5  B1 24           LDA (plot_draw.pal),Y
-  1BC7  85 1B           STA plot_draw_a.co+n
-  1BC9  A9 00           LDA #0
-  1BCB  85 1F           STA plot_draw_a.cm+n
-  1BCD  4C DA 1B        JMP fdone
+  1B9C  A4 0F           LDY plot_draw_a.aidx+n
+  1B9E  B1 22           LDA (plot_setup.spr),Y
+  1BA0  E6 0F           INC plot_draw_a.aidx+n
+  1BA2  A8              TAY
+  1BA3  B9 42 20        LDA shr3,Y
+  1BA6  AA              TAX
+  1BA7  BD 1E 20        LDA PY+1,X
+  1BAA  85 13           STA plot_draw_a.aend+n
+  1BAC  C5 2C           CMP plot_draw_a.acnt
+  1BAE  F0 EC           BEQ fetch
+  1BB0  98              TYA
+  1BB1  29 07           AND #7
+  1BB3  F0 16           BEQ transp
+  1BB5  09 28           ORA #16+n*8
+  1BB7  A8              TAY
+  1BB8  B1 26           LDA (plot_draw.pal),Y
+  1BBA  85 17           STA plot_draw_a.ce+n
+  1BBC  98              TYA
+  1BBD  49 60           EOR #(16+n*8) EOR (48+n*8)
+  1BBF  A8              TAY
+  1BC0  B1 26           LDA (plot_draw.pal),Y
+  1BC2  85 1B           STA plot_draw_a.co+n
+  1BC4  A9 00           LDA #0
+  1BC6  85 1F           STA plot_draw_a.cm+n
+  1BC8  4C D5 1B        JMP fdone
 .transp
-  1BD0  A9 00           LDA #0
-  1BD2  85 17           STA plot_draw_a.ce+n
-  1BD4  85 1B           STA plot_draw_a.co+n
-  1BD6  A9 11           LDA #slotmask(n)
-  1BD8  85 1F           STA plot_draw_a.cm+n
+  1BCB  A9 00           LDA #0
+  1BCD  85 17           STA plot_draw_a.ce+n
+  1BCF  85 1B           STA plot_draw_a.co+n
+  1BD1  A9 11           LDA #slotmask(n)
+  1BD3  85 1F           STA plot_draw_a.cm+n
 .fdone
-  1BDA  A6 2C           LDX plot_draw_a.acnt
-  1BDC  A4 2D           LDY plot_draw_a.ysave
+  1BD5  A6 2C           LDX plot_draw_a.acnt
+  1BD7  A4 2D           LDY plot_draw_a.ysave
 .@
-  1BDE  A5 1C           LDA cm+0
-  1BE0  05 1D           ORA cm+1
-  1BE2  05 1E           ORA cm+2
-  1BE4  05 1F           ORA cm+3
-  1BE6  F0 3C           BEQ solidpair
-  1BE8  C9 FF           CMP #&FF
-  1BEA  F0 53           BEQ skippair
-  1BEC  85 2C           STA mtmp
-  1BEE  A5 18           LDA co+0
-  1BF0  05 19           ORA co+1
-  1BF2  05 1A           ORA co+2
-  1BF4  05 1B           ORA co+3
-  1BF6  85 2D           STA otmp
-  1BF8  A5 14           LDA ce+0
-  1BFA  05 15           ORA ce+1
-  1BFC  05 16           ORA ce+2
-  1BFE  05 17           ORA ce+3
-  1C00  85 38           STA etmp
-  1C02  B1 26           LDA (scr),Y
-  1C04  25 2C           AND mtmp
-  1C06  05 2D           ORA otmp
-  1C08  91 26           STA (scr),Y
-  1C0A  88              DEY
-  1C0B  B1 26           LDA (scr),Y
-  1C0D  25 2C           AND mtmp
-  1C0F  05 38           ORA etmp
-  1C11  91 26           STA (scr),Y
-  1C13  88              DEY
-  1C14  30 08           BMI adjust
+  1BD9  A5 1C           LDA cm+0
+  1BDB  05 1D           ORA cm+1
+  1BDD  05 1E           ORA cm+2
+  1BDF  05 1F           ORA cm+3
+  1BE1  F0 3C           BEQ solidpair
+  1BE3  C9 FF           CMP #&FF
+  1BE5  F0 53           BEQ skippair
+  1BE7  85 2C           STA mtmp
+  1BE9  A5 18           LDA co+0
+  1BEB  05 19           ORA co+1
+  1BED  05 1A           ORA co+2
+  1BEF  05 1B           ORA co+3
+  1BF1  85 2D           STA otmp
+  1BF3  A5 14           LDA ce+0
+  1BF5  05 15           ORA ce+1
+  1BF7  05 16           ORA ce+2
+  1BF9  05 17           ORA ce+3
+  1BFB  85 3B           STA etmp
+  1BFD  B1 20           LDA (scr),Y
+  1BFF  25 2C           AND mtmp
+  1C01  05 2D           ORA otmp
+  1C03  91 20           STA (scr),Y
+  1C05  88              DEY
+  1C06  B1 20           LDA (scr),Y
+  1C08  25 2C           AND mtmp
+  1C0A  05 3B           ORA etmp
+  1C0C  91 20           STA (scr),Y
+  1C0E  88              DEY
+  1C0F  30 08           BMI adjust
 .resume
-  1C16  E8              INX
-  1C17  E4 30           CPX plot_setup.ph
-  1C19  F0 2B           BEQ stripdone
-  1C1B  4C CA 1A        JMP pairloop
+  1C11  E8              INX
+  1C12  E4 33           CPX plot_setup.ph
+  1C14  F0 2B           BEQ stripdone
+  1C16  4C C5 1A        JMP pairloop
 .adjust
-  1C1E  C6 27           DEC scr+1
-  1C20  A0 07           LDY #7
-  1C22  D0 F2           BNE resume
+  1C19  C6 21           DEC scr+1
+  1C1B  A0 07           LDY #7
+  1C1D  D0 F2           BNE resume
 .solidpair
-  1C24  A5 18           LDA co+0
-  1C26  05 19           ORA co+1
-  1C28  05 1A           ORA co+2
-  1C2A  05 1B           ORA co+3
-  1C2C  91 26           STA (scr),Y
-  1C2E  88              DEY
-  1C2F  A5 14           LDA ce+0
-  1C31  05 15           ORA ce+1
-  1C33  05 16           ORA ce+2
-  1C35  05 17           ORA ce+3
-  1C37  91 26           STA (scr),Y
-  1C39  88              DEY
-  1C3A  30 E2           BMI adjust
-  1C3C  4C 16 1C        JMP resume
+  1C1F  A5 18           LDA co+0
+  1C21  05 19           ORA co+1
+  1C23  05 1A           ORA co+2
+  1C25  05 1B           ORA co+3
+  1C27  91 20           STA (scr),Y
+  1C29  88              DEY
+  1C2A  A5 14           LDA ce+0
+  1C2C  05 15           ORA ce+1
+  1C2E  05 16           ORA ce+2
+  1C30  05 17           ORA ce+3
+  1C32  91 20           STA (scr),Y
+  1C34  88              DEY
+  1C35  30 E2           BMI adjust
+  1C37  4C 11 1C        JMP resume
 .skippair
-  1C3F  88              DEY
-  1C40  88              DEY
-  1C41  30 DB           BMI adjust
-  1C43  4C 16 1C        JMP resume
+  1C3A  88              DEY
+  1C3B  88              DEY
+  1C3C  30 DB           BMI adjust
+  1C3E  4C 11 1C        JMP resume
 .stripdone
-  1C46  A5 26           LDA scr
-  1C48  18              CLC
-  1C49  69 08           ADC #8
-  1C4B  85 26           STA scr
-  1C4D  A5 36           LDA aexh
-  1C4F  D0 03           BNE done
-  1C51  4C 8A 1A        JMP striploop
+  1C41  A5 20           LDA scr
+  1C43  18              CLC
+  1C44  69 08           ADC #8
+  1C46  85 20           STA scr
+  1C48  A5 39           LDA aexh
+  1C4A  D0 03           BNE done
+  1C4C  4C 85 1A        JMP striploop
 .done
 .vanished
-  1C54  60              RTS
+  1C4F  60              RTS
 .findcol
-  1C55  A5 34           LDA c
-  1C57  C5 2F           CMP plot_setup.wid
-  1C59  F0 1D           BEQ exhausted
-  1C5B  A5 2B           LDA xacc+1
-  1C5D  85 2C           STA tmp
-  1C5F  A5 2A           LDA xacc
-  1C61  18              CLC
-  1C62  65 22           ADC plot_setup.scale
-  1C64  85 2A           STA xacc
-  1C66  A5 2B           LDA xacc+1
-  1C68  65 23           ADC plot_setup.scale+1
-  1C6A  85 2B           STA xacc+1
-  1C6C  38              SEC
-  1C6D  E5 2C           SBC tmp
-  1C6F  85 2C           STA rem
-  1C71  F0 01           BEQ nextc
-  1C73  60              RTS
+  1C50  A5 37           LDA c
+  1C52  C5 32           CMP plot_setup.wid
+  1C54  F0 1D           BEQ exhausted
+  1C56  A5 2B           LDA xacc+1
+  1C58  85 2C           STA tmp
+  1C5A  A5 2A           LDA xacc
+  1C5C  18              CLC
+  1C5D  65 24           ADC plot_setup.scale
+  1C5F  85 2A           STA xacc
+  1C61  A5 2B           LDA xacc+1
+  1C63  65 25           ADC plot_setup.scale+1
+  1C65  85 2B           STA xacc+1
+  1C67  38              SEC
+  1C68  E5 2C           SBC tmp
+  1C6A  85 2C           STA rem
+  1C6C  F0 01           BEQ nextc
+  1C6E  60              RTS
 .nextc
-  1C74  E6 34           INC c
-  1C76  D0 DD           BNE findcol
+  1C6F  E6 37           INC c
+  1C71  D0 DD           BNE findcol
 .exhausted
-  1C78  60              RTS
+  1C73  60              RTS
 }
 .clearscreen
 {
-  1C79  A5 2E           LDA drawpage
-  1C7B  C9 70           CMP #&70
-  1C7D  F0 03           BEQ @+
-  1C7F  4C 85 1C        JMP clear6000
+  1C74  A5 2E           LDA drawpage
+  1C76  C9 70           CMP #&70
+  1C78  F0 03           BEQ @+
+  1C7A  4C 80 1C        JMP clear6000
 .@
-  1C82  4C 05 1D        JMP clear7000
+  1C7D  4C 00 1D        JMP clear7000
 }
 .clear6000
-  1C85                  clearbody &6000
+  1C80                  clearbody &6000
 {
-  1C85  A9 5F           LDA #skyeven
-  1C87  A0 00           LDY #0
+  1C80  A9 5F           LDA #skyeven
+  1C82  A0 00           LDY #0
 .@
-  1C89  99 00 60        STA base + pg*256, Y
-  1C8C  99 00 61        STA base + pg*256, Y
-  1C8F  99 00 62        STA base + pg*256, Y
-  1C92  99 00 63        STA base + pg*256, Y
-  1C95  99 00 64        STA base + pg*256, Y
-  1C98  99 00 65        STA base + pg*256, Y
-  1C9B  99 00 66        STA base + pg*256, Y
-  1C9E  99 00 67        STA base + pg*256, Y
-  1CA1  C8              INY
+  1C84  99 00 60        STA base + pg*256, Y
+  1C87  99 00 61        STA base + pg*256, Y
+  1C8A  99 00 62        STA base + pg*256, Y
+  1C8D  99 00 63        STA base + pg*256, Y
+  1C90  99 00 64        STA base + pg*256, Y
+  1C93  99 00 65        STA base + pg*256, Y
+  1C96  99 00 66        STA base + pg*256, Y
+  1C99  99 00 67        STA base + pg*256, Y
+  1C9C  C8              INY
+  1C9D  C8              INY
+  1C9E  D0 E4           BNE @-
+  1CA0  A9 AF           LDA #skyodd
+.@
   1CA2  C8              INY
-  1CA3  D0 E4           BNE @-
-  1CA5  A9 AF           LDA #skyodd
+  1CA3  99 00 60        STA base + pg*256, Y
+  1CA6  99 00 61        STA base + pg*256, Y
+  1CA9  99 00 62        STA base + pg*256, Y
+  1CAC  99 00 63        STA base + pg*256, Y
+  1CAF  99 00 64        STA base + pg*256, Y
+  1CB2  99 00 65        STA base + pg*256, Y
+  1CB5  99 00 66        STA base + pg*256, Y
+  1CB8  99 00 67        STA base + pg*256, Y
+  1CBB  C8              INY
+  1CBC  D0 E4           BNE @-
+  1CBE  A9 55           LDA #grounde
+  1CC0  A0 00           LDY #0
 .@
-  1CA7  C8              INY
-  1CA8  99 00 60        STA base + pg*256, Y
-  1CAB  99 00 61        STA base + pg*256, Y
-  1CAE  99 00 62        STA base + pg*256, Y
-  1CB1  99 00 63        STA base + pg*256, Y
-  1CB4  99 00 64        STA base + pg*256, Y
-  1CB7  99 00 65        STA base + pg*256, Y
-  1CBA  99 00 66        STA base + pg*256, Y
-  1CBD  99 00 67        STA base + pg*256, Y
-  1CC0  C8              INY
-  1CC1  D0 E4           BNE @-
-  1CC3  A9 55           LDA #grounde
-  1CC5  A0 00           LDY #0
-.@
-  1CC7  99 00 68        STA base + &800 + pg*256, Y
-  1CCA  99 00 69        STA base + &800 + pg*256, Y
-  1CCD  99 00 6A        STA base + &800 + pg*256, Y
-  1CD0  99 00 6B        STA base + &800 + pg*256, Y
-  1CD3  99 00 6C        STA base + &800 + pg*256, Y
-  1CD6  99 00 6D        STA base + &800 + pg*256, Y
-  1CD9  99 00 6E        STA base + &800 + pg*256, Y
-  1CDC  99 00 6F        STA base + &800 + pg*256, Y
-  1CDF  C8              INY
+  1CC2  99 00 68        STA base + &800 + pg*256, Y
+  1CC5  99 00 69        STA base + &800 + pg*256, Y
+  1CC8  99 00 6A        STA base + &800 + pg*256, Y
+  1CCB  99 00 6B        STA base + &800 + pg*256, Y
+  1CCE  99 00 6C        STA base + &800 + pg*256, Y
+  1CD1  99 00 6D        STA base + &800 + pg*256, Y
+  1CD4  99 00 6E        STA base + &800 + pg*256, Y
+  1CD7  99 00 6F        STA base + &800 + pg*256, Y
+  1CDA  C8              INY
+  1CDB  C8              INY
+  1CDC  D0 E4           BNE @-
+  1CDE  A9 AA           LDA #groundo
   1CE0  C8              INY
-  1CE1  D0 E4           BNE @-
-  1CE3  A9 AA           LDA #groundo
-  1CE5  C8              INY
 .@
-  1CE6  99 00 68        STA base + &800 + pg*256, Y
-  1CE9  99 00 69        STA base + &800 + pg*256, Y
-  1CEC  99 00 6A        STA base + &800 + pg*256, Y
-  1CEF  99 00 6B        STA base + &800 + pg*256, Y
-  1CF2  99 00 6C        STA base + &800 + pg*256, Y
-  1CF5  99 00 6D        STA base + &800 + pg*256, Y
-  1CF8  99 00 6E        STA base + &800 + pg*256, Y
-  1CFB  99 00 6F        STA base + &800 + pg*256, Y
-  1CFE  C8              INY
-  1CFF  C8              INY
-  1D00  C0 01           CPY #1
-  1D02  D0 E2           BNE @-
+  1CE1  99 00 68        STA base + &800 + pg*256, Y
+  1CE4  99 00 69        STA base + &800 + pg*256, Y
+  1CE7  99 00 6A        STA base + &800 + pg*256, Y
+  1CEA  99 00 6B        STA base + &800 + pg*256, Y
+  1CED  99 00 6C        STA base + &800 + pg*256, Y
+  1CF0  99 00 6D        STA base + &800 + pg*256, Y
+  1CF3  99 00 6E        STA base + &800 + pg*256, Y
+  1CF6  99 00 6F        STA base + &800 + pg*256, Y
+  1CF9  C8              INY
+  1CFA  C8              INY
+  1CFB  C0 01           CPY #1
+  1CFD  D0 E2           BNE @-
 }
-  1D04  60              RTS
+  1CFF  60              RTS
 .clear7000
-  1D05                  clearbody &7000
+  1D00                  clearbody &7000
 {
-  1D05  A9 5F           LDA #skyeven
-  1D07  A0 00           LDY #0
+  1D00  A9 5F           LDA #skyeven
+  1D02  A0 00           LDY #0
 .@
-  1D09  99 00 70        STA base + pg*256, Y
-  1D0C  99 00 71        STA base + pg*256, Y
-  1D0F  99 00 72        STA base + pg*256, Y
-  1D12  99 00 73        STA base + pg*256, Y
-  1D15  99 00 74        STA base + pg*256, Y
-  1D18  99 00 75        STA base + pg*256, Y
-  1D1B  99 00 76        STA base + pg*256, Y
-  1D1E  99 00 77        STA base + pg*256, Y
-  1D21  C8              INY
+  1D04  99 00 70        STA base + pg*256, Y
+  1D07  99 00 71        STA base + pg*256, Y
+  1D0A  99 00 72        STA base + pg*256, Y
+  1D0D  99 00 73        STA base + pg*256, Y
+  1D10  99 00 74        STA base + pg*256, Y
+  1D13  99 00 75        STA base + pg*256, Y
+  1D16  99 00 76        STA base + pg*256, Y
+  1D19  99 00 77        STA base + pg*256, Y
+  1D1C  C8              INY
+  1D1D  C8              INY
+  1D1E  D0 E4           BNE @-
+  1D20  A9 AF           LDA #skyodd
+.@
   1D22  C8              INY
-  1D23  D0 E4           BNE @-
-  1D25  A9 AF           LDA #skyodd
+  1D23  99 00 70        STA base + pg*256, Y
+  1D26  99 00 71        STA base + pg*256, Y
+  1D29  99 00 72        STA base + pg*256, Y
+  1D2C  99 00 73        STA base + pg*256, Y
+  1D2F  99 00 74        STA base + pg*256, Y
+  1D32  99 00 75        STA base + pg*256, Y
+  1D35  99 00 76        STA base + pg*256, Y
+  1D38  99 00 77        STA base + pg*256, Y
+  1D3B  C8              INY
+  1D3C  D0 E4           BNE @-
+  1D3E  A9 55           LDA #grounde
+  1D40  A0 00           LDY #0
 .@
-  1D27  C8              INY
-  1D28  99 00 70        STA base + pg*256, Y
-  1D2B  99 00 71        STA base + pg*256, Y
-  1D2E  99 00 72        STA base + pg*256, Y
-  1D31  99 00 73        STA base + pg*256, Y
-  1D34  99 00 74        STA base + pg*256, Y
-  1D37  99 00 75        STA base + pg*256, Y
-  1D3A  99 00 76        STA base + pg*256, Y
-  1D3D  99 00 77        STA base + pg*256, Y
-  1D40  C8              INY
-  1D41  D0 E4           BNE @-
-  1D43  A9 55           LDA #grounde
-  1D45  A0 00           LDY #0
-.@
-  1D47  99 00 78        STA base + &800 + pg*256, Y
-  1D4A  99 00 79        STA base + &800 + pg*256, Y
-  1D4D  99 00 7A        STA base + &800 + pg*256, Y
-  1D50  99 00 7B        STA base + &800 + pg*256, Y
-  1D53  99 00 7C        STA base + &800 + pg*256, Y
-  1D56  99 00 7D        STA base + &800 + pg*256, Y
-  1D59  99 00 7E        STA base + &800 + pg*256, Y
-  1D5C  99 00 7F        STA base + &800 + pg*256, Y
-  1D5F  C8              INY
+  1D42  99 00 78        STA base + &800 + pg*256, Y
+  1D45  99 00 79        STA base + &800 + pg*256, Y
+  1D48  99 00 7A        STA base + &800 + pg*256, Y
+  1D4B  99 00 7B        STA base + &800 + pg*256, Y
+  1D4E  99 00 7C        STA base + &800 + pg*256, Y
+  1D51  99 00 7D        STA base + &800 + pg*256, Y
+  1D54  99 00 7E        STA base + &800 + pg*256, Y
+  1D57  99 00 7F        STA base + &800 + pg*256, Y
+  1D5A  C8              INY
+  1D5B  C8              INY
+  1D5C  D0 E4           BNE @-
+  1D5E  A9 AA           LDA #groundo
   1D60  C8              INY
-  1D61  D0 E4           BNE @-
-  1D63  A9 AA           LDA #groundo
-  1D65  C8              INY
 .@
-  1D66  99 00 78        STA base + &800 + pg*256, Y
-  1D69  99 00 79        STA base + &800 + pg*256, Y
-  1D6C  99 00 7A        STA base + &800 + pg*256, Y
-  1D6F  99 00 7B        STA base + &800 + pg*256, Y
-  1D72  99 00 7C        STA base + &800 + pg*256, Y
-  1D75  99 00 7D        STA base + &800 + pg*256, Y
-  1D78  99 00 7E        STA base + &800 + pg*256, Y
-  1D7B  99 00 7F        STA base + &800 + pg*256, Y
-  1D7E  C8              INY
-  1D7F  C8              INY
-  1D80  C0 01           CPY #1
-  1D82  D0 E2           BNE @-
+  1D61  99 00 78        STA base + &800 + pg*256, Y
+  1D64  99 00 79        STA base + &800 + pg*256, Y
+  1D67  99 00 7A        STA base + &800 + pg*256, Y
+  1D6A  99 00 7B        STA base + &800 + pg*256, Y
+  1D6D  99 00 7C        STA base + &800 + pg*256, Y
+  1D70  99 00 7D        STA base + &800 + pg*256, Y
+  1D73  99 00 7E        STA base + &800 + pg*256, Y
+  1D76  99 00 7F        STA base + &800 + pg*256, Y
+  1D79  C8              INY
+  1D7A  C8              INY
+  1D7B  C0 01           CPY #1
+  1D7D  D0 E2           BNE @-
 }
-  1D84  60              RTS
+  1D7F  60              RTS
 .swapbuffers
 {
-  1D85  A5 FE           LDA irqchange
+  1D80  A5 FE           LDA irqchange
 .@
-  1D87  C5 FE           CMP irqchange
-  1D89  F0 FC           BEQ @-
-  1D8B  A9 0C           LDA #12
-  1D8D  8D 00 FE        STA &FE00
-  1D90  A5 2E           LDA drawpage
-  1D92  4A              LSR A
-  1D93  4A              LSR A
-  1D94  4A              LSR A
-  1D95  8D 01 FE        STA &FE01
-  1D98  A5 2E           LDA drawpage
-  1D9A  49 10           EOR #&10
-  1D9C  85 2E           STA drawpage
-  1D9E  60              RTS
+  1D82  C5 FE           CMP irqchange
+  1D84  F0 FC           BEQ @-
+  1D86  A9 0C           LDA #12
+  1D88  8D 00 FE        STA &FE00
+  1D8B  A5 2E           LDA drawpage
+  1D8D  4A              LSR A
+  1D8E  4A              LSR A
+  1D8F  4A              LSR A
+  1D90  8D 01 FE        STA &FE01
+  1D93  A5 2E           LDA drawpage
+  1D95  49 10           EOR #&10
+  1D97  85 2E           STA drawpage
+  1D99  60              RTS
 }
 .irq
-  1D9F  A9 02           LDA #&02
-  1DA1  8D 4D FE        STA &FE4D
-  1DA4  A5 FE           LDA irqchange
-  1DA6  49 01           EOR #1
-  1DA8  85 FE           STA irqchange
-  1DAA  F0 02           BEQ @+
-  1DAC  E6 FD           INC framectr
+  1D9A  A9 02           LDA #&02
+  1D9C  8D 4D FE        STA &FE4D
+  1D9F  A5 FE           LDA irqchange
+  1DA1  49 01           EOR #1
+  1DA3  85 FE           STA irqchange
+  1DA5  F0 02           BEQ @+
+  1DA7  E6 FD           INC framectr
 .@
-  1DAE  A5 FC           LDA &FC
-  1DB0  40              RTI
+  1DA9  A5 FC           LDA &FC
+  1DAB  40              RTI
 .entry
 {
-  1DB1  78              SEI
-  1DB2  A2 FF           LDX #&FF
-  1DB4  9A              TXS
-  1DB5  A9 7F           LDA #&7F
-  1DB7  8D 4E FE        STA &FE4E
-  1DBA  8D 43 FE        STA &FE43
-  1DBD  A9 0F           LDA #&0F
-  1DBF  8D 42 FE        STA &FE42
-  1DC2  A9 03           LDA #3
-  1DC4  8D 40 FE        STA &FE40
-  1DC7  A9 04           LDA #&04
-  1DC9  8D 4C FE        STA &FE4C
-  1DCC  A9 82           LDA #&82
-  1DCE  8D 4E FE        STA &FE4E
-  1DD1  A2 0D           LDX #13
+  1DAC  78              SEI
+  1DAD  A2 FF           LDX #&FF
+  1DAF  9A              TXS
+  1DB0  A9 7F           LDA #&7F
+  1DB2  8D 4E FE        STA &FE4E
+  1DB5  8D 43 FE        STA &FE43
+  1DB8  A9 0F           LDA #&0F
+  1DBA  8D 42 FE        STA &FE42
+  1DBD  A9 03           LDA #3
+  1DBF  8D 40 FE        STA &FE40
+  1DC2  A9 04           LDA #&04
+  1DC4  8D 4C FE        STA &FE4C
+  1DC7  A9 82           LDA #&82
+  1DC9  8D 4E FE        STA &FE4E
+  1DCC  A2 0D           LDX #13
 .crtcloop
-  1DD3  8E 00 FE        STX &FE00
-  1DD6  BD 0D 1E        LDA crtcregs,X
-  1DD9  8D 01 FE        STA &FE01
-  1DDC  CA              DEX
-  1DDD  10 F4           BPL crtcloop
-  1DDF  A9 C4           LDA #&C4
-  1DE1  8D 20 FE        STA &FE20
-  1DE4  A2 0F           LDX #15
+  1DCE  8E 00 FE        STX &FE00
+  1DD1  BD 08 1E        LDA crtcregs,X
+  1DD4  8D 01 FE        STA &FE01
+  1DD7  CA              DEX
+  1DD8  10 F4           BPL crtcloop
+  1DDA  A9 C4           LDA #&C4
+  1DDC  8D 20 FE        STA &FE20
+  1DDF  A2 0F           LDX #15
 .palloop
-  1DE6  BD 1B 1E        LDA paldata,X
-  1DE9  8D 21 FE        STA &FE21
-  1DEC  CA              DEX
-  1DED  10 F7           BPL palloop
-  1DEF  20 85 1C        JSR clear6000
-  1DF2  20 05 1D        JSR clear7000
-  1DF5  A9 00           LDA #0
-  1DF7  85 FD           STA framectr
-  1DF9  85 FE           STA irqchange
-  1DFB  A9 70           LDA #&70
-  1DFD  85 2E           STA drawpage
-  1DFF  A9 9F           LDA #LO(irq)
-  1E01  8D 04 02        STA &204
-  1E04  A9 1D           LDA #HI(irq)
-  1E06  8D 05 02        STA &205
-  1E09  58              CLI
-  1E0A  4C 00 11        JMP mainloop
+  1DE1  BD 16 1E        LDA paldata,X
+  1DE4  8D 21 FE        STA &FE21
+  1DE7  CA              DEX
+  1DE8  10 F7           BPL palloop
+  1DEA  20 80 1C        JSR clear6000
+  1DED  20 00 1D        JSR clear7000
+  1DF0  A9 00           LDA #0
+  1DF2  85 FD           STA framectr
+  1DF4  85 FE           STA irqchange
+  1DF6  A9 70           LDA #&70
+  1DF8  85 2E           STA drawpage
+  1DFA  A9 9A           LDA #LO(irq)
+  1DFC  8D 04 02        STA &204
+  1DFF  A9 1D           LDA #HI(irq)
+  1E01  8D 05 02        STA &205
+  1E04  58              CLI
+  1E05  4C 00 11        JMP mainloop
 }
 .crtcregs
-  1E0D  3F 20 2D 24...  EQUB 63, 32, 45, &24, 38, 0, 16, 26, 0, 7, 32, 8, HI(&6000/8), LO(&6000/8)
+  1E08  3F 20 2D 24...  EQUB 63, 32, 45, &24, 38, 0, 16, 26, 0, 7, 32, 8, HI(&6000/8), LO(&6000/8)
 physcols = {0, 4, 1, 2}
 .paldata
-  1E1B  07 17 23 33...  EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
-scaletab = INT(256 * (0.25 + 1.375 * (1 - COS((0..255) * 2 * PI / 256))))
-.scalelo
-  1E2B  40 40 40 40...  EQUB scaletab AND 255
-.scalehi
-  1F2B  00 00 00 00...  EQUB scaletab DIV 256
+  1E16  07 17 23 33...  EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
+.normlo
+  1E26  00 12 24 36...  EQUB ((0..63)*256 DIV 14) AND 255
+.normhi
+  1E66  00 00 00 00...  EQUB ((0..63)*256 DIV 14) DIV 256
 .pal_creature
-  202B                  palette {black, brown, red, olive, green, blue, magenta}
-  202B  00 00           EQUB 0, 0
-  202D  00 00           EQUB pateven(cols[i]), patodd(cols[i])
-  202F  50 A0           EQUB pateven(cols[i]), patodd(cols[i])
-  2031  F0 F0           EQUB pateven(cols[i]), patodd(cols[i])
-  2033  F5 FA           EQUB pateven(cols[i]), patodd(cols[i])
-  2035  FF FF           EQUB pateven(cols[i]), patodd(cols[i])
-  2037  0F 0F           EQUB pateven(cols[i]), patodd(cols[i])
-  2039  5A A5           EQUB pateven(cols[i]), patodd(cols[i])
-  203B  00              EQUB 0
-  203C  00              EQUB pateven(cols[i]) AND slotmask(n)
-  203D  00              EQUB pateven(cols[i]) AND slotmask(n)
-  203E  80              EQUB pateven(cols[i]) AND slotmask(n)
-  203F  80              EQUB pateven(cols[i]) AND slotmask(n)
-  2040  88              EQUB pateven(cols[i]) AND slotmask(n)
-  2041  08              EQUB pateven(cols[i]) AND slotmask(n)
-  2042  08              EQUB pateven(cols[i]) AND slotmask(n)
-  2043  00              EQUB 0
-  2044  00              EQUB pateven(cols[i]) AND slotmask(n)
-  2045  40              EQUB pateven(cols[i]) AND slotmask(n)
-  2046  40              EQUB pateven(cols[i]) AND slotmask(n)
-  2047  44              EQUB pateven(cols[i]) AND slotmask(n)
-  2048  44              EQUB pateven(cols[i]) AND slotmask(n)
-  2049  04              EQUB pateven(cols[i]) AND slotmask(n)
-  204A  40              EQUB pateven(cols[i]) AND slotmask(n)
-  204B  00              EQUB 0
-  204C  00              EQUB pateven(cols[i]) AND slotmask(n)
-  204D  00              EQUB pateven(cols[i]) AND slotmask(n)
-  204E  20              EQUB pateven(cols[i]) AND slotmask(n)
-  204F  20              EQUB pateven(cols[i]) AND slotmask(n)
-  2050  22              EQUB pateven(cols[i]) AND slotmask(n)
-  2051  02              EQUB pateven(cols[i]) AND slotmask(n)
-  2052  02              EQUB pateven(cols[i]) AND slotmask(n)
-  2053  00              EQUB 0
-  2054  00              EQUB pateven(cols[i]) AND slotmask(n)
-  2055  10              EQUB pateven(cols[i]) AND slotmask(n)
-  2056  10              EQUB pateven(cols[i]) AND slotmask(n)
-  2057  11              EQUB pateven(cols[i]) AND slotmask(n)
-  2058  11              EQUB pateven(cols[i]) AND slotmask(n)
-  2059  01              EQUB pateven(cols[i]) AND slotmask(n)
-  205A  10              EQUB pateven(cols[i]) AND slotmask(n)
-  205B  00              EQUB 0
-  205C  00              EQUB patodd(cols[i]) AND slotmask(n)
-  205D  80              EQUB patodd(cols[i]) AND slotmask(n)
-  205E  80              EQUB patodd(cols[i]) AND slotmask(n)
-  205F  88              EQUB patodd(cols[i]) AND slotmask(n)
-  2060  88              EQUB patodd(cols[i]) AND slotmask(n)
-  2061  08              EQUB patodd(cols[i]) AND slotmask(n)
-  2062  80              EQUB patodd(cols[i]) AND slotmask(n)
-  2063  00              EQUB 0
-  2064  00              EQUB patodd(cols[i]) AND slotmask(n)
-  2065  00              EQUB patodd(cols[i]) AND slotmask(n)
-  2066  40              EQUB patodd(cols[i]) AND slotmask(n)
-  2067  40              EQUB patodd(cols[i]) AND slotmask(n)
-  2068  44              EQUB patodd(cols[i]) AND slotmask(n)
-  2069  04              EQUB patodd(cols[i]) AND slotmask(n)
-  206A  04              EQUB patodd(cols[i]) AND slotmask(n)
-  206B  00              EQUB 0
-  206C  00              EQUB patodd(cols[i]) AND slotmask(n)
-  206D  20              EQUB patodd(cols[i]) AND slotmask(n)
-  206E  20              EQUB patodd(cols[i]) AND slotmask(n)
-  206F  22              EQUB patodd(cols[i]) AND slotmask(n)
-  2070  22              EQUB patodd(cols[i]) AND slotmask(n)
-  2071  02              EQUB patodd(cols[i]) AND slotmask(n)
-  2072  20              EQUB patodd(cols[i]) AND slotmask(n)
-  2073  00              EQUB 0
-  2074  00              EQUB patodd(cols[i]) AND slotmask(n)
-  2075  00              EQUB patodd(cols[i]) AND slotmask(n)
-  2076  10              EQUB patodd(cols[i]) AND slotmask(n)
-  2077  10              EQUB patodd(cols[i]) AND slotmask(n)
-  2078  11              EQUB patodd(cols[i]) AND slotmask(n)
-  2079  01              EQUB patodd(cols[i]) AND slotmask(n)
-  207A  01              EQUB patodd(cols[i]) AND slotmask(n)
+  1EA6                  palette {black, brown, red, olive, green, blue, magenta}
+  1EA6  00 00           EQUB 0, 0
+  1EA8  00 00           EQUB pateven(cols[i]), patodd(cols[i])
+  1EAA  50 A0           EQUB pateven(cols[i]), patodd(cols[i])
+  1EAC  F0 F0           EQUB pateven(cols[i]), patodd(cols[i])
+  1EAE  F5 FA           EQUB pateven(cols[i]), patodd(cols[i])
+  1EB0  FF FF           EQUB pateven(cols[i]), patodd(cols[i])
+  1EB2  0F 0F           EQUB pateven(cols[i]), patodd(cols[i])
+  1EB4  5A A5           EQUB pateven(cols[i]), patodd(cols[i])
+  1EB6  00              EQUB 0
+  1EB7  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1EB8  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1EB9  80              EQUB pateven(cols[i]) AND slotmask(n)
+  1EBA  80              EQUB pateven(cols[i]) AND slotmask(n)
+  1EBB  88              EQUB pateven(cols[i]) AND slotmask(n)
+  1EBC  08              EQUB pateven(cols[i]) AND slotmask(n)
+  1EBD  08              EQUB pateven(cols[i]) AND slotmask(n)
+  1EBE  00              EQUB 0
+  1EBF  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC0  40              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC1  40              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC2  44              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC3  44              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC4  04              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC5  40              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC6  00              EQUB 0
+  1EC7  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC8  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1EC9  20              EQUB pateven(cols[i]) AND slotmask(n)
+  1ECA  20              EQUB pateven(cols[i]) AND slotmask(n)
+  1ECB  22              EQUB pateven(cols[i]) AND slotmask(n)
+  1ECC  02              EQUB pateven(cols[i]) AND slotmask(n)
+  1ECD  02              EQUB pateven(cols[i]) AND slotmask(n)
+  1ECE  00              EQUB 0
+  1ECF  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1ED0  10              EQUB pateven(cols[i]) AND slotmask(n)
+  1ED1  10              EQUB pateven(cols[i]) AND slotmask(n)
+  1ED2  11              EQUB pateven(cols[i]) AND slotmask(n)
+  1ED3  11              EQUB pateven(cols[i]) AND slotmask(n)
+  1ED4  01              EQUB pateven(cols[i]) AND slotmask(n)
+  1ED5  10              EQUB pateven(cols[i]) AND slotmask(n)
+  1ED6  00              EQUB 0
+  1ED7  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1ED8  80              EQUB patodd(cols[i]) AND slotmask(n)
+  1ED9  80              EQUB patodd(cols[i]) AND slotmask(n)
+  1EDA  88              EQUB patodd(cols[i]) AND slotmask(n)
+  1EDB  88              EQUB patodd(cols[i]) AND slotmask(n)
+  1EDC  08              EQUB patodd(cols[i]) AND slotmask(n)
+  1EDD  80              EQUB patodd(cols[i]) AND slotmask(n)
+  1EDE  00              EQUB 0
+  1EDF  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE0  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE1  40              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE2  40              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE3  44              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE4  04              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE5  04              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE6  00              EQUB 0
+  1EE7  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE8  20              EQUB patodd(cols[i]) AND slotmask(n)
+  1EE9  20              EQUB patodd(cols[i]) AND slotmask(n)
+  1EEA  22              EQUB patodd(cols[i]) AND slotmask(n)
+  1EEB  22              EQUB patodd(cols[i]) AND slotmask(n)
+  1EEC  02              EQUB patodd(cols[i]) AND slotmask(n)
+  1EED  20              EQUB patodd(cols[i]) AND slotmask(n)
+  1EEE  00              EQUB 0
+  1EEF  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1EF0  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1EF1  10              EQUB patodd(cols[i]) AND slotmask(n)
+  1EF2  10              EQUB patodd(cols[i]) AND slotmask(n)
+  1EF3  11              EQUB patodd(cols[i]) AND slotmask(n)
+  1EF4  01              EQUB patodd(cols[i]) AND slotmask(n)
+  1EF5  01              EQUB patodd(cols[i]) AND slotmask(n)
 .pal_boulder
-  207B                  palette {black, brown, red, olive, black, black, black}
-  207B  00 00           EQUB 0, 0
-  207D  00 00           EQUB pateven(cols[i]), patodd(cols[i])
-  207F  50 A0           EQUB pateven(cols[i]), patodd(cols[i])
-  2081  F0 F0           EQUB pateven(cols[i]), patodd(cols[i])
-  2083  F5 FA           EQUB pateven(cols[i]), patodd(cols[i])
-  2085  00 00           EQUB pateven(cols[i]), patodd(cols[i])
-  2087  00 00           EQUB pateven(cols[i]), patodd(cols[i])
-  2089  00 00           EQUB pateven(cols[i]), patodd(cols[i])
-  208B  00              EQUB 0
-  208C  00              EQUB pateven(cols[i]) AND slotmask(n)
-  208D  00              EQUB pateven(cols[i]) AND slotmask(n)
-  208E  80              EQUB pateven(cols[i]) AND slotmask(n)
-  208F  80              EQUB pateven(cols[i]) AND slotmask(n)
-  2090  00              EQUB pateven(cols[i]) AND slotmask(n)
-  2091  00              EQUB pateven(cols[i]) AND slotmask(n)
-  2092  00              EQUB pateven(cols[i]) AND slotmask(n)
-  2093  00              EQUB 0
-  2094  00              EQUB pateven(cols[i]) AND slotmask(n)
-  2095  40              EQUB pateven(cols[i]) AND slotmask(n)
-  2096  40              EQUB pateven(cols[i]) AND slotmask(n)
-  2097  44              EQUB pateven(cols[i]) AND slotmask(n)
-  2098  00              EQUB pateven(cols[i]) AND slotmask(n)
-  2099  00              EQUB pateven(cols[i]) AND slotmask(n)
-  209A  00              EQUB pateven(cols[i]) AND slotmask(n)
-  209B  00              EQUB 0
-  209C  00              EQUB pateven(cols[i]) AND slotmask(n)
-  209D  00              EQUB pateven(cols[i]) AND slotmask(n)
-  209E  20              EQUB pateven(cols[i]) AND slotmask(n)
-  209F  20              EQUB pateven(cols[i]) AND slotmask(n)
-  20A0  00              EQUB pateven(cols[i]) AND slotmask(n)
-  20A1  00              EQUB pateven(cols[i]) AND slotmask(n)
-  20A2  00              EQUB pateven(cols[i]) AND slotmask(n)
-  20A3  00              EQUB 0
-  20A4  00              EQUB pateven(cols[i]) AND slotmask(n)
-  20A5  10              EQUB pateven(cols[i]) AND slotmask(n)
-  20A6  10              EQUB pateven(cols[i]) AND slotmask(n)
-  20A7  11              EQUB pateven(cols[i]) AND slotmask(n)
-  20A8  00              EQUB pateven(cols[i]) AND slotmask(n)
-  20A9  00              EQUB pateven(cols[i]) AND slotmask(n)
-  20AA  00              EQUB pateven(cols[i]) AND slotmask(n)
-  20AB  00              EQUB 0
-  20AC  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20AD  80              EQUB patodd(cols[i]) AND slotmask(n)
-  20AE  80              EQUB patodd(cols[i]) AND slotmask(n)
-  20AF  88              EQUB patodd(cols[i]) AND slotmask(n)
-  20B0  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20B1  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20B2  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20B3  00              EQUB 0
-  20B4  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20B5  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20B6  40              EQUB patodd(cols[i]) AND slotmask(n)
-  20B7  40              EQUB patodd(cols[i]) AND slotmask(n)
-  20B8  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20B9  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20BA  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20BB  00              EQUB 0
-  20BC  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20BD  20              EQUB patodd(cols[i]) AND slotmask(n)
-  20BE  20              EQUB patodd(cols[i]) AND slotmask(n)
-  20BF  22              EQUB patodd(cols[i]) AND slotmask(n)
-  20C0  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20C1  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20C2  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20C3  00              EQUB 0
-  20C4  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20C5  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20C6  10              EQUB patodd(cols[i]) AND slotmask(n)
-  20C7  10              EQUB patodd(cols[i]) AND slotmask(n)
-  20C8  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20C9  00              EQUB patodd(cols[i]) AND slotmask(n)
-  20CA  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1EF6                  palette {black, brown, red, olive, black, black, black}
+  1EF6  00 00           EQUB 0, 0
+  1EF8  00 00           EQUB pateven(cols[i]), patodd(cols[i])
+  1EFA  50 A0           EQUB pateven(cols[i]), patodd(cols[i])
+  1EFC  F0 F0           EQUB pateven(cols[i]), patodd(cols[i])
+  1EFE  F5 FA           EQUB pateven(cols[i]), patodd(cols[i])
+  1F00  00 00           EQUB pateven(cols[i]), patodd(cols[i])
+  1F02  00 00           EQUB pateven(cols[i]), patodd(cols[i])
+  1F04  00 00           EQUB pateven(cols[i]), patodd(cols[i])
+  1F06  00              EQUB 0
+  1F07  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F08  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F09  80              EQUB pateven(cols[i]) AND slotmask(n)
+  1F0A  80              EQUB pateven(cols[i]) AND slotmask(n)
+  1F0B  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F0C  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F0D  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F0E  00              EQUB 0
+  1F0F  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F10  40              EQUB pateven(cols[i]) AND slotmask(n)
+  1F11  40              EQUB pateven(cols[i]) AND slotmask(n)
+  1F12  44              EQUB pateven(cols[i]) AND slotmask(n)
+  1F13  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F14  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F15  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F16  00              EQUB 0
+  1F17  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F18  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F19  20              EQUB pateven(cols[i]) AND slotmask(n)
+  1F1A  20              EQUB pateven(cols[i]) AND slotmask(n)
+  1F1B  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F1C  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F1D  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F1E  00              EQUB 0
+  1F1F  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F20  10              EQUB pateven(cols[i]) AND slotmask(n)
+  1F21  10              EQUB pateven(cols[i]) AND slotmask(n)
+  1F22  11              EQUB pateven(cols[i]) AND slotmask(n)
+  1F23  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F24  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F25  00              EQUB pateven(cols[i]) AND slotmask(n)
+  1F26  00              EQUB 0
+  1F27  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F28  80              EQUB patodd(cols[i]) AND slotmask(n)
+  1F29  80              EQUB patodd(cols[i]) AND slotmask(n)
+  1F2A  88              EQUB patodd(cols[i]) AND slotmask(n)
+  1F2B  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F2C  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F2D  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F2E  00              EQUB 0
+  1F2F  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F30  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F31  40              EQUB patodd(cols[i]) AND slotmask(n)
+  1F32  40              EQUB patodd(cols[i]) AND slotmask(n)
+  1F33  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F34  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F35  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F36  00              EQUB 0
+  1F37  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F38  20              EQUB patodd(cols[i]) AND slotmask(n)
+  1F39  20              EQUB patodd(cols[i]) AND slotmask(n)
+  1F3A  22              EQUB patodd(cols[i]) AND slotmask(n)
+  1F3B  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F3C  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F3D  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F3E  00              EQUB 0
+  1F3F  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F40  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F41  10              EQUB patodd(cols[i]) AND slotmask(n)
+  1F42  10              EQUB patodd(cols[i]) AND slotmask(n)
+  1F43  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F44  00              EQUB patodd(cols[i]) AND slotmask(n)
+  1F45  00              EQUB patodd(cols[i]) AND slotmask(n)
 .creature
-  20CB                  sprite {{0,0,0,0,1,1,1,1,0,0,0,0},...
+  1F46                  sprite {{0,0,0,0,1,1,1,1,0,0,0,0},...
 n = LEN(pic[0])
 h = LEN(pic)
-  20CB  0C 14 CA        EQUB n, h, threshold(pic)
-  20CE  0F              EQUB 3 + n + coloff(pic, c)
-  20CF  12              EQUB 3 + n + coloff(pic, c)
-  20D0  17              EQUB 3 + n + coloff(pic, c)
-  20D1  20              EQUB 3 + n + coloff(pic, c)
-  20D2  2B              EQUB 3 + n + coloff(pic, c)
-  20D3  33              EQUB 3 + n + coloff(pic, c)
-  20D4  3E              EQUB 3 + n + coloff(pic, c)
-  20D5  49              EQUB 3 + n + coloff(pic, c)
-  20D6  51              EQUB 3 + n + coloff(pic, c)
-  20D7  5C              EQUB 3 + n + coloff(pic, c)
-  20D8  65              EQUB 3 + n + coloff(pic, c)
-  20D9  6A              EQUB 3 + n + coloff(pic, c)
+  1F46  0C 14 CA        EQUB n, h, threshold(pic)
+  1F49  0F              EQUB 3 + n + coloff(pic, c)
+  1F4A  12              EQUB 3 + n + coloff(pic, c)
+  1F4B  17              EQUB 3 + n + coloff(pic, c)
+  1F4C  20              EQUB 3 + n + coloff(pic, c)
+  1F4D  2B              EQUB 3 + n + coloff(pic, c)
+  1F4E  33              EQUB 3 + n + coloff(pic, c)
+  1F4F  3E              EQUB 3 + n + coloff(pic, c)
+  1F50  49              EQUB 3 + n + coloff(pic, c)
+  1F51  51              EQUB 3 + n + coloff(pic, c)
+  1F52  5C              EQUB 3 + n + coloff(pic, c)
+  1F53  65              EQUB 3 + n + coloff(pic, c)
+  1F54  6A              EQUB 3 + n + coloff(pic, c)
 col = REVERSE(pic[.., c])
-  20DA  38              EQUB col[i] + i*8
-  20DB  51              EQUB col[i] + i*8
-  20DC  98              EQUB col[i] + i*8
+  1F55  38              EQUB col[i] + i*8
+  1F56  51              EQUB col[i] + i*8
+  1F57  98              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  20DD  38              EQUB col[i] + i*8
-  20DE  41              EQUB col[i] + i*8
-  20DF  53              EQUB col[i] + i*8
-  20E0  59              EQUB col[i] + i*8
-  20E1  98              EQUB col[i] + i*8
+  1F58  38              EQUB col[i] + i*8
+  1F59  41              EQUB col[i] + i*8
+  1F5A  53              EQUB col[i] + i*8
+  1F5B  59              EQUB col[i] + i*8
+  1F5C  98              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  20E2  00              EQUB col[i] + i*8
-  20E3  11              EQUB col[i] + i*8
-  20E4  28              EQUB col[i] + i*8
-  20E5  49              EQUB col[i] + i*8
-  20E6  53              EQUB col[i] + i*8
-  20E7  59              EQUB col[i] + i*8
-  20E8  68              EQUB col[i] + i*8
-  20E9  89              EQUB col[i] + i*8
-  20EA  98              EQUB col[i] + i*8
+  1F5D  00              EQUB col[i] + i*8
+  1F5E  11              EQUB col[i] + i*8
+  1F5F  28              EQUB col[i] + i*8
+  1F60  49              EQUB col[i] + i*8
+  1F61  53              EQUB col[i] + i*8
+  1F62  59              EQUB col[i] + i*8
+  1F63  68              EQUB col[i] + i*8
+  1F64  89              EQUB col[i] + i*8
+  1F65  98              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  20EB  00              EQUB col[i] + i*8
-  20EC  09              EQUB col[i] + i*8
-  20ED  12              EQUB col[i] + i*8
-  20EE  29              EQUB col[i] + i*8
-  20EF  4C              EQUB col[i] + i*8
-  20F0  51              EQUB col[i] + i*8
-  20F1  5C              EQUB col[i] + i*8
-  20F2  69              EQUB col[i] + i*8
-  20F3  8D              EQUB col[i] + i*8
-  20F4  91              EQUB col[i] + i*8
-  20F5  98              EQUB col[i] + i*8
+  1F66  00              EQUB col[i] + i*8
+  1F67  09              EQUB col[i] + i*8
+  1F68  12              EQUB col[i] + i*8
+  1F69  29              EQUB col[i] + i*8
+  1F6A  4C              EQUB col[i] + i*8
+  1F6B  51              EQUB col[i] + i*8
+  1F6C  5C              EQUB col[i] + i*8
+  1F6D  69              EQUB col[i] + i*8
+  1F6E  8D              EQUB col[i] + i*8
+  1F6F  91              EQUB col[i] + i*8
+  1F70  98              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  20F6  00              EQUB col[i] + i*8
-  20F7  09              EQUB col[i] + i*8
-  20F8  22              EQUB col[i] + i*8
-  20F9  64              EQUB col[i] + i*8
-  20FA  75              EQUB col[i] + i*8
-  20FB  86              EQUB col[i] + i*8
-  20FC  95              EQUB col[i] + i*8
-  20FD  99              EQUB col[i] + i*8
+  1F71  00              EQUB col[i] + i*8
+  1F72  09              EQUB col[i] + i*8
+  1F73  22              EQUB col[i] + i*8
+  1F74  64              EQUB col[i] + i*8
+  1F75  75              EQUB col[i] + i*8
+  1F76  86              EQUB col[i] + i*8
+  1F77  95              EQUB col[i] + i*8
+  1F78  99              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  20FE  08              EQUB col[i] + i*8
-  20FF  21              EQUB col[i] + i*8
-  2100  34              EQUB col[i] + i*8
-  2101  47              EQUB col[i] + i*8
-  2102  64              EQUB col[i] + i*8
-  2103  6D              EQUB col[i] + i*8
-  2104  76              EQUB col[i] + i*8
-  2105  81              EQUB col[i] + i*8
-  2106  8E              EQUB col[i] + i*8
-  2107  95              EQUB col[i] + i*8
-  2108  99              EQUB col[i] + i*8
+  1F79  08              EQUB col[i] + i*8
+  1F7A  21              EQUB col[i] + i*8
+  1F7B  34              EQUB col[i] + i*8
+  1F7C  47              EQUB col[i] + i*8
+  1F7D  64              EQUB col[i] + i*8
+  1F7E  6D              EQUB col[i] + i*8
+  1F7F  76              EQUB col[i] + i*8
+  1F80  81              EQUB col[i] + i*8
+  1F81  8E              EQUB col[i] + i*8
+  1F82  95              EQUB col[i] + i*8
+  1F83  99              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2109  08              EQUB col[i] + i*8
-  210A  21              EQUB col[i] + i*8
-  210B  34              EQUB col[i] + i*8
-  210C  47              EQUB col[i] + i*8
-  210D  64              EQUB col[i] + i*8
-  210E  6D              EQUB col[i] + i*8
-  210F  76              EQUB col[i] + i*8
-  2110  81              EQUB col[i] + i*8
-  2111  8E              EQUB col[i] + i*8
-  2112  95              EQUB col[i] + i*8
-  2113  99              EQUB col[i] + i*8
+  1F84  08              EQUB col[i] + i*8
+  1F85  21              EQUB col[i] + i*8
+  1F86  34              EQUB col[i] + i*8
+  1F87  47              EQUB col[i] + i*8
+  1F88  64              EQUB col[i] + i*8
+  1F89  6D              EQUB col[i] + i*8
+  1F8A  76              EQUB col[i] + i*8
+  1F8B  81              EQUB col[i] + i*8
+  1F8C  8E              EQUB col[i] + i*8
+  1F8D  95              EQUB col[i] + i*8
+  1F8E  99              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2114  00              EQUB col[i] + i*8
-  2115  09              EQUB col[i] + i*8
-  2116  22              EQUB col[i] + i*8
-  2117  64              EQUB col[i] + i*8
-  2118  75              EQUB col[i] + i*8
-  2119  86              EQUB col[i] + i*8
-  211A  95              EQUB col[i] + i*8
-  211B  99              EQUB col[i] + i*8
+  1F8F  00              EQUB col[i] + i*8
+  1F90  09              EQUB col[i] + i*8
+  1F91  22              EQUB col[i] + i*8
+  1F92  64              EQUB col[i] + i*8
+  1F93  75              EQUB col[i] + i*8
+  1F94  86              EQUB col[i] + i*8
+  1F95  95              EQUB col[i] + i*8
+  1F96  99              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  211C  00              EQUB col[i] + i*8
-  211D  09              EQUB col[i] + i*8
-  211E  12              EQUB col[i] + i*8
-  211F  29              EQUB col[i] + i*8
-  2120  4C              EQUB col[i] + i*8
-  2121  51              EQUB col[i] + i*8
-  2122  5C              EQUB col[i] + i*8
-  2123  69              EQUB col[i] + i*8
-  2124  8D              EQUB col[i] + i*8
-  2125  91              EQUB col[i] + i*8
-  2126  98              EQUB col[i] + i*8
+  1F97  00              EQUB col[i] + i*8
+  1F98  09              EQUB col[i] + i*8
+  1F99  12              EQUB col[i] + i*8
+  1F9A  29              EQUB col[i] + i*8
+  1F9B  4C              EQUB col[i] + i*8
+  1F9C  51              EQUB col[i] + i*8
+  1F9D  5C              EQUB col[i] + i*8
+  1F9E  69              EQUB col[i] + i*8
+  1F9F  8D              EQUB col[i] + i*8
+  1FA0  91              EQUB col[i] + i*8
+  1FA1  98              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2127  00              EQUB col[i] + i*8
-  2128  11              EQUB col[i] + i*8
-  2129  28              EQUB col[i] + i*8
-  212A  49              EQUB col[i] + i*8
-  212B  53              EQUB col[i] + i*8
-  212C  59              EQUB col[i] + i*8
-  212D  68              EQUB col[i] + i*8
-  212E  89              EQUB col[i] + i*8
-  212F  98              EQUB col[i] + i*8
+  1FA2  00              EQUB col[i] + i*8
+  1FA3  11              EQUB col[i] + i*8
+  1FA4  28              EQUB col[i] + i*8
+  1FA5  49              EQUB col[i] + i*8
+  1FA6  53              EQUB col[i] + i*8
+  1FA7  59              EQUB col[i] + i*8
+  1FA8  68              EQUB col[i] + i*8
+  1FA9  89              EQUB col[i] + i*8
+  1FAA  98              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2130  38              EQUB col[i] + i*8
-  2131  41              EQUB col[i] + i*8
-  2132  53              EQUB col[i] + i*8
-  2133  59              EQUB col[i] + i*8
-  2134  98              EQUB col[i] + i*8
+  1FAB  38              EQUB col[i] + i*8
+  1FAC  41              EQUB col[i] + i*8
+  1FAD  53              EQUB col[i] + i*8
+  1FAE  59              EQUB col[i] + i*8
+  1FAF  98              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2135  38              EQUB col[i] + i*8
-  2136  51              EQUB col[i] + i*8
-  2137  98              EQUB col[i] + i*8
+  1FB0  38              EQUB col[i] + i*8
+  1FB1  51              EQUB col[i] + i*8
+  1FB2  98              EQUB col[i] + i*8
 .boulder
-  2138                  sprite {{0,0,0,0,3,3,3,3,4,0,0,0,0,0}, \...
+  1FB3                  sprite {{0,0,0,0,3,3,3,3,4,0,0,0,0,0}, \...
 n = LEN(pic[0])
 h = LEN(pic)
-  2138  0E 10 FA        EQUB n, h, threshold(pic)
-  213B  11              EQUB 3 + n + coloff(pic, c)
-  213C  15              EQUB 3 + n + coloff(pic, c)
-  213D  1B              EQUB 3 + n + coloff(pic, c)
-  213E  22              EQUB 3 + n + coloff(pic, c)
-  213F  2A              EQUB 3 + n + coloff(pic, c)
-  2140  31              EQUB 3 + n + coloff(pic, c)
-  2141  36              EQUB 3 + n + coloff(pic, c)
-  2142  3F              EQUB 3 + n + coloff(pic, c)
-  2143  43              EQUB 3 + n + coloff(pic, c)
-  2144  4A              EQUB 3 + n + coloff(pic, c)
-  2145  52              EQUB 3 + n + coloff(pic, c)
-  2146  57              EQUB 3 + n + coloff(pic, c)
-  2147  62              EQUB 3 + n + coloff(pic, c)
-  2148  67              EQUB 3 + n + coloff(pic, c)
+  1FB3  0E 10 FA        EQUB n, h, threshold(pic)
+  1FB6  11              EQUB 3 + n + coloff(pic, c)
+  1FB7  15              EQUB 3 + n + coloff(pic, c)
+  1FB8  1B              EQUB 3 + n + coloff(pic, c)
+  1FB9  22              EQUB 3 + n + coloff(pic, c)
+  1FBA  2A              EQUB 3 + n + coloff(pic, c)
+  1FBB  31              EQUB 3 + n + coloff(pic, c)
+  1FBC  36              EQUB 3 + n + coloff(pic, c)
+  1FBD  3F              EQUB 3 + n + coloff(pic, c)
+  1FBE  43              EQUB 3 + n + coloff(pic, c)
+  1FBF  4A              EQUB 3 + n + coloff(pic, c)
+  1FC0  52              EQUB 3 + n + coloff(pic, c)
+  1FC1  57              EQUB 3 + n + coloff(pic, c)
+  1FC2  62              EQUB 3 + n + coloff(pic, c)
+  1FC3  67              EQUB 3 + n + coloff(pic, c)
 col = REVERSE(pic[.., c])
-  2149  20              EQUB col[i] + i*8
-  214A  42              EQUB col[i] + i*8
-  214B  5B              EQUB col[i] + i*8
-  214C  78              EQUB col[i] + i*8
+  1FC4  20              EQUB col[i] + i*8
+  1FC5  42              EQUB col[i] + i*8
+  1FC6  5B              EQUB col[i] + i*8
+  1FC7  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  214D  00              EQUB col[i] + i*8
-  214E  09              EQUB col[i] + i*8
-  214F  10              EQUB col[i] + i*8
-  2150  3A              EQUB col[i] + i*8
-  2151  6B              EQUB col[i] + i*8
-  2152  78              EQUB col[i] + i*8
+  1FC8  00              EQUB col[i] + i*8
+  1FC9  09              EQUB col[i] + i*8
+  1FCA  10              EQUB col[i] + i*8
+  1FCB  3A              EQUB col[i] + i*8
+  1FCC  6B              EQUB col[i] + i*8
+  1FCD  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2153  00              EQUB col[i] + i*8
-  2154  09              EQUB col[i] + i*8
-  2155  2A              EQUB col[i] + i*8
-  2156  43              EQUB col[i] + i*8
-  2157  4A              EQUB col[i] + i*8
-  2158  73              EQUB col[i] + i*8
-  2159  78              EQUB col[i] + i*8
+  1FCE  00              EQUB col[i] + i*8
+  1FCF  09              EQUB col[i] + i*8
+  1FD0  2A              EQUB col[i] + i*8
+  1FD1  43              EQUB col[i] + i*8
+  1FD2  4A              EQUB col[i] + i*8
+  1FD3  73              EQUB col[i] + i*8
+  1FD4  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  215A  09              EQUB col[i] + i*8
-  215B  22              EQUB col[i] + i*8
-  215C  4B              EQUB col[i] + i*8
-  215D  52              EQUB col[i] + i*8
-  215E  5B              EQUB col[i] + i*8
-  215F  62              EQUB col[i] + i*8
-  2160  73              EQUB col[i] + i*8
-  2161  78              EQUB col[i] + i*8
+  1FD5  09              EQUB col[i] + i*8
+  1FD6  22              EQUB col[i] + i*8
+  1FD7  4B              EQUB col[i] + i*8
+  1FD8  52              EQUB col[i] + i*8
+  1FD9  5B              EQUB col[i] + i*8
+  1FDA  62              EQUB col[i] + i*8
+  1FDB  73              EQUB col[i] + i*8
+  1FDC  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2162  09              EQUB col[i] + i*8
-  2163  1A              EQUB col[i] + i*8
-  2164  2B              EQUB col[i] + i*8
-  2165  32              EQUB col[i] + i*8
-  2166  4B              EQUB col[i] + i*8
-  2167  52              EQUB col[i] + i*8
-  2168  7B              EQUB col[i] + i*8
+  1FDD  09              EQUB col[i] + i*8
+  1FDE  1A              EQUB col[i] + i*8
+  1FDF  2B              EQUB col[i] + i*8
+  1FE0  32              EQUB col[i] + i*8
+  1FE1  4B              EQUB col[i] + i*8
+  1FE2  52              EQUB col[i] + i*8
+  1FE3  7B              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2169  09              EQUB col[i] + i*8
-  216A  12              EQUB col[i] + i*8
-  216B  3B              EQUB col[i] + i*8
-  216C  42              EQUB col[i] + i*8
-  216D  7B              EQUB col[i] + i*8
+  1FE4  09              EQUB col[i] + i*8
+  1FE5  12              EQUB col[i] + i*8
+  1FE6  3B              EQUB col[i] + i*8
+  1FE7  42              EQUB col[i] + i*8
+  1FE8  7B              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  216E  09              EQUB col[i] + i*8
-  216F  12              EQUB col[i] + i*8
-  2170  23              EQUB col[i] + i*8
-  2171  2A              EQUB col[i] + i*8
-  2172  3B              EQUB col[i] + i*8
-  2173  4A              EQUB col[i] + i*8
-  2174  63              EQUB col[i] + i*8
-  2175  74              EQUB col[i] + i*8
-  2176  7B              EQUB col[i] + i*8
+  1FE9  09              EQUB col[i] + i*8
+  1FEA  12              EQUB col[i] + i*8
+  1FEB  23              EQUB col[i] + i*8
+  1FEC  2A              EQUB col[i] + i*8
+  1FED  3B              EQUB col[i] + i*8
+  1FEE  4A              EQUB col[i] + i*8
+  1FEF  63              EQUB col[i] + i*8
+  1FF0  74              EQUB col[i] + i*8
+  1FF1  7B              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2177  09              EQUB col[i] + i*8
-  2178  5B              EQUB col[i] + i*8
-  2179  74              EQUB col[i] + i*8
-  217A  7B              EQUB col[i] + i*8
+  1FF2  09              EQUB col[i] + i*8
+  1FF3  5B              EQUB col[i] + i*8
+  1FF4  74              EQUB col[i] + i*8
+  1FF5  7B              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  217B  09              EQUB col[i] + i*8
-  217C  1B              EQUB col[i] + i*8
-  217D  22              EQUB col[i] + i*8
-  217E  2B              EQUB col[i] + i*8
-  217F  3A              EQUB col[i] + i*8
-  2180  53              EQUB col[i] + i*8
-  2181  7C              EQUB col[i] + i*8
+  1FF6  09              EQUB col[i] + i*8
+  1FF7  1B              EQUB col[i] + i*8
+  1FF8  22              EQUB col[i] + i*8
+  1FF9  2B              EQUB col[i] + i*8
+  1FFA  3A              EQUB col[i] + i*8
+  1FFB  53              EQUB col[i] + i*8
+  1FFC  7C              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  2182  09              EQUB col[i] + i*8
-  2183  2B              EQUB col[i] + i*8
-  2184  32              EQUB col[i] + i*8
-  2185  4B              EQUB col[i] + i*8
-  2186  54              EQUB col[i] + i*8
-  2187  5B              EQUB col[i] + i*8
-  2188  74              EQUB col[i] + i*8
-  2189  78              EQUB col[i] + i*8
+  1FFD  09              EQUB col[i] + i*8
+  1FFE  2B              EQUB col[i] + i*8
+  1FFF  32              EQUB col[i] + i*8
+  2000  4B              EQUB col[i] + i*8
+  2001  54              EQUB col[i] + i*8
+  2002  5B              EQUB col[i] + i*8
+  2003  74              EQUB col[i] + i*8
+  2004  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  218A  09              EQUB col[i] + i*8
-  218B  10              EQUB col[i] + i*8
-  218C  43              EQUB col[i] + i*8
-  218D  6C              EQUB col[i] + i*8
-  218E  78              EQUB col[i] + i*8
+  2005  09              EQUB col[i] + i*8
+  2006  10              EQUB col[i] + i*8
+  2007  43              EQUB col[i] + i*8
+  2008  6C              EQUB col[i] + i*8
+  2009  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  218F  00              EQUB col[i] + i*8
-  2190  09              EQUB col[i] + i*8
-  2191  18              EQUB col[i] + i*8
-  2192  33              EQUB col[i] + i*8
-  2193  3C              EQUB col[i] + i*8
-  2194  43              EQUB col[i] + i*8
-  2195  4C              EQUB col[i] + i*8
-  2196  53              EQUB col[i] + i*8
-  2197  5C              EQUB col[i] + i*8
-  2198  6B              EQUB col[i] + i*8
-  2199  78              EQUB col[i] + i*8
+  200A  00              EQUB col[i] + i*8
+  200B  09              EQUB col[i] + i*8
+  200C  18              EQUB col[i] + i*8
+  200D  33              EQUB col[i] + i*8
+  200E  3C              EQUB col[i] + i*8
+  200F  43              EQUB col[i] + i*8
+  2010  4C              EQUB col[i] + i*8
+  2011  53              EQUB col[i] + i*8
+  2012  5C              EQUB col[i] + i*8
+  2013  6B              EQUB col[i] + i*8
+  2014  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  219A  00              EQUB col[i] + i*8
-  219B  09              EQUB col[i] + i*8
-  219C  20              EQUB col[i] + i*8
-  219D  5B              EQUB col[i] + i*8
-  219E  78              EQUB col[i] + i*8
+  2015  00              EQUB col[i] + i*8
+  2016  09              EQUB col[i] + i*8
+  2017  20              EQUB col[i] + i*8
+  2018  5B              EQUB col[i] + i*8
+  2019  78              EQUB col[i] + i*8
 col = REVERSE(pic[.., c])
-  219F  30              EQUB col[i] + i*8
-  21A0  4B              EQUB col[i] + i*8
-  21A1  78              EQUB col[i] + i*8
+  201A  30              EQUB col[i] + i*8
+  201B  4B              EQUB col[i] + i*8
+  201C  78              EQUB col[i] + i*8
 .PY
-  21A2  00 00 00 00...  SKIP 33
+  201D  00 00 00 00...  SKIP 33
 .slotbits
-  21C3  88 44 22 11     EQUB &88, &44, &22, &11
+  203E  88 44 22 11     EQUB &88, &44, &22, &11
 .shr3
-  21C7  00 00 00 00...  EQUB (0..255) DIV 8
+  2042  00 00 00 00...  EQUB (0..255) DIV 8
+  2142  00 00 00 00...  ALIGN &100
+  2200                  include "tables.6502"
+ncam    = 256
+radius  = 375
+camorig = {600, 32, 600}
+focal   = 128
+near    = 64
+lookahead = 1000
+sprw    = 14
+sprh    = 16
+objects = {...
+nobj = LEN(objects)
+k   = 2*PI / ncam
+t   = 0 ..< ncam
+sn  = SIN(t*k)
+cs  = COS(t*k)
+den = 1 + sn*sn
+campath = camorig + ZIP(cs/den, FULL(ncam, 0), SIN(2*t*k)/(2*den)) * radius
+dxdt = sn*(sn*sn - 3)/den^2
+dzdt = (1 - 3*sn*sn)/den^2
+hdg  = normalise(ZIP(dxdt, FULL(ncam, 0), dzdt))
+target = hdg*lookahead + {0, -camorig[1], 0}
+fwd    = normalise(target)
+right  = ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])
+up     = cross(fwd, right)
+rel = objects[.., 0..2] - ZIP(campath)
+vx  = viewdot(rel, right)
+vy  = viewdot(rel, up)
+vz  = viewdot(rel, fwd)
+vzc = MAX({vz, near}, 0)
+wcols = focal*objects[.., 3]/vzc / 2
+sxc   = focal*vx/vzc / 2 + 64
+syp   = (127 - (64 - focal*vy/vzc)) / 2
+sizeb = MAX({nearest(wcols), 0}, 0)
+xlb   = nearest(sxc - wcols/2)
+syb   = nearest(syp)
+scale8 = sizeb*256 DIV sprw
+pwx    = (sprw*scale8 + 128) DIV 256
+phpx    = (sprh*scale8 + 128) DIV 256
+vis = (vz > near) * (sizeb >= 1) * (xlb >= 0) * (xlb + pwx <= 128) * (syb >= 0) * (syb + phpx <= 64)
+w      = 2*MAX(ABS(vz)) + 1
+vzs    = vz*vis
+key    = ZIP(t)*w - vzs
+recs    = ZIP(FLATTEN(key), FLATTEN(xlb*vis), FLATTEN(syb*vis), FLATTEN(sizeb*vis))
+sortedf = SORT(recs, 0)
+percam  = SUM(vis, 1)
+maxvis  = MAX(percam)
+nslots  = MIN({maxvis, 16})
+tabstride = nslots
+max visible = 13 of 32 boulders -> 13 slots
+shift   = MAX({percam - nslots, 0}, 0)
+slotidx = FLATTEN(ZIP(0 ..< nslots) + (0 ..< ncam)*nobj + shift)
+.tab_x
+  2200  38 3C 07 01...  EQUB sortedf[slotidx, 1]
+.tab_y
+  2F00  1E 1E 1E 1F...  EQUB sortedf[slotidx, 2]
+.tab_sz
+  3C00  09 09 06 05...  EQUB sortedf[slotidx, 3]
 ENDSECTION
 

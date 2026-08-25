@@ -48,6 +48,7 @@ irqchange = &FE
 
 ZPRESERVE &00..&FC
 ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
+ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 
 
 \ ******************************************************************
@@ -58,45 +59,8 @@ ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
 {
     JSR clearscreen
 
-    ; the creature, still at 1x on the left
-    LDA #0:STA plot_setup.scale
-    LDA #1:STA plot_setup.scale+1
-    LDA #LO(creature):STA plot_setup.spr
-    LDA #HI(creature):STA plot_setup.spr+1
-    JSR plot_setup
-    LDA #LO(pal_creature):STA plot_draw.pal
-    LDA #HI(pal_creature):STA plot_draw.pal+1
-    LDA #6:STA plot_draw.sprx
-    LDA #8:STA plot_draw.spry
-    JSR plot_draw
-
-    ; the boulder, breathing through the scale table, centred
-    LDX framectr                ; scale index: one table entry per frame
-    LDA scalelo,X:STA plot_setup.scale
-    LDA scalehi,X:STA plot_setup.scale+1
-    LDA #LO(boulder):STA plot_setup.spr
-    LDA #HI(boulder):STA plot_setup.spr+1
-    JSR plot_setup
-    LDA #LO(pal_boulder):STA plot_draw.pal
-    LDA #HI(pal_boulder):STA plot_draw.pal+1
-
-    ; centre it: x = 64 - width/2, y = 32 - height/2 (pairs)
-    LDA plot_setup.pw:LSR A:STA plot_draw.sprx
-    LDA #64:SEC:SBC plot_draw.sprx:STA plot_draw.sprx
-    LDA plot_setup.ph:LSR A:STA plot_draw.spry
-    LDA #32:SEC:SBC plot_draw.spry:STA plot_draw.spry
-    LDA plot_setup.scale+1
-    BNE useengine                   ; 1x and up: always the stretch engine
-    LDY #2
-    LDA plot_setup.scale
-    CMP (plot_setup.spr),Y          ; below the sprite's own crossover the
-    BCC userebuild                  ; per-pair rebuild wins
-.useengine
-    JSR plot_draw
-    JMP plotted
-.userebuild
-    JSR plot_draw_a
-.plotted
+    LDA framectr:STA camidx     ; one copy per loop - vsync moves it under us
+    JSR drawsprites
 
     JSR swapbuffers
 
@@ -106,6 +70,68 @@ ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
     JMP mainloop
 .@
     JMP (&FFFC)
+}
+
+
+\ ******************************************************************
+\ *    Walk the slot tables for this camera index, far to near,
+\ *    stopping at size 0. Each table is nslots pages (ncam = 256:
+\ *    one page per slot), tabstride pages apart. The tables only
+\ *    hold fully-visible sprites, so no clipping anywhere.
+\ ******************************************************************
+
+.drawsprites
+{
+    ZPAUTO1 slots
+    ZPAUTO1 tabhi                   ; slot page in tab_x
+    ZPAUTO2 tptr
+
+    LDA #LO(boulder):STA plot_setup.spr
+    LDA #HI(boulder):STA plot_setup.spr+1
+    LDA #LO(pal_boulder):STA plot_draw.pal
+    LDA #HI(pal_boulder):STA plot_draw.pal+1
+    LDA #HI(tab_x):STA tabhi
+    LDA #nslots:STA slots
+.slotloop
+    LDY camidx
+    LDA #0:STA tptr
+    LDA tabhi:CLC:ADC #2*tabstride:STA tptr+1   ; tab_sz
+    LDA (tptr),Y
+    BEQ done                        ; size 0 = nothing more to draw
+    TAX
+    LDA normlo,X:STA plot_setup.scale
+    LDA normhi,X:STA plot_setup.scale+1
+    LDA tabhi:STA tptr+1                        ; tab_x
+    LDA (tptr),Y:STA plot_draw.sprx
+    LDA tabhi:CLC:ADC #tabstride:STA tptr+1     ; tab_y
+    LDA (tptr),Y:STA plot_draw.spry
+    JSR plot_sprite
+    INC tabhi
+    DEC slots
+    BNE slotloop
+.done
+    RTS
+}
+
+
+\ ******************************************************************
+\ *    Set up and plot one sprite: spr/scale/sprx/spry/pal are in.
+\ *    Picks the plotter with the sprite's own crossover byte.
+\ ******************************************************************
+
+.plot_sprite
+{
+    JSR plot_setup
+    LDA plot_setup.scale+1
+    BNE useengine                   ; 1x and up: always the stretch engine
+    LDY #2
+    LDA plot_setup.scale
+    CMP (plot_setup.spr),Y          ; below the sprite's own crossover the
+    BCC userebuild                  ; per-pair rebuild wins
+.useengine
+    JMP plot_draw
+.userebuild
+    JMP plot_draw_a
 }
 
 
@@ -866,15 +892,14 @@ physcols = {0, 4, 1, 2}         ; black, blue, red, green
 
 
 \ ******************************************************************
-\ *    Scale table: 256 frames of 8.8 scale, 0.25x to 3x and back (cosine)
+\ *    Size normalisation: plotted width in pixels -> 8.8 scale for
+\ *    the 14-wide boulder
 \ ******************************************************************
 
-scaletab = INT(256 * (0.25 + 1.375 * (1 - COS((0..255) * 2 * PI / 256))))
-
-.scalelo
-    EQUB scaletab AND 255
-.scalehi
-    EQUB scaletab DIV 256
+.normlo
+    EQUB ((0..63)*256 DIV 14) AND 255
+.normhi
+    EQUB ((0..63)*256 DIV 14) DIV 256
 
 
 \ ******************************************************************
@@ -1038,5 +1063,12 @@ ENDMACRO
     EQUB &88, &44, &22, &11     ; pixel bit of slot 0..3
 .shr3
     EQUB (0..255) DIV 8         ; run byte -> end row - 1
+
+\ ******************************************************************
+\ *    The precalculated camera tables, page aligned after the code
+\ ******************************************************************
+
+ALIGN &100
+include "tables.6502"
 
 ENDSECTION

@@ -1,0 +1,163 @@
+\ **************************************************************************
+\ *
+\ *    Camera / boulder table generation
+\ *
+\ *    A cut-down version of the camera demo's generator (see that demo
+\ *    for the full commentary on shapes and broadcasting). The camera
+\ *    rides the same lemniscate over a field of boulders; per camera
+\ *    position we emit slot tables of the sprite plot inputs:
+\ *
+\ *        tab_x   bottom-left pixel column
+\ *        tab_y   bottom pair (from the bottom of the screen)
+\ *        tab_sz  plotted width in pixels; 0 = no more sprites
+\ *
+\ *    far to near per camera index. There is no clipping in the
+\ *    plotters, so anything that would poke off ANY screen edge is
+\ *    simply culled here - using the same integer maths the runtime
+\ *    will use, so the fit test is exact, not a margin.
+\ *
+\ **************************************************************************
+
+ncam    = 256                   \ camera positions around the loop
+radius  = 375
+camorig = {600, 32, 600}
+focal   = 128
+near    = 64
+lookahead = 1000
+
+sprw    = 14                    \ the boulder source size, for the runtime's
+sprh    = 16                    \ size -> scale -> pw/ph reproduction
+
+\ The field: {x, y, z, world size}
+
+objects = {
+    { 365, 0,   45, 64},
+    { 235, 0,   65, 48},
+    { 995, 0,  110, 72},
+    { 580, 0,  195, 56},
+    { 145, 0,  260, 64},
+    {1140, 0,  315, 48},
+    { 585, 0,  335, 64},
+    { 750, 0,  365, 72},
+    {  70, 0,  445, 56},
+    { 340, 0,  570, 64},
+    { 755, 0,  640, 48},
+    { 265, 0,  775, 64},
+    { 940, 0,  810, 72},
+    { 565, 0,  890, 56},
+    { 145, 0,  935, 64},
+    { 790, 0, 1035, 64},
+    { 445, 0, 1085, 48},
+    { 940, 0, 1135, 72},
+    { 820, 0,   55, 56},
+    { 700, 0,  140, 64},
+    { 390, 0,  260, 72},
+    { 940, 0,  335, 48},
+    { 465, 0,  380, 64},
+    {1075, 0,  460, 64},
+    { 485, 0,  585, 56},
+    {1105, 0,  700, 64},
+    {  40, 0,  780, 48},
+    { 760, 0,  820, 64},
+    { 345, 0,  940, 72},
+    { 930, 0,  960, 56},
+    {1135, 0, 1040, 64},
+    { 180, 0, 1160, 56},
+}
+
+nobj = LEN(objects)
+
+FUNCTION normalise(v)
+    lensq = SUM(v*v, 1)
+    len   = ZIP(SQRT(lensq))
+= v / len
+
+FUNCTION cross(a, b)
+    x = a[..,1]*b[..,2] - a[..,2]*b[..,1]
+    y = a[..,2]*b[..,0] - a[..,0]*b[..,2]
+    z = a[..,0]*b[..,1] - a[..,1]*b[..,0]
+= ZIP(x, y, z)
+
+FUNCTION viewdot(rel, basis) = SUM(rel * ZIP(basis), 2)
+
+FUNCTION nearest(v)
+    s = (v >= 0)*2 - 1
+= ROUND(v + s*0.5)
+
+\ Camera path and basis (lemniscate of Bernoulli, aimed at the ground
+\ `lookahead` ahead - identical to the camera demo)
+
+k   = 2*PI / ncam
+t   = 0 ..< ncam
+sn  = SIN(t*k)
+cs  = COS(t*k)
+den = 1 + sn*sn
+
+campath = camorig + ZIP(cs/den, FULL(ncam, 0), SIN(2*t*k)/(2*den)) * radius
+
+dxdt = sn*(sn*sn - 3)/den^2
+dzdt = (1 - 3*sn*sn)/den^2
+hdg  = normalise(ZIP(dxdt, FULL(ncam, 0), dzdt))
+
+target = hdg*lookahead + {0, -camorig[1], 0}
+fwd    = normalise(target)
+right  = ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])
+up     = cross(fwd, right)
+
+\ View-space positions, projected to (column, pair) space: columns are
+\ double-width pixels and our vertical unit is the scanline PAIR, so
+\ both projected axes get the same /2 and the space is square.
+
+rel = objects[.., 0..2] - ZIP(campath)
+vx  = viewdot(rel, right)
+vy  = viewdot(rel, up)
+vz  = viewdot(rel, fwd)
+vzc = MAX({vz, near}, 0)
+
+wcols = focal*objects[.., 3]/vzc / 2      \ plotted width, columns (float)
+sxc   = focal*vx/vzc / 2 + 64             \ centre column
+syp   = (127 - (64 - focal*vy/vzc)) / 2   \ bottom edge, pairs from the bottom
+
+sizeb = MAX({nearest(wcols), 0}, 0)       \ the size byte
+xlb   = nearest(sxc - wcols/2)            \ bottom-left column
+syb   = nearest(syp)                      \ bottom pair
+
+\ Reproduce the runtime's integer pipeline exactly: size -> 8.8 scale ->
+\ plotted pw/ph, then cull anything not FULLY on the 128 x 64 screen.
+
+scale8 = sizeb*256 DIV sprw
+pwx    = (sprw*scale8 + 128) DIV 256
+phpx    = (sprh*scale8 + 128) DIV 256
+
+vis = (vz > near) * (sizeb >= 1) * (xlb >= 0) * (xlb + pwx <= 128) * (syb >= 0) * (syb + phpx <= 64)
+
+\ Depth-sort into slot tables, far to near, culled entries last
+\ (they carry size 0, the renderer's stop marker)
+
+w      = 2*MAX(ABS(vz)) + 1
+vzs    = vz*vis
+key    = ZIP(t)*w - vzs
+
+recs    = ZIP(FLATTEN(key), FLATTEN(xlb*vis), FLATTEN(syb*vis), FLATTEN(sizeb*vis))
+sortedf = SORT(recs, 0)
+
+percam  = SUM(vis, 1)
+maxvis  = MAX(percam)
+nslots  = MIN({maxvis, 16})     \ table budget: at most 16 slots
+tabstride = nslots              \ pages from one table to the next
+
+PRINT "max visible = ", maxvis, " of ", nobj, " boulders -> ", nslots, " slots"
+
+\ When a camera position sees more than nslots, drop the FARTHEST:
+\ shift that camera's window so the nearest nslots survive (still
+\ far to near; short frames still end at the size-0 padding).
+
+shift   = MAX({percam - nslots, 0}, 0)
+slotidx = FLATTEN(ZIP(0 ..< nslots) + (0 ..< ncam)*nobj + shift)
+
+.tab_x
+    EQUB sortedf[slotidx, 1]
+.tab_y
+    EQUB sortedf[slotidx, 2]
+.tab_sz
+    EQUB sortedf[slotidx, 3]
