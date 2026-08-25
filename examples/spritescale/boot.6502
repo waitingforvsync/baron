@@ -8,7 +8,7 @@ SECTION Boot, filename="!BOOT", org=&1200
 .@  LDA message,X
     JSR &FFE3
     INX
-    CMP #13
+    CMP #0
     BNE @-
 
     ; execute
@@ -19,6 +19,6 @@ SECTION Boot, filename="!BOOT", org=&1200
 .cmd
     EQUS "/"
 .message
-    EQUS "SPRITE", 13
+    EQUS "SCALE", 13, 13, 0
 
 ENDSECTION

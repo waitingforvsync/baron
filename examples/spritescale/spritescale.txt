@@ -7,7 +7,7 @@ SECTION Boot, filename="!BOOT", org=&1200
   1209  BD 1C 12        LDA message,X
   120C  20 E3 FF        JSR &FFE3
   120F  E8              INX
-  1210  C9 0D           CMP #13
+  1210  C9 00           CMP #0
   1212  D0 F5           BNE @-
   1214  A2 1B           LDX #LO(cmd)
   1216  A0 12           LDY #HI(cmd)
@@ -15,7 +15,7 @@ SECTION Boot, filename="!BOOT", org=&1200
 .cmd
   121B  2F              EQUS "/"
 .message
-  121C  53 50 52 49...  EQUS "SPRITE", 13
+  121C  53 43 41 4C...  EQUS "SCALE", 13, 13, 0
 ENDSECTION
 
 black     = {0, 0}
@@ -32,7 +32,7 @@ skyeven  = pateven(teal)
 skyodd   = patodd(teal)
 grounde  = pateven(darkgreen)
 groundo  = patodd(darkgreen)
-SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "SPRITE", guard = &6000
+SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "SCALE", guard = &6000
 framectr = &FD
 irqchange = &FE
 drawpage = &2E [auto]

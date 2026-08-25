@@ -41,7 +41,7 @@ skyodd   = patodd(teal)
 grounde  = pateven(darkgreen)
 groundo  = patodd(darkgreen)
 
-SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "SPRITE", guard = &6000
+SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "SCALE", guard = &6000
 
 framectr = &FD                  ; incremented by the vsync interrupt
 irqchange = &FE
@@ -1029,9 +1029,7 @@ ENDMACRO
             {0,0,0,0,0,0,0,0,0,0,0,0}}
 
 
-\ A 14x16 boulder, no outline: red body, brown dimples and lower-left
-\ shading, olive highlights upper right, and an elliptical black
-\ shadow in the bottom two rows (the rock sits two rows up).
+\ A 14x16 boulder.
 \ 0 transparent, 1 black, 2 brown, 3 red, 4 olive.
 
 .boulder
