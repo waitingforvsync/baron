@@ -18,5 +18,10 @@ rc_str file_path_normalize(rc_str path, rc_arena *arena);
 // includes are not special-cased yet, they just get appended like anything else. Fresh copy.
 rc_str file_path_resolve(rc_str base, rc_str include, rc_arena *arena);
 
+// `name` placed inside the directory `dir` - the separator is added unless dir already ends in one, and
+// an empty dir leaves the name where it stands (the current directory). Both sides are normalised
+// first. Fresh copy.
+rc_str file_path_join(rc_str dir, rc_str name, rc_arena *arena);
+
 
 #endif // ifndef BARON_FILE_UTILS_H_

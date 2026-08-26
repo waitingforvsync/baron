@@ -49,10 +49,11 @@ typedef struct output_spec_result {
 output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint32_t boot, uint32_t cycle,
                                     rc_arena *arena);
 
-// The loose-files writer: each entry's bytes to `filename` in the current directory. `inf` also writes a
-// "<name>.inf" sidecar beside each ("$.NAME <load> <exec> <length>" - the BBC-world interchange form that
-// carries the addresses a bare host file loses). Returns a complaint, empty on success.
-rc_str output_write_files(const output_spec *spec, bool inf, rc_arena *arena);
+// The loose-files writer: each entry's bytes to `filename` inside the directory `dir` (empty = the
+// current one; the directory must already exist). `inf` also writes a "<name>.inf" sidecar beside each
+// ("$.NAME <load> <exec> <length>" - the BBC-world interchange form that carries the addresses a bare
+// host file loses). Returns a complaint, empty on success.
+rc_str output_write_files(const output_spec *spec, rc_str dir, bool inf, rc_arena *arena);
 
 
 #endif // ifndef BARON_OUTPUT_H_

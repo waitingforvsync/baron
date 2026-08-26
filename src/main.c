@@ -7,7 +7,6 @@
 #include "richc/mstr.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #ifdef BARON_TESTS
@@ -15,20 +14,54 @@
 #endif
 
 
-static const char usage[] =
-    "usage: baron [-v] [--check] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>] [--cycle <0-99>]"
-    " [-log<n> <file>] <source files>\n";
+#define BARON_VERSION "0.1.0"
+
+
+static void display_version(void) {
+    puts("baron " BARON_VERSION);
+    puts("Developed and maintained by Rich Talbot-Watkins");
+    puts("https://github.com/waitingforvsync/baron");
+}
+
+
+static void display_help(void) {
+    puts("Usage: baron [OPTION]... [SOURCE FILES]...");
+    puts("A 6502 assembler targetting the BBC Micro.");
+    puts("");
+    puts("General options:");
+    puts("  -log<N> <file>   Output messages to stream N (0-9) to the given file");
+    puts("  -v               Output listing for assembled source code");
+    puts("");
+    puts("Options for generating a .ssd disk image:");
+    puts("  -o <file>        Create a .ssd disk image containing the saved sections");
+    puts("  --cycle <0-99>   Set this cycle count");
+    puts("  --opt <n>        Set this *OPT 4,n boot option");
+    puts("  --title <title>  Set this disk title");
+    puts("");
+    puts("Options for generating raw binary files to the host:");
+    puts("  -p <path>        Specify path for outputting raw object files");
+    puts("  --inf            Generate .inf sidecars alongside the assembled binaries");
+    puts("");
+    puts("Additional:");
+    puts("  --version to display version and author information");
+    puts("  --help to display this help again");
+}
+
 
 // A decimal option value in [0, max], or -1 with a complaint printed. `what` names the switch.
-static long parse_option_value(const char *what, const char *s, long max)
+// Bailing out the moment we pass max keeps the running total below max * 10 + 9, so it cannot overflow.
+static int32_t parse_option_value(const char *what, const char *s, uint32_t max)
 {
-    char *end = NULL;
-    long v = strtol(s, &end, 10);
-    if (*s == '\0' || *end != '\0' || v < 0 || v > max) {
-        fprintf(stderr, "baron: %s must be 0-%ld\n", what, max);
+    uint32_t v = 0;
+    const char *p = s;
+    while (*p >= '0' && *p <= '9' && v <= max) {
+        v = v * 10 + (uint32_t) (*p++ - '0');
+    }
+    if (p == s || *p != '\0' || v > max) {
+        fprintf(stderr, "baron: %s must be 0-%u\n", what, max);
         return -1;
     }
-    return v;
+    return (int32_t) v;
 }
 
 // A channel-redirect switch -log0 .. -log9, or -1. Its channel digit is the switch's own last character.
@@ -44,7 +77,7 @@ static int log_channel(const char *arg)
 // assemble pass, which must SKIP those values or it would try to assemble them.
 static bool option_takes_value(const char *arg)
 {
-    return strcmp(arg, "-o") == 0 || strcmp(arg, "--title") == 0
+    return strcmp(arg, "-o") == 0 || strcmp(arg, "-p") == 0 || strcmp(arg, "--title") == 0
         || strcmp(arg, "--opt") == 0 || strcmp(arg, "--cycle") == 0
         || log_channel(arg) >= 0;
 }
@@ -74,15 +107,25 @@ int main(int argc, char **argv)
     bool verbose = false;
     bool check = false;   // --check: assemble and validate everything, write nothing
     bool inf = false;
-    const char *out = NULL;
+    const char *out = NULL;     // -o: gather the saved sections into a disc image
+    const char *raw = NULL;     // -p: write the saved sections as raw binaries into this directory
     const char *title = "";
     const char *log_paths[baron_num_channels] = {0};   // -logN: write PRINT channel N to this file
-    long boot = 0;
-    long cycle = 0;
+    int32_t boot = 0;
+    int32_t cycle = 0;
     bool disc_options = false;   // any of --title/--opt/--cycle, which only mean something with -o
     int files = 0;
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-v") == 0) {
+        if (strcmp(argv[i], "--help") == 0) {
+            display_help();
+            return 1;
+        }
+        else if (strcmp(argv[i], "--version") == 0) {
+            display_version();
+            return 1;
+        }
+        else if (strcmp(argv[i], "-v") == 0) {
             verbose = true;
         }
         else if (strcmp(argv[i], "--check") == 0) {
@@ -93,6 +136,9 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
+        }
+        else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            raw = argv[++i];
         }
         else if (log_channel(argv[i]) >= 0 && i + 1 < argc) {
             log_paths[log_channel(argv[i])] = argv[i + 1];
@@ -111,7 +157,7 @@ int main(int argc, char **argv)
             disc_options = true;
         }
         else if (argv[i][0] == '-') {
-            fprintf(stderr, "baron: unknown option '%s'\n%s", argv[i], usage);
+            fprintf(stderr, "baron: unknown option '%s'.\nbaron --help for options.", argv[i]);
             return 1;
         }
         else {
@@ -122,16 +168,21 @@ int main(int argc, char **argv)
         return 1;   // parse_option_value already complained
     }
     if (files == 0) {
-        fprintf(stderr, "%s", usage);
+        display_help();
         return 1;
     }
     if (out == NULL && disc_options) {
-        fprintf(stderr, "baron: --title/--opt/--cycle describe a disc image and need -o\n%s", usage);
+        fprintf(stderr, "baron: --title/--opt/--cycle describe a disc image and need -o.\nbaron --help for options.");
         return 1;
     }
-    if (out != NULL && inf) {
-        fprintf(stderr, "baron: --inf applies to loose file output only (drop -o)\n%s", usage);
+    if (inf && raw == NULL) {
+        fprintf(stderr, "baron: --inf describes the raw binaries and needs -p.\nbaron --help for options.");
         return 1;
+    }
+    if (out == NULL && raw == NULL && !check) {
+        // Assembling with nowhere to put the result is legal - PRINT and -v still speak - but it is far
+        // more often a forgotten switch, so it does not pass in silence. --check means it on purpose.
+        fprintf(stderr, "baron: warning: no output requested; -p writes raw binaries, -o a disc image\n");
     }
     if (out != NULL) {
         // The extension picks the writer; only DFS discs exist so far, and refusing the rest up front
@@ -217,7 +268,8 @@ int main(int argc, char **argv)
     }
 
     // The output stage. Nothing is written unless EVERY file assembled - a partial batch would quietly
-    // produce outputs with sections missing.
+    // produce outputs with sections missing. -p and -o are independent gates on the same spec, so a run
+    // may ask for both the raw binaries and a disc image; with neither, the assembled bytes go nowhere.
     if (!failed) {
         output_spec_result sr = output_spec_make(saved.view, rc_str_from_cstr(title),
                                                  (uint32_t) boot, (uint32_t) cycle, &cli);
@@ -225,31 +277,31 @@ int main(int argc, char **argv)
             fprintf(stderr, "baron: %.*s\n", (int) sr.error.len, sr.error.data);
             failed = true;
         }
-        else if (out == NULL) {
-            if (!check) {
-                rc_str err = output_write_files(&sr.spec, inf, &cli);
+        else {
+            // Sections only ask to be saved by carrying a filename, so an output switch with nothing to
+            // write is almost always a forgotten attribute rather than a deliberately empty run.
+            if (sr.spec.entries.num == 0 && (out != NULL || raw != NULL) && !check) {
+                fprintf(stderr, "baron: warning: no section carries a filename attribute; nothing to write\n");
+            }
+            if (raw != NULL && !check) {
+                rc_str err = output_write_files(&sr.spec, rc_str_from_cstr(raw), inf, &cli);
                 if (err.len != 0) {
                     fprintf(stderr, "baron: %.*s\n", (int) err.len, err.data);
                     failed = true;
                 }
             }
-        }
-        else {
-            // An empty disc is still a valid disc - a bare catalogue - but it is more likely a forgotten
-            // filename attribute, so say so.
-            if (sr.spec.entries.num == 0 && !check) {
-                fprintf(stderr, "baron: warning: no section carries a filename attribute; writing an empty disc image\n");
-            }
-            // --check still BUILDS the image - a full disc or a bad catalogue should fail a check run -
-            // it just never lands on disk.
-            disc_ssd_result d = disc_ssd_make(&sr.spec, &cli);
-            if (d.error.len != 0) {
-                fprintf(stderr, "baron: %.*s\n", (int) d.error.len, d.error.data);
-                failed = true;
-            }
-            else if (!check && rc_file_save_binary(rc_str_from_cstr(out), d.image.view) != RC_FILE_OK) {
-                fprintf(stderr, "baron: cannot write '%s'\n", out);
-                failed = true;
+            if (out != NULL) {
+                // --check still BUILDS the image - a full disc or a bad catalogue should fail a check
+                // run - it just never lands on disk.
+                disc_ssd_result d = disc_ssd_make(&sr.spec, &cli);
+                if (d.error.len != 0) {
+                    fprintf(stderr, "baron: %.*s\n", (int) d.error.len, d.error.data);
+                    failed = true;
+                }
+                else if (!check && rc_file_save_binary(rc_str_from_cstr(out), d.image.view) != RC_FILE_OK) {
+                    fprintf(stderr, "baron: cannot write '%s'\n", out);
+                    failed = true;
+                }
             }
         }
     }

@@ -26,6 +26,22 @@ rc_str file_path_resolve(rc_str base, rc_str include, rc_arena *arena)
     return m.view;
 }
 
+rc_str file_path_join(rc_str dir, rc_str name, rc_arena *arena)
+{
+    rc_str dir_n  = file_path_normalize(dir, arena);
+    rc_str name_n = file_path_normalize(name, arena);
+    if (dir_n.len == 0) {
+        return name_n;
+    }
+
+    rc_mstr m = rc_mstr_from_str(dir_n, dir_n.len + name_n.len + 1, arena);
+    if (dir_n.data[dir_n.len - 1] != '/') {
+        rc_mstr_append_char(&m, '/', arena);
+    }
+    rc_mstr_append(&m, name_n, arena);
+    return m.view;
+}
+
 
 #ifdef BARON_TESTS
 
@@ -51,6 +67,18 @@ RC_TEST(file_utils, resolve)
     // Backslashes on either side are flattened.
     RC_CHECK(file_path_resolve(RC_STR("a\\b\\main.6502"), RC_STR("x.6502"), &a), ==, RC_STR("a/b/x.6502"));
     RC_CHECK(file_path_resolve(RC_STR("dir/main.6502"), RC_STR("x\\y.6502"), &a), ==, RC_STR("dir/x/y.6502"));
+    rc_arena_deinit(&a);
+}
+
+RC_TEST(file_utils, join)
+{
+    rc_arena a = rc_arena_make_default();
+    // No directory means the name stands alone; one with or without a trailing slash gets exactly one.
+    RC_CHECK(file_path_join(RC_STR(""),      RC_STR("CODE"), &a), ==, RC_STR("CODE"));
+    RC_CHECK(file_path_join(RC_STR("out"),   RC_STR("CODE"), &a), ==, RC_STR("out/CODE"));
+    RC_CHECK(file_path_join(RC_STR("out/"),  RC_STR("CODE"), &a), ==, RC_STR("out/CODE"));
+    RC_CHECK(file_path_join(RC_STR("a\\b"),  RC_STR("CODE"), &a), ==, RC_STR("a/b/CODE"));
+    RC_CHECK(file_path_join(RC_STR("/tmp/"), RC_STR("$.CODE"), &a), ==, RC_STR("/tmp/$.CODE"));
     rc_arena_deinit(&a);
 }
 

@@ -87,11 +87,12 @@ ENDSECTION
 Then assemble it:
 
 ```
-$ baron hello.6502
+$ baron -p . hello.6502
 ```
 
-Success is silent, and a file `HELLO` appears in the current directory (naming the file in the section is
-what asked for it).
+Success is silent, and a file `HELLO` appears in the current directory: naming the file in the section is
+what asked for it, and `-p` says where the raw binaries should land (`.` being here). Without `-p` or `-o`
+Baron assembles and reports as usual but writes nothing, and says as much.
 
 More usefully, we can go straight to a disc image:
 
@@ -110,7 +111,7 @@ $ baron -o hello.ssd --title HELLO --opt 3 boot.6502 hello.6502
 That builds a DFS `.ssd` with the two files on it, titled `HELLO`, set to `*EXEC !BOOT`. Load it
 into your favourite emulator, hit Shift-Break, and there we are.
 
-While we are here, try `baron -v hello.6502` - the listing shows every byte against its source line:
+While we are here, try `baron -v -p . hello.6502` - the listing shows every byte against its source line:
 
 ```
 .start
@@ -598,18 +599,24 @@ IF * > &3000 : ERROR "code overran the screen by ", * - &3000, " bytes" : ENDIF
 
 ## Saving your work ##
 
-Naming a file is the request to save: every section with a `filename` attribute is written, and nothing
-else is. There are two destinations:
+Naming a file is the request to save: every section with a `filename` attribute is a candidate, and
+nothing else is. Where those candidates actually go is the command line's call, and there are two
+destinations:
 
-- **Loose files** (the default): each named section becomes a binary in the current directory. Add
-  `--inf` to write a `.inf` sidecar beside each (`$.CODE 001100 001100 001F40` style), which most
-  emulators and transfer tools read.
-- **A disc image**: `-o game.ssd` gathers the same sections onto a DFS single-sided disc image instead.
+- **Raw binaries on the host**: `-p build` writes each named section as a file of that name in the
+  `build` directory (which must already exist; `-p .` for the current one). Add `--inf` to write a `.inf`
+  sidecar beside each (`$.CODE 001100 001100 001F40` style), which most emulators and transfer tools read.
+- **A disc image**: `-o game.ssd` gathers the same sections onto a DFS single-sided disc image.
   `--title` sets the disc title, `--opt` the `*OPT4` boot option (`3` execs a `!BOOT` you have supplied
   as just another named section), `--cycle` the catalogue cycle number.
 
-A multi-file run (`baron main.6502 loader.6502`) assembles each file independently and pools all their
-saved sections into the output. If *anything* failed to assemble, nothing at all is written - no
+Neither is implied, and they are not exclusive - `baron -p build -o game.ssd ...` writes both. A run
+given neither still assembles, reports, lists and prints; it simply has nowhere to put the bytes, and
+warns you in case that was not what you meant. (`--check` is the way to say it deliberately: assemble and
+validate everything, write nothing, no grumbling.)
+
+A multi-file run (`baron -p . main.6502 loader.6502`) assembles each file independently and pools all
+their saved sections into the output. If *anything* failed to assemble, nothing at all is written - no
 half-built discs.
 
 ## Examples ##

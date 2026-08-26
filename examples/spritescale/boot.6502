@@ -1,4 +1,4 @@
-SECTION Boot, filename="!BOOT", org=&1200
+SECTION Boot, filename="!BOOT", org=&400, load=&FFFF0400
 
     ; silence the beep
     LDA #15:LDX #0:JSR &FFF4
@@ -19,6 +19,6 @@ SECTION Boot, filename="!BOOT", org=&1200
 .cmd
     EQUS "/"
 .message
-    EQUS "SCALE", 13, 13, 0
+    EQUS "SCALE V0.2", 13, 13, 0
 
 ENDSECTION

@@ -1,5 +1,7 @@
 #include "output.h"
 
+#include "file_utils.h"   // file_path_join: entries land inside -p's directory
+
 #include "richc/file.h"
 #include "richc/macros.h"
 #include "richc/mstr.h"
@@ -117,13 +119,14 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
     };
 }
 
-rc_str output_write_files(const output_spec *spec, bool inf, rc_arena *arena)
+rc_str output_write_files(const output_spec *spec, rc_str dir, bool inf, rc_arena *arena)
 {
     RC_ASSERT(spec != NULL && arena != NULL);
     for (uint32_t i = 0; i < spec->entries.num; i++) {
         output_entry e = rc_view_output_entry_get(spec->entries, i);
-        if (rc_file_save_binary(e.filename, e.code) != RC_FILE_OK) {
-            return write_error(e.filename, arena);
+        rc_str path = file_path_join(dir, e.filename, arena);
+        if (rc_file_save_binary(path, e.code) != RC_FILE_OK) {
+            return write_error(path, arena);
         }
         if (inf) {
             // The sidecar line: the DFS-style name (the filename as given when it already carries a "d."
@@ -141,7 +144,7 @@ rc_str output_write_files(const output_spec *spec, bool inf, rc_arena *arena)
             rc_mstr_append_hex32(&line, e.code.num, arena);
             rc_mstr_append_char(&line, '\n', arena);
 
-            rc_mstr name = rc_mstr_from_str(e.filename, 0, arena);
+            rc_mstr name = rc_mstr_from_str(path, 0, arena);
             rc_mstr_append(&name, RC_STR(".inf"), arena);
             if (rc_file_save_text(name.view, line.view) != RC_FILE_OK) {
                 return write_error(name.view, arena);
@@ -243,7 +246,7 @@ RC_TEST(output, files_and_inf_sidecars)
     };
     output_spec spec = {.entries = RC_VIEW(e)};
 
-    rc_str err = output_write_files(&spec, true, &arena);
+    rc_str err = output_write_files(&spec, RC_STR(""), true, &arena);
     RC_CHECK(err.len, ==, 0u);
 
     // The binary round-trips, and the sidecar carries the addresses in the interchange shape.
@@ -257,6 +260,20 @@ RC_TEST(output, files_and_inf_sidecars)
 
     rc_file_delete(RC_STR("TSTOUT"));
     rc_file_delete(RC_STR("TSTOUT.inf"));
+
+    // A directory is glued on to both the binary and its sidecar; the sidecar's own DFS name is the
+    // bare filename, path or no path.
+    err = output_write_files(&spec, RC_STR("."), true, &arena);
+    RC_CHECK(err.len, ==, 0u);
+    bin = rc_file_load_binary(RC_STR("./TSTOUT"), 0, &arena);
+    RC_CHECK_TRUE(bin.error == RC_FILE_OK);
+    RC_CHECK(bin.contents.num, ==, 3u);
+    inf = rc_file_load_text(RC_STR("./TSTOUT.inf"), 0, &arena);
+    RC_CHECK_TRUE(inf.error == RC_FILE_OK);
+    RC_CHECK(inf.text.view, ==, RC_STR("$.TSTOUT 00001900 00001903 00000003\n"));
+
+    rc_file_delete(RC_STR("./TSTOUT"));
+    rc_file_delete(RC_STR("./TSTOUT.inf"));
     rc_arena_deinit(&arena);
 }
 

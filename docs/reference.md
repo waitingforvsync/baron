@@ -13,19 +13,27 @@ depth, see [Zero page allocation](zero-page-allocation.md).
 ## Command line reference ##
 
 ```
-baron [-v] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>] [--cycle <0-99>]
-      [-log<n> <file>] <source files>
+baron [-v] [--check] [-p <path>] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>]
+      [--cycle <0-99>] [-log<n> <file>] <source files>
 ```
 
 | Switch | What it does |
 |--------|--------------|
 | `-v` | Print an assembly listing to stdout: every emitted byte against its source line, macro expansions and includes followed through, `PRINT` output interleaved. |
-| `--inf` | Loose-file output only: write a `.inf` sidecar beside each saved binary, carrying its DFS name and load/exec addresses. Refused alongside `-o`. |
-| `-o <image.ssd>` | Gather every saved section onto a DFS single-sided disc image instead of loose files. Only `.ssd` for now (`.dsd`, `.adf` and `.uef` are spoken for, later). |
+| `--check` | Assemble and validate everything, write nothing - no binaries, no image, no logs. |
+| `-p <path>` | Write every saved section as a raw binary into the directory *path* (which must already exist; `.` for the current one). Nothing is written without this or `-o`. |
+| `--inf` | Write a `.inf` sidecar beside each raw binary, carrying its DFS name and load/exec addresses. Needs `-p`. |
+| `-o <image.ssd>` | Gather every saved section onto a DFS single-sided disc image. Only `.ssd` for now (`.dsd`, `.adf` and `.uef` are spoken for, later). May be combined with `-p`. |
 | `--title <t>` | The disc title, up to 12 characters. Needs `-o`. |
 | `--opt <0-3>` | The `*OPT4` boot option: 0 none, 1 `*LOAD`, 2 `*RUN`, 3 `*EXEC !BOOT`. Needs `-o`. |
 | `--cycle <0-99>` | The catalogue cycle number. Needs `-o`. |
 | `-log<n> <file>` | Redirect `PRINT` channel *n* (0-9) to a file. Channel 0 otherwise goes to stdout; channels 1-9 are otherwise discarded. |
+| `--help` | Print the switch summary. |
+| `--version` | Print the version and author information. |
+
+`-p` and `-o` are the two output gates, and neither is implied: a run given neither still assembles,
+reports and prints (`-v`, `PRINT`, `-log<n>` are unaffected), but the assembled bytes go nowhere and a
+warning says so. `--check` asks for exactly that on purpose, and stays quiet.
 
 Anything that is not a switch is a source file, and each assembles **independently** - a fresh symbol
 table per file, diagnostics reported per file as it finishes. Diagnostics go to stderr in the
@@ -233,5 +241,5 @@ Your own `FUNCTION` names join the table as they are defined, callable as `name(
 ## Version history ##
 
 - **0.1** (August 2026) - first release: the full assembler described here. NMOS 6502; sections with
-  loose-file and `.ssd` output; zero-page auto-allocation; macros, functions, lists and broadcasting;
+  raw binary (`-p`) and `.ssd` (`-o`) output; zero-page auto-allocation; macros, functions, lists and broadcasting;
   `PRINT` channels; the `-v` listing.

@@ -1,21 +1,21 @@
-SECTION Boot, filename="!BOOT", org=&1200
-  1200  A9 0F           LDA #15
-  1202  A2 00           LDX #0
-  1204  20 F4 FF        JSR &FFF4
-  1207  A2 00           LDX #0
+SECTION Boot, filename="!BOOT", org=&400, load=&FFFF0400
+  0400  A9 0F           LDA #15
+  0402  A2 00           LDX #0
+  0404  20 F4 FF        JSR &FFF4
+  0407  A2 00           LDX #0
 .@
-  1209  BD 1C 12        LDA message,X
-  120C  20 E3 FF        JSR &FFE3
-  120F  E8              INX
-  1210  C9 00           CMP #0
-  1212  D0 F5           BNE @-
-  1214  A2 1B           LDX #LO(cmd)
-  1216  A0 12           LDY #HI(cmd)
-  1218  4C F7 FF        JMP &FFF7
+  0409  BD 1C 04        LDA message,X
+  040C  20 E3 FF        JSR &FFE3
+  040F  E8              INX
+  0410  C9 00           CMP #0
+  0412  D0 F5           BNE @-
+  0414  A2 1B           LDX #LO(cmd)
+  0416  A0 04           LDY #HI(cmd)
+  0418  4C F7 FF        JMP &FFF7
 .cmd
-  121B  2F              EQUS "/"
+  041B  2F              EQUS "/"
 .message
-  121C  53 43 41 4C...  EQUS "SCALE", 13, 13, 0
+  041C  53 43 41 4C...  EQUS "SCALE V0.2", 13, 13, 0
 ENDSECTION
 
 black     = {0, 0}
