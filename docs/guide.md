@@ -580,6 +580,15 @@ PRINT "code ends at ", *, " (", * - start, " bytes)"
 Strings print raw and numbers in decimal; spacing is yours to supply. A `PRINT` speaks exactly once per
 assembly, on the final pass, with everything resolved.
 
+For the BBC's own dialect, `~` turns a number into a hex string - two digits, four or eight, whichever is
+the narrowest that holds it, and the `&` is yours to write:
+
+```
+PRINT "code ends at &", ~*, " (", * - start, " bytes)"     ; code ends at &1F40 (2112 bytes)
+```
+
+Like `<` and `>`, it swallows the whole expression after it, so `~start+1` is the hex of `start+1`.
+
 There are ten channels, `#0` to `#9`, selected by a leading `#n,`:
 
 ```

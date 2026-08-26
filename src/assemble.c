@@ -3943,6 +3943,18 @@ RC_TEST_STEP(assemble, zpauto_print_allocated_address, fix)
     RC_CHECK_TRUE(rc_str_is_equal(fix->r.channels[0], RC_STR("112\n")));   // &70, in PRINT's decimal
 }
 
+RC_TEST_STEP(assemble, zpauto_print_hex_address, fix)
+{
+    // '~' is the reason PRINT can speak the BBC's language, and a ZPAUTO address is its headline case:
+    // the placeholder must reach it without complaint on the earlier passes (a refusal there would be
+    // reported at the final pass, where PRINT is still silent) and come out as the allocated byte.
+    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : STA ptr : STA ptr+1\n"
+                          "PRINT \"ptr at &\", ~ptr, \", high byte &\", ~ptr+1");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(rc_str_is_equal(fix->r.channels[0], RC_STR("ptr at &70, high byte &71\n")));
+}
+
 RC_TEST_STEP(assemble, zpauto_jmp_via_variable_vector, fix)
 {
     // A JMP through a ZPAUTO pointer is a dispatch through a cell WE own: computed flow, refused

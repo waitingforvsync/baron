@@ -104,15 +104,16 @@ you can use the placeholder freely and Baron fills in the real number at the end
 
 vhi = v + 1                 ; aliases carry the identity: LDA vhi is a use of v
 
-    PRINT "v lives at ", v  ; PRINT happens after allocation, so this is the real address
+    PRINT "v lives at &", ~v   ; PRINT happens after allocation, so this is the real address
 ```
 
 What you can't do is make the *shape* of the program depend on an address: a condition (`IF v <> w`), a
 count (`SKIP v`, `ZPAUTO v, q`), a loop bound (`FOR n = v..8`), a section's `org`. Those all need a real
 number while Baron is still assembling - before any addresses exist - so Baron refuses them at the
 line: `Cannot use a ZPAUTO address here: 'v'`. The only arithmetic a placeholder address supports is
-adding or subtracting a whole number (that is how `ptr+1` works); anything else - multiply, compare, a
-range - is a type error.
+adding or subtracting a whole number (that is how `ptr+1` works); the only other operator that will
+touch one is `~`, which formats it for `PRINT`. Anything else - multiply, compare, a range - is a type
+error.
 
 ## What you can rely on ##
 

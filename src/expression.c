@@ -312,6 +312,29 @@ static value fn_hi(value v, rc_arena *arena)
     return value_make_numeric((double)((as_u32(v) >> 8) & 0xFFu));
 }
 
+// A number as an uppercase hex string, in the narrowest of richc's fixed widths that holds it: a byte, a
+// word, or the whole 32 bits. 10 -> "0A", &123 -> "0123", &123456 -> "00123456". No "&" - that is the
+// caller's to write, and PRINT is the point of the thing.
+static value fn_hex(value v, rc_arena *arena)
+{
+    // A ZPAUTO address stands in with its offset until allocation, exactly as an instruction operand
+    // does; the real byte arrives on the output pass, which is the pass PRINT speaks on.
+    NEEDS_NUM(value_is_numeric(v) || value_is_zpauto(v));
+    uint32_t u = value_is_zpauto(v) ? (uint32_t) v.zpauto.offset : as_u32(v);
+
+    rc_mstr m = rc_mstr_make(8, arena);
+    if (u <= 0xFFu) {
+        rc_mstr_append_hex8(&m, (uint8_t) u, arena);
+    }
+    else if (u <= 0xFFFFu) {
+        rc_mstr_append_hex16(&m, (uint16_t) u, arena);
+    }
+    else {
+        rc_mstr_append_hex32(&m, u, arena);
+    }
+    return value_make_string(m.view);
+}
+
 static value fn_not(value v, rc_arena *arena)
 {
     (void)arena;
@@ -1239,6 +1262,9 @@ static const token even_entries[] = {
     // low precedence, so they swallow the whole following expression: <start+1 is lo(start+1).
     {RC_STR_INIT("<"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo, .precedence = prec_lohi}}},
     {RC_STR_INIT(">"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi, .precedence = prec_lohi}}},
+    // '~' formats its argument as hex text - the same swallow-the-tail precedence, since it is almost
+    // always the last thing in a PRINT: ~start+1 is the hex of start+1.
+    {RC_STR_INIT("~"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hex, .precedence = prec_lohi}}},
 
     // Element-wise builtins are parenthesised unary ops: the '(' is part of the token (so
     // the name only reads as a call when followed by '(' - 'lo' is a variable, 'lo(' the op),
@@ -2616,6 +2642,37 @@ RC_TEST_STEP(expression, defined_lohi_strings, fix)
     // '+' concatenates strings
     RC_CHECK_TRUE(value_is_equal(VAL("\"foo\"+\"bar\""),      value_make_string(RC_STR("foobar"))));
     RC_CHECK_TRUE(value_is_equal(VAL("len(\"foo\"+\"bar\")"), value_make_numeric(6)));
+}
+
+RC_TEST_STEP(expression, hex_operator, fix)
+{
+    // '~' formats a number as hex text: the narrowest of a byte / word / long that holds it, so the
+    // length only ever steps at the width boundaries.
+    RC_CHECK_TRUE(value_is_equal(VAL("~10"),      value_make_string(RC_STR("0A"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~65"),      value_make_string(RC_STR("41"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~&123"),    value_make_string(RC_STR("0123"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~65535"),   value_make_string(RC_STR("FFFF"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~0"),       value_make_string(RC_STR("00"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~255"),     value_make_string(RC_STR("FF"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~256"),     value_make_string(RC_STR("0100"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~&123456"), value_make_string(RC_STR("00123456"))));
+
+    // The argument is read as a 32-bit pattern, exactly as NOT/AND do: negatives come out in two's
+    // complement, a fraction truncates toward zero, and anything past the window wraps.
+    RC_CHECK_TRUE(value_is_equal(VAL("~-1"),         value_make_string(RC_STR("FFFFFFFF"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~1.5"),        value_make_string(RC_STR("01"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("~4294967296"), value_make_string(RC_STR("00"))));
+
+    // Same very low precedence as '<' and '>', so it swallows the whole following expression...
+    RC_CHECK_TRUE(value_is_equal(VAL("~&1234+1"),   value_make_string(RC_STR("1235"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("len(~&1234)"), value_make_numeric(4)));
+
+    // ...and, being a unary op, it broadcasts.
+    value h[] = {value_make_string(RC_STR("01")), value_make_string(RC_STR("FF"))};
+    RC_CHECK_TRUE(value_is_equal(VAL("~{1,255}"), value_make_list((rc_view_value) RC_VIEW(h))));
+
+    // A string has no hex form.
+    RC_CHECK_TRUE(value_is_error(VAL("~\"x\"")));
 }
 
 RC_TEST_STEP(expression, math_functions, fix)

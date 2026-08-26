@@ -161,7 +161,7 @@ arithmetic and comparisons, so `0..n-1` needs no parentheses.
 | `AND` | Bitwise AND (32-bit). |
 | `OR` `EOR` | Bitwise OR, exclusive-OR (32-bit). |
 | `..` `..<` | Range construction. |
-| `<x` `>x` | 6502-style low / high byte of the whole following expression: `<start+1` is `LO(start+1)`. |
+| `<x` `>x` `~x` | 6502-style low / high byte of the whole following expression: `<start+1` is `LO(start+1)`. `~x` is the same shape, giving `x` as an uppercase hex *string* - 2, 4 or 8 digits, the narrowest that holds it (`~10` is `"0A"`, `~&123` is `"0123"`, `~&123456` is `"00123456"`). No `&` prefix; the 32-bit pattern is what is formatted, so `~-1` is `"FFFFFFFF"`. |
 
 ### Subscripts ###
 
@@ -240,6 +240,4 @@ Your own `FUNCTION` names join the table as they are defined, callable as `name(
 
 ## Version history ##
 
-- **0.1** (August 2026) - first release: the full assembler described here. NMOS 6502; sections with
-  raw binary (`-p`) and `.ssd` (`-o`) output; zero-page auto-allocation; macros, functions, lists and broadcasting;
-  `PRINT` channels; the `-v` listing.
+- **0.1.0** (August 2026) - first release: the full assembler described here.
