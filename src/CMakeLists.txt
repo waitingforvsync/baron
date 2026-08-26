@@ -61,7 +61,7 @@ else()
     target_compile_options(baron PRIVATE -Wall -Wextra)
 endif()
 
-# Gated by the BARON_TESTS option (default ON). Tests are compiled into the binary
+# Gated by the BARON_TESTS option (default OFF). Tests are compiled into the binary
 # (so they can reach internal/static functions) and run after every build; a failing
 # RC_CHECK fails the build. They run from a dedicated working directory, with the test
 # data files (src/test) copied in first, so file I/O tests use relative names without

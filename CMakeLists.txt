@@ -5,9 +5,8 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-# Tests are compiled into the baron binary and run after each build. Turn this off
-# (-DBARON_TESTS=OFF) to build baron without compiling or running them.
-option(BARON_TESTS "Build the unit tests into baron and run them after each build" ON)
+# If set (-DBARON_TESTS=ON), tests are compiled into the baron binary and run after each build. 
+option(BARON_TESTS "Build the unit tests into baron and run them after each build" OFF)
 
 # richc dependency (git submodule at extern/richc). Core library only: the app
 # layer needs GLFW/glad and is not used by baron. RICHC_CORE_ONLY is set as a

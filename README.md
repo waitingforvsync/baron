@@ -9,7 +9,7 @@ I hastily wrote BeebAsm 1.x many years ago with one goal: to allow BBC BASIC ass
 Baron is a ground-up redesign and rewrite of BeebAsm, in response to some of its problems which annoy me the most. Much of the original familiar syntax is retained, but looking to Python and elsewhere for inspiration, there are now a number of new features in a modern style, such as strings, lists, named scopes, assisted memory allocation, user-defined functions, and more.
 
 ## Building ##
-Baron is written in C17 and builds with [richc](https://github.com/waitingforvsync/richc) as its foundation library, included as a git submodule. It's tested with Clang, CMake and Ninja but should build with any major compiler.
+Baron is written in C17 and builds with [richc](https://github.com/waitingforvsync/richc) as its foundation library, included as a git submodule. It's tested with clang/gcc on Linux, and Visual Studio on Windows, with CMake and Ninja, but should build with any major compiler.
 
 Clone with submodules, or initialise them in an existing clone:
 
@@ -19,18 +19,27 @@ git clone --recurse-submodules https://github.com/waitingforvsync/baron.git
 git submodule update --init
 ```
 
-Configure and build, e.g.:
+Configure and build an optimised binary, e.g.:
 
 ```
-cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang
+cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Enable unit tests with the CMake variable `BARON_TESTS`. They are compiled into the `baron` executable and run automatically as a post-build step, so a failing test fails the build. To run them by hand, optionally filtered to a single group:
+Visual Studio for Windows has built-in CMake support: just open the folder containing the root CMakeLists.txt.
+
+Unit tests are off by default. Turn them on with the CMake variable `BARON_TESTS`, ideally in a build directory of their own:
 
 ```
-./build/src/baron --test          # all tests
-./build/src/baron --test value    # just the "value" group
+cmake -B build-test -G Ninja -DCMAKE_C_COMPILER=clang -DBARON_TESTS=ON
+cmake --build build-test
+```
+
+They are compiled into the `baron` executable and run automatically as a post-build step, so a failing test fails the build. To run them by hand, optionally filtered to a single group:
+
+```
+./build-test/src/baron --test          # all tests
+./build-test/src/baron --test value    # just the "value" group
 ```
 
 ## Getting started ##
