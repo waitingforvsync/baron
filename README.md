@@ -28,19 +28,7 @@ cmake --build build
 
 Visual Studio for Windows has built-in CMake support: just open the folder containing the root CMakeLists.txt.
 
-Unit tests are off by default. Turn them on with the CMake variable `BARON_TESTS`, ideally in a build directory of their own:
-
-```
-cmake -B build-test -G Ninja -DCMAKE_C_COMPILER=clang -DBARON_TESTS=ON
-cmake --build build-test
-```
-
-They are compiled into the `baron` executable and run automatically as a post-build step, so a failing test fails the build. To run them by hand, optionally filtered to a single group:
-
-```
-./build-test/src/baron --test          # all tests
-./build-test/src/baron --test value    # just the "value" group
-```
+Unit tests are off by default. Turn them on with the CMake variable `BARON_TESTS`: they are compiled into the `baron` executable and run automatically as a post-build step.
 
 ## Getting started ##
 Go and check out The Baron Guide, [here](docs/guide.md). A more po-faced reference can be found [here](docs/reference.md).
@@ -53,6 +41,9 @@ Since there are breaking changes to syntax and usage compared to current version
 It's an acronym for Beeb Asm, Ready or Not.
 
 Honest.
+
+## Licence ##
+Baron is released under the [MIT licence](LICENSE), as is [richc](https://github.com/waitingforvsync/richc), the library it is built on.
 
 ## Authorship / AI disclosure ##
 Baron was started back in 2020 by me, Rich Talbot-Watkins, and lay abandoned for a while until AI assistance helped get it over the line. I designed and implemented most of it, with Claude Code doing the magical zp allocator and other bits, writing full test coverage and the documentation.

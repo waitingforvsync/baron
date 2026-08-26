@@ -8,7 +8,6 @@ depth, see [Zero page allocation](zero-page-allocation.md).
 - [Keyword reference](#keyword-reference)
 - [Expression reference](#expression-reference)
 - [Version history](#version-history)
-- [Authorship](#authorship)
 
 ## Command line reference ##
 
