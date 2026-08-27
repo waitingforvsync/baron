@@ -273,8 +273,9 @@ bytes is refused.
 ## Expressions ##
 
 Anywhere Baron wants a value, you get the full expression language: the usual arithmetic (`+ - * / ^`),
-integer `DIV` and `MOD`, shifts `<<` `>>`, bitwise `AND` `OR` `EOR` `NOT()`, comparisons, and a ton of
-functions (`SIN`, `SQRT`, `LO`, `HI`, ...) - the whole list is in the
+integer `DIV` and `MOD`, shifts `<<` `>>`, bitwise `AND` `OR` `EOR` `NOT()`, comparisons, logical
+`!` (`!x` is 1 if `x` is 0, else 0 - `NOT()` is the bitwise complement, `!` the truthy one), and a
+ton of functions (`SIN`, `SQRT`, `LO`, `HI`, ...) - the whole list is in the
 [reference](reference.md#expression-reference).
 
 ```

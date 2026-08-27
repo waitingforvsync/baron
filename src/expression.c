@@ -342,6 +342,15 @@ static value fn_not(value v, rc_arena *arena)
     return value_make_numeric((double)(~as_u32(v)));
 }
 
+// The logical-NOT counterpart. Exists because NOT(TRUE) != FALSE.
+// Is this horrible? Maybe a little bit.
+static value fn_pling(value v, rc_arena *arena)
+{
+    (void)arena;
+    NEEDS_NUM(value_is_numeric(v));
+    return value_make_numeric(v.numeric == 0.0 ? 1.0 : 0.0);
+}
+
 static value fn_sqrt(value v, rc_arena *arena)
 {
     (void)arena;
@@ -1258,12 +1267,13 @@ static const token even_entries[] = {
 
     {RC_STR_INIT("+"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_pos, .precedence = prec_neg}}},
     {RC_STR_INIT("-"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_neg, .precedence = prec_neg}}},
+    {RC_STR_INIT("!"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_pling, .precedence = prec_neg}}},
+
     // Bare low/high-byte operators (6502 style): '<' is the low byte, '>' the high byte. Very
     // low precedence, so they swallow the whole following expression: <start+1 is lo(start+1).
     {RC_STR_INIT("<"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_lo, .precedence = prec_lohi}}},
     {RC_STR_INIT(">"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hi, .precedence = prec_lohi}}},
-    // '~' formats its argument as hex text - the same swallow-the-tail precedence, since it is almost
-    // always the last thing in a PRINT: ~start+1 is the hex of start+1.
+
     {RC_STR_INIT("~"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_hex, .precedence = prec_lohi}}},
 
     // Element-wise builtins are parenthesised unary ops: the '(' is part of the token (so
@@ -2133,6 +2143,24 @@ RC_TEST_STEP(expression, unary, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("-2*3"), value_make_numeric(-6.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("+5"),   value_make_numeric(5.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("--5"),  value_make_numeric(5.0)));    // -(-5)
+
+    // '!' - logical NOT: 1 for zero, 0 for anything else (0.5 is truthy, like a body IF)
+    RC_CHECK_TRUE(value_is_equal(VAL("!0"),      value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("!1"),      value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("!255"),    value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("!0.5"),    value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("!TRUE"),   value_make_numeric(0.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("!FALSE"),  value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("!!5"),     value_make_numeric(1.0)));    // prefixes chain
+    RC_CHECK_TRUE(value_is_equal(VAL("-!0"),     value_make_numeric(-1.0)));   // and mix with minus
+    RC_CHECK_TRUE(value_is_equal(VAL("!0 + 1"),  value_make_numeric(2.0)));    // tight: (!0)+1, not !(0+1)
+    RC_CHECK_TRUE(value_is_equal(VAL("!0 = 1"),  value_make_numeric(1.0)));    // (!0) compared with 1
+    RC_CHECK_TRUE(value_is_equal(VAL("3 != 3"),  value_make_numeric(0.0)));    // '!=' still means not-equal
+    RC_CHECK_TRUE(value_is_error(VAL("!\"abc\"")));                            // type mismatch, not silence
+
+    // and it maps element-wise over a list, like any unary op
+    value mask[] = {value_make_numeric(1), value_make_numeric(0), value_make_numeric(1)};
+    RC_CHECK_TRUE(value_is_equal(VAL("!{0, 3, 0}"), value_make_list((rc_view_value) RC_VIEW(mask))));
 }
 
 RC_TEST_STEP(expression, functions, fix)

@@ -157,7 +157,7 @@ arithmetic and comparisons, so `0..n-1` needs no parentheses.
 |-----------|---------|
 | `x[...]` | Subscript - see [Subscripts](#subscripts). |
 | `^` | Power (right-associative). |
-| `-x` `+x` | Unary minus / plus. |
+| `-x` `+x` `!x` | Unary minus / plus, and logical NOT: `!x` is 1 if `x` is 0, else 0. Binds as tightly as unary minus, so `!x = 1` compares `!x` against 1. |
 | `*` `/` `DIV` `MOD` `<<` `>>` | Multiply, divide, integer divide, modulo, shifts. |
 | `+` `-` | Add, subtract. `+` also concatenates strings. |
 | `=` `==` `!=` `<>` `<` `>` `<=` `>=` | Comparisons, yielding 1 or 0. `=`/`==` and `!=`/`<>` are synonyms; strings compare too. |
