@@ -401,6 +401,23 @@ fixed addresses outside the pool (an auto-allocated address moves between builds
 entry is protected exactly as far as a strict poke-`CALL`-peek transaction requires, which ordinary
 liveness already provides - so a sync entry is *only* a root.
 
+**The input warning.** A sync root that *reads* a variable before writing it is expecting its caller
+to have set the value - impossible at an auto-allocated address - so each `ZPENTRY` block is checked
+and every such variable warned (`zpentry_input`, default-visible; handler blocks are exempt, their
+live-in being Guard 3's supported comm-var pattern). The test is NOT `live_in` at the root:
+the backward fixpoint's return edges are context-insensitive, so a helper called both from the
+entry's pre-init stretch and from inside the main loop smears the loop call site's live-after
+through the shared `RTS` into the entry's unrelated call site, and every loop-carried variable then
+looks live-in at the root along a path that cannot execute. Instead
+`liveness_read_before_write` (`src/liveness.c`) re-runs the must-write engine forward from the root
+- same byte id space, same per-entry extents, same intersection meet - and harvests each read of a
+byte the definitely-written-so-far set does not cover; a call applies its callees' summaries in
+place (their input bytes count only where the caller has not already covered them, their must-writes
+extend the covered set), which is per-call-site precise where the return edges are not. Summaries
+interleave in one outer fixpoint: must-write shrinks from full, read-before-write grows from empty.
+Unknown and external arms contribute nothing - a warning must not demand annotations, and Guard 1
+refuses computed flow anyway.
+
 ## Colouring ##
 
 With the interference graph built, `zp_color` (`src/zpalloc.c`) assigns addresses by
@@ -490,7 +507,7 @@ Deliberate limitations, all soundness-safe or documented trust points:
 | IR + registries | `src/zeropage.{h,c}` | reserved set, `zp_var`/`zp_insn` (incl. `var_kill` DISCARD markers)/`zp_cflow`/`zp_label`/`zp_entry`, vreg resolution |
 | recording | `src/opcodes.c` | `record_insn`: each instruction's touch, flow and target |
 | basic blocks | `src/cfg.{h,c}` | `cfg_build`, target resolution, `cfg_call_targets`, the external rule |
-| liveness | `src/liveness.{h,c}` | backward byte-level fixpoint, must-write, return edges, interference, classes |
+| liveness | `src/liveness.{h,c}` | backward byte-level fixpoint, must-write, return edges, interference, classes; forward read-before-write walk for the ZPENTRY input warning |
 | footprints | `src/footprint.{h,c}` | transitive Touch(R) per call site, recursion / unknown-call detection |
 | colouring | `src/zpalloc.{h,c}` | first-fit-decreasing over the interference graph |
 | the driver | `src/assemble.c` | `zeropage_finalize`: checks, roots + reachability, guards, interrupt pinning, colour, symbol rewrite; `run_passes` runs the output pass |

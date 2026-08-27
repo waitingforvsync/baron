@@ -365,6 +365,12 @@ move it next build. Variables you share with the outside get a fixed home:
 xpos = &70                      ; BASIC pokes here, so it must stay put - not a ZPAUTO
 ```
 
+Baron watches for the mistake: a `ZPENTRY` routine that reads a `ZPAUTO` variable before writing it
+is expecting *someone* to have set the value - and the only someone is the outside caller, who cannot
+know an auto-allocated address. That draws a warning naming the variable
+(`ZPAUTO input to a ZPENTRY routine`). The fix is one of two: give the variable a fixed home as
+above, or initialise it in the routine before the first read.
+
 **`ZPINTERRUPT`** - the same marker, for interrupt handlers. These need more than a "way in", because
 an interrupt fires between any two instructions. Say the handler counts frames:
 
@@ -474,10 +480,11 @@ fall back to a hand-placed address.
 | `DISCARD needs a whole ZPAUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZPAUTO` variable, whole. |
 | `ZPENTRY/ZPINTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |
 
-And three warnings:
+And four warnings:
 
 | Message | Level | What happened |
 |---------|-------|---------------|
 | `Unused ZPAUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition** - referencing it is an error, exactly as if the declaration were not there. Use it or remove it. |
 | `Unchecked indexed access into ZPAUTO variable: '...'` | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. |
 | `ZPAUTO used in code unreachable from any entry (missing ZPENTRY/ZPINTERRUPT, or dead code)` | default | Nothing can reach this code from any entry. Usually a handler or a BASIC-called routine missing its marker; sometimes dead code; occasionally a routine behind a computed call that wants a `CANCALL`. |
+| `ZPAUTO input to a ZPENTRY routine: '...' (external callers cannot know its address)` | default | A `ZPENTRY` routine reads the variable before writing it on some path, so it expects its caller to have set the value - and an outside caller cannot know an auto-allocated address. Give the interface a fixed home (see `ZPENTRY` above), or initialise the variable before the first read. |

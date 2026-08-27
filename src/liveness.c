@@ -596,6 +596,258 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
     return block < lv->num_blocks && vreg < lv->num_vars && rc_bitset_is_set(&lv->live_out[block], vreg);
 }
 
+// The read-before-write walk. Structurally this is the must-write engine from liveness_analyze run a
+// second time (same byte id space, same per-entry extent walks, same forward intersection meet), with one
+// extra harvest per routine: after the definite-write sets stabilise, a sweep over the extent collects
+// every read of a byte the routine has not provably written yet - the routine's inputs. Calls apply the
+// callee's summaries instead of edges: its inputs count only where the caller's written set does not
+// already cover them, and its must-writes extend the written set - which is exactly what keeps one call
+// site's context from leaking into another (the imprecision the backward fixpoint's shared return edges
+// accept). The outer fixpoint interleaves both summaries: must-write shrinks from FULL, read-before-write
+// grows from empty, both bounded, so it terminates.
+rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
+                                     rc_view_zp_var vars, uint32_t root, rc_arena *arena, rc_arena scratch)
+{
+    uint32_t num_vars = vars.num;
+    uint32_t nb = g.blocks.num;
+    rc_bitset result = {0};
+    rc_bitset_resize(&result, num_vars ? num_vars : 1, arena);
+    if (nb == 0 || num_vars == 0 || root >= nb) {
+        return result;
+    }
+
+    uint32_t *base = rc_arena_alloc_type(&scratch, uint32_t, num_vars);
+    uint32_t nbytes = 0;
+    for (uint32_t v = 0; v < num_vars; v++) {
+        base[v] = nbytes;
+        nbytes += rc_view_zp_var_get(vars, v).width;
+    }
+    uint32_t *owner = rc_arena_alloc_type(&scratch, uint32_t, nbytes);
+    for (uint32_t v = 0; v < num_vars; v++) {
+        for (uint32_t k = 0; k < rc_view_zp_var_get(vars, v).width; k++) {
+            owner[base[v] + k] = v;
+        }
+    }
+
+    call_targets *calls = rc_arena_alloc_zero_type(&scratch, call_targets, insns.num);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        zp_insn n = rc_view_zp_insn_get(insns, i);
+        if (n.flow == zp_flow_call) {
+            calls[i] = cfg_call_targets(g, cflows, n, &scratch);
+        }
+    }
+
+    // Summaries are needed for every call-target entry plus the root itself (the root is a routine too,
+    // just one nothing inside the program calls).
+    bool *is_entry = rc_arena_alloc_zero_type(&scratch, bool, nb);
+    is_entry[root] = true;
+    for (uint32_t i = 0; i < insns.num; i++) {
+        for (uint32_t c = 0; c < calls[i].blocks.view.num; c++) {
+            is_entry[rc_array_u32_get(&calls[i].blocks, c)] = true;
+        }
+    }
+
+    uint32_t *pred_count = rc_arena_alloc_zero_type(&scratch, uint32_t, nb);
+    uint32_t *pred_first = rc_arena_alloc_type(&scratch, uint32_t, nb);
+    uint32_t  npreds     = 0;
+    for (uint32_t b = 0; b < nb; b++) {
+        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            pred_count[cfg_succ(g, blk, s)]++;
+        }
+        npreds += blk.succ_count;
+    }
+    for (uint32_t b = 0; b < nb; b++) {
+        pred_first[b] = (b == 0) ? 0 : pred_first[b - 1] + pred_count[b - 1];
+        pred_count[b] = 0;   // reused as the fill cursor
+    }
+    uint32_t *preds = npreds ? rc_arena_alloc_type(&scratch, uint32_t, npreds) : NULL;
+    for (uint32_t b = 0; b < nb; b++) {
+        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            uint32_t t = cfg_succ(g, blk, s);
+            preds[pred_first[t] + pred_count[t]++] = b;
+        }
+    }
+
+    rc_bitset full = {0};
+    rc_bitset_resize(&full, nbytes, &scratch);
+    for (uint32_t i = 0; i < nbytes; i++) {
+        rc_bitset_set(&full, i);
+    }
+
+    // mwb[e] = bytes routine e definitely writes before returning (starts FULL, shrinks);
+    // rbwb[e] = bytes some path from e reads before writing (starts empty, grows). Entry rows only.
+    rc_bitset *mwb  = make_rows(nb, nbytes, &scratch);
+    rc_bitset *rbwb = make_rows(nb, nbytes, &scratch);
+    for (uint32_t e = 0; e < nb; e++) {
+        if (is_entry[e]) {
+            rc_bitset_copy(&mwb[e], &full);
+        }
+    }
+    rc_bitset *mwin  = make_rows(nb, nbytes, &scratch);
+    rc_bitset *mwout = make_rows(nb, nbytes, &scratch);
+    rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
+    rc_bitset  mrow  = {0}; rc_bitset_resize(&mrow, nbytes, &scratch);
+    rc_bitset  reads = {0}; rc_bitset_resize(&reads, nbytes, &scratch);
+    bool      *in_ext = rc_arena_alloc_type(&scratch, bool, nb);
+    uint32_t  *stack  = rc_arena_alloc_type(&scratch, uint32_t, nb);
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (uint32_t e = 0; e < nb; e++) {
+            if (!is_entry[e]) {
+                continue;
+            }
+            for (uint32_t b = 0; b < nb; b++) { in_ext[b] = false; }
+            uint32_t sp = 0;
+            stack[sp++] = e;
+            in_ext[e] = true;
+            bool tainted = false;
+            while (sp > 0) {
+                basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
+                tainted = tainted || blk.unknown_succ;
+                for (uint32_t s = 0; s < blk.succ_count; s++) {
+                    uint32_t t = cfg_succ(g, blk, s);
+                    if (!in_ext[t]) { in_ext[t] = true; stack[sp++] = t; }
+                }
+            }
+
+            rc_bitset_reset(&acc);
+            rc_bitset_reset(&reads);
+            bool any_return = false;
+            if (!tainted) {
+                for (uint32_t b = 0; b < nb; b++) {
+                    if (in_ext[b]) {
+                        rc_bitset_copy(&mwin[b], &full);
+                        rc_bitset_copy(&mwout[b], &full);
+                    }
+                }
+                bool pass = true;
+                while (pass) {
+                    pass = false;
+                    for (uint32_t b = 0; b < nb; b++) {
+                        if (!in_ext[b]) {
+                            continue;
+                        }
+                        if (b == e) {
+                            rc_bitset_reset(&mrow);
+                        }
+                        else {
+                            rc_bitset_copy(&mrow, &full);
+                            for (uint32_t p = 0; p < pred_count[b]; p++) {
+                                uint32_t pb = preds[pred_first[b] + p];
+                                if (in_ext[pb]) {
+                                    rc_bitset_intersection(&mrow, &mwout[pb]);
+                                }
+                            }
+                        }
+                        if (!rc_bitset_is_equal(&mrow, &mwin[b])) {
+                            rc_bitset_copy(&mwin[b], &mrow);
+                            pass = true;
+                        }
+                        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                        for (uint32_t k = 0; k < blk.num_insns; k++) {
+                            uint32_t ni = blk.first_insn + k;
+                            zp_insn  n  = rc_view_zp_insn_get(insns, ni);
+                            if (n.flow == zp_flow_call) {
+                                rc_bitset ck = call_kill_bytes(calls[ni], mwb, nbytes, &scratch);
+                                rc_bitset_union(&mrow, &ck);
+                            }
+                            if (n.vreg == RC_INDEX_NONE) {
+                                continue;
+                            }
+                            touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                            for (uint32_t i = 0; i < w.write_count; i++) {
+                                rc_bitset_set(&mrow, base[n.vreg] + w.write_first + i);
+                            }
+                        }
+                        if (!rc_bitset_is_equal(&mrow, &mwout[b])) {
+                            rc_bitset_copy(&mwout[b], &mrow);
+                            pass = true;
+                        }
+                    }
+                }
+
+                // The harvest: with the written-so-far sets stable, replay each block and collect the
+                // reads that land outside them - checking each instruction's reads BEFORE applying its
+                // writes, so a read-modify-write consumes the old value. A callee contributes its own
+                // input set, filtered by what this caller has already covered.
+                for (uint32_t b = 0; b < nb; b++) {
+                    if (!in_ext[b]) {
+                        continue;
+                    }
+                    rc_bitset_copy(&mrow, &mwin[b]);
+                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                    for (uint32_t k = 0; k < blk.num_insns; k++) {
+                        uint32_t ni = blk.first_insn + k;
+                        zp_insn  n  = rc_view_zp_insn_get(insns, ni);
+                        if (n.flow == zp_flow_call) {
+                            for (uint32_t c = 0; c < calls[ni].blocks.view.num; c++) {
+                                rc_bitset *crbw = &rbwb[rc_array_u32_get(&calls[ni].blocks, c)];
+                                for (uint32_t bit = rc_bitset_get_first_set(crbw); bit != RC_INDEX_NONE;
+                                     bit = rc_bitset_get_next_set(crbw, bit + 1)) {
+                                    if (!rc_bitset_is_set(&mrow, bit)) {
+                                        rc_bitset_set(&reads, bit);
+                                    }
+                                }
+                            }
+                            rc_bitset ck = call_kill_bytes(calls[ni], mwb, nbytes, &scratch);
+                            rc_bitset_union(&mrow, &ck);
+                        }
+                        if (n.vreg == RC_INDEX_NONE) {
+                            continue;
+                        }
+                        touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                        for (uint32_t i = 0; i < w.read_count; i++) {
+                            uint32_t bit = base[n.vreg] + w.read_first + i;
+                            if (!rc_bitset_is_set(&mrow, bit)) {
+                                rc_bitset_set(&reads, bit);
+                            }
+                        }
+                        for (uint32_t i = 0; i < w.write_count; i++) {
+                            rc_bitset_set(&mrow, base[n.vreg] + w.write_first + i);
+                        }
+                    }
+                }
+
+                for (uint32_t b = 0; b < nb; b++) {
+                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                    if (!in_ext[b] || !block_returns(g, insns, cflows, blk)) {
+                        continue;
+                    }
+                    if (!any_return) {
+                        rc_bitset_copy(&acc, &mwout[b]);
+                        any_return = true;
+                    }
+                    else {
+                        rc_bitset_intersection(&acc, &mwout[b]);
+                    }
+                }
+            }
+            if (!tainted && !any_return) {
+                rc_bitset_copy(&acc, &full);   // never returns: vacuously writes everything
+            }
+            if (!rc_bitset_is_equal(&acc, &mwb[e])) {
+                rc_bitset_copy(&mwb[e], &acc);
+                changed = true;
+            }
+            rc_bitset_union(&reads, &rbwb[e]);   // summaries only ever grow
+            if (!rc_bitset_is_equal(&reads, &rbwb[e])) {
+                rc_bitset_copy(&rbwb[e], &reads);
+                changed = true;
+            }
+        }
+    }
+
+    for (uint32_t bit = rc_bitset_get_first_set(&rbwb[root]); bit != RC_INDEX_NONE;
+         bit = rc_bitset_get_next_set(&rbwb[root], bit + 1)) {
+        rc_bitset_set(&result, owner[bit]);
+    }
+    return result;
+}
+
 
 #ifdef BARON_TESTS
 

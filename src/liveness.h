@@ -57,5 +57,18 @@ vreg_class liveness_class_of(const liveness *lv, uint32_t vreg);
 bool liveness_is_live_in(const liveness *lv, uint32_t block, uint32_t vreg);
 bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg);
 
+// May-read-before-write from `root`: the variables some real control path starting at `root` READS before
+// any write covers the byte read - the routine's true inputs. This is the precise form of "live-in at the
+// root": the backward liveness above answers the same question only up to its context-INsensitive return
+// edges, which smear one call site's live-after through a shared callee into another call site (a helper
+// called both from a pre-init stretch and from the main loop makes everything the loop keeps live look
+// live-in at the entry). This walk follows calls with per-callee summaries instead - a callee's reads
+// count only where the caller has not already definitely written the bytes, and its must-writes extend
+// the caller's written set - so that path does not exist here. Unknown/external call arms contribute
+// nothing (no false alarms; Guard 1 refuses computed flow anyway). Returns a var-level bitset (vars.num
+// bits) allocated in `arena`.
+rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
+                                     rc_view_zp_var vars, uint32_t root, rc_arena *arena, rc_arena scratch);
+
 
 #endif // ifndef BARON_LIVENESS_H_

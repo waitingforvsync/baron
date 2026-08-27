@@ -3327,6 +3327,37 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
+    // The ZPENTRY input warning: an externally-called routine that reads a variable before writing it
+    // expects its caller to have poked the value - but an outside caller cannot know an allocator-chosen
+    // address, so a ZPAUTO input on a declared external interface is almost certainly a mistake (an
+    // external interface wants fixed bytes: ZPRESERVE them, or use plain addresses). The test is the
+    // read-before-write walk, not live-in: the backward fixpoint's shared return edges smear one call
+    // site's live-after through a common helper into another call site (a helper called both before the
+    // entry's init and from the main loop makes every loop-carried variable look live-in at the entry),
+    // while the walk follows calls with per-callee summaries, so only genuine uninitialised reads count.
+    // Handler blocks are excluded - a stacked ZPENTRY+ZPINTERRUPT takes the stricter interrupt treatment,
+    // and Guard 3's pinned comm vars ARE the supported live-in pattern there.
+    rc_bitset sync_seen = {0};
+    rc_bitset_resize(&sync_seen, nb ? nb : 1, &scratch);
+    for (uint32_t i = 0; nv > 0 && i < entries.num; i++) {
+        zp_entry e = rc_view_zp_entry_get(entries, i);
+        if (e.interrupt) {
+            continue;
+        }
+        uint32_t bi = cfg_block_at(g, e.section, e.pc);
+        if (bi == RC_INDEX_NONE || rc_bitset_is_set(&handler_seen, bi) || rc_bitset_is_set(&sync_seen, bi)) {
+            continue;   // unresolved already errored above; duplicates collapse to one report
+        }
+        rc_bitset_set(&sync_seen, bi);
+        rc_bitset inputs = liveness_read_before_write(g, insns, cflows, zeropage_vars(&b->zeropage),
+                                                      bi, &work, scratch);
+        for (uint32_t v = rc_bitset_get_first_set(&inputs); v != RC_INDEX_NONE;
+             v = rc_bitset_get_next_set(&inputs, v + 1)) {
+            baron_warning_payload(b, error_type_zpentry_input, e.at, severity_warning,
+                                  zeropage_var_get(&b->zeropage, v).name);
+        }
+    }
+
     if (!refused) {
         zp_coloring col = zp_color(&lv, zeropage_vars(&b->zeropage), zeropage_reserved(&b->zeropage),
                                    &work, scratch);
@@ -5274,6 +5305,91 @@ RC_TEST_STEP(assemble, zpinterrupt_pins_comm_var, fix)
     RC_CHECK_TRUE(flag != t);
     RC_CHECK_TRUE(flag != ht);
     RC_CHECK_TRUE(t != ht);   // footprint isolation separates the handler temp from the mainline temp too
+}
+
+RC_TEST_STEP(assemble, zpentry_input_warns, fix)
+{
+    // A ZPENTRY routine reading `v` before writing it expects its caller to have poked the value - which
+    // an outside caller cannot do at an allocator-chosen address. Warn, name the variable, allocate anyway.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      ".main ZPENTRY : LDA v : STA v : RTS\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_zpentry_input), ==, RC_STR("v"));
+    RC_CHECK_TRUE(zp_addr(&fix->r, "v") >= 0);
+
+    // Written before read is an ordinary temp - nothing to say.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      ".main ZPENTRY : STA v : LDA v : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+
+    // The read may sit a call deep in the routine's extent - the footprint walk still sees it.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      ".main ZPENTRY : JSR sub : RTS\n"
+                      ".sub LDA v : STA v : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
+}
+
+RC_TEST_STEP(assemble, zpentry_input_ignores_threaded_liveness, fix)
+{
+    // `keep` is held live ACROSS an in-program call to the marked routine, so the return edges thread it
+    // through and it shows up live-in at the entry - but the routine never reads it unwritten, so it is
+    // not an input. The read-before-write walk is exactly what keeps this quiet.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, w\n"
+                      ".main ZPENTRY : STA keep : JSR rout : LDA keep : RTS\n"
+                      ".rout ZPENTRY : STA w : LDA w : RTS\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+}
+
+RC_TEST_STEP(assemble, zpentry_input_ignores_shared_helper_smear, fix)
+{
+    // The demo shape that broke the first cut of this warning: a helper called both from the entry's
+    // pre-init stretch and from inside the main loop. The loop call site's live-after (f, live around
+    // the loop) smears through the helper's shared return edge into the entry's unrelated call site,
+    // so plain live-in claims f is an input - but f is written before every real read from the entry.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 f\n"
+                      ".mainloop LDA f : JSR shared : JMP mainloop\n"
+                      ".shared LDX #0 : RTS\n"
+                      ".entry ZPENTRY : JSR shared : LDA #0 : STA f : JMP mainloop\n"
+                      ".irq ZPINTERRUPT : INC f : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+
+    // Contrast: a genuinely conditional init IS an input - the untaken path reaches the read unwritten.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 f\n"
+                      ".entry ZPENTRY : BEQ over : STA f : .over LDA f : STA f : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_zpentry_input), ==, RC_STR("f"));
+}
+
+RC_TEST_STEP(assemble, zpentry_input_is_byte_accurate, fix)
+{
+    // Seeding only a pointer's low byte leaves the high byte an input to the deref...
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr\n"
+                      ".main ZPENTRY : LDA #0 : STA ptr : TAY : LDA (ptr),Y : STA ptr+1 : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
+
+    // ...while seeding both bytes before the deref is a fully-initialised temp.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr\n"
+                      ".main ZPENTRY : LDA #0 : STA ptr : STA ptr+1 : TAY : LDA (ptr),Y : STA ptr : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+}
+
+RC_TEST_STEP(assemble, zpentry_input_spares_handlers, fix)
+{
+    // A handler's live-in comm var IS the supported pattern (Guard 3 pins it) - no input warning there...
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 flag\n"
+                      ".main ZPENTRY : STA flag : RTS\n"
+                      ".irq ZPINTERRUPT : LDA flag : RTI\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+
+    // ...and a stacked ZPENTRY+ZPINTERRUPT on one pc takes the stricter handler treatment, so the sync
+    // marker stays quiet too.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 flag\n"
+                      ".main ZPENTRY : STA flag : LDA flag : RTS\n"
+                      ".irq ZPENTRY : ZPINTERRUPT : LDA flag : RTI\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
 }
 
 RC_TEST_STEP(assemble, zpinterrupt_separates_temps_from_mainline, fix)

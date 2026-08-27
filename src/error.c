@@ -72,6 +72,7 @@ rc_str error_type_name(error_type e)
         case error_type_zpauto_address:          return RC_STR("Cannot use a ZPAUTO address here: '%'");
         case error_type_discard_needs_var:       return RC_STR("DISCARD needs a whole ZPAUTO variable: '%'");
         case error_type_zpentry_no_code:         return RC_STR("ZPENTRY/ZPINTERRUPT does not mark an instruction");
+        case error_type_zpentry_input:           return RC_STR("ZPAUTO input to a ZPENTRY routine: '%' (external callers cannot know its address)");
         case error_type_zpauto_unreachable:      return RC_STR("ZPAUTO used in code unreachable from any entry (missing ZPENTRY/ZPINTERRUPT, or dead code)");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol: '%'");
         case error_type_duplicate_symbol:        return RC_STR("Duplicate symbol: '%'");

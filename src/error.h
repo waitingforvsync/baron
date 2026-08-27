@@ -83,6 +83,8 @@ typedef enum error_type {
                                       // condition, a layout address) - addresses exist only after allocation
     error_type_discard_needs_var,     // a DISCARD operand that is not a whole ZPAUTO variable
     error_type_zpentry_no_code,       // a ZPENTRY/ZPINTERRUPT marker whose pc begins no assembled instruction
+    error_type_zpentry_input,         // warning: a ZPENTRY routine reads a ZPAUTO before writing it - an
+                                      // external caller cannot know an allocator-chosen input address
     error_type_zpauto_unreachable,    // warning: ZPAUTO-touching code unreachable from every declared/default root
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
