@@ -34,6 +34,7 @@ typedef enum error_type {
     error_type_bad_index_register,    // expected X or Y after a ','
     error_type_missing_operand,
     error_type_expression,            // a parse error inside an operand expression
+    error_type_expected_end_of_expression, // text remains after an expression that must stand alone (a -D define)
     error_type_unclosed_if,           // IF reached '}' or end of input before ENDIF
     error_type_unexpected_elif,       // ELIF with no IF to match
     error_type_unexpected_else,       // ELSE with no IF to match

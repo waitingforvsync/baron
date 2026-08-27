@@ -14,7 +14,7 @@
 #endif
 
 
-#define BARON_VERSION "0.1.0"
+#define BARON_VERSION "0.1.2"
 
 
 static void display_version(void) {
@@ -29,6 +29,7 @@ static void display_help(void) {
     puts("A 6502 assembler targetting the BBC Micro.");
     puts("");
     puts("General options:");
+    puts("  -D <sym>=<expr>  Predefine a symbol before assembly (e.g. -D DEBUG=TRUE)");
     puts("  -log<N> <file>   Output messages to stream N (0-9) to the given file");
     puts("  -v               Output listing for assembled source code");
     puts("");
@@ -77,8 +78,8 @@ static int log_channel(const char *arg)
 // assemble pass, which must SKIP those values or it would try to assemble them.
 static bool option_takes_value(const char *arg)
 {
-    return strcmp(arg, "-o") == 0 || strcmp(arg, "-p") == 0 || strcmp(arg, "--title") == 0
-        || strcmp(arg, "--opt") == 0 || strcmp(arg, "--cycle") == 0
+    return strcmp(arg, "-o") == 0 || strcmp(arg, "-p") == 0 || strcmp(arg, "-D") == 0
+        || strcmp(arg, "--title") == 0 || strcmp(arg, "--opt") == 0 || strcmp(arg, "--cycle") == 0
         || log_channel(arg) >= 0;
 }
 
@@ -102,6 +103,11 @@ int main(int argc, char **argv)
     }
 #endif
 
+    // One arena for everything the CLI itself keeps (the -D definitions, section copies, rendered
+    // reports, the output spec and image). Made before the option loop so the definitions have
+    // somewhere to gather.
+    rc_arena cli = rc_arena_make_default();
+
     // Options first. A value-taking switch as the last argument falls through to the unknown-option
     // complaint (there is no value to take), and at least one real file must remain.
     bool verbose = false;
@@ -115,6 +121,7 @@ int main(int argc, char **argv)
     int32_t cycle = 0;
     bool disc_options = false;   // any of --title/--opt/--cycle, which only mean something with -o
     int files = 0;
+    rc_array_str defines = rc_array_str_make(8, &cli);   // -D: "name=expression" predefines, in argv order
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) {
@@ -139,6 +146,9 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             raw = argv[++i];
+        }
+        else if (strcmp(argv[i], "-D") == 0 && i + 1 < argc) {
+            rc_array_str_push(&defines, rc_str_from_cstr(argv[++i]), &cli);
         }
         else if (log_channel(argv[i]) >= 0 && i + 1 < argc) {
             log_paths[log_channel(argv[i])] = argv[i + 1];
@@ -194,16 +204,15 @@ int main(int argc, char **argv)
         }
     }
 
-    // One arena for everything the CLI itself keeps (section copies, rendered reports, the output spec and
-    // image); one baron_desc - arenas plus options - REUSED across all files. Reuse is safe because nothing
+    // One baron_desc - arenas plus options - REUSED across all files. Reuse is safe because nothing
     // outlives its turn: each report is printed before the next assemble supersedes the result it came
-    // from, and the sections worth keeping are copied.
-    rc_arena cli = rc_arena_make_default();
+    // from, and the sections worth keeping are copied (into `cli`, made above the option loop).
     baron_desc desc = {
         .permanent = rc_arena_make_default(),
         .per_pass  = rc_arena_make_default(),
         .scratch   = rc_arena_make_default(),
-        .verbose   = verbose,   // -v: ask the assembler for the listing pass
+        .verbose   = verbose,          // -v: ask the assembler for the listing pass
+        .defines   = defines.view,     // -D: predefine these symbols in each file's root scope
     };
     rc_array_section saved = rc_array_section_make(8, &cli);
     bool failed = false;

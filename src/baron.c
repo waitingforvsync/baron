@@ -26,6 +26,7 @@ baron baron_make(baron_desc *a)
         b.channels[i] = (rc_mstr) {0};   // empty handles; run_pass re-zeroes them, appends allocate lazily
     }
     b.want_verbose   = a->verbose;      // whether to run the listing pass at all
+    b.defines        = a->defines;      // "name=expression" predefines, applied at the top of every pass
     return b;
 }
 

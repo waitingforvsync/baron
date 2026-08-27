@@ -1,8 +1,9 @@
 #ifndef BARON_ASSEMBLE_H_
 #define BARON_ASSEMBLE_H_
 
-#include "richc/bytes.h"   // rc_view_bytes, rc_str
-#include "richc/arena.h"   // rc_arena
+#include "richc/bytes.h"     // rc_view_bytes, rc_str
+#include "richc/arena.h"     // rc_arena
+#include "richc/array/str.h" // rc_view_str: the command-line symbol definitions
 #include "symbols.h"       // symbol_entry, rc_view_symbol_entry (the harvest's output; brings value.h)
 #include "scopes.h"        // scopes_view: the read-only scope tree a result carries
 #include "sections.h"      // section, rc_view_section: the object-code sections a result carries
@@ -68,11 +69,17 @@ typedef struct diagnostic {
 // desc (which supersedes it).
 // `verbose` asks for the assembly listing (baron_result.channels[0]): it costs one extra pass over the
 // source, so it is off unless someone wants it.
+// `defines` predefines symbols in the root scope (the CLI's -D switch): each element is one raw
+// "name=expression" string, applied at the top of every pass before the source parses, so the expression
+// may forward-reference symbols the source defines later. A later source assignment to the same name is
+// a duplicate (the predefinition stands); a source default goes under a DIFFERENT name, guarded with
+// DEFINED (IF DEFINED(name) : local = name : ELSE : local = default : ENDIF). Zero-init means none.
 typedef struct baron_desc {
-    rc_arena permanent;
-    rc_arena per_pass;
-    rc_arena scratch;
-    bool     verbose;   // build the assembly listing (one extra pass; see baron_result.channels)
+    rc_arena    permanent;
+    rc_arena    per_pass;
+    rc_arena    scratch;
+    bool        verbose;   // build the assembly listing (one extra pass; see baron_result.channels)
+    rc_view_str defines;   // "name=expression" predefines, bound into the root scope each pass
 } baron_desc;
 
 // What an assemble produced: a read-only, position-independent snapshot. Every field borrows from the arenas

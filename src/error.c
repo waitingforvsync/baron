@@ -26,6 +26,7 @@ rc_str error_type_name(error_type e)
         case error_type_bad_index_register:      return RC_STR("Expected index register X or Y");
         case error_type_missing_operand:         return RC_STR("Missing operand");
         case error_type_expression:              return RC_STR("Malformed expression");
+        case error_type_expected_end_of_expression: return RC_STR("Expected end of expression");
         case error_type_unclosed_if:             return RC_STR("Unclosed IF");
         case error_type_unexpected_elif:         return RC_STR("ELIF without an IF");
         case error_type_unexpected_else:         return RC_STR("ELSE without an IF");

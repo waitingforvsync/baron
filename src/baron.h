@@ -40,6 +40,8 @@ typedef struct baron {
                                            // the output pass (final, or listing under -v); channel 0 also
                                            // carries the -v listing, so PRINTs interleave it
     bool                want_verbose;      // copied from baron_desc.verbose: run the listing pass at all?
+    rc_view_str         defines;           // copied from baron_desc.defines: "name=expression" predefines,
+                                           // bound into the root scope at the top of every pass
     uint32_t            include_depth;     // how many INCLUDEs deep the parser is now, to catch runaway recursion
     uint32_t            macro_depth;       // how many macro expansions deep, to catch runaway recursion
     uint32_t            function_depth;    // how many FUNCTION calls deep the evaluator is, to catch runaway recursion

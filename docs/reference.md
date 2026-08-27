@@ -12,13 +12,14 @@ depth, see [Zero page allocation](zero-page-allocation.md).
 ## Command line reference ##
 
 ```
-baron [-v] [--check] [-p <path>] [--inf] [-o <image.ssd>] [--title <t>] [--opt <0-3>]
-      [--cycle <0-99>] [-log<n> <file>] <source files>
+baron [-v] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>] [--title <t>]
+      [--opt <0-3>] [--cycle <0-99>] [-log<n> <file>] <source files>
 ```
 
 | Switch | What it does |
 |--------|--------------|
 | `-v` | Print an assembly listing to stdout: every emitted byte against its source line, macro expansions and includes followed through, `PRINT` output interleaved. |
+| `-D <sym>=<expr>` | Predefine a symbol before assembly, e.g. `-D DEBUG=TRUE -D version="1.0"` (no spaces inside the assignment; repeat the switch for more). The expression gets the full evaluator and may forward-reference symbols the source defines. Applies to every source file on the line. See [Predefined symbols](guide.md#predefined-symbols). |
 | `--check` | Assemble and validate everything, write nothing - no binaries, no image, no logs. |
 | `-p <path>` | Write every saved section as a raw binary into the directory *path* (which must already exist; `.` for the current one). Nothing is written without this or `-o`. |
 | `--inf` | Write a `.inf` sidecar beside each raw binary, carrying its DFS name and load/exec addresses. Needs `-p`. |

@@ -2703,6 +2703,93 @@ static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
     return true;
 }
 
+
+// ---- command-line predefines ----
+
+// Apply one -D "name=expression" definition into the root scope. The string is registered as a tiny
+// synthetic source named after the switch itself, so a diagnostic points somewhere readable
+// ("-D DEBUG=TRU:1:9: ..."); registration is keyed by name, so every pass lands on the same source
+// index and the binding's identity holds - re-evaluation is an update, never a duplicate. The name
+// lexes through the base statement table, giving it the same collision rules the source has (a
+// mnemonic, keyword or built-in constant is refused), and the expression evaluates exactly like an
+// assignment's, so it may forward-reference symbols the source defines later. Anything left over
+// after the expression is a mistake: there is no next statement to hand it to.
+static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_arena scratch)
+{
+    rc_mstr name = rc_mstr_make(define.len + 4, &scratch);
+    rc_mstr_append(&name, RC_STR("-D "), &scratch);
+    rc_mstr_append(&name, define, &scratch);
+    uint32_t src = source_files_add_string(&b->source_files, name.view, define);
+
+    rc_str text = source_files_text(&b->source_files, src);
+    cursor def  = {.source = src, .pos = 0};
+
+    lexer_result nm = lexer_next(text, 0, base_statement_tokens);
+    if (nm.token.type != lexeme_type_identifier) {
+        return syntax_error(b, error_type_expected_var_name, def);
+    }
+    if (is_dotted(nm.token.identifier.name)) {
+        return syntax_error(b, error_type_invalid_assignment, def);
+    }
+
+    lexer_result eq = lexer_next(text, nm.next, assign_tokens);
+    if (eq.token.type != lexeme_type_assign) {
+        return syntax_error(b, error_type_expected_assign, (cursor) {.source = src, .pos = nm.next});
+    }
+
+    expr_result e = eval(b, (cursor) {.source = src, .pos = eq.next}, 0, sections_default, scratch);
+    if (e.error != expr_error_none) {
+        return syntax_error(b, error_type_expression, (cursor) {.source = src, .pos = e.error_at});
+    }
+    if (!lexer_at_end(text, lexer_skip_whitespace(text, e.next))) {
+        return syntax_error(b, error_type_expected_end_of_expression, (cursor) {.source = src, .pos = e.next});
+    }
+
+    // Bind it, mirroring handle_assignment: a duplicate here is a second -D of the same name (a
+    // source assignment to it collides at ITS site instead - we bound first), a forward reference
+    // defers to the next pass, and a moved value is the convergence signal.
+    parse_result r = {.next = e.next};
+    symbol_status st = scopes_set_symbol(&b->scopes, 0, nm.token.identifier.name, e.value, def);
+
+    if (st == symbol_status_duplicate) {
+        semantic_error_payload(b, flags, error_type_duplicate_symbol, def, nm.token.identifier.name);
+        cursor original = scopes_symbol_def(&b->scopes, 0, nm.token.identifier.name);
+        if (!cursor_is_none(original)) {
+            semantic_error_payload(b, flags, error_type_original_definition, original, nm.token.identifier.name);
+        }
+    }
+    else {
+        if (value_is_error(e.value)) {
+            if (e.value.error.code == error_type_unknown_symbol) {
+                semantic_error_payload(b, flags, error_type_undefined_symbol,
+                                       (cursor) {.source = src, .pos = eq.next}, e.value.error.detail);
+                if (!flags.final) r.unresolved = true;   // a forward reference into the source; settles on a later pass
+            }
+            else {
+                semantic_error_payload(b, flags, e.value.error.code,
+                                       (cursor) {.source = src, .pos = eq.next}, e.value.error.detail);
+            }
+        }
+        r.changed = (st == symbol_status_changed);
+    }
+
+    // Echo it in the listing like the assignment it is.
+    verbose_text_line(b, flags, def, text.len, 0, verbose_text_margin);
+
+    return r;
+}
+
+// All the -D definitions, in command-line order, folded into one result for the pass to carry. A
+// malformed definition is fatal - it can never come right on a later pass - so we stop at the first.
+static parse_result apply_defines(baron *b, parse_flags flags, rc_arena scratch)
+{
+    parse_result r = {0};
+    for (uint32_t i = 0; i < b->defines.num && !r.fatal; i++) {
+        r = fold(r, apply_define(b, rc_view_str_get(b->defines, i), flags, scratch));
+    }
+    return r;
+}
+
 static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_arena scratch)
 {
     // The per-pass arena backs sections, macros and functions - a fresh projection of the source each pass.
@@ -2736,14 +2823,21 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 
     const uint32_t scope   = 0;
     const uint32_t section = sections_default;   // each pass starts in the default section (index 0)
-    parse_result r = parse_file(
+
+    // The command-line predefines bind first, so the very first statement can already read them; their
+    // forward references fold into the pass result and settle with everything else.
+    parse_result r = apply_defines(b, flags, scratch);
+    if (r.fatal) {
+        return r;
+    }
+    r = fold(r, parse_file(
         b,
         (cursor) {.source = source, .pos = 0},
         scope,
         section,
         flags,
         scratch
-    );
+    ));
 
     // INCSECTION bookkeeping. A reservation that missed its source's settled size reshapes the layout,
     // so it forces another pass; a dependency cycle can never settle, so it fails RIGHT NOW (on the first
@@ -5734,6 +5828,113 @@ RC_TEST_STEP(assemble, diagnostics_carry_payloads, fix)
     // The unused-ZPAUTO warning names the variable.
     RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 spare : RTS") != 0);
     RC_CHECK(diag_payload(&fix->r, error_type_zpauto_unused), ==, RC_STR("spare"));
+}
+
+RC_TEST_STEP(assemble, define_binds_symbol, fix)
+{
+    // The CLI's -D switch: each desc.defines entry is one "name=expression" bound into the root scope
+    // before the source parses, so the very first statement can already read it. The expression gets
+    // the full evaluator - numbers, strings, built-in constants - and a later define may read an
+    // earlier one (they apply in command-line order).
+    static const rc_str defs[] = {RC_STR_INIT("screenwidth=64"), RC_STR_INIT("debug=TRUE"),
+                                  RC_STR_INIT("version=\"1.0\""), RC_STR_INIT("half=screenwidth/2")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(defs);
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #screenwidth : EQUB half"), (uint8_t[]) {0xA9, 0x40, 0x20}, 3));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("debug")), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("version")), value_make_string(RC_STR("1.0"))));
+}
+
+RC_TEST_STEP(assemble, define_forward_reference, fix)
+{
+    // A -D expression may reference symbols the SOURCE defines - unresolved on the first pass,
+    // settled once the label binds, exactly like any forward reference. The defines may lean on
+    // each other in either direction too: an earlier one naming a later one just takes a pass.
+    static const rc_str defs[] = {RC_STR_INIT("total=limit*2"), RC_STR_INIT("first=second+1"),
+                                  RC_STR_INIT("second=10")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(defs);
+    RC_CHECK_TRUE(ASM("SKIP 5\n.limit") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("total")), value_make_numeric(10)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("first")), value_make_numeric(11)));
+}
+
+RC_TEST_STEP(assemble, define_duplicate_and_default_idiom, fix)
+{
+    // A source assignment to a -D name is a duplicate - the predefinition came first and stands -
+    // and the companion note points into the -D's own synthetic source, so the report names the switch.
+    static const rc_str defs[] = {RC_STR_INIT("debug=1")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(defs);
+    RC_CHECK_TRUE(ERR("debug = 0") == error_type_duplicate_symbol);
+    bool named = false;
+    for (uint32_t i = 0; i < fix->r.diagnostics.num; i++) {
+        diagnostic d = rc_view_diagnostic_get(fix->r.diagnostics, i);
+        if (d.code == error_type_original_definition && d.at.source < fix->r.sources.num) {
+            named = rc_str_is_equal(rc_view_source_file_get(fix->r.sources, d.at.source).name,
+                                    RC_STR("-D debug=1"));
+        }
+    }
+    RC_CHECK_TRUE(named);
+
+    // So a source default guards with DEFINED and binds a DIFFERENT name (self-guarding -
+    // IF defined(x) == FALSE : x = 0 - cannot converge: binding x flips its own condition, and the
+    // then-dead branch removes the binding again). The aliased form settles both ways.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF defined(debug)\ndbg = debug\nELSE\ndbg = 0\nENDIF\nEQUB dbg"),
+                          (uint8_t[]) {0x01}, 1));
+    fix->desc.defines = (rc_view_str) {0};
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF defined(debug)\ndbg = debug\nELSE\ndbg = 0\nENDIF\nEQUB dbg"),
+                          (uint8_t[]) {0x00}, 1));
+
+    // Two -D of the same name collide the same way (their strings differ, so their identities do).
+    static const rc_str twice[] = {RC_STR_INIT("x=1"), RC_STR_INIT("x=2")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(twice);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_duplicate_symbol);
+}
+
+RC_TEST_STEP(assemble, define_undefined_and_value_errors, fix)
+{
+    // A define's symbol still unknown on the final pass is the usual undefined-symbol error, naming
+    // the symbol; a value error (x=1/0) surfaces on the final pass like any assignment's would.
+    static const rc_str unknown[] = {RC_STR_INIT("x=nothing")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(unknown);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("nothing"));
+
+    static const rc_str div0[] = {RC_STR_INIT("x=1/0")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(div0);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_divide_by_zero);
+}
+
+RC_TEST_STEP(assemble, define_malformed, fix)
+{
+    // A definition that can never come right is fatal on the first pass: a reserved name (the same
+    // collision rules the source has), a missing '=', text left over after the expression, a dotted name.
+    static const rc_str no_eq[]    = {RC_STR_INIT("just_a_name")};
+    static const rc_str trailing[] = {RC_STR_INIT("x=1:y=2")};
+    static const rc_str reserved[] = {RC_STR_INIT("pi=5")};
+    static const rc_str mnemonic[] = {RC_STR_INIT("lda=1")};
+    static const rc_str dotted[]   = {RC_STR_INIT("a.b=1")};
+
+    fix->desc.defines = (rc_view_str) RC_VIEW(no_eq);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_expected_assign);
+    fix->desc.defines = (rc_view_str) RC_VIEW(trailing);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_expected_end_of_expression);
+    fix->desc.defines = (rc_view_str) RC_VIEW(reserved);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_expected_var_name);
+    fix->desc.defines = (rc_view_str) RC_VIEW(mnemonic);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_expected_var_name);
+    fix->desc.defines = (rc_view_str) RC_VIEW(dotted);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_invalid_assignment);
+}
+
+RC_TEST_STEP(assemble, define_listing, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // A define echoes at the margin like the assignment it is, ahead of the source's first line.
+    static const rc_str defs[] = {RC_STR_INIT("screenwidth=64")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(defs);
+    RC_CHECK_TRUE(ASM("lda #screenwidth") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("screenwidth=64\n"
+                    "  0000  A9 40           lda #screenwidth\n"));
 }
 
 RC_TEST_STEP(assemble, print_to_channel_zero, fix)

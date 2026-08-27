@@ -22,6 +22,7 @@ switch, keyword and operator live in the [reference](reference.md).
 - [Broadcasting](#broadcasting)
 - [Zero-page allocation](#zero-page-allocation)
 - [IF and FOR](#if-and-for)
+- [Predefined symbols](#predefined-symbols)
 - [Macros](#macros)
 - [Functions](#functions)
 - [Logging](#logging)
@@ -506,6 +507,37 @@ NEXT
 Each iteration gets its own scope, so labels inside the body do not collide from one iteration to the
 next. And because these are statements, not preprocessing, they nest freely with everything else -
 macros, includes, other loops.
+
+## Predefined symbols ##
+
+The `-D` switch defines a symbol from the command line, before any source is read - the build script's
+way of steering the assembly:
+
+```
+baron -D DEBUG=TRUE -D screenwidth=64 -D version="1.0" game.6502
+```
+
+Each `-D` takes one `name=expression` argument with no spaces in it, and binds the name in the top-level
+scope of every file on the line. The right-hand side is a full Baron expression - numbers, strings,
+built-in constants and functions, even references to symbols the source itself defines later (they
+settle over the passes like any forward reference). The one thing it cannot do is call a `FUNCTION` from
+the source: functions do not exist yet when the definitions bind.
+
+A predefinition is an ordinary symbol, and symbols bind once: if the source also assigns `DEBUG = 0`,
+that is a duplicate-symbol error, with the note pointing back at the `-D`. To give the source a default
+for when the switch is absent, test with `DEFINED()` and bind a *different* name:
+
+```
+IF DEFINED(debug)
+    dbg = debug         ; the command line spoke
+ELSE
+    dbg = FALSE         ; the default
+ENDIF
+```
+
+(Guarding an assignment to the *same* name - `IF DEFINED(debug) == FALSE : debug = 0 : ENDIF` - cannot
+settle: binding the symbol flips its own condition on the next pass. Baron will report it as undefined
+rather than loop forever.)
 
 ## Macros ##
 
