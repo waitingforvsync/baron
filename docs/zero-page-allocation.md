@@ -313,6 +313,83 @@ The `PHP : RTI` flavour (address pushed unadjusted) is annotated the same way.
 For all of these, list *every* destination - if you omit something by mistake, you may see your zp
 getting clobbered unexpectedly.
 
+**`DISCARD`** - tells Baron a variable's current value is finished with: everything read later comes
+from writes after this point. You need it when a variable is rebuilt through indexed stores, because
+`STA arr,X` never proves *which* byte it wrote:
+
+```
+    LDX #0
+.fill
+    LDA (src),Y : STA arr,X     ; rebuilds all of arr - but which byte? Baron can't tell
+    INX : CPX #4 : BNE fill
+    LDA arr+0 : ORA arr+1       ; so these reads look like they might want stale bytes
+```
+
+With no provable write anywhere, Baron assumes the old value might still be wanted, keeps `arr` alive
+back through the routine's entry and around whatever loop reaches it, and walls its bytes off from
+everything. One line fixes it - place it where the old value stops mattering, before the rebuild:
+
+```
+    DISCARD arr                 ; the old value is dead; the fill loop makes a new one
+```
+
+It emits nothing, takes a comma list, and wants whole variables (`DISCARD arr+1` is refused). TRUSTED
+like the others: if something *does* read the old value past a `DISCARD`, that byte may already belong
+to someone else. Inside a subroutine it also tells callers their copy dies at the `JSR`, just as a real
+full rewrite would. One quirk: at a loop's top it re-asserts every time around - Baron cannot tell "on
+entry" from "each iteration" at the same address. (In the spritescale demo, two `DISCARD` lines freed
+17 bytes of zero page at zero runtime cost - the two plotters' slot arrays fold onto each other.)
+
+**`ZPENTRY`** - put this at the top of any routine that the *outside world* calls. A routine that only
+BASIC ever `CALL`s is referenced by nothing in the program, so to Baron it looks like dead code:
+
+```
+.blit
+    ZPENTRY                     ; nothing here calls this - BASIC does
+    LDA xpos
+    ...
+    RTS
+```
+
+The marker takes no operand; it just remembers the address where it stands, so either side of the
+label works. Normally Baron assumes execution enters at the top of each section. Write one `ZPENTRY`
+and it stops guessing: your markers are now the complete list of ways in, so mark every routine the
+outside calls - the main one included. Anything touching a `ZPAUTO` variable that none of them can
+reach gets a warning: dead code, or a routine you forgot to mark.
+
+One thing `ZPENTRY` does *not* do: keep BASIC's pokes and peeks safe. If BASIC does
+`?&70=X% : CALL blit`, then `&70` had better not be auto-allocated - the allocator would cheerfully
+move it next build. Variables you share with the outside get a fixed home:
+
+```
+xpos = &70                      ; BASIC pokes here, so it must stay put - not a ZPAUTO
+```
+
+**`ZPINTERRUPT`** - the same marker, for interrupt handlers. These need more than a "way in", because
+an interrupt fires between any two instructions. Say the handler counts frames:
+
+```
+ZPAUTO1 vsync
+
+.irq
+    ZPINTERRUPT
+    LDA #&40 : STA &FE4D
+    INC vsync
+    LDA &FC
+    RTI
+```
+
+Without the marker, `vsync` looks dead nearly everywhere - only the handler and one wait loop touch
+it - so some innocent temporary gets packed onto its byte, and the next interrupt increments your
+temporary. With it, Baron keeps the handler's world apart: `vsync` gets a byte all to itself, and
+nothing the handler touches can land on a byte the main program might be using when it fires.
+Temporaries *inside* the handler still share with each other as usual, and two marked handlers are
+kept apart from each other too (an NMI can land mid-IRQ).
+
+Two honest limits: a *multi-byte* variable shared with a handler can still be caught half-updated
+(keep shared state to single bytes, or bring your own interlock), and an RTS-dispatch inside a handler
+is as invisible here as anywhere - `CANJUMP` it.
+
 ## The rules ##
 
 What the allocator will not accept, and what it trusts you with:
@@ -345,6 +422,17 @@ What the allocator will not accept, and what it trusts you with:
   ```
 
 - **Cross-section transfers go through labels**, so Baron knows which bank you mean.
+- **`STA arr,X` proves nothing.** An indexed store cannot say which byte it wrote, so an array rebuilt
+  only that way looks permanently live. `DISCARD` it where the old value dies.
+- **Mark your ways in.** One `ZPENTRY` anywhere and Baron stops assuming sections are entered at the
+  top - your markers become the complete list. Interrupt handlers always need their `ZPINTERRUPT`.
+  The unreachable warning follows calls, branches and declared `CANJUMP`/`CANCALL` targets, so a
+  routine reached only through a computed call may need the `CANCALL` before it goes quiet.
+- **Variables shared with the outside get fixed addresses.** `?&70=X% : CALL blit` needs `&70` to stay
+  put, and an auto-allocated address moves whenever the code changes.
+- **A write nobody reads is thrown away.** If nothing in the program consumes a value, its byte is up
+  for reuse - and "read back by BASIC afterwards" counts as nobody. Another reason shared variables
+  live at fixed addresses.
 
 ## Tips for tight packing ##
 
@@ -383,10 +471,13 @@ fall back to a hand-placed address.
 | `ZPAUTO variable freshly written and held live across recursion` | A per-level value in a call cycle - one byte cannot hold a value per level. |
 | `ZPAUTO1 dereferenced as a pointer (declare it ZPAUTO2)` | `(var),Y` on a one-byte variable. |
 | `Access past the end of ZPAUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
+| `DISCARD needs a whole ZPAUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZPAUTO` variable, whole. |
+| `ZPENTRY/ZPINTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |
 
-And two warnings:
+And three warnings:
 
 | Message | Level | What happened |
 |---------|-------|---------------|
 | `Unused ZPAUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition** - referencing it is an error, exactly as if the declaration were not there. Use it or remove it. |
 | `Unchecked indexed access into ZPAUTO variable: '...'` | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. |
+| `ZPAUTO used in code unreachable from any entry (missing ZPENTRY/ZPINTERRUPT, or dead code)` | default | Nothing can reach this code from any entry. Usually a handler or a BASIC-called routine missing its marker; sometimes dead code; occasionally a routine behind a computed call that wants a `CANCALL`. |

@@ -61,7 +61,10 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
         }
         for (uint32_t k = 0; k < blk.num_insns; k++) {
             zp_insn n = rc_view_zp_insn_get(c->insns, blk.first_insn + k);
-            if (n.vreg != RC_INDEX_NONE) {
+            if (n.vreg != RC_INDEX_NONE && !n.var_kill) {
+                // A DISCARD marker is not a touch: it stores nothing, so a caller's variable sharing the
+                // byte is safe across a callee that merely discards - and it must not feed `killed`, whose
+                // job is spotting FRESH per-level values across recursion.
                 rc_bitset_set(c->touched, n.vreg);
                 // A write with no accompanying read is a fresh assignment - the value came from nowhere prior.
                 // If the recursion does this and holds it live across itself, one static byte cannot serve it.
@@ -179,7 +182,7 @@ RC_TEST(footprint, transitive_touch_through_calls)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};   // no annotations in these tests
     footprint main_fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 2, &arena, scratch);
     RC_CHECK_FALSE(main_fp.unknown_call);
@@ -208,7 +211,7 @@ RC_TEST(footprint, recursion_is_flagged)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};
     footprint fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 1, &arena, scratch);
     RC_CHECK_TRUE(fp.recursive);
@@ -230,7 +233,7 @@ RC_TEST(footprint, unknown_call_target_is_flagged)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};
     footprint fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 1, &arena, scratch);
     RC_CHECK_TRUE(fp.unknown_call);
@@ -253,7 +256,7 @@ RC_TEST(footprint, external_call_has_empty_footprint)
     pc = fp_push(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     rc_view_zp_cflow none = {0};
     footprint fp = footprint_compute(g, insns.view, none, cfg_block_at(g, 0, 0x2000), 1, &arena, scratch);
     RC_CHECK_FALSE(fp.unknown_call);

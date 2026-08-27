@@ -25,7 +25,7 @@ olddotaddrhi    = &3E00
 olddotaddry     = &3F00
 screenbase      = &4000
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "DEMO"
-vsync = &FF
+vsync = &0A [auto]
 multabptr = &00 [auto]
 mulnegtabptr = &02 [auto]
 angle = &04 [auto]
@@ -33,9 +33,9 @@ speed = &06 [auto]
 .start
 {
 xpos = &08 [auto]
-colour = &0A [auto]
+colour = &0B [auto]
 write = &08 [auto]
-behindflag = &0B [auto]
+behindflag = &0C [auto]
 .mainloop
   1100  A2 00           LDX #0
 .plotdotloop
@@ -45,13 +45,13 @@ behindflag = &0B [auto]
   1108  A8              TAY
   1109  18              CLC
   110A  69 40           ADC #64
-  110C  85 0B           STA behindflag
+  110C  85 0C           STA behindflag
   110E  B9 00 13        LDA sintable,Y
   1111  85 00           STA multabptr
   1113  49 FF           EOR #255
   1115  85 02           STA mulnegtabptr
   1117  B9 00 14        LDA coltable,Y
-  111A  85 0A           STA colour
+  111A  85 0B           STA colour
   111C  C0 80           CPY #128
   111E  BC 00 17        LDY dotr,X
   1121  B0 08           BCS negativesine
@@ -67,10 +67,10 @@ behindflag = &0B [auto]
   1130  69 40           ADC #64
   1132  85 08           STA xpos
   1134  29 01           AND #1
-  1136  05 0A           ORA colour
+  1136  05 0B           ORA colour
   1138  A8              TAY
   1139  B9 FD 11        LDA colours,Y
-  113C  85 0A           STA colour
+  113C  85 0B           STA colour
   113E  A5 08           LDA xpos
   1140  29 FE           AND #&FE
   1142  0A              ASL A
@@ -90,10 +90,10 @@ behindflag = &0B [auto]
   115C  29 07           AND #7
   115E  9D 00 3F        STA olddotaddry,X
   1161  A8              TAY
-  1162  A5 0A           LDA colour
+  1162  A5 0B           LDA colour
   1164  11 08           ORA (write),Y
   1166  91 08           STA (write),Y
-  1168  24 0B           BIT behindflag
+  1168  24 0C           BIT behindflag
   116A  30 0F           BMI behind
   116C  88              DEY
   116D  10 06           BPL @+
@@ -101,7 +101,7 @@ behindflag = &0B [auto]
   1171  C6 09           DEC write+1
   1173  A0 07           LDY #7
 .@
-  1175  A5 0A           LDA colour
+  1175  A5 0B           LDA colour
   1177  11 08           ORA (write),Y
   1179  91 08           STA (write),Y
 .behind
@@ -110,12 +110,12 @@ behindflag = &0B [auto]
   117E  D0 82           BNE plotdotloop
 .waitforvsync
 .waitingforvsync
-  1180  A5 FF           LDA vsync
+  1180  A5 0A           LDA vsync
   1182  F0 FC           BEQ waitingforvsync
   1184  C9 02           CMP #2
   1186  B0 68           BCS exit
   1188  A9 00           LDA #0
-  118A  85 FF           STA vsync
+  118A  85 0A           STA vsync
   118C  AA              TAX
 .eraseloop
   118D  BC 00 3D        LDY olddotaddrlo,X
@@ -174,7 +174,7 @@ behindflag = &0B [auto]
 .irq
   11F3  A9 40           LDA #&40
   11F5  8D 4D FE        STA &FE4D
-  11F8  E6 FF           INC vsync
+  11F8  E6 0A           INC vsync
   11FA  A5 FC           LDA &FC
   11FC  40              RTI
 .colours
@@ -276,7 +276,7 @@ delta = &06 [auto]
   1834  D0 F4           BNE clearloop
   1836  85 04           STA angle
   1838  85 05           STA angle+1
-  183A  85 FF           STA vsync
+  183A  85 0A           STA vsync
   183C  85 06           STA speed
   183E  A9 01           LDA #1
   1840  85 07           STA speed+1
@@ -317,10 +317,10 @@ delta = &06 [auto]
   188D  8D 05 02        STA &205
   1890  58              CLI
 .initialwait
-  1891  A5 FF           LDA vsync
+  1891  A5 0A           LDA vsync
   1893  F0 FC           BEQ initialwait
   1895  A9 00           LDA #0
-  1897  85 FF           STA vsync
+  1897  85 0A           STA vsync
   1899  4C 00 11        JMP start
 }
 .crtcregs

@@ -89,8 +89,8 @@ screenbase      = &4000
 
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "DEMO"
 
-vsync = &FF
 ZPRESERVE &00..&FC
+ZPAUTO1 vsync                   ; incremented by the vsync interrupt
 ZPAUTO2 multabptr
 ZPAUTO2 mulnegtabptr
 ZPAUTO2 angle
@@ -229,6 +229,7 @@ ZPAUTO2 speed
 \ ******************************************************************
 
 .irq
+    ZPINTERRUPT
     LDA #&40:STA &FE4D:INC vsync
     LDA &FC
     RTI
@@ -322,6 +323,7 @@ ALIGN &100
 
 .entry
 {
+    ZPENTRY
     ZPAUTO2 sqr
     ZPAUTO1 delta
 

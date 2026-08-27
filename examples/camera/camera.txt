@@ -23,15 +23,15 @@ skyodd   = &AF
 grounde  = &55
 groundo  = &AA
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "CAMERA", guard = &6000
-framectr = &FD
-irqchange = &FE
+framectr = &02 [auto]
+irqchange = &03 [auto]
 scr = &00 [auto]
-camidx = &02 [auto]
-drawpage = &03 [auto]
+camidx = &04 [auto]
+drawpage = &05 [auto]
 .mainloop
 {
-  1100  A5 FD           LDA framectr
-  1102  85 02           STA camidx
+  1100  A5 02           LDA framectr
+  1102  85 04           STA camidx
   1104  20 1A 11        JSR clearscreen
   1107  20 26 12        JSR drawsprites
   110A  20 0F 13        JSR swapbuffers
@@ -43,7 +43,7 @@ drawpage = &03 [auto]
 }
 .clearscreen
 {
-  111A  A5 03           LDA drawpage
+  111A  A5 05           LDA drawpage
   111C  C9 70           CMP #&70
   111E  F0 03           BEQ @+
   1120  4C 26 11        JMP clear6000
@@ -175,39 +175,39 @@ drawpage = &03 [auto]
 tabstride = nslots * ncam DIV 256
 .drawsprites
 {
-slots = &04 [auto]
-tabhi = &05 [auto]
+slots = &06 [auto]
+tabhi = &07 [auto]
   1226  A9 14           LDA #HI(tab_xl)
-  1228  85 05           STA tabhi
+  1228  85 07           STA tabhi
   122A  A9 0F           LDA #nslots
-  122C  85 04           STA slots
+  122C  85 06           STA slots
 .slotloop
-  122E  A4 02           LDY camidx
+  122E  A4 04           LDY camidx
   1230  A9 00           LDA #0
   1232  85 00           STA scr
-  1234  A5 05           LDA tabhi
+  1234  A5 07           LDA tabhi
   1236  18              CLC
   1237  69 2D           ADC #3*tabstride
   1239  85 01           STA scr+1
   123B  B1 00           LDA (scr),Y
   123D  F0 38           BEQ done
-  123F  85 09           STA drawsprite.sht
-  1241  A5 05           LDA tabhi
+  123F  85 0B           STA drawsprite.sht
+  1241  A5 07           LDA tabhi
   1243  85 01           STA scr+1
   1245  B1 00           LDA (scr),Y
-  1247  85 06           STA drawsprite.sxl
+  1247  85 08           STA drawsprite.sxl
   1249  A5 01           LDA scr+1
   124B  18              CLC
   124C  69 0F           ADC #tabstride
   124E  85 01           STA scr+1
   1250  B1 00           LDA (scr),Y
-  1252  85 07           STA drawsprite.sxr
+  1252  85 09           STA drawsprite.sxr
   1254  A5 01           LDA scr+1
   1256  18              CLC
   1257  69 0F           ADC #tabstride
   1259  85 01           STA scr+1
   125B  B1 00           LDA (scr),Y
-  125D  85 08           STA drawsprite.syrow
+  125D  85 0A           STA drawsprite.syrow
   125F  A5 01           LDA scr+1
   1261  18              CLC
   1262  69 1E           ADC #2*tabstride
@@ -215,84 +215,84 @@ tabhi = &05 [auto]
   1266  B1 00           LDA (scr),Y
   1268  A8              TAY
   1269  B9 3B 13        LDA colbytes,Y
-  126C  85 0A           STA drawsprite.solid
+  126C  85 0C           STA drawsprite.solid
   126E  20 78 12        JSR drawsprite
-  1271  E6 05           INC tabhi
-  1273  C6 04           DEC slots
+  1271  E6 07           INC tabhi
+  1273  C6 06           DEC slots
   1275  D0 B7           BNE slotloop
 .done
   1277  60              RTS
 }
 .drawsprite
 {
-sxl = &06 [auto]
-sxr = &07 [auto]
-syrow = &08 [auto]
-sht = &09 [auto]
-solid = &0A [auto]
-lom = &0B [auto]
-rom = &0C [auto]
-firstb = &06 [auto]
-lastb = &07 [auto]
-curb = &0D [auto]
-ys = &0E [auto]
-msk = &08 [auto]
-whibase = &0F [auto]
-  1278  A5 06           LDA sxl
+sxl = &08 [auto]
+sxr = &09 [auto]
+syrow = &0A [auto]
+sht = &0B [auto]
+solid = &0C [auto]
+lom = &0D [auto]
+rom = &0E [auto]
+firstb = &08 [auto]
+lastb = &09 [auto]
+curb = &0F [auto]
+ys = &10 [auto]
+msk = &0A [auto]
+whibase = &11 [auto]
+  1278  A5 08           LDA sxl
   127A  29 03           AND #3
-  127C  85 0B           STA lom
-  127E  A5 07           LDA sxr
+  127C  85 0D           STA lom
+  127E  A5 09           LDA sxr
   1280  29 03           AND #3
-  1282  85 0C           STA rom
-  1284  A5 06           LDA sxl
+  1282  85 0E           STA rom
+  1284  A5 08           LDA sxl
   1286  4A              LSR A
   1287  4A              LSR A
-  1288  85 06           STA firstb
-  128A  85 0D           STA curb
-  128C  A5 07           LDA sxr
+  1288  85 08           STA firstb
+  128A  85 0F           STA curb
+  128C  A5 09           LDA sxr
   128E  38              SEC
   128F  E9 01           SBC #1
   1291  4A              LSR A
   1292  4A              LSR A
-  1293  85 07           STA lastb
-  1295  A5 08           LDA syrow
+  1293  85 09           STA lastb
+  1295  A5 0A           LDA syrow
   1297  29 07           AND #7
-  1299  85 0E           STA ys
-  129B  A5 08           LDA syrow
+  1299  85 10           STA ys
+  129B  A5 0A           LDA syrow
   129D  4A              LSR A
   129E  4A              LSR A
   129F  4A              LSR A
   12A0  18              CLC
-  12A1  65 03           ADC drawpage
-  12A3  85 0F           STA whibase
+  12A1  65 05           ADC drawpage
+  12A3  85 11           STA whibase
 .striploop
   12A5  A9 FF           LDA #&FF
-  12A7  A6 0D           LDX curb
-  12A9  E4 06           CPX firstb
+  12A7  A6 0F           LDX curb
+  12A9  E4 08           CPX firstb
   12AB  D0 05           BNE @+
-  12AD  A6 0B           LDX lom
+  12AD  A6 0D           LDX lom
   12AF  3D 3F 13        AND leftmasks,X
 .@
-  12B2  A6 0D           LDX curb
-  12B4  E4 07           CPX lastb
+  12B2  A6 0F           LDX curb
+  12B4  E4 09           CPX lastb
   12B6  D0 05           BNE @+
-  12B8  A6 0C           LDX rom
+  12B8  A6 0E           LDX rom
   12BA  3D 43 13        AND rightmasks,X
 .@
-  12BD  85 08           STA msk
-  12BF  A5 0D           LDA curb
+  12BD  85 0A           STA msk
+  12BF  A5 0F           LDA curb
   12C1  0A              ASL A
   12C2  0A              ASL A
   12C3  0A              ASL A
   12C4  85 00           STA scr
-  12C6  A5 0F           LDA whibase
+  12C6  A5 11           LDA whibase
   12C8  85 01           STA scr+1
-  12CA  A4 0E           LDY ys
-  12CC  A6 09           LDX sht
-  12CE  A5 08           LDA msk
+  12CA  A4 10           LDY ys
+  12CC  A6 0B           LDX sht
+  12CE  A5 0A           LDA msk
   12D0  C9 FF           CMP #&FF
   12D2  D0 11           BNE masked
-  12D4  A5 0A           LDA solid
+  12D4  A5 0C           LDA solid
 .fullrow
   12D6  91 00           STA (scr),Y
   12D8  88              DEY
@@ -306,8 +306,8 @@ whibase = &0F [auto]
 .masked
   12E5  49 FF           EOR #&FF
   12E7  8D F4 12        STA mand+1
-  12EA  A5 0A           LDA solid
-  12EC  25 08           AND msk
+  12EA  A5 0C           LDA solid
+  12EC  25 0A           AND msk
   12EE  8D F6 12        STA mora+1
 .maskrow
   12F1  B1 00           LDA (scr),Y
@@ -324,40 +324,40 @@ whibase = &0F [auto]
   1300  CA              DEX
   1301  D0 EE           BNE maskrow
 .nextstrip
-  1303  A5 0D           LDA curb
-  1305  C5 07           CMP lastb
+  1303  A5 0F           LDA curb
+  1305  C5 09           CMP lastb
   1307  F0 05           BEQ done
-  1309  E6 0D           INC curb
+  1309  E6 0F           INC curb
   130B  4C A5 12        JMP striploop
 .done
   130E  60              RTS
 }
 .swapbuffers
 {
-  130F  A5 FE           LDA irqchange
+  130F  A5 03           LDA irqchange
 .@
-  1311  C5 FE           CMP irqchange
+  1311  C5 03           CMP irqchange
   1313  F0 FC           BEQ @-
   1315  A9 0C           LDA #12
   1317  8D 00 FE        STA &FE00
-  131A  A5 03           LDA drawpage
+  131A  A5 05           LDA drawpage
   131C  4A              LSR A
   131D  4A              LSR A
   131E  4A              LSR A
   131F  8D 01 FE        STA &FE01
-  1322  A5 03           LDA drawpage
+  1322  A5 05           LDA drawpage
   1324  49 10           EOR #&10
-  1326  85 03           STA drawpage
+  1326  85 05           STA drawpage
   1328  60              RTS
 }
 .irq
   1329  A9 02           LDA #&02
   132B  8D 4D FE        STA &FE4D
-  132E  A5 FE           LDA irqchange
+  132E  A5 03           LDA irqchange
   1330  49 01           EOR #1
-  1332  85 FE           STA irqchange
+  1332  85 03           STA irqchange
   1334  F0 02           BEQ @+
-  1336  E6 FD           INC framectr
+  1336  E6 02           INC framectr
 .@
   1338  A5 FC           LDA &FC
   133A  40              RTI
@@ -401,10 +401,10 @@ whibase = &0F [auto]
   1385  20 26 11        JSR clear6000
   1388  20 A6 11        JSR clear7000
   138B  A9 00           LDA #0
-  138D  85 FD           STA framectr
-  138F  85 FE           STA irqchange
+  138D  85 02           STA framectr
+  138F  85 03           STA irqchange
   1391  A9 70           LDA #&70
-  1393  85 03           STA drawpage
+  1393  85 05           STA drawpage
   1395  A9 29           LDA #LO(irq)
   1397  8D 04 02        STA &204
   139A  A9 13           LDA #HI(irq)

@@ -110,6 +110,9 @@ A filename destined for a disc image follows DFS rules: an optional single-chara
 | `UNREACHABLE` | Assert the preceding branch is always taken - the fall-through path is pruned. |
 | `CANCALL targets` | After a computed/self-modified `JSR`: the routines it may reach. |
 | `CANJUMP targets` | After a computed/indirect `JMP`: the labels it may land on. |
+| `DISCARD vars` | Promise the named `ZPAUTO` variables' current values are dead - later reads see only later writes. For arrays rebuilt via `STA arr,X`, whose writes prove nothing. |
+| `ZPENTRY` | Mark the routine it opens as an externally-called entry point (a reachability root). Any `ZPENTRY` replaces the default "each section starts a routine" presumption. |
+| `ZPINTERRUPT` | Mark the routine it opens as an interrupt handler: a root whose variables are kept apart from the rest of the program. |
 
 The full story - liveness, footprints, sections, every error - is in
 [Zero page allocation](zero-page-allocation.md).

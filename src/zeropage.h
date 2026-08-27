@@ -89,6 +89,9 @@ typedef struct zp_insn {
                              // 2-byte access, so a 1-byte ZPAUTO1 here is refused (final-pass width check)
     uint32_t var_offset;     // the compile-time-known byte offset into the var (0 for `var`, k for `var+k`), or
                              // RC_INDEX_NONE if not statically known; a final-pass check bounds it against width
+    bool     var_kill;       // a DISCARD marker, not a real instruction: the programmer's promise that the
+                             // value `vreg` holds at this pc is never read again. Size 0, flow normal, rw none;
+                             // the analyses treat it as a full-width kill that pins nothing, touches nothing
     uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE. Resolves WITHIN this
                              // instruction's own section only (locals @+/@-, in-section expression branches);
                              // it never crosses a section - only a named label (below) can do that.
@@ -170,6 +173,23 @@ typedef struct zp_label {
 #include "richc/template/array.h"
 
 
+// A declared program entry: ZPENTRY (a synchronous external entry - a sync reachability root) or
+// ZPINTERRUPT (an interrupt handler - an async root whose communication vars and footprint the finalize
+// step pins against the rest of the program). Both are bare marker statements: they record the pc they
+// stand at, so placing one just inside a routine (before or after its label - nothing is emitted, the pc
+// is the same) declares that routine. Recorded on the final pass only, like the annotations above.
+typedef struct zp_entry {
+    uint32_t section;    // the section current at the marker statement
+    uint32_t pc;         // the marked pc - the declared routine's entry address
+    bool     interrupt;  // ZPINTERRUPT vs ZPENTRY
+    cursor   at;         // where the marker sits, for diagnostics
+} zp_entry;
+
+#define RC_ARRAY_TYPE zp_entry
+#define RC_ARRAY_NAME zp_entry
+#include "richc/template/array.h"
+
+
 typedef struct zeropage {
     rc_arena        *arena;      // BORROWED permanent: backs the reserve bitset, var list and insn list
     rc_bitset        reserved;   // 256 bits: reserved[b] iff zero-page byte b may be auto-allocated
@@ -177,6 +197,7 @@ typedef struct zeropage {
     rc_array_zp_insn insns;      // the VAR-touching instructions, recorded on the final pass
     rc_array_zp_cflow cflows;    // UNREACHABLE / CANCALL annotations, recorded on the final pass
     rc_array_zp_label labels;    // label markers (identity -> section + pc), recorded on the final pass
+    rc_array_zp_entry entries;   // ZPENTRY / ZPINTERRUPT markers, recorded on the final pass
     bool             enabled;    // a ZPRESERVE directive has run -> the ZPAUTO1/ZPAUTO2 feature is active
 } zeropage;
 
@@ -233,6 +254,10 @@ rc_view_zp_cflow zeropage_cflows(const zeropage *zp);   // all annotations, for 
 // Record one label marker (final pass only). Returns its index.
 uint32_t          zeropage_add_label(zeropage *zp, uint32_t scope, cursor def, uint32_t section, uint32_t pc);
 rc_view_zp_label  zeropage_labels(const zeropage *zp);   // all label markers, for the CFG's target resolution
+
+// Record one entry marker (final pass only). Returns its index.
+uint32_t          zeropage_add_entry(zeropage *zp, zp_entry e);
+rc_view_zp_entry  zeropage_entries(const zeropage *zp);  // all entry markers, for the CFG + finalize roots
 
 
 #endif // ifndef BARON_ZEROPAGE_H_

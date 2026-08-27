@@ -35,6 +35,9 @@ static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t s
 static parse_result handle_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpentry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_zpinterrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -356,6 +359,9 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_unreachable}}}, // dead fall-through
     {RC_STR_INIT("cancall"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_cancall}}},   // a JSR's real targets
     {RC_STR_INIT("canjump"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_canjump}}},   // a computed JMP's targets
+    {RC_STR_INIT("discard"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_discard}}},   // a variable's value dies here
+    {RC_STR_INIT("zpentry"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpentry}}},   // an external entry root
+    {RC_STR_INIT("zpinterrupt"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpinterrupt}}}, // an interrupt handler root
     {RC_STR_INIT("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR_INIT("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR_INIT("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
@@ -1102,6 +1108,9 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
     uint32_t site = RC_INDEX_NONE;
     if (flags.final) {
         uint32_t ni = zeropage_insn_count(&b->zeropage);
+        while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).var_kill) {
+            ni--;   // a DISCARD between the instruction and its annotation is a marker, not the site
+        }
         if (ni > 0) {
             zp_insn last = zeropage_insn_get(&b->zeropage, ni - 1);
             bool fits = (kind == zp_cflow_cancall)
@@ -1170,6 +1179,109 @@ static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t sc
 static parse_result handle_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_canjump, scratch);
+}
+
+// DISCARD <var>[, <var>...] - the programmer's promise that the value each named ZPAUTO variable holds AT
+// THIS POINT is never read again: everything read later comes from writes after here. Recorded as a size-0
+// marker in the zp instruction stream; liveness treats it as a full-width kill that stores nothing, which is
+// what lets an array rebuilt through indexed stores (`STA arr,X` - no provable byte written) have a live
+// range that starts at its rebuild instead of leaking back to the routine entry and around the caller's
+// loop. TRUSTED, like UNREACHABLE: a wrong DISCARD hands the variable's byte to someone else while the old
+// value is still wanted. Whole variables only - the promise is hard enough to audit without byte windows.
+static parse_result handle_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) stmt;
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+    bool unresolved = false;
+    while (true) {
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        if (e.error != expr_error_none) {
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+        }
+        int_argument arg = int_argument_make(e.value, flags.final, pos);
+        switch (arg.type) {
+            case int_argument_type_known:
+                if (!arg.zpauto || arg.value != 0) {
+                    // A number, a fixed address, or a var+n slice: nothing here the allocator manages whole.
+                    semantic_error_payload(b, flags, error_type_discard_needs_var, cursor_at(at, pos),
+                                           arg.zpauto ? arg.zp_name : (rc_str) {0});
+                }
+                else if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+                    zeropage_add_insn(&b->zeropage, (zp_insn) {
+                        .pc           = sections_pc(&b->sections, section),
+                        .size         = 0,
+                        .flow         = zp_flow_normal,
+                        .rw           = vref_none,
+                        .vreg         = RC_INDEX_NONE,
+                        .var_scope    = arg.zp_scope,
+                        .var_def      = arg.zp_def,
+                        .var_offset   = 0,
+                        .var_kill     = true,
+                        .target       = RC_INDEX_NONE,
+                        .target_scope = RC_INDEX_NONE,
+                        .target_def   = cursor_none(),
+                        .section      = section,
+                        .at           = cursor_at(at, pos),
+                    });
+                }
+                break;
+            case int_argument_type_unresolved:
+                unresolved = true;   // a forward-declared variable; it binds on a later pass
+                break;
+            case int_argument_type_error:
+            default:
+                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+                break;
+        }
+        lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;
+        }
+        parse_result r = require_separator(b, cursor_at(at, e.next));
+        r.unresolved = unresolved;
+        return r;
+    }
+}
+
+// The shared body of ZPENTRY / ZPINTERRUPT: a bare marker, like UNREACHABLE, recording the pc it stands at
+// as a declared program entry. Nothing is emitted, so a marker just inside a routine records the same pc as
+// its label - place it as the routine's first statement. zeropage_finalize turns the records into the
+// reachability roots (and, for ZPINTERRUPT, the pinning of the handler's communication vars and footprint).
+static parse_result handle_entry_mark(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
+                                      bool interrupt, rc_arena scratch)
+{
+    (void) stmt;
+    (void) scope;
+    (void) scratch;
+    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+        zeropage_add_entry(&b->zeropage, (zp_entry) {
+            .section   = section,
+            .pc        = sections_pc(&b->sections, section),
+            .interrupt = interrupt,
+            .at        = cursor_at(at, at.pos),
+        });
+    }
+    return require_separator(b, at);
+}
+
+// ZPENTRY - marks the routine it opens as an external entry point (called from outside the program: a BASIC
+// framework, another executable). Declared entries become the ONLY sync roots for the allocator's
+// reachability check - one ZPENTRY anywhere replaces the default "each section's first instruction"
+// presumption. Deliberately NOT an interface contract: an external API whose inputs/outputs matter should
+// fix them to concrete addresses, not ZPAUTO them.
+static parse_result handle_zpentry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    return handle_entry_mark(b, stmt, at, scope, section, flags, false, scratch);
+}
+
+// ZPINTERRUPT - marks the routine it opens as an interrupt handler. An async root: besides feeding the
+// reachability check, its communication vars (live-in at the handler) and its whole transitive footprint are
+// pinned against the rest of the program, because the handler can preempt at any instruction.
+static parse_result handle_zpinterrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    return handle_entry_mark(b, stmt, at, scope, section, flags, true, scratch);
 }
 
 // Emit `bits` as `width` little-endian bytes into the current section.
@@ -2669,6 +2781,61 @@ static bool call_rewrites(const liveness *lv, call_targets ct, uint32_t v)
     return true;
 }
 
+// Mark into `reach` every block reachable from `seed`, following the same edges control can take: the CFG's
+// successor slices (fall-throughs, branches, wired CANJUMP arms) plus each call's resolved callee entries.
+// An unknown or external call arm contributes nothing - external code is off the map, and an unannotated
+// computed call cannot extend reachability (its true callees may then warn, which is exactly the "add
+// CANCALL" nudge). `within`, when non-NULL, restricts the walk to blocks inside that set - how the region
+// closures below stay within the unreachable half of the graph.
+static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t seed,
+                       const rc_bitset *within, rc_bitset *reach, rc_arena scratch)
+{
+    if (seed >= g.blocks.num || rc_bitset_is_set(reach, seed)
+        || (within != NULL && !rc_bitset_is_set(within, seed))) {
+        return;
+    }
+    uint32_t *stack = rc_arena_alloc_type(&scratch, uint32_t, g.blocks.num);
+    uint32_t  sp    = 0;
+    stack[sp++] = seed;
+    rc_bitset_set(reach, seed);
+    while (sp > 0) {
+        basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
+        for (uint32_t i = 0; i < blk.num_insns; i++) {
+            zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
+            if (n.flow != zp_flow_call) {
+                continue;
+            }
+            call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
+            for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
+                uint32_t t = rc_array_u32_get(&ct.blocks, c);
+                if (!rc_bitset_is_set(reach, t) && (within == NULL || rc_bitset_is_set(within, t))) {
+                    rc_bitset_set(reach, t);
+                    stack[sp++] = t;
+                }
+            }
+        }
+        for (uint32_t k = 0; k < blk.succ_count; k++) {
+            uint32_t t = cfg_succ(g, blk, k);
+            if (!rc_bitset_is_set(reach, t) && (within == NULL || rc_bitset_is_set(within, t))) {
+                rc_bitset_set(reach, t);
+                stack[sp++] = t;
+            }
+        }
+    }
+}
+
+// Pin variable `v` against every other variable: both interference directions, the whole registry. The
+// hammer for state an interrupt handler shares with the rest of the program - no byte reuse, ever.
+static void pin_var(liveness *lv, uint32_t v, uint32_t nv)
+{
+    for (uint32_t w = 0; w < nv; w++) {
+        if (w != v) {
+            rc_bitset_set(&lv->interfere[v], w);
+            rc_bitset_set(&lv->interfere[w], v);
+        }
+    }
+}
+
 // Post-convergence zero-page allocation. Layout has settled with every ZPAUTO reference sized as a
 // placeholder zero-page access, so assigning a real byte and patching the operand cannot perturb size. The
 // governing rule is CERTAINTY: this only patches a program it can prove correct, and turns anything it cannot
@@ -2755,8 +2922,13 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 
     // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
     // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
-    cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), &work, scratch);
-    liveness lv = liveness_analyze(g, insns, cflows, zeropage_vars(&b->zeropage), 0, &work, scratch);
+    cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), zeropage_entries(&b->zeropage),
+                            &work, scratch);
+    // No entry block: the old "block 0 is the program entry" presumption is retired (roots are handled
+    // below), so the synthetic pairwise-input rule and the input classification stay dormant here. A var
+    // read before any write from an entry has no defined value, and gets no protection - by design.
+    liveness lv = liveness_analyze(g, insns, cflows, zeropage_vars(&b->zeropage), RC_INDEX_NONE,
+                                   &work, scratch);
 
     // A variable no instruction touches gets a WARNING, no address, and no definition (the rewrite below
     // removes its binding): a declaration costing a byte of the pool for nothing is more likely a leftover
@@ -2774,6 +2946,152 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
         if (!already) {
             baron_warning_payload(b, error_type_zpauto_unused, var.def, severity_warning, var.name);
+        }
+    }
+
+    // The root set: where control can enter the program from outside. Declared ZPENTRY / ZPINTERRUPT
+    // markers resolve to their blocks (the cfg marked each a leader, so "no block" reliably means the
+    // marker sits on no instruction - data, or a section's end - a static mistake we refuse). Any ZPENTRY
+    // replaces the default sync roots; without one, each section's first recorded block roots itself - the
+    // generalisation of the old "block 0 is the entry" presumption, kind to the relocation workflow where
+    // a spliced section's code is entered at its own org. ZPINTERRUPT alone leaves the defaults in place
+    // (a handler is extra, not a statement about where the mainline starts).
+    rc_view_zp_entry entries = zeropage_entries(&b->zeropage);
+    uint32_t  nb           = g.blocks.num;
+    rc_bitset roots        = {0};
+    rc_bitset handler_seen = {0};
+    rc_bitset_resize(&roots, nb ? nb : 1, &scratch);
+    rc_bitset_resize(&handler_seen, nb ? nb : 1, &scratch);
+    uint32_t *handler_blocks = entries.num ? rc_arena_alloc_type(&scratch, uint32_t, entries.num) : NULL;
+    cursor   *handler_ats    = entries.num ? rc_arena_alloc_type(&scratch, cursor, entries.num) : NULL;
+    uint32_t  num_handlers   = 0;
+    bool      any_sync       = false;
+    bool      entry_unknown  = false;
+    for (uint32_t i = 0; i < entries.num; i++) {
+        zp_entry e = rc_view_zp_entry_get(entries, i);
+        if (!e.interrupt) {
+            any_sync = true;   // the declaration replaces the defaults even if it fails to resolve
+        }
+        uint32_t bi = cfg_block_at(g, e.section, e.pc);
+        if (bi == RC_INDEX_NONE) {
+            baron_error(b, error_type_zpentry_no_code, e.at);
+            refused = entry_unknown = true;
+            continue;
+        }
+        rc_bitset_set(&roots, bi);   // duplicates, and ZPENTRY + ZPINTERRUPT on one pc, collapse here
+        if (e.interrupt && !rc_bitset_is_set(&handler_seen, bi)) {
+            rc_bitset_set(&handler_seen, bi);
+            handler_blocks[num_handlers] = bi;
+            handler_ats[num_handlers]    = e.at;
+            num_handlers++;
+        }
+    }
+    if (!any_sync) {
+        // Blocks are recorded in stream order and a section's pc only advances, so the first block seen
+        // carrying each section index is that section's earliest code. A data-only section has no blocks,
+        // hence no root - correctly nothing to reach.
+        uint32_t max_section = 0;
+        for (uint32_t bi = 0; bi < nb; bi++) {
+            uint32_t sec = rc_array_basic_block_get(&g.blocks, bi).section;
+            if (sec > max_section) {
+                max_section = sec;
+            }
+        }
+        rc_bitset section_seen = {0};   // indexed by section, and data-only sections can leave gaps
+        rc_bitset_resize(&section_seen, max_section + 1, &scratch);
+        for (uint32_t bi = 0; bi < nb; bi++) {
+            uint32_t sec = rc_array_basic_block_get(&g.blocks, bi).section;
+            if (!rc_bitset_is_set(&section_seen, sec)) {
+                rc_bitset_set(&section_seen, sec);
+                rc_bitset_set(&roots, bi);
+            }
+        }
+    }
+
+    // The reachability warning: code touching a ZPAUTO variable that no root can reach is either an
+    // undeclared handler (the silently-unsound shape this whole feature exists to catch) or dead code.
+    // One warning per REGION, at its head (the natural "put your marker here" spot), not per block.
+    // Skipped when a marker failed to resolve - an under-approximate root set would spray false alarms,
+    // and the error above already fails the assemble.
+    if (!entry_unknown && nv > 0 && nb > 0) {
+        rc_bitset reach = {0};
+        rc_bitset_resize(&reach, nb, &scratch);
+        for (uint32_t r = rc_bitset_get_first_set(&roots); r != RC_INDEX_NONE;
+             r = rc_bitset_get_next_set(&roots, r + 1)) {
+            reach_from(g, insns, cflows, r, NULL, &reach, scratch);
+        }
+        rc_bitset offending = {0};
+        rc_bitset_resize(&offending, nb, &scratch);
+        bool any_offending = false;
+        for (uint32_t bi = 0; bi < nb; bi++) {
+            basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+            for (uint32_t i = 0; !rc_bitset_is_set(&reach, bi) && i < blk.num_insns; i++) {
+                zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
+                if (n.vreg != RC_INDEX_NONE && !n.var_kill) {   // a stray DISCARD is not a use worth warning over
+                    rc_bitset_set(&offending, bi);
+                    any_offending = true;
+                    break;
+                }
+            }
+        }
+        if (any_offending) {
+            // A region head is an unreachable block with no unreachable predecessor - over the same edge
+            // set the walk follows. Warn once per head whose closure holds an uncovered offender; a pure
+            // cycle has no head, so a mop-up sweep catches anything the heads did not claim.
+            rc_bitset unreached = {0};
+            rc_bitset_resize(&unreached, nb, &scratch);
+            bool *upred = rc_arena_alloc_zero_type(&scratch, bool, nb);
+            for (uint32_t bi = 0; bi < nb; bi++) {
+                if (!rc_bitset_is_set(&reach, bi)) {
+                    rc_bitset_set(&unreached, bi);
+                }
+            }
+            for (uint32_t bi = 0; bi < nb; bi++) {
+                if (rc_bitset_is_set(&reach, bi)) {
+                    continue;
+                }
+                basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+                for (uint32_t i = 0; i < blk.num_insns; i++) {
+                    zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
+                    if (n.flow != zp_flow_call) {
+                        continue;
+                    }
+                    call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
+                    for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
+                        uint32_t t = rc_array_u32_get(&ct.blocks, c);
+                        if (!rc_bitset_is_set(&reach, t)) { upred[t] = true; }
+                    }
+                }
+                for (uint32_t k = 0; k < blk.succ_count; k++) {
+                    uint32_t t = cfg_succ(g, blk, k);
+                    if (!rc_bitset_is_set(&reach, t)) { upred[t] = true; }
+                }
+            }
+            rc_bitset covered = {0};
+            rc_bitset_resize(&covered, nb, &scratch);
+            for (uint32_t pass = 0; pass < 2; pass++) {
+                for (uint32_t bi = 0; bi < nb; bi++) {
+                    bool head = pass == 0 ? (!rc_bitset_is_set(&reach, bi) && !upred[bi])
+                                          : (rc_bitset_is_set(&offending, bi) && !rc_bitset_is_set(&covered, bi));
+                    if (!head) {
+                        continue;
+                    }
+                    rc_bitset closure = {0};
+                    rc_bitset_resize(&closure, nb, &scratch);
+                    reach_from(g, insns, cflows, bi, &unreached, &closure, scratch);
+                    bool fresh = false;
+                    for (uint32_t c = rc_bitset_get_first_set(&closure); !fresh && c != RC_INDEX_NONE;
+                         c = rc_bitset_get_next_set(&closure, c + 1)) {
+                        fresh = rc_bitset_is_set(&offending, c) && !rc_bitset_is_set(&covered, c);
+                    }
+                    if (fresh) {
+                        basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+                        baron_warning(b, error_type_zpauto_unreachable,
+                                      rc_view_zp_insn_get(insns, blk.first_insn).at, severity_warning);
+                    }
+                    rc_bitset_union(&covered, &closure);
+                }
+            }
         }
     }
 
@@ -2869,13 +3187,48 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 // bytes it does not touch, so the old value stays live through it. This sweep runs at
                 // variable granularity, so a store PAIR that fully rewrites a pointer conservatively
                 // keeps it live too - a too-live set only adds interference edges, never misses any.
-                if (zp_insn_write_kills(n, zeropage_var_get(&b->zeropage, n.vreg).width)) {
+                if (n.var_kill) {
+                    rc_bitset_clear(&live, n.vreg);   // a DISCARD ends the whole variable's range, pinning nothing
+                }
+                else if (zp_insn_write_kills(n, zeropage_var_get(&b->zeropage, n.vreg).width)) {
                     rc_bitset_clear(&live, n.vreg);
                 }
                 else if (n.rw & vref_write) {
                     rc_bitset_set(&live, n.vreg);
                 }
                 if (n.rw & vref_read) { rc_bitset_set(&live, n.vreg); }
+            }
+        }
+    }
+
+    // Guard 3 / interrupt pinning: a ZPINTERRUPT handler preempts at ARBITRARY instructions, so no
+    // transaction discipline can be assumed around it. Two rules make its variables sound: (i) its
+    // communication vars - live-in at the handler's entry, written by the mainline for the handler to read -
+    // are pinned against everything, the handler's own temps included (the mainline may rewrite one at any
+    // moment relative to the handler's execution, so no instant of "dead" exists to reuse); (ii) every var
+    // in the handler's transitive footprint interferes with every var outside it - a handler temp can never
+    // share a byte with mainline state it might fire on top of. Among the handler's own temps, ordinary
+    // liveness still governs, so intra-handler reuse survives. A footprint the walk cannot bound (an
+    // unannotated computed call in the extent) is refused, with the same remedy as ever: CANCALL.
+    for (uint32_t h = 0; h < num_handlers; h++) {
+        footprint fp = footprint_compute(g, insns, cflows, handler_blocks[h], nv, &work, scratch);
+        if (fp.unknown_call) {
+            baron_error(b, error_type_zpauto_across_call, handler_ats[h]);
+            refused = true;
+            continue;
+        }
+        for (uint32_t v = 0; v < nv; v++) {
+            if (liveness_is_live_in(&lv, handler_blocks[h], v)) {
+                pin_var(&lv, v, nv);
+            }
+        }
+        for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
+             t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
+            for (uint32_t v = 0; v < nv; v++) {
+                if (v != t && !rc_bitset_is_set(&fp.touched, v)) {
+                    rc_bitset_set(&lv.interfere[t], v);
+                    rc_bitset_set(&lv.interfere[v], t);
+                }
             }
         }
     }
@@ -3145,6 +3498,18 @@ static bool has_diag(const baron_result *r, error_type code)
         }
     }
     return false;
+}
+
+// How many diagnostics carry `code` - for the once-per-region promises, where "fired" is not enough.
+static uint32_t diag_count(const baron_result *r, error_type code)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < r->diagnostics.num; i++) {
+        if (rc_view_diagnostic_get(r->diagnostics, i).code == code) {
+            n++;
+        }
+    }
+    return n;
 }
 
 // The payload of the first diagnostic carrying `code` ({0} when none does).
@@ -4664,7 +5029,7 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
     run_passes(&b, s, desc.scratch);
 
     cfg g = cfg_build(zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage), zeropage_labels(&b.zeropage),
-                      &arena, scratch);
+                      zeropage_entries(&b.zeropage), &arena, scratch);
     liveness lv = liveness_analyze(g, zeropage_insns(&b.zeropage), zeropage_cflows(&b.zeropage),
                                    zeropage_vars(&b.zeropage), 0, &arena, scratch);
 
@@ -4685,6 +5050,330 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
     rc_arena_deinit(&desc.permanent);
     rc_arena_deinit(&desc.per_pass);
     rc_arena_deinit(&desc.scratch);
+}
+
+RC_TEST_STEP(assemble, zpentry_parses_and_is_reserved, fix)
+{
+    // The marker emits nothing, so it records the label's pc whichever side of the label it sits.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 v : .main : ZPENTRY : STA v : LDA v : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unreachable));
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 v : ZPENTRY : .main : STA v : LDA v : RTS") != 0);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unreachable));
+
+    // The names are statement keywords now, so a label cannot be spelled after them...
+    RC_CHECK_TRUE(ERR(".zpentry RTS") == error_type_expected_label_name);
+    // ...and a marker takes no operand.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPENTRY 5 : RTS") == error_type_expected_separator);
+
+    // Without ZPRESERVE the feature is off and the marker is inert, like the other annotations.
+    RC_CHECK_TRUE(ASM("ZPENTRY : LDA #1 : RTS") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+}
+
+RC_TEST_STEP(assemble, zpentry_marks_no_code_errors, fix)
+{
+    // A marker at a pc where no instruction starts declares nothing - the end of the code...
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 v : .main STA v : LDA v : RTS : ZPENTRY")
+                  == error_type_zpentry_no_code);
+    // ...or a run of data (EQUB records no instruction).
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 v : .main STA v : LDA v : RTS\nZPENTRY : EQUB 1")
+                  == error_type_zpentry_no_code);
+
+    // Mid-routine the marker is legal but marks THAT pc, so the prefix above it warns - self-diagnosing.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 v : .main STA v : ZPENTRY : LDA v : RTS") != 0);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unreachable));
+}
+
+RC_TEST_STEP(assemble, zpentry_replaces_default_roots, fix)
+{
+    // Two routines, nothing calling the second. The default root is the section's first block, so only
+    // `other` is off the map.
+    #define TWO_ROUTINES(markers1, markers2) \
+        "ZPRESERVE &70..&7F : ZPAUTO1 u, w\n" \
+        ".main " markers1 "STA u : LDA u : RTS\n" \
+        ".other " markers2 "STA w : LDA w : RTS\n"
+    RC_CHECK_TRUE(ASM(TWO_ROUTINES("", "")) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+
+    // One ZPENTRY replaces the default: only the marked routine roots, so `other` still warns.
+    RC_CHECK_TRUE(ASM(TWO_ROUTINES("ZPENTRY : ", "")) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+
+    // Marking both covers everything.
+    RC_CHECK_TRUE(ASM(TWO_ROUTINES("ZPENTRY : ", "ZPENTRY : ")) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    #undef TWO_ROUTINES
+}
+
+RC_TEST_STEP(assemble, zpentry_default_roots_per_section, fix)
+{
+    // With no markers anywhere, EACH section's first block roots itself - the multi-section generalisation
+    // of the old block-0 presumption, and what keeps the INCSECTION relocation workflow warning-free.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 u, w\n"
+                      "SECTION one, org=&2000\n.m1 STA u : LDA u : RTS\nENDSECTION\n"
+                      "SECTION two, org=&3000\n.m2 STA w : LDA w : RTS\nENDSECTION\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_keeps_default_roots, fix)
+{
+    // A handler declaration says nothing about where the mainline starts, so the defaults stay: main is
+    // rooted by its section, the handler by its marker - no warnings from either.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+                      ".main STA m : LDA m : RTS\n"
+                      ".irq ZPINTERRUPT : STA h : LDA h : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+}
+
+RC_TEST_STEP(assemble, zpauto_unreachable_island_warns, fix)
+{
+    // The shape this whole feature exists to catch: an interrupt handler nothing calls. Its variables are
+    // analysed as a disconnected island, so the layout around them is a guess - warn, once.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+                      ".main STA m : LDA m : RTS\n"
+                      ".irq STA h : LDA h : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // a warning, not an error
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+}
+
+RC_TEST_STEP(assemble, zpauto_unreachable_region_dedup, fix)
+{
+    // A multi-block island (branch + join) is ONE region: the head speaks once for all of it.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+                      ".main STA m : LDA m : RTS\n"
+                      ".irq STA h : BNE done : LDA h\n.done LDA h : RTI\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+}
+
+RC_TEST_STEP(assemble, zpauto_unreachable_follows_calls, fix)
+{
+    // Reachability walks call targets and CANJUMP-wired dispatch arms, so a routine only ever entered
+    // through a JSR or a declared jump table is on the map - no warning.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      ".main JSR sub : RTS\n"
+                      ".sub STA v : LDA v : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      ".main STA v : JMP (vector) : CANJUMP hA\n"
+                      ".hA LDA v : RTS\n"
+                      ".vector EQUW hA\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_pins_comm_var, fix)
+{
+    // `flag` is written by the mainline and read by the handler - live-in at the handler entry, so it is
+    // pinned against EVERYTHING: the mainline may store to it at any instant relative to the handler, so
+    // no byte reuse exists for it, the handler's own temp included.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 flag, t, ht\n"
+                      ".main STA flag : STA t : LDA t : RTS\n"
+                      ".irq ZPINTERRUPT : LDA flag : STA ht : LDA ht : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    int64_t flag = zp_addr(&fix->r, "flag");
+    int64_t t    = zp_addr(&fix->r, "t");
+    int64_t ht   = zp_addr(&fix->r, "ht");
+    RC_CHECK_TRUE(flag >= 0 && t >= 0 && ht >= 0);
+    RC_CHECK_TRUE(flag != t);
+    RC_CHECK_TRUE(flag != ht);
+    RC_CHECK_TRUE(t != ht);   // footprint isolation separates the handler temp from the mainline temp too
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_separates_temps_from_mainline, fix)
+{
+    // The control: without the marker the handler is an island, its temp's range overlaps nothing the
+    // analysis can see, and first-fit happily packs both temps onto one byte - the silent clobber.
+    #define IRQ_TEMPS(marker) \
+        "ZPRESERVE &70..&7F : ZPAUTO1 m, h\n" \
+        ".main STA m : LDA m : RTS\n" \
+        ".irq " marker "STA h : LDA h : RTI\n"
+    RC_CHECK_TRUE(ASM(IRQ_TEMPS("")) != 0);
+    RC_CHECK(zp_addr(&fix->r, "m"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "h"), ==, 0x70);
+
+    // With it, the handler's footprint interferes with everything outside - the temps split.
+    RC_CHECK_TRUE(ASM(IRQ_TEMPS("ZPINTERRUPT : ")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "h"));
+    #undef IRQ_TEMPS
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_handler_temps_still_share, fix)
+{
+    // Inside the handler, ordinary liveness still governs: two temps with disjoint ranges share a byte.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h1, h2\n"
+                      ".main STA m : LDA m : RTS\n"
+                      ".irq ZPINTERRUPT : STA h1 : LDA h1 : STA h2 : LDA h2 : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "h1"), ==, zp_addr(&fix->r, "h2"));
+    RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "h1"));
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_two_handlers_separated, fix)
+{
+    // An NMI can preempt an IRQ handler mid-flight, so two handlers' footprints must not share either -
+    // which falls out of each footprint interfering with everything outside itself.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, hi, hn\n"
+                      ".main STA m : LDA m : RTS\n"
+                      ".irq ZPINTERRUPT : STA hi : LDA hi : RTI\n"
+                      ".nmi ZPINTERRUPT : STA hn : LDA hn : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "hi") != zp_addr(&fix->r, "hn"));
+    RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "hi"));
+    RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "hn"));
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_unknown_call_refused, fix)
+{
+    // A handler whose extent reaches computed flow has an unboundable footprint: the pinning cannot be
+    // applied soundly, so the marker refuses (alongside Guard 1's own complaint at the jump itself). The
+    // remedy is the same as ever - declare the targets.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+                      ".main STA m : LDA m : RTS\n"
+                      ".irq ZPINTERRUPT : STA h : LDA h : JMP (vector)\n"
+                      ".vector EQUW irq\n") == 0u);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_across_call));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_computed_flow));
+
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+                      ".main STA m : LDA m : RTS\n"
+                      ".irq ZPINTERRUPT : STA h : LDA h : JMP (vector) : CANJUMP done\n"
+                      ".done RTI\n"
+                      ".vector EQUW done\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, zpentry_zero_vars_is_noop, fix)
+{
+    // No ZPAUTO variables: nothing to analyse, and a well-placed marker is a clean no-op...
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : .main ZPENTRY : LDA #1 : RTS") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+    // ...but a marker sitting on nothing is still a static mistake worth refusing.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPENTRY : EQUB 1") == error_type_zpentry_no_code);
+}
+
+RC_TEST_STEP(assemble, zpentry_duplicates_and_dual_decl, fix)
+{
+    // Stacked markers on one pc collapse: one root, one handler record - and the stricter (interrupt)
+    // treatment applies. No duplicate diagnostics from the repetition.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      ".main ZPENTRY : ZPENTRY : ZPINTERRUPT : STA v : LDA v : RTS\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_unused_var_is_inert, fix)
+{
+    // Pinning may aim edges at an unused variable, but unused is decided first and the colourer skips it:
+    // still just the unused warning, no address, no spill.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&71 : ZPAUTO1 used, gap\n"
+                      ".main STA used : LDA used : RTS\n"
+                      ".irq ZPINTERRUPT : LDA used : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unused));
+    RC_CHECK(zp_addr(&fix->r, "used"), ==, 0x70);
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("gap"))));
+}
+
+RC_TEST_STEP(assemble, zpinterrupt_handler_also_called, fix)
+{
+    // A handler can be installed in a vector AND called directly (a shared service routine): the call
+    // machinery and the pinning are independent and compose. Reached both ways, so no warning either.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+                      ".main STA m : JSR irq : LDA m : RTS\n"
+                      ".irq ZPINTERRUPT : STA h : LDA h : RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "h"));
+}
+
+RC_TEST_STEP(assemble, discard_confines_indexed_array, fix)
+{
+    // The spritescale shape in miniature: two JMP-dispatched alternates on a loop. `arr` is initialised
+    // only through `STA arr,X` - no provable byte written - so its reads leak liveness back to the
+    // routine entry and around the loop, through the sibling: without DISCARD, `t` must dodge all of it.
+    #define ALTERNATES(marker) \
+        "ZPRESERVE &70..&7F\n" \
+        ".loop LDA &90 : BEQ done : LSR A : BCC toa\n" \
+        "JMP rb\n" \
+        ".toa JMP ra\n" \
+        ".done RTS\n" \
+        ".ra { ZPAUTO 4, arr : " marker "LDX #0\n" \
+        ".l STA arr,X : INX : CPX #4 : BNE l\n" \
+        "LDA arr+0 : STA &91 : JMP loop }\n" \
+        ".rb { ZPAUTO1 t : STA t : LDA t : STA &91 : JMP loop }\n"
+    RC_CHECK_TRUE(ASM(ALTERNATES("")) != 0);
+    RC_CHECK(zp_addr(&fix->r, "ra.arr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "rb.t"), ==, 0x74);     // arr leaks through rb, so t dodges its span
+
+    RC_CHECK_TRUE(ASM(ALTERNATES("DISCARD arr : ")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "ra.arr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "rb.t"), ==, 0x70);     // the promise confines arr; t reuses its first byte
+    #undef ALTERNATES
+}
+
+RC_TEST_STEP(assemble, discard_operand_errors, fix)
+{
+    // Only a whole ZPAUTO variable can be discarded: a number, a var+n slice, or a label is refused, an
+    // unknown name defers and errors on the final pass, and the keyword itself is reserved.
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : DISCARD 5") == error_type_discard_needs_var);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 v : STA v : LDA v : DISCARD v+1") == error_type_discard_needs_var);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : .lbl DISCARD lbl") == error_type_discard_needs_var);
+    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : DISCARD nothere") == error_type_undefined_symbol);
+    RC_CHECK_TRUE(ERR(".discard RTS") == error_type_expected_label_name);
+
+    // The happy path parses as a comma list, like the other annotations.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 u, w : STA u : LDA u : STA w : LDA w\n"
+                      "DISCARD u, w : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, discard_only_var_is_unused, fix)
+{
+    // A DISCARD is a promise about a value, not a use of one: a variable nothing else touches is still
+    // unused - warned, unplaced, undefined - and the stray marker upsets nothing.
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 used, ghost\n"
+                      ".main STA used : LDA used : DISCARD ghost : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unused));
+    RC_CHECK(zp_addr(&fix->r, "used"), ==, 0x70);
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("ghost"))));
+}
+
+RC_TEST_STEP(assemble, discard_keeps_annotation_site_binding, fix)
+{
+    // CANCALL/CANJUMP bind to the previous INSTRUCTION; a DISCARD in between is a marker, not a site, so
+    // the RTS-dispatch annotation still lands on the RTS - the target stays wired (and so reachable).
+    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+                      "LDA #0 : PHA : PHA\n"
+                      "RTS : DISCARD v : CANJUMP target\n"
+                      ".target STA v : LDA v : RTS\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unreachable));
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, discard_is_must_write_at_the_call, fix)
+{
+    // Inside a JSR-called routine the promise counts as a definite rewrite: the caller's pre-call value
+    // dies at the call, so `b1` - alive only between prep's store and the JSR - can share prep's byte.
+    #define PREP_CALL(body) \
+        "ZPRESERVE &70..&7F : ZPAUTO1 prep, b1\n" \
+        ".main STA prep : STA b1 : LDA b1 : JSR sub : LDA prep : RTS\n" \
+        ".sub " body " RTS\n"
+    RC_CHECK_TRUE(ASM(PREP_CALL("STA &90 :")) != 0);
+    RC_CHECK(zp_addr(&fix->r, "b1"), ==, 0x71);       // prep is live across the call: no sharing
+
+    RC_CHECK_TRUE(ASM(PREP_CALL("DISCARD prep :")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "prep"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "b1"), ==, 0x70);       // the pre-call value died at the JSR
+    #undef PREP_CALL
 }
 
 RC_TEST_STEP(assemble, org_and_labels, fix)

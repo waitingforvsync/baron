@@ -26,10 +26,9 @@ groundo  = &AA                  ;                     odd scanlines  {3,0,3,0}
 
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "CAMERA", guard = &6000
 
-framectr = &FD                  ; incremented by the vsync interrupt
-irqchange = &FE
-
 ZPRESERVE &00..&FC
+ZPAUTO1 framectr                ; incremented by the vsync interrupt
+ZPAUTO1 irqchange
 ZPAUTO2 scr                     ; the one indirect pointer (tables, then screen)
 ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
@@ -282,6 +281,7 @@ tabstride = nslots * ncam DIV 256   ; pages per table (nslots is kept even)
 \ ******************************************************************
 
 .irq
+    ZPINTERRUPT
     LDA #&02:STA &FE4D              ; clear the CA1 (vsync) interrupt flag
     LDA irqchange:EOR #1:STA irqchange
     BEQ @+
@@ -311,6 +311,7 @@ tabstride = nslots * ncam DIV 256   ; pages per table (nslots is kept even)
 
 .entry
 {
+    ZPENTRY
     SEI
     LDX #&FF:TXS                ; reset stack
     LDA #&7F:STA &FE4E          ; disable all system VIA interrupts

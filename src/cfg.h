@@ -53,11 +53,13 @@ typedef struct cfg {
 // Build the CFG for `insns` (recorded in program / pc order, sections interleaving). `cflows` supplies the
 // control-flow annotations (UNREACHABLE prunes a branch's dead fall-through; CANJUMP wires a computed JMP's
 // declared targets); `labels` maps each label's identity to its (section, pc) so a control transfer that named
-// a label resolves across sections. Blocks + successors live in `arena`; `scratch` (by value) backs the
-// transient leader set. An empty instruction list gives an empty CFG. Assumes pc is monotonic WITHIN a section
-// run (the block cut at every section change keeps it so, even as sections interleave in the stream).
+// a label resolves across sections; `entries` lists the declared ZPENTRY / ZPINTERRUPT markers, whose
+// addresses are marked as leaders so a mid-run entry starts its own block. Blocks + successors live in
+// `arena`; `scratch` (by value) backs the transient leader set. An empty instruction list gives an empty CFG.
+// Assumes pc is monotonic WITHIN a section run (the block cut at every section change keeps it so, even as
+// sections interleave in the stream).
 cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label labels,
-              rc_arena *arena, rc_arena scratch);
+              rc_view_zp_entry entries, rc_arena *arena, rc_arena scratch);
 
 // The index of the block whose entry is exactly (`section`, `pc`), or RC_INDEX_NONE. Maps a fall-through /
 // in-section target LOCATION to the block it enters (a linear scan - blocks are few).

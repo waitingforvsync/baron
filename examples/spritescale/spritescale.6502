@@ -43,10 +43,9 @@ groundo  = patodd(darkgreen)
 
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "SCALE", guard = &6000
 
-framectr = &FD                  ; incremented by the vsync interrupt
-irqchange = &FE
-
 ZPRESERVE &00..&FC
+ZPAUTO1 framectr                ; incremented by the vsync interrupt
+ZPAUTO1 irqchange
 ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
 ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 
@@ -337,7 +336,8 @@ ENDMACRO
 \ code. With one column there is nothing to check or minimise - the
 \ only possible event is its own.
 MACRO changesbody n, swallow
-    STY plot_draw.ysave
+    ZPAUTO1 ysave
+    STY ysave
     IF n = 1
         \ One column: nothing else's bits to preserve, so no merges.
         \ data = pattern under the column's mask; mask = &FF for a
@@ -386,7 +386,7 @@ MACRO changesbody n, swallow
     TAY                             ; the stretch's end position
     SEC:SBC plot_draw.cnt:TAX       ; pairs to emit before the next change
     STY plot_draw.cnt               ; becomes the position once emitted
-    LDY plot_draw.ysave
+    LDY ysave
     JMP plot_draw.stretch
 ENDMACRO
 
@@ -419,7 +419,6 @@ ENDMACRO
     ZPAUTO1 mask
     ZPAUTO1 data_even
     ZPAUTO1 data_odd
-    ZPAUTO1 ysave
 
     \\ where the bottom pair lives: scanline 127 - 2*spry
 
@@ -450,6 +449,11 @@ ENDMACRO
     LDA plot_setup.xacc0:STA xacc
     LDA plot_setup.xacc0+1:STA xacc+1
     LDA plot_setup.sx0:AND #3:STA slot  ; the first strip's pixel offset
+
+    \\ An allocation hint: the slot state is only ever written with
+    \\ indexed stores, which never prove a whole variable overwritten,
+    \\ so without this promise Baron would keep it alive across the call.
+    DISCARD colmask, idx, cp
 
 .striploop
     \\ assign slots to columns; X = tracked index. Only entries 0..X
@@ -639,8 +643,10 @@ ENDMACRO
 \ Fetch slot n's next run: end first (swallowing shrunk-away runs),
 \ then the pre-masked patterns from the palette's slot tables.
 MACRO afetch n
-    STX plot_draw_a.acnt
-    STY plot_draw_a.ysave
+    ZPAUTO1 acnt
+    ZPAUTO1 ysave
+    STX acnt
+    STY ysave
 .fetch
     LDY plot_draw_a.aidx+n
     LDA (plot_setup.spr),Y
@@ -648,7 +654,7 @@ MACRO afetch n
     TAY                             ; raw run byte
     LDA shr3,Y:TAX                  ; end row - 1
     LDA PY+1,X:STA plot_draw_a.aend+n
-    CMP plot_draw_a.acnt
+    CMP acnt
     BEQ fetch                       ; shrunk away: take the next one
     TYA:AND #7
     BEQ transp
@@ -662,14 +668,12 @@ MACRO afetch n
     LDA #0:STA plot_draw_a.ce+n:STA plot_draw_a.co+n
     LDA #slotmask(n):STA plot_draw_a.cm+n
 .fdone
-    LDX plot_draw_a.acnt
-    LDY plot_draw_a.ysave
+    LDX acnt
+    LDY ysave
 ENDMACRO
 
 .plot_draw_a
 {
-    ZPAUTO1 acnt                    ; the pair being built (X mirrored for fetches)
-    ZPAUTO1 ysave
     ZPAUTO1 ystart                  ; bottom pair's odd scanline within its row
     ZPAUTO1 pagestart               ; and that row's page
     ZPAUTO2 scr                     ; screen pointer: low = column*8 (fixed per strip)
@@ -707,6 +711,11 @@ ENDMACRO
     LDA plot_setup.xacc0:STA xacc
     LDA plot_setup.xacc0+1:STA xacc+1
     LDA plot_setup.sx0:AND #3:STA alead
+
+    \\ An allocation hint: the slot state is only ever written with
+    \\ indexed stores, which never prove a whole variable overwritten,
+    \\ so without this promise Baron would keep it alive across the call.
+    DISCARD aidx, aend, ce, co, cm
 
 .striploop
     \\ fill the four slots: lead padding and past-the-end are dummies
@@ -903,6 +912,7 @@ ENDMACRO
 \ ******************************************************************
 
 .irq
+    ZPINTERRUPT
     LDA #&02:STA &FE4D
     LDA irqchange:EOR #1:STA irqchange
     BEQ @+
@@ -917,6 +927,7 @@ ENDMACRO
 
 .entry
 {
+    ZPENTRY
     SEI
     LDX #&FF:TXS
     LDA #&7F:STA &FE4E

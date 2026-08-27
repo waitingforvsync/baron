@@ -14,6 +14,7 @@ needed, and every example here is a real program with the addresses Baron actual
 - [The control-flow graph](#the-control-flow-graph)
 - [Liveness: walking backward](#liveness-walking-backward)
 - [Calls](#calls)
+- [Roots, reachability and interrupts](#roots-reachability-and-interrupts)
 - [Colouring](#colouring)
 - [The output pass](#the-output-pass)
 - [The certainty contract](#the-certainty-contract)
@@ -257,9 +258,25 @@ Two refinements:
   gains an edge to the owner of every other live byte. That single rule generates the entire graph -
   "the output can reuse the dead input's byte" and all its friends fall out with no special cases.
 
-Finally, variables live-in at the program entry are its *inputs*; they pairwise interfere (two read-only
-inputs coexist at entry even if no instruction sees both at once), and each variable is classified
-`input` / `output` / `temp` / `unused` for diagnostics and the unused-variable handling.
+Finally, each variable is classified `input` / `output` / `temp` / `unused`. Only `unused` matters in
+production (the unused-variable warning and the colourer's skip); the `input`/`output` split, and the
+synthetic rule that made a routine's entry inputs pairwise interfere, are anchored on an `entry_block`
+parameter that the driver no longer supplies - there is no presumed program entry any more (see
+[Roots, reachability and interrupts](#roots-reachability-and-interrupts)). The mechanism survives for
+the analysis's own tests, and a value read at an entry before anything writes it simply has no defined
+value and no protection.
+
+One record in the stream is not an instruction at all: a `DISCARD` marker (`zp_insn.var_kill`, size 0,
+sharing its pc with the instruction after it). Its window "writes" the variable's whole width while
+reading nothing, so the backward walk treats it as a full kill - which is the entire point: an array
+rebuilt only through indexed stores has no provable write anywhere, and without the marker its reads
+keep the old value live clear back to the routine entry (and, through a `JMP` entry, around the caller's
+loop). Three carve-outs keep the promise honest: the interference sweep clears the bytes *without
+pinning* (nothing is stored, so another variable may own the bytes at that instant), the footprint walk
+skips it entirely (a callee that merely discards touches nothing), and the must-write analysis counts it
+in full (the caller's pre-call value is equally dead whichever path runs, so a discard-then-rebuild
+callee kills at its call sites like a provable rewrite). The cfg tolerates the shared pc by cutting
+blocks only where the address *changes* to a leader, marker first in its block.
 
 ## Calls ##
 
@@ -348,6 +365,42 @@ the recursive call would need a byte per level, which one static address cannot 
 must-write reduction, so the kill cannot hide the pattern). A counter merely `DEC`ed through the
 recursion is a single running value and rides one byte happily.
 
+## Roots, reachability and interrupts ##
+
+Everything so far analyses the stream as it lies; nothing asks *where control can enter it*. That
+question has two customers, both fed by the `ZPENTRY` / `ZPINTERRUPT` markers (`zp_entry` records: a
+section, the marked pc, an interrupt flag - `cfg_build` marks each a block leader so a mid-run entry
+starts its own block, and a marker that resolves to no block is refused as marking no instruction).
+
+**Reachability.** The root set is every declared marker's block; with no `ZPENTRY` anywhere the
+defaults apply instead - each section's first recorded block (blocks come in stream order with
+per-section pc monotonic, so first sighting of a section index is its earliest code; a `ZPINTERRUPT`
+alone keeps the defaults, since a handler says nothing about where the mainline starts). From the
+roots, `reach_from` walks successor edges plus each call's resolved arms - the same edge set control
+can actually take, `CANJUMP`/`CANCALL` arms included; unknown and external arms contribute nothing. A
+block that touches a `ZPAUTO` variable and is not reached warns (`zpauto_unreachable`,
+default-visible): most likely an unmarked handler - the silently-unsound island shape the feature
+exists to catch - or dead code. One warning per region: heads are unreachable blocks with no
+unreachable predecessor, each head's closure is claimed once, and a headless cycle is mopped up
+separately. Warnings never refuse; unreachable code is still fully analysed and coloured.
+
+**Interrupt pinning (Guard 3).** A `ZPINTERRUPT` handler preempts between *any* two instructions, so
+no transaction discipline exists around it and two interference rules are injected (plain edge writes
+into `lv.interfere`, like Guard 2's): the handler's live-in - state the mainline feeds it - is pinned
+against *everything*, its own temps included (the mainline may rewrite a communication variable at any
+moment relative to the handler, so no instant of "dead" is reusable); and every variable in the
+handler's transitive footprint (`footprint_compute` at its entry) interferes with every variable
+outside it. Handler-internal reuse is untouched - ordinary liveness governs among its own temps - and
+two handlers separate each other for free (each is outside the other's footprint). A footprint the
+walk cannot bound (an unannotated computed call in the extent) is refused with the usual
+`zpauto_across_call`, at the marker. Edge injection is order-independent of Guard 2: `lv.interfere` is
+write-only until the colourer reads it.
+
+`ZPENTRY` deliberately carries no interface semantics. An external API's inputs and outputs belong at
+fixed addresses outside the pool (an auto-allocated address moves between builds); an auto-allocated
+entry is protected exactly as far as a strict poke-`CALL`-peek transaction requires, which ordinary
+liveness already provides - so a sync entry is *only* a root.
+
 ## Colouring ##
 
 With the interference graph built, `zp_color` (`src/zpalloc.c`) assigns addresses by
@@ -398,13 +451,18 @@ The refusals (all fatal):
 | `zpauto_recursion` | a fresh per-level value held across a recursive call (Guard 2) |
 | `zeropage_full` | a spill: more simultaneous liveness than reserved bytes |
 
-The warnings: `zpauto_unused` (default level) and `zpauto_indexed_access` (opt-in).
+(`discard_needs_var` - an operand that is not a whole `ZPAUTO` variable - is a recoverable semantic
+error at the statement, like the other operand mistakes.)
+
+The warnings: `zpauto_unused` and `zpauto_unreachable` (default level) and `zpauto_indexed_access`
+(opt-in).
 
 And the trust points - the deliberate holes in the proof, each an explicit contract with the user:
 
 - **Annotations are believed.** A wrong `UNREACHABLE`, `CANCALL` or `CANJUMP` defeats the analysis; a
   *missing* one is caught wherever possible (Guards 1 and 2) - except an unmarked RTS-dispatch, which is
-  indistinguishable from a real return.
+  indistinguishable from a real return. A wrong `DISCARD` is the same class: it hands the variable's
+  bytes away while the old value is still wanted; a missing one merely wastes bytes, never correctness.
 - **A constant destination off the assembled stream is assumed external.** True for real OS calls, and
   the user's responsibility for a self-modified placeholder or a bare cross-bank number (name the label
   and it resolves properly).
@@ -413,24 +471,26 @@ And the trust points - the deliberate holes in the proof, each an explicit contr
 
 ## Known gaps ##
 
-Three deliberate limitations, all soundness-safe:
+Deliberate limitations, all soundness-safe or documented trust points:
 
-- **Single-entry classification.** Entry-input interference and the `input` class seed from block 0; a
-  bank entered only by cross-section calls gets a slightly coarser classification. Precision only -
-  Guard 2's footprint edges keep the colouring correct regardless.
 - **Annotation operands resolve in their own section.** Ordinary cross-section transfers resolve by
   label; a `CANCALL`/`CANJUMP` *operand* is still a bare number resolved in the annotating
-  instruction's section, so it cannot yet name a target in a different bank.
+  instruction's section, so it cannot yet name a target in a different bank. (`ZPENTRY`/`ZPINTERRUPT`
+  take no operand, so they are intrinsically in the right section.)
 - **The reserved set is global.** One physical zero page, one pool.
+- **INCSECTION splices are byte copies.** A marker lives in its source section's coordinates; the
+  spliced copy is never re-analysed, same as every annotation.
+- **Re-entrant interruption is outside the model.** A handler preempted by *itself* (or an unmarked
+  RTS-dispatch inside a handler, invisible as ever) is a trust point, like recursion and `CANCALL`.
 
 ## Map of the code ##
 
 | Piece | Where | What |
 |-------|-------|------|
-| IR + registries | `src/zeropage.{h,c}` | reserved set, `zp_var`/`zp_insn`/`zp_cflow`/`zp_label`, vreg resolution |
+| IR + registries | `src/zeropage.{h,c}` | reserved set, `zp_var`/`zp_insn` (incl. `var_kill` DISCARD markers)/`zp_cflow`/`zp_label`/`zp_entry`, vreg resolution |
 | recording | `src/opcodes.c` | `record_insn`: each instruction's touch, flow and target |
 | basic blocks | `src/cfg.{h,c}` | `cfg_build`, target resolution, `cfg_call_targets`, the external rule |
 | liveness | `src/liveness.{h,c}` | backward byte-level fixpoint, must-write, return edges, interference, classes |
 | footprints | `src/footprint.{h,c}` | transitive Touch(R) per call site, recursion / unknown-call detection |
 | colouring | `src/zpalloc.{h,c}` | first-fit-decreasing over the interference graph |
-| the driver | `src/assemble.c` | `zeropage_finalize`: checks, guards, colour, symbol rewrite; `run_passes` runs the output pass |
+| the driver | `src/assemble.c` | `zeropage_finalize`: checks, roots + reachability, guards, interrupt pinning, colour, symbol rewrite; `run_passes` runs the output pass |

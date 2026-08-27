@@ -204,7 +204,7 @@ static bool cflow_at(rc_view_zp_cflow cflows, zp_cflow_kind kind, uint32_t pc)
 }
 
 cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label labels,
-              rc_arena *arena, rc_arena scratch)
+              rc_view_zp_entry entries, rc_arena *arena, rc_arena scratch)
 {
     RC_ASSERT(arena != NULL);
     cfg result = {.blocks = rc_array_basic_block_make(16, arena), .succs = rc_array_u32_make(32, arena),
@@ -270,6 +270,16 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
             }
         }
     }
+    // A ZPENTRY / ZPINTERRUPT marker is a code entry too: mark it a leader so a mid-run entry address starts
+    // its own block - and so "no block at (section, pc)" reliably means the marker sits on no instruction
+    // (data, or the end of a section), which finalize reports. A marker in a section with no recorded insns
+    // has no leader space at all; skip it here and let the same finalize check catch it.
+    for (uint32_t i = 0; i < entries.num; i++) {
+        zp_entry e = rc_view_zp_entry_get(entries, i);
+        if (e.section < num_sections) {
+            mark_leader(&leaders, e.section, e.pc);
+        }
+    }
 
     // Pass 2: cut the instruction stream into blocks. A new block starts at the first instruction, at every
     // SECTION change (which keeps each block single-section and its pc monotonic even as sections interleave),
@@ -279,11 +289,16 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     uint32_t prev_pc  = 0;
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn insn = rc_view_zp_insn_get(insns, i);
-        // Within one section pc must be strictly forward - the property that keeps (section, pc) an unambiguous
-        // block identity. It holds by construction (a section's org is fixed at open and its cursor only
-        // advances), so this asserts the invariant rather than handling a violation.
-        RC_ASSERT(i == 0 || insn.section != prev_sec || insn.pc > prev_pc);
-        if (i == 0 || insn.section != prev_sec || addr_is_leader(&leaders, insn.section, insn.pc)) {
+        // Within one section pc must never step backward - the property that keeps (section, pc) an
+        // unambiguous block identity. It holds by construction (a section's org is fixed at open and its
+        // cursor only advances), so this asserts the invariant rather than handling a violation. Equal pcs
+        // DO occur: a size-0 DISCARD marker shares its address with the instruction after it, which is also
+        // why a leader starts a new block only when the address CHANGES - both same-pc records belong to
+        // one block, marker first.
+        RC_ASSERT(i == 0 || insn.section != prev_sec || insn.pc >= prev_pc);
+        bool new_addr = i == 0 || insn.section != prev_sec || insn.pc != prev_pc;
+        if (i == 0 || insn.section != prev_sec
+            || (new_addr && addr_is_leader(&leaders, insn.section, insn.pc))) {
             current = rc_array_basic_block_push(
                 &result.blocks,
                 (basic_block) {
@@ -419,7 +434,7 @@ RC_TEST(cfg, empty_stream_is_empty)
 {
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
-    cfg g = cfg_build((rc_view_zp_insn) {0}, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build((rc_view_zp_insn) {0}, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 0u);
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -438,7 +453,7 @@ RC_TEST(cfg, straight_line_is_one_block)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
@@ -467,7 +482,7 @@ RC_TEST(cfg, indirect_jump_is_unknown_successor)
     pc = push_insn(&insns, pc, 3, zp_flow_jump, RC_INDEX_NONE, &arena);     // JMP (ind) - unknown target
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);
@@ -496,7 +511,7 @@ RC_TEST(cfg, branch_splits_into_blocks_with_edges)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 3u);
 
     // Block 0: LDX + BNE, leader 2000, two successors - fall-through (block 1) and target (block 2).
@@ -538,7 +553,7 @@ RC_TEST(cfg, jump_target_leads_backward_edge)
     pc = push_insn(&insns, pc, 3, zp_flow_jump, 0x2000, &arena);           // JMP 2000
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
@@ -565,7 +580,7 @@ RC_TEST(cfg, call_is_in_block_not_an_edge)
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
     basic_block b = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);        // JSR and RTS in one block
@@ -599,7 +614,7 @@ RC_TEST(cfg, canjump_wires_declared_targets)
     rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2000, .kind = zp_cflow_canjump}, &arena);
     rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2003, .kind = zp_cflow_canjump}, &arena);
 
-    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2006));
     RC_CHECK_FALSE(b.unknown_succ);            // CANJUMP resolved it - no taint
     RC_CHECK(b.succ_count, ==, 2u);
@@ -607,7 +622,7 @@ RC_TEST(cfg, canjump_wires_declared_targets)
     RC_CHECK(cfg_succ(g, b, 1), ==, cfg_block_at(g, 0, 0x2003));
 
     // Without the annotation the same JMP stays an unknown successor with no placeable edges.
-    cfg g2 = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g2 = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     basic_block b2 = rc_array_basic_block_get(&g2.blocks, cfg_block_at(g2, 0, 0x2006));
     RC_CHECK_TRUE(b2.unknown_succ);
     RC_CHECK(b2.succ_count, ==, 0u);
@@ -639,7 +654,7 @@ RC_TEST(cfg, canjump_external_arm_and_midblock_target)
     rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0x2002, .kind = zp_cflow_canjump}, &arena);
     rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0xFFEE, .kind = zp_cflow_canjump}, &arena);
 
-    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 3u);   // [2000], [2002,2004] (split by the declared target), [2005]
     basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2005));
     RC_CHECK_FALSE(b.unknown_succ);   // both arms accounted for - no taint
@@ -666,7 +681,7 @@ RC_TEST(cfg, external_constant_targets_are_clean_exits)
     pc = push_insn(&insns, pc, 3, zp_flow_jump,   0xFFEE, &arena);   // JMP &FFEE
     (void) pc;
 
-    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 2u);
     basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
     RC_CHECK(b0.succ_count, ==, 1u);          // fall-through to the JMP block only
@@ -695,7 +710,7 @@ RC_TEST(cfg, vector_jump_external_vs_own_label)
     // (a) a literal constant cell - JMP (&FFFC): a fixed OS vector, so control leaves for external code.
     rc_array_zp_insn constant = rc_array_zp_insn_make(1, &arena);
     rc_array_zp_insn_push(&constant, jmp, &arena);
-    cfg ga = cfg_build(constant.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg ga = cfg_build(constant.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     basic_block ba = rc_array_basic_block_get(&ga.blocks, 0);
     RC_CHECK_FALSE(ba.unknown_succ);   // a clean exit, no annotation needed
     RC_CHECK(ba.succ_count, ==, 0u);
@@ -710,17 +725,83 @@ RC_TEST(cfg, vector_jump_external_vs_own_label)
     rc_array_zp_label labels = rc_array_zp_label_make(1, &arena);
     rc_array_zp_label_push(&labels,
         (zp_label) {.scope = 5, .def = vec_def, .section = 0, .pc = 0x2100}, &arena);
-    cfg gb = cfg_build(owned.view, (rc_view_zp_cflow) {0}, labels.view, &arena, scratch);
+    cfg gb = cfg_build(owned.view, (rc_view_zp_cflow) {0}, labels.view, (rc_view_zp_entry) {0}, &arena, scratch);
     basic_block bb = rc_array_basic_block_get(&gb.blocks, 0);
     RC_CHECK_TRUE(bb.unknown_succ);
     RC_CHECK(bb.succ_count, ==, 0u);   // and NO edge to the vector cell's own address (it is data, not a target)
 
     // (c) the same named cell with NO marker (a `wrchv = &20E` constant, not a code label): a cell outside
     // the program, so external again.
-    cfg gc = cfg_build(owned.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, &arena, scratch);
+    cfg gc = cfg_build(owned.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     basic_block bc = rc_array_basic_block_get(&gc.blocks, 0);
     RC_CHECK_FALSE(bc.unknown_succ);
     RC_CHECK(bc.succ_count, ==, 0u);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, size0_marker_shares_its_address)
+{
+    // A DISCARD marker is a size-0 record at the same pc as the instruction after it. The pair must land
+    // in ONE block - marker first - even when that address is a leader, so (section, pc) stays a unique
+    // block identity and a branch to the address still resolves.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    rc_array_zp_insn_push(&insns,
+        (zp_insn) {.pc = pc, .size = 0, .flow = zp_flow_normal, .vreg = 0, .var_kill = true,
+                   .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE, .target_def = cursor_none(),
+                   .at = (cursor) {0}},
+        &arena);                                                            // (DISCARD) @2002
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2002,        &arena);   // BNE 2002 @2004
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2006
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 3u);                       // [2000] [marker+2002+branch] [2006]
+    uint32_t bi = cfg_block_at(g, 0, 0x2002);
+    RC_CHECK_TRUE(bi != RC_INDEX_NONE);
+    basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+    RC_CHECK(blk.first_insn, ==, 1u);                     // the marker opens the block...
+    RC_CHECK(blk.num_insns, ==, 3u);                      // ...and the branch closes it
+    RC_CHECK(blk.succ_count, ==, 2u);                     // fall-through first, then the taken edge
+    RC_CHECK(cfg_succ(g, blk, 1), ==, bi);                // the loop edge resolves to the marker's block
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, entry_marker_splits_midrun_block)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+
+    //   2000  LDA #    (normal)
+    //   2002  LDA #    (normal)  <- a ZPENTRY marker mid-run: the leader marking must split the block here,
+    //   2004  RTS                   so the entry address names a real block for the reachability roots
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2004
+    (void) pc;
+
+    rc_array_zp_entry entries = rc_array_zp_entry_make(2, &arena);
+    rc_array_zp_entry_push(&entries, (zp_entry) {.section = 0, .pc = 0x2002}, &arena);
+    // A marker in a section beyond the insn stream (a data-only section) has no leader space: it must be
+    // skipped without trapping - finalize reports it as marking no instruction.
+    rc_array_zp_entry_push(&entries, (zp_entry) {.section = 9, .pc = 0x3000, .interrupt = true}, &arena);
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, entries.view, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 2u);
+    uint32_t bi = cfg_block_at(g, 0, 0x2002);
+    RC_CHECK_TRUE(bi != RC_INDEX_NONE);
+    RC_CHECK(rc_array_basic_block_get(&g.blocks, bi).first_insn, ==, 1u);
+    RC_CHECK_TRUE(cfg_block_at(g, 9, 0x3000) == RC_INDEX_NONE);   // the stray marker resolved to nothing
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
