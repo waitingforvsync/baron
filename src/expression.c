@@ -335,6 +335,23 @@ static value fn_hex(value v, rc_arena *arena)
     return value_make_string(m.view);
 }
 
+// A string's character codes as a rank-1 list of numbers: codes("AB") is {65, 66}, codes("") the
+// empty list. This is the bridge from text to arithmetic - subscript for one character's code
+// (codes("A")[0]), broadcasting for whole-string remaps (codes(s) - codes(" ")), and a gather
+// subscript for the full character-mapping idiom (table[codes(s)]).
+static value fn_codes(value v, rc_arena *arena)
+{
+    if (!value_is_string(v)) {
+        return value_make_error(error_type_type_mismatch);
+    }
+
+    rc_array_value out = rc_array_value_make(v.string.len, arena);
+    for (uint32_t i = 0; i < v.string.len; i++) {
+        rc_array_value_push(&out, value_make_numeric((double) (uint8_t) v.string.data[i]), arena);
+    }
+    return value_make_list(out.view);
+}
+
 static value fn_not(value v, rc_arena *arena)
 {
     (void)arena;
@@ -362,7 +379,7 @@ static value fn_sqrt(value v, rc_arena *arena)
     return value_make_numeric(r);
 }
 
-// Rounding to an integral value, the three directions: down, toward zero, up.
+// Rounding to an integral value, the four flavours: down, toward zero, to nearest, up.
 static value fn_int(value v, rc_arena *arena)
 {
     (void)arena;
@@ -370,11 +387,18 @@ static value fn_int(value v, rc_arena *arena)
     return value_make_numeric(floor(v.numeric));
 }
 
-static value fn_round(value v, rc_arena *arena)
+static value fn_trunc(value v, rc_arena *arena)
 {
     (void)arena;
     NEEDS_NUM(value_is_numeric(v));
     return value_make_numeric(trunc(v.numeric));
+}
+
+static value fn_round(value v, rc_arena *arena)
+{
+    (void)arena;
+    NEEDS_NUM(value_is_numeric(v));
+    return value_make_numeric(round(v.numeric));   // halves go away from zero: round(2.5) = 3, round(-2.5) = -3
 }
 
 static value fn_ceil(value v, rc_arena *arena)
@@ -1237,6 +1261,201 @@ static value fn_defined(rc_view_value args, rc_arena *arena)
     return value_make_numeric(unresolved ? 0.0 : 1.0);
 }
 
+// chr: the inverse of codes - every numeric leaf of the argument (flattened, ranges enumerated)
+// becomes one character of a single string, so chr(72) is "H", chr({72, 73}) is "HI", and
+// chr(codes(s)) is s again. Doubling as the "join a list of codes into a string" the language
+// otherwise lacks is the point of collapsing the shape. Fractions truncate toward zero like
+// every other byte-sized context; a code outside 0..255 has no character to become.
+static value fn_chr(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 1) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+
+    rc_array_value leaves = {0};
+    flatten_into(v, &leaves, arena);
+
+    rc_mstr m = rc_mstr_make(leaves.num, arena);
+    for (uint32_t i = 0; i < leaves.num; i++) {
+        value e = rc_view_value_get(leaves.view, i);
+        if (value_is_error(e)) {
+            return e;   // an unbounded / oversized range arrives from the flatten as an error leaf
+        }
+        if (!value_is_numeric(e)) {
+            return value_make_error(error_type_type_mismatch);
+        }
+        double code = trunc(e.numeric);
+        if (code < 0.0 || code > 255.0) {
+            return value_make_error(error_type_domain);
+        }
+        rc_mstr_append_char(&m, (char) (uint8_t) code, arena);
+    }
+    return value_make_string(m.view);
+}
+
+// Append v the way PRINT shows it: a string raw (no quotes - the text IS the message),
+// everything else in value_format's diagnostic shape. Shared by error() and find()'s payload.
+static void append_value_raw(rc_mstr *out, value v, rc_arena *arena)
+{
+    if (value_is_string(v)) {
+        rc_mstr_append(out, v.string, arena);
+    }
+    else {
+        value_format(out, v, arena);
+    }
+}
+
+// A whole haystack scanned and the needle nowhere in it: a not_found error naming the culprit,
+// so "Not found: 'Q'" points straight at the character missing from the charset.
+static value not_found(value needle, rc_arena *arena)
+{
+    rc_mstr m = rc_mstr_make(16, arena);
+    append_value_raw(&m, needle, arena);
+    return value_make_error_detail(error_type_not_found, m.view);
+}
+
+// One find: the zero-based index of needle's first occurrence in hay (already coerced to a
+// list or a string). A compound needle broadcasts - find(from, codes(s)) is a same-shape list
+// of indices, which is what makes table[find(from, codes(s))] the whole character map. A miss
+// anywhere fails the whole call rather than embedding an error element: a gathered subscript
+// would only garble it into "subscript out of range", a long way from the real complaint.
+static value find_one(value hay, value needle, rc_arena *arena)
+{
+    if (value_is_error(needle)) {
+        return needle;
+    }
+
+    if (value_is_range(needle)) {
+        needle = range_to_list(needle.range, arena);
+        if (value_is_error(needle)) {
+            return needle;
+        }
+    }
+    if (value_is_list(needle)) {
+        rc_array_value out = rc_array_value_make(needle.list.num, arena);
+        for (uint32_t i = 0; i < needle.list.num; i++) {
+            value r = find_one(hay, rc_view_value_get(needle.list, i), arena);
+            if (value_is_error(r)) {
+                return r;
+            }
+            rc_array_value_push(&out, r, arena);
+        }
+        return value_make_list(out.view);
+    }
+
+    if (value_is_string(hay)) {
+        // Substring search (so we can also answer "where does this token start"): the needle
+        // must itself be a string; an empty one matches at the start.
+        if (!value_is_string(needle)) {
+            return value_make_error(error_type_type_mismatch);
+        }
+        if (needle.string.len <= hay.string.len) {
+            for (uint32_t i = 0; i + needle.string.len <= hay.string.len; i++) {
+                if (rc_str_is_equal(rc_str_substr(hay.string, i, needle.string.len), needle.string)) {
+                    return value_make_numeric((double) i);
+                }
+            }
+        }
+        return not_found(needle, arena);
+    }
+
+    for (uint32_t i = 0; i < hay.list.num; i++) {
+        if (value_is_equal(rc_view_value_get(hay.list, i), needle)) {
+            return value_make_numeric((double) i);
+        }
+    }
+    return not_found(needle, arena);
+}
+
+// find(haystack, needle): the index of needle's first occurrence in the haystack (a list, a
+// range, or a string - a string haystack searches for a substring). The needle broadcasts;
+// the haystack does not (it is the thing being searched, however deep its elements). Note the
+// broadcast means a needle can never itself be a list-valued element of the haystack.
+static value fn_find(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 2) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    value hay = rc_view_value_get(args, 0);
+    if (value_is_error(hay)) {
+        return hay;
+    }
+
+    if (value_is_range(hay)) {
+        hay = range_to_list(hay.range, arena);
+        if (value_is_error(hay)) {
+            return hay;
+        }
+    }
+    if (!value_is_list(hay) && !value_is_string(hay)) {
+        return value_make_error(error_type_type_mismatch);   // a scalar has nothing to search
+    }
+
+    return find_one(hay, rc_view_value_get(args, 1), arena);
+}
+
+// Whole-value type predicates: 1 or 0 for the value as a whole, deliberately NOT element-wise
+// (a list is neither a string nor a number - list-ness is already spelled shape(x) != {}).
+// Errors propagate as usual (only defined() inspects), so a forward reference still defers.
+static value fn_is_string(rc_view_value args, rc_arena *arena)
+{
+    (void)arena;
+
+    if (args.num != 1) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+    return value_make_numeric(value_is_string(v) ? 1.0 : 0.0);
+}
+
+static value fn_is_number(rc_view_value args, rc_arena *arena)
+{
+    (void)arena;
+
+    if (args.num != 1) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    value v = rc_view_value_get(args, 0);
+    if (value_is_error(v)) {
+        return v;
+    }
+    // A ZPAUTO address counts: it denotes the number it becomes at allocation, and answering
+    // by its transient type would flip the answer between the settling and output passes.
+    return value_make_numeric(value_is_numeric(v) || value_is_zpauto(v) ? 1.0 : 0.0);
+}
+
+// error(...): the ERROR statement as a value. The arguments format PRINT-style (strings raw,
+// everything else in value_format's shape, concatenated) into a user_error the diagnostics
+// render verbatim, so a FUNCTION body can refuse bad input from behind an IF:
+// r = error("bad width: ", w). An error argument propagates first, so a forward reference
+// defers rather than firing prematurely.
+static value fn_error(rc_view_value args, rc_arena *arena)
+{
+    for (uint32_t i = 0; i < args.num; i++) {
+        value a = rc_view_value_get(args, i);
+        if (value_is_error(a)) {
+            return a;
+        }
+    }
+
+    rc_mstr m = rc_mstr_make(16, arena);
+    for (uint32_t i = 0; i < args.num; i++) {
+        append_value_raw(&m, rc_view_value_get(args, i), arena);
+    }
+    return value_make_error_detail(error_type_user_error, m.view);
+}
+
 
 // ---- named constants ----
 // Each hands back its value given the evaluation environment. The pure ones ignore it; const_pc reads the
@@ -1288,6 +1507,7 @@ static const token even_entries[] = {
     {RC_STR_INIT("int("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
     {RC_STR_INIT("floor("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_int}}},
     {RC_STR_INIT("round("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_round}}},
+    {RC_STR_INIT("trunc("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_trunc}}},
     {RC_STR_INIT("ceil("),  {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ceil}}},
     {RC_STR_INIT("sin("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_sin}}},
     {RC_STR_INIT("cos("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_cos}}},
@@ -1298,6 +1518,7 @@ static const token even_entries[] = {
     {RC_STR_INIT("log("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_log}}},     // base 10
     {RC_STR_INIT("ln("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ln}}},      // natural
     {RC_STR_INIT("exp("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_exp}}},
+    {RC_STR_INIT("codes("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_codes}}},   // string -> list of char codes
 
     // Structural/variadic builtins are functions: the handler gets the whole arg list.
     {RC_STR_INIT("shape("),   {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
@@ -1314,6 +1535,11 @@ static const token even_entries[] = {
     {RC_STR_INIT("min("),     {.type = lexeme_type_function, .function = {.apply = fn_min}}},
     {RC_STR_INIT("max("),     {.type = lexeme_type_function, .function = {.apply = fn_max}}},
     {RC_STR_INIT("defined("), {.type = lexeme_type_function, .function = {.apply = fn_defined}}},
+    {RC_STR_INIT("chr("),     {.type = lexeme_type_function, .function = {.apply = fn_chr}}},
+    {RC_STR_INIT("find("),    {.type = lexeme_type_function, .function = {.apply = fn_find}}},
+    {RC_STR_INIT("is_string("), {.type = lexeme_type_function, .function = {.apply = fn_is_string}}},
+    {RC_STR_INIT("is_number("), {.type = lexeme_type_function, .function = {.apply = fn_is_number}}},
+    {RC_STR_INIT("error("),   {.type = lexeme_type_function, .function = {.apply = fn_error}}},
 
     // Named constants. The bare words behave like the word operators (div / mod / and): a longer identifier
     // still wins, so PI vs PICKLE. The PC constant is '*' in operand position (multiply lives in the odd
@@ -1528,6 +1754,7 @@ typedef struct body_result {
     bool       saw_statement;// did any assignment / IF run before the stop (to tell a forward decl from a body)
     error_type error;        // error_type_none, or a structural body error
     uint32_t   error_at;
+    rc_str     error_detail; // a payload for the error, when one helps (the duplicated local's name)
 } body_result;
 
 static body_result interpret_statements(const parser *p, uint32_t pos, bool active);
@@ -1570,7 +1797,14 @@ static body_result interpret_assignment(const parser *p, rc_str name, uint32_t p
 
     cursor at = {p->env->source, name_at};
     if (active) {
-        scopes_set_symbol(p->env->scopes, p->env->scope_index, name, rhs.value, at);
+        // Bindings are single-assignment: a second live assignment to the same name in one call
+        // (a parameter included) would otherwise be silently ignored, which reads like mutation
+        // that never happens. Branches are fine - only the live one binds.
+        if (scopes_set_symbol(p->env->scopes, p->env->scope_index, name, rhs.value, at) == symbol_status_duplicate) {
+            body_result dup = body_fail(error_type_duplicate_symbol, name_at);
+            dup.error_detail = name;
+            return dup;
+        }
     }
     else if (cursor_is_equal(scopes_symbol_def(p->env->scopes, p->env->scope_index, name), at)) {
         scopes_remove_symbol(p->env->scopes, p->env->scope_index, name);
@@ -1754,7 +1988,7 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     if (p->env->call_depth) { (*p->env->call_depth)--; }
 
     if (br.error != error_type_none) {
-        return ok(value_make_error(br.error), after);   // a malformed body (should have failed the scan) -> a value
+        return ok(value_make_error_detail(br.error, br.error_detail), after);   // a malformed body -> a value
     }
     if (br.stop != body_stop_return) {
         return ok(value_make_error(error_type_unclosed_function), after);
@@ -2280,8 +2514,12 @@ RC_TEST_STEP(expression, more_functions, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("INT(2.7)"),  value_make_numeric(2.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("INT(-2.7)"), value_make_numeric(-3.0)));   // floor, toward -inf
     RC_CHECK_TRUE(value_is_equal(VAL("FLOOR(-2.7)"), value_make_numeric(-3.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("ROUND(2.7)"),  value_make_numeric(2.0)));  // trunc, toward zero
-    RC_CHECK_TRUE(value_is_equal(VAL("ROUND(-2.7)"), value_make_numeric(-2.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("ROUND(2.7)"),  value_make_numeric(3.0)));  // to nearest, halves away from zero
+    RC_CHECK_TRUE(value_is_equal(VAL("ROUND(-2.7)"), value_make_numeric(-3.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("ROUND(2.5)"),  value_make_numeric(3.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("ROUND(-2.5)"), value_make_numeric(-3.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUNC(2.7)"),  value_make_numeric(2.0)));  // toward zero
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUNC(-2.7)"), value_make_numeric(-2.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("CEIL(2.1)"),   value_make_numeric(3.0)));  // toward +inf
     RC_CHECK_TRUE(value_is_error(VAL("SQRT(-1)")));
 }
@@ -2754,6 +2992,111 @@ RC_TEST_STEP(expression, strings_and_zip, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("zip({1,2},{3,4},{5,6})"), value_make_list((rc_view_value) RC_VIEW(tt))));
 
     RC_CHECK_TRUE(value_is_error(VAL("zip({1,2},{3,4,5})")));   // lengths must match
+}
+
+RC_TEST_STEP(expression, codes_and_chr, fix)
+{
+    // codes: a string's character codes as a rank-1 list; chr joins codes back into a string.
+    value ab[] = {value_make_numeric(65), value_make_numeric(66)};
+    RC_CHECK_TRUE(value_is_equal(VAL("CODES(\"AB\")"), value_make_list((rc_view_value) RC_VIEW(ab))));
+    RC_CHECK_TRUE(value_is_equal(VAL("CODES(\"A\")[0]"), value_make_numeric(65)));   // the char-literal idiom
+
+    value empty = VAL("CODES(\"\")");
+    RC_CHECK_TRUE(value_is_list(empty));
+    RC_CHECK(empty.list.num, ==, 0u);
+
+    // The length-1 list broadcasts, so an offset remap needs no scalar at all.
+    value off[] = {value_make_numeric(33), value_make_numeric(34)};
+    RC_CHECK_TRUE(value_is_equal(VAL("CODES(\"AB\") - CODES(\" \")"), value_make_list((rc_view_value) RC_VIEW(off))));
+
+    // codes is a broadcasting unary, so a list of strings maps element-wise.
+    value cd[] = {value_make_numeric(67), value_make_numeric(68)};
+    value pair[] = {value_make_list((rc_view_value) RC_VIEW(ab)), value_make_list((rc_view_value) RC_VIEW(cd))};
+    RC_CHECK_TRUE(value_is_equal(VAL("CODES({\"AB\",\"CD\"})"), value_make_list((rc_view_value) RC_VIEW(pair))));
+
+    RC_CHECK_TRUE(value_is_error(VAL("CODES(5)")));   // only strings have codes
+
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR(72)"),        value_make_string(RC_STR("H"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR({72,73})"),   value_make_string(RC_STR("HI"))));   // structural join
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR(65..67)"),    value_make_string(RC_STR("ABC"))));  // ranges enumerate
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR({65,{66,67}})"), value_make_string(RC_STR("ABC"))));  // nested leaves flatten
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR(CODES(\"Hello!\"))"), value_make_string(RC_STR("Hello!"))));   // the round trip
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR(65.9)"),      value_make_string(RC_STR("A"))));    // fractions truncate
+
+    RC_CHECK_TRUE(value_is_error(VAL("CHR(-1)")));     // no character to become
+    RC_CHECK_TRUE(value_is_error(VAL("CHR(256)")));
+    RC_CHECK_TRUE(value_is_error(VAL("CHR(\"x\")")));
+}
+
+RC_TEST_STEP(expression, find, fix)
+{
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND({5,7,9}, 9)"),  value_make_numeric(2)));
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND({5,7,5}, 5)"),  value_make_numeric(0)));   // first occurrence
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND(10..20, 15)"),  value_make_numeric(5)));   // a range haystack enumerates
+
+    // The needle broadcasts: a list of needles yields a same-shape list of indices - which is
+    // exactly the character map, to[find(from, codes(s))].
+    value ix[] = {value_make_numeric(2), value_make_numeric(0)};
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND({5,7,9}, {9,5})"), value_make_list((rc_view_value) RC_VIEW(ix))));
+    value map[] = {value_make_numeric(2), value_make_numeric(0), value_make_numeric(1)};
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND(CODES(\"ABC\"), CODES(\"CAB\"))"), value_make_list((rc_view_value) RC_VIEW(map))));
+
+    // A string haystack is a substring search.
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND(\"hello world\", \"world\")"), value_make_numeric(6)));
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND(\"hello\", \"\")"), value_make_numeric(0)));   // empty matches at the start
+
+    // A miss is a loud not_found naming the needle, even from inside a broadcast.
+    value miss = VAL("FIND({5,7,9}, 6)");
+    RC_CHECK_TRUE(value_is_error(miss));
+    RC_CHECK_TRUE(miss.error.code == error_type_not_found);
+    RC_CHECK(miss.error.detail, ==, RC_STR("6"));
+    value cmiss = VAL("FIND(CODES(\"ABC\"), CODES(\"AQ\"))");
+    RC_CHECK_TRUE(value_is_error(cmiss));
+    RC_CHECK_TRUE(cmiss.error.code == error_type_not_found);
+    value smiss = VAL("FIND(\"hello\", \"z\")");
+    RC_CHECK_TRUE(value_is_error(smiss));
+    RC_CHECK_TRUE(smiss.error.code == error_type_not_found);
+    RC_CHECK(smiss.error.detail, ==, RC_STR("z"));   // raw, not quoted
+
+    RC_CHECK_TRUE(value_is_error(VAL("FIND(\"hello\", 5)")));   // a number is not a substring
+    RC_CHECK_TRUE(value_is_error(VAL("FIND(5, 1)")));           // a scalar has nothing to search
+    RC_CHECK_TRUE(value_is_error(VAL("FIND({1,2})")));          // arity
+}
+
+RC_TEST_STEP(expression, type_predicates, fix)
+{
+    // Whole-value predicates, deliberately not element-wise: a list is neither.
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING(\"a\")"),   value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING(5)"),       value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING({\"a\"})"), value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(5)"),       value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(\"a\")"),   value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER({1,2})"),   value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(1..3)"),    value_make_numeric(0)));
+
+    // Errors propagate (only defined() inspects), so a forward reference defers, not answers.
+    value fwd = VAL("IS_NUMBER(nosuch)");
+    RC_CHECK_TRUE(value_is_error(fwd));
+    RC_CHECK_TRUE(fwd.error.code == error_type_unknown_symbol);
+}
+
+RC_TEST_STEP(expression, error_function, fix)
+{
+    // error(...) is the ERROR statement as a value: a user_error carrying the formatted message.
+    value e = VAL("ERROR(\"oops \", 42)");
+    RC_CHECK_TRUE(value_is_error(e));
+    RC_CHECK_TRUE(e.error.code == error_type_user_error);
+    RC_CHECK(e.error.detail, ==, RC_STR("oops 42"));
+
+    // It screens its arguments first, so a forward reference defers instead of firing.
+    value fwd = VAL("ERROR(\"width was \", nosuch)");
+    RC_CHECK_TRUE(value_is_error(fwd));
+    RC_CHECK_TRUE(fwd.error.code == error_type_unknown_symbol);
+
+    // And like any error value it short-circuits through operators.
+    value thru = VAL("1 + ERROR(\"bang\")");
+    RC_CHECK_TRUE(value_is_error(thru));
+    RC_CHECK_TRUE(thru.error.code == error_type_user_error);
 }
 
 #undef RESULT

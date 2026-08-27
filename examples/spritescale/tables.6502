@@ -80,10 +80,6 @@ FUNCTION cross(a, b)
 
 FUNCTION viewdot(rel, basis) = SUM(rel * ZIP(basis), 2)
 
-FUNCTION nearest(v)
-    s = (v >= 0)*2 - 1
-= ROUND(v + s*0.5)
-
 \ Camera path and basis (lemniscate of Bernoulli, aimed at the ground
 \ `lookahead` ahead - identical to the camera demo)
 
@@ -118,9 +114,9 @@ wcols = focal*objects[.., 3]/vzc / 2      \ plotted width, columns (float)
 sxc   = focal*vx/vzc / 2 + 64             \ centre column
 syp   = (127 - (64 - focal*vy/vzc)) / 2   \ bottom edge, pairs from the bottom
 
-sizeb = MAX({nearest(wcols), 0}, 0)       \ the size byte
-xlb   = nearest(sxc - wcols/2)            \ bottom-left column
-syb   = nearest(syp)                      \ bottom pair
+sizeb = MAX({ROUND(wcols), 0}, 0)       \ the size byte
+xlb   = ROUND(sxc - wcols/2)            \ bottom-left column
+syb   = ROUND(syp)                      \ bottom pair
 
 \ Reproduce the runtime's integer pipeline exactly: size -> 8.8 scale ->
 \ plotted pw/ph, then cull anything not FULLY on the 128 x 64 screen.

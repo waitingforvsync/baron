@@ -103,14 +103,6 @@ FUNCTION viewdot(rel, basis) = SUM(rel * ZIP(basis), 2)
 \\ (Plain MAX(v, lo) would read lo as an axis number instead.)
 FUNCTION clamp(v, lo, hi) = MIN({MAX({v, lo}, 0), hi}, 0)
 
-; Round-to-nearest stopgap: baron's ROUND( currently truncates toward zero, so
-; shift by half away from zero first. Delete once baron's ROUND does this itself.
-; The sign is arithmetic ((v >= 0) is 1 or 0, element-wise) because an IF in a
-; function body needs a single number, and v here is a whole table.
-FUNCTION nearest(v)
-    s = (v >= 0)*2 - 1          \ same shape as v: +1 or -1 per element
-= ROUND(v + s*0.5)
-
 \\ Define camera path
 \\ A lemniscate of Bernoulli (figure-of-eight), ncam positions around the loop.
 \\ Everything is derived from t, the list of camera indices - one entry per
@@ -192,8 +184,8 @@ syc = 64 - py                   \ [ncam x N]  bottom row (screen y grows downwar
 ; own, or the bottom-row fraction and height fraction beat against each other and the
 ; top edge wobbles as the camera moves (7x the edge jitter, measured)
 
-xlc = clamp(nearest(sxc - h/4), 0, 128)   \ [ncam x N]  left column, on-screen
-xrc = clamp(nearest(sxc + h/4), 0, 128)   \ [ncam x N]  right column, exclusive
+xlc = clamp(ROUND(sxc - h/4), 0, 128)   \ [ncam x N]  left column, on-screen
+xrc = clamp(ROUND(sxc + h/4), 0, 128)   \ [ncam x N]  right column, exclusive
                                           \             (sprite width = h/2 columns,
                                           \             so half a width is h/4)
 
@@ -201,8 +193,8 @@ xrc = clamp(nearest(sxc + h/4), 0, 128)   \ [ncam x N]  right column, exclusive
 ; bottom of the screen, and the renderer has no y clip - so clamp the bottom row
 ; and the top row to 0..127 here
 
-ybi = nearest(syc)              \ [ncam x N]  bottom row, from the float bottom edge
-yti = nearest(syc - h) + 1      \ [ncam x N]  top row, from the float top edge
+ybi = ROUND(syc)              \ [ncam x N]  bottom row, from the float bottom edge
+yti = ROUND(syc - h) + 1      \ [ncam x N]  top row, from the float top edge
 ybc = MIN({ybi, 127}, 0)        \ [ncam x N]  bottom row clipped to the screen
 tpc = MAX({yti, 0}, 0)          \ [ncam x N]  top row clipped to the screen
 hgt = ybc - tpc + 1             \ [ncam x N]  height from the rounded rows

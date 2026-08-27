@@ -20,6 +20,7 @@ switch, keyword and operator live in the [reference](reference.md).
 - [Lists and ranges](#lists-and-ranges)
 - [Subscripts](#subscripts)
 - [Broadcasting](#broadcasting)
+- [Strings and character codes](#strings-and-character-codes)
 - [Zero-page allocation](#zero-page-allocation)
 - [IF and FOR](#if-and-for)
 - [Predefined symbols](#predefined-symbols)
@@ -55,8 +56,9 @@ into its own:
 - **One file, one assembly.** Each source file on the command line assembles in a fresh world; symbols
   never leak between them.
 
-A few BeebAsm conveniences have no Baron equivalent yet: `MAPCHAR` is best implemented as a user-defined
-function, and `COPYBLOCK` is now better done by `INCSECTION`. `ASSERT` is spelled with the tools you have:
+A few BeebAsm conveniences are spelled differently here: `MAPCHAR` is a one-line user function (the
+recipe is in [Strings and character codes](#strings-and-character-codes)), `COPYBLOCK` is now better
+done by `INCSECTION`, and `ASSERT` is spelled with the tools you have:
 `IF weird : ERROR "oh frak" : ENDIF`.
 
 ## A first program ##
@@ -457,6 +459,54 @@ ALIGN &100
 
 A full 256-entry sine table, one line.
 
+## Strings and character codes ##
+
+`CODES` turns a string into the list of its character codes, and `CHR` turns codes back into a string:
+
+```
+CODES("AB")             ; {65, 66}
+CODES("A")[0]           ; 65 - a character literal, e.g. CMP #CODES("Z")[0]
+CHR(72)                 ; "H"
+CHR({72, 73})           ; "HI" - every code becomes a character of ONE string
+```
+
+That one bridge, plus the machinery you already have, is the whole story of character mapping. A
+`CODES` result is a list, so it broadcasts - and a *list of indices* is a gather subscript, so
+indexing a table with one **is** the character map, NumPy-fashion. `FIND(x, v)` supplies the indices:
+it returns where `v` first occurs in `x`, and the needle broadcasts too.
+
+So BeebAsm's `MAPCHAR` is a one-liner. Map each character to its position in a glyph set:
+
+```
+glyphs = " ABCDEFGHIJKLMNOPQRSTUVWXYZ!?"
+
+FUNCTION mapchar(s) = FIND(CODES(glyphs), CODES(s))
+
+EQUS mapchar("HELLO WORLD!")    ; each byte is its character's index into glyphs
+```
+
+Or keep explicit `{old, new}` tables and look bytes up through both:
+
+```
+from = CODES("ABC")
+to   = {&80, &90, &A0}
+
+FUNCTION remap(s) = to[FIND(from, CODES(s))]
+```
+
+Or, when the mapping is just an offset, skip the function entirely - a length-1 list broadcasts:
+
+```
+EQUS CODES("HELLO WORLD") - CODES(" ")   ; font starts at space = 0
+```
+
+A character missing from the set fails the assemble with `Not found: '81'` naming the stray code -
+which is exactly what you want from a font with holes in it.
+
+Two type predicates round the toolkit out: `IS_STRING(x)` and `IS_NUMBER(x)` answer 1 or 0 for the
+value *as a whole* (a list is neither; test list-ness with `RANK(x) > 0`) - handy for a `FUNCTION`
+that accepts either a string or a list of codes.
+
 ## Zero-page allocation ##
 
 The headline feature. Hand Baron a pool of zero-page bytes and declare variables by name; it runs a
@@ -599,6 +649,23 @@ Functions are pure - they compute, they never emit - and lexically scoped: a bod
 the globals of where it was *defined*, never the caller's locals. Overload by parameter count, and recurse
 away (`IF` for the base case, as with macros). Definition before use, as with macros.
 
+Locals bind **once**, parameters included: there is no mutation in a body, so a second assignment to the
+same name is an error rather than a silent no-op (`x = x + 1` is asking for a loop that does not exist -
+recursion is the loop). Assigning the same name in an `IF` and its `ELSE` is fine; only one arm runs.
+
+To refuse bad input, `ERROR(...)` is also a *function*: it returns an error value carrying your message,
+which surfaces as a proper diagnostic wherever the result ends up used:
+
+```
+FUNCTION checked(w)
+    IF w < 0
+        r = ERROR("bad width: ", w)
+    ELSE
+        r = w
+    ENDIF
+= r
+```
+
 Functions are powerful enough to be able to implement something like the quicksort algorithm, taking a list
 and returning it sorted! 
 
@@ -638,6 +705,10 @@ build (though assembly carries on, so you still get the full report):
 ```
 IF * > &3000 : ERROR "code overran the screen by ", * - &3000, " bytes" : ENDIF
 ```
+
+The same name doubles as a *function* in expression position - `ERROR("bad width: ", w)` returns an
+error value that reports wherever it ends up used, which is how a [`FUNCTION` body](#functions) refuses
+bad input.
 
 ## Saving your work ##
 

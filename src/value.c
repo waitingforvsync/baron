@@ -56,9 +56,16 @@ value value_make_copy(value v, rc_arena *arena)
         case value_type_none:
         case value_type_numeric:
         case value_type_range:
-        case value_type_error:
         case value_type_zpauto:   // the name view is into permanent source text, so no copy needed
             return v;   // wholly inline: nothing to deep-copy
+
+        case value_type_error:
+            // The detail is usually a view into source text, but error() composes its message in
+            // the evaluation arena - so a bound error value must bring its detail's bytes along.
+            if (v.error.detail.len != 0) {
+                return value_make_error_detail(v.error.code, rc_mstr_from_str(v.error.detail, v.error.detail.len, arena).view);
+            }
+            return v;
 
         case value_type_string:
             // Copy the bytes so the copy no longer aliases the source/scratch text.

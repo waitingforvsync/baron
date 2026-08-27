@@ -101,6 +101,7 @@ rc_str error_type_name(error_type e)
         case error_type_incorrect_parameters:    return RC_STR("Wrong number or kind of arguments");
         case error_type_shape_mismatch:          return RC_STR("Operand shapes do not match");
         case error_type_list_too_big:            return RC_STR("List too large");
+        case error_type_not_found:               return RC_STR("Not found: '%'");
         case error_type_not_implemented:         return RC_STR("Not implemented");
         case error_type_user_error:              return RC_STR("%");
         case error_type_no_convergence:          return RC_STR("Assembly did not settle");

@@ -6925,6 +6925,68 @@ RC_TEST_STEP(assemble, function_call_and_definition_errors, fix)
     RC_CHECK_TRUE(ERR("FUNCTION lo(x) = x") == error_type_function_name_reserved);
 }
 
+RC_TEST_STEP(assemble, mapchar_idioms, fix)
+{
+    // The MAPCHAR replacement, NumPy style: codes() bridges text to numbers, find() maps each
+    // code to its index in a charset string, and a gather subscript is the lookup table.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "glyphs = \"ABC \"\n"
+        "FUNCTION mapchar(s) = find(codes(glyphs), codes(s))\n"
+        "EQUB mapchar(\"CAB BA\")"), (uint8_t[]) {2, 0, 1, 3, 1, 0}, 6));
+
+    // The {old, new} pair-list flavour: search one list, subscript the other with the indices.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "from = codes(\"XYZ\")\n"
+        "to   = {7, 8, 9}\n"
+        "FUNCTION remap(s) = to[find(from, codes(s))]\n"
+        "EQUB remap(\"ZYX\")"), (uint8_t[]) {9, 8, 7}, 3));
+
+    // The offset flavour needs no FUNCTION at all: a length-1 codes() list broadcasts.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB codes(\"HAL\") - codes(\" \")"), (uint8_t[]) {40, 33, 44}, 3));
+
+    // A character missing from the charset fails the assemble loudly, naming the code.
+    RC_CHECK_TRUE(ERR(
+        "glyphs = \"ABC\"\n"
+        "FUNCTION mapchar(s) = find(codes(glyphs), codes(s))\n"
+        "EQUB mapchar(\"AQ\")") == error_type_not_found);
+    RC_CHECK(diag_payload(&fix->r, error_type_not_found), ==, RC_STR("81"));   // 'Q'
+}
+
+RC_TEST_STEP(assemble, function_error_value, fix)
+{
+    // error() in a body: the guard branch fires and its message lands as a user_error at the
+    // use site; the happy path never sees it (a dead branch's error() is built, then dropped).
+    #define CHECKED_FN \
+        "FUNCTION checked(w)\n" \
+        "IF w < 0\n" \
+        "r = error(\"bad width: \", w)\n" \
+        "ELSE\n" \
+        "r = w\n" \
+        "ENDIF\n" \
+        "= r\n"
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(CHECKED_FN "EQUB checked(5)"), (uint8_t[]) {5}, 1));
+    RC_CHECK_TRUE(ERR(CHECKED_FN "EQUB checked(0-3)") == error_type_user_error);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("bad width: -3"));
+    #undef CHECKED_FN
+}
+
+RC_TEST_STEP(assemble, function_duplicate_local, fix)
+{
+    // Body locals are single-assignment: a second live assignment to one name used to be
+    // silently ignored (reading like mutation that never happened) - now it is a duplicate,
+    // naming the local at the call site.
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nr = 1\nr = r + n\n= r\nEQUB f(1)") == error_type_duplicate_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_duplicate_symbol), ==, RC_STR("r"));
+
+    // Rebinding a parameter is the same mistake.
+    RC_CHECK_TRUE(ERR("FUNCTION g(n)\nn = 2\n= n\nEQUB g(1)") == error_type_duplicate_symbol);
+
+    // Branches stay fine: only the live arm binds, so IF/ELSE both assigning is one binding.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION pick(c)\nIF c\nx = 2\nELSE\nx = 3\nENDIF\n= x\n"
+        "EQUB pick(TRUE), pick(FALSE)"), (uint8_t[]) {2, 3}, 2));
+}
+
 RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
 {
     // Push the permanent arena well past its initial reserves so its scope nodes and symbol pool have to

@@ -115,6 +115,7 @@ typedef enum error_type {
     error_type_incorrect_parameters,
     error_type_shape_mismatch,        // a ragged operand, or shapes that do not broadcast
     error_type_list_too_big,          // a list grew past VALUE_LIST_MAX_LENGTH
+    error_type_not_found,             // find() scanned the whole haystack and the needle was not in it
     error_type_not_implemented,
 
     // The ERROR statement: the user's own message, carried whole in the diagnostic's payload.

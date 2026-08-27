@@ -80,7 +80,7 @@ to the end of the line.
 | `FOR v = seq` ... `NEXT` | Run the body once per element of a range or list, `v` bound to each element, each iteration in its own scope. An empty sequence runs zero times. |
 | `INCLUDE "file"` | Splice another source file in textually: its code emits here, its symbols bind here. Paths resolve relative to the including file. |
 | `MACRO name sig` ... `ENDMACRO` | Define a macro. The signature is parameter names, commas, and quoted literal tokens matched verbatim; one name may carry several overloads, matched by shape. An empty body forward-declares. Define before use. |
-| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments and `IF`s ending in a top-level `= expr` return. Overloads by parameter count. Define before use. |
+| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments and `IF`s ending in a top-level `= expr` return. Locals (parameters included) bind once - a second live assignment to the same name is an error. Overloads by parameter count. Define before use. |
 | `PRINT [#n,] v [, v...]` | Write text during assembly (final pass only): values concatenated, one newline per statement, to channel `n` (default 0). |
 | `ERROR [v [, v...]]` | Report the message as an assembly error and fail the build; assembly carries on to find more. |
 
@@ -206,12 +206,24 @@ All broadcast; trigonometry is in radians.
 | `LO(n)`, `HI(n)` | The low byte (bits 0-7) / the high byte (bits 8-15). |
 | `ABS(n)` | Absolute value. |
 | `INT(n)`, `FLOOR(n)` | Round down (the two are synonyms). |
-| `ROUND(n)`, `CEIL(n)` | Round toward zero / up. |
+| `ROUND(n)` | Round to nearest; halves go away from zero (`ROUND(2.5)` is 3, `ROUND(-2.5)` is -3). |
+| `TRUNC(n)` | Round toward zero. |
+| `CEIL(n)` | Round up. |
 | `SQRT(n)` | Square root. |
 | `SIN(n)`, `COS(n)`, `TAN(n)`, `ASIN(n)`, `ACOS(n)`, `ATAN(n)` | Trigonometry. |
 | `LOG(n)`, `LN(n)`, `EXP(n)` | Log base 10, natural log, e^n. |
 | `NOT(n)` | Bitwise complement (32-bit). |
 | `RND(n)` | A random integer in 0..n-1. `RND(FULL(k, n))` makes k draws. Deterministically reseeded each pass, so it converges. |
+| `CODES(s)` | A string's character codes as a rank-1 list: `CODES("AB")` is `{65, 66}`, `CODES("")` is `{}`. The bridge from text to arithmetic - `CODES("A")[0]` is a character literal, and a length-1 result broadcasts (`CODES(s) - CODES(" ")`). |
+
+### String, search and type functions ###
+
+| Function | Meaning |
+|----------|---------|
+| `CHR(x)` | The inverse of `CODES`: every numeric leaf of `x` (flattened; ranges enumerate) becomes one character of a single string - `CHR(72)` is `"H"`, `CHR({72, 73})` is `"HI"`, `CHR(CODES(s))` is `s`. Codes must land in 0..255; fractions truncate. Doubles as the way to join a list of codes into one string. |
+| `FIND(x, v)` | The index of `v`'s first occurrence in `x` (a list, range, or string - a string is searched for a substring: `FIND("hello world", "world")` is 6). The needle broadcasts, so `FIND(from, CODES(s))` is a same-shape list of indices; a needle can therefore never itself be a list-valued element. A miss is a hard error naming the needle. |
+| `IS_STRING(x)`, `IS_NUMBER(x)` | 1 or 0 for the value as a whole - a list is neither (test list-ness with `SHAPE(x) != {}` or `RANK(x) > 0`). A still-undefined symbol defers rather than answering. |
+| `ERROR(v, ...)` | The [`ERROR` statement](#structure-and-control) as a value: an error carrying the concatenated message (strings raw, everything else as `PRINT` shows it), reported wherever the value ends up used. Made for guarding `FUNCTION` bodies: `r = ERROR("bad width: ", w)` behind an `IF`. |
 
 ### List functions ###
 
