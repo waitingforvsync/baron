@@ -66,7 +66,7 @@ static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uin
 // table, so it sits on its own. Pure: it reads v and returns the reduction.
 int_argument int_argument_make(value v, bool final_pass, uint32_t at)
 {
-    if (value_is_numeric(v)) {
+    if (value_is_number(v)) {   // a boolean coerces: TRUE / FALSE are 1 / 0 here
         return (int_argument) {
             .type = int_argument_type_known,
             .value = (int64_t) v.numeric
@@ -655,13 +655,13 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         for (uint32_t i = 0; i < inherited.num; i++) {
             attribute a = rc_view_attribute_get(inherited, i);
             sections_add_attribute(&b->sections, child, a.key, a.v, a.at);
-            if (rc_str_is_equal_insensitive(a.key, RC_STR("org")) && value_is_numeric(a.v)) {
+            if (rc_str_is_equal_insensitive(a.key, RC_STR("org")) && value_is_number(a.v)) {
                 parent_org = (uint32_t) ((int64_t) a.v.numeric & 0xFFFF);
             }
-            else if (rc_str_is_equal_insensitive(a.key, RC_STR("cmos")) && value_is_numeric(a.v)) {
+            else if (rc_str_is_equal_insensitive(a.key, RC_STR("cmos")) && value_is_number(a.v)) {
                 parent_cmos = a.v.numeric != 0;
             }
-            else if (rc_str_is_equal_insensitive(a.key, RC_STR("guard")) && value_is_numeric(a.v)) {
+            else if (rc_str_is_equal_insensitive(a.key, RC_STR("guard")) && value_is_number(a.v)) {
                 parent_guard = (uint32_t) ((int64_t) a.v.numeric & 0xFFFF);
             }
         }
@@ -5956,7 +5956,7 @@ RC_TEST_STEP(assemble, define_binds_symbol, fix)
                                   RC_STR_INIT("version=\"1.0\""), RC_STR_INIT("half=screenwidth/2")};
     fix->desc.defines = (rc_view_str) RC_VIEW(defs);
     RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #screenwidth : EQUB half"), (uint8_t[]) {0xA9, 0x40, 0x20}, 3));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("debug")), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("debug")), value_make_bool(true)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("version")), value_make_string(RC_STR("1.0"))));
 }
 
@@ -6411,6 +6411,22 @@ RC_TEST_STEP(assemble, equb_dead_branch_emits_nothing, fix)
 {
     RC_CHECK_TRUE(code_is(&fix->r, ASM("LDA #0 : IF 0 : EQUB 1, 2, 3 : ENDIF : LDA #1"),
                           (uint8_t[]){0xA9, 0x00, 0xA9, 0x01}, 4));
+}
+
+RC_TEST_STEP(assemble, boolean_values_coerce, fix)
+{
+    // A boolean coerces to 1 / 0 wherever a number is wanted: data bytes, arithmetic, conditions.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB TRUE, FALSE, 2>1"), (uint8_t[]){0x01, 0x00, 0x01}, 3));
+    // The comparison-mask idiom: comparisons yield booleans, and multiplying them coerces.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB (2>1)*(3>2)*5"), (uint8_t[]){0x05}, 1));
+    // A condition is a boolean or a number's zero/nonzero truthiness - both live here.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF TRUE : EQUB 1 : ENDIF : IF 5 : EQUB 2 : ENDIF"),
+                          (uint8_t[]){0x01, 0x02}, 2));
+    // PRINT renders a boolean by name.
+    RC_CHECK_TRUE(ASM("PRINT TRUE, \" \", FALSE, \" \", 1=1") != 0);
+    RC_CHECK(fix->r.channels[0], ==, RC_STR("TRUE FALSE TRUE\n"));
+    // A mixed boolean/number pair under AND/OR/EOR is refused, and the refusal surfaces here.
+    RC_CHECK_TRUE(ERR("EQUB TRUE and 1") == error_type_type_mismatch);
 }
 
 RC_TEST_STEP(assemble, equw_emits_little_endian_words, fix)

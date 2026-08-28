@@ -133,7 +133,8 @@ message.
 
 | Kind | Examples |
 |------|----------|
-| Number | `42`, `1.5`, `&FF` or `$FF` (hex), `%1010` (binary). All numbers are one type; booleans are just 1 and 0. |
+| Number | `42`, `1.5`, `&FF` or `$FF` (hex), `%1010` (binary). All numbers are one type. |
+| Boolean | `TRUE`, `FALSE` - what comparisons and the predicates return. Coerces to 1 / 0 in any numeric context (`(x>5)*10`, `EQUB flag`), so a boolean goes anywhere a number does; only `AND`/`OR`/`EOR`/`NOT` care about the difference (logical on booleans, bitwise on numbers, a mixed pair refused). **Note: This is a breaking change from BeebAsm, which represents TRUE as -1, not 1.** |
 | String | `"hello"` - write `""` for a literal quote. |
 | List | `{1, 2, 3}` - nestable, mixed types welcome, newlines allowed inside the braces. Nested equal-length lists act as higher-rank arrays; `SHAPE`/`RANK` report the axes all elements agree on (ragged lists keep only their uniform leading axes). |
 | Range | A compact list of consecutive integers - see [Range forms](#range-forms). |
@@ -157,12 +158,12 @@ arithmetic and comparisons, so `0..n-1` needs no parentheses.
 |-----------|---------|
 | `x[...]` | Subscript - see [Subscripts](#subscripts). |
 | `^` | Power (right-associative). |
-| `-x` `+x` `!x` | Unary minus / plus, and logical NOT: `!x` is 1 if `x` is 0, else 0. Binds as tightly as unary minus, so `!x = 1` compares `!x` against 1. |
+| `-x` `+x` | Unary minus / plus. |
 | `*` `/` `DIV` `MOD` `<<` `>>` | Multiply, divide, integer divide, modulo, shifts. |
 | `+` `-` | Add, subtract. `+` also concatenates strings. |
-| `=` `==` `!=` `<>` `<` `>` `<=` `>=` | Comparisons, yielding 1 or 0. `=`/`==` and `!=`/`<>` are synonyms; strings compare too. |
-| `AND` | Bitwise AND (32-bit). |
-| `OR` `EOR` | Bitwise OR, exclusive-OR (32-bit). |
+| `=` `==` `!=` `<>` `<` `>` `<=` `>=` | Comparisons, yielding `TRUE` or `FALSE`. `=`/`==` and `!=`/`<>` are synonyms; strings compare too. A boolean compares against a number as 1 / 0, so `1 = TRUE` holds. |
+| `AND` | Logical AND on two booleans (yielding a boolean); bitwise AND (32-bit) on two numbers. A mixed boolean/number pair is an error. |
+| `OR` `EOR` | Logical / bitwise OR and exclusive-OR, overloaded exactly as `AND`. |
 | `..` `..<` | Range construction. |
 | `<x` `>x` `~x` | 6502-style low / high byte of the whole following expression: `<start+1` is `LO(start+1)`. `~x` is the same shape, giving `x` as an uppercase hex *string* - 2, 4 or 8 digits, the narrowest that holds it (`~10` is `"0A"`, `~&123` is `"0123"`, `~&123456` is `"00123456"`). No `&` prefix; the 32-bit pattern is what is formatted, so `~-1` is `"FFFFFFFF"`. |
 
@@ -212,8 +213,8 @@ All broadcast; trigonometry is in radians.
 | `SQRT(n)` | Square root. |
 | `SIN(n)`, `COS(n)`, `TAN(n)`, `ASIN(n)`, `ACOS(n)`, `ATAN(n)` | Trigonometry. |
 | `LOG(n)`, `LN(n)`, `EXP(n)` | Log base 10, natural log, e^n. |
-| `NOT(n)` | Bitwise complement (32-bit). |
-| `RND(n)` | A random integer in 0..n-1. `RND(FULL(k, n))` makes k draws. Deterministically reseeded each pass, so it converges. |
+| `NOT(x)` | Logical NOT on a boolean (`NOT(TRUE)` is `FALSE`); bitwise complement (32-bit) on a number. |
+| `RND(n)` | A random integer in 0..n-1. `RND(REPEATED(k, n))` makes k draws. Deterministically reseeded each pass, so it converges. |
 | `CODES(s)` | A string's character codes as a rank-1 list: `CODES("AB")` is `{65, 66}`, `CODES("")` is `{}`. The bridge from text to arithmetic - `CODES("A")[0]` is a character literal, and a length-1 result broadcasts (`CODES(s) - CODES(" ")`). |
 
 ### String, search and type functions ###
@@ -222,7 +223,7 @@ All broadcast; trigonometry is in radians.
 |----------|---------|
 | `CHR(x)` | The inverse of `CODES`: every numeric leaf of `x` (flattened; ranges enumerate) becomes one character of a single string - `CHR(72)` is `"H"`, `CHR({72, 73})` is `"HI"`, `CHR(CODES(s))` is `s`. Codes must land in 0..255; fractions truncate. Doubles as the way to join a list of codes into one string. |
 | `FIND(x, v)` | The index of `v`'s first occurrence in `x` (a list, range, or string - a string is searched for a substring: `FIND("hello world", "world")` is 6). The needle broadcasts, so `FIND(from, CODES(s))` is a same-shape list of indices; a needle can therefore never itself be a list-valued element. A miss is a hard error naming the needle. |
-| `IS_STRING(x)`, `IS_NUMBER(x)` | 1 or 0 for the value as a whole - a list is neither (test list-ness with `SHAPE(x) != {}` or `RANK(x) > 0`). A still-undefined symbol defers rather than answering. |
+| `IS_STRING(x)`, `IS_NUMBER(x)` | `TRUE` or `FALSE` for the value as a whole - a list is neither (test list-ness with `SHAPE(x) != {}` or `RANK(x) > 0`). A boolean counts as a number (it coerces to one). A still-undefined symbol defers rather than answering. |
 | `ERROR(v, ...)` | The [`ERROR` statement](#structure-and-control) as a value: an error carrying the concatenated message (strings raw, everything else as `PRINT` shows it), reported wherever the value ends up used. Made for guarding `FUNCTION` bodies: `r = ERROR("bad width: ", w)` behind an `IF`. |
 
 ### List functions ###
@@ -232,7 +233,7 @@ All broadcast; trigonometry is in radians.
 | `LEN(x)` | Length of the outermost axis (elements, characters, or range count). |
 | `SHAPE(x)` | The axis lengths as a list, outermost first; the axes all elements agree on (`SHAPE({{1,2},{3,4,5}})` is `{2}`). `{}` for a scalar; a range counts as the rank-1 list it stands for (`SHAPE(0..9)` is `{10}`; unbounded errors); empty axes are real lengths (`SHAPE({})` is `{0}`, `SHAPE({{}})` is `{1, 0}`). |
 | `RANK(x)` | The number of axes (0 for a scalar; 1 for any range, unbounded included). |
-| `FULL(n, v)` | A list of `n` copies of `v`. |
+| `REPEATED(n, v)`, `FULL(n, v)` | A list of `n` copies of `v` (two names, one function). |
 | `FLATTEN(x)` | Every leaf, in order, as one flat list. |
 | `CONCAT(a, b, ...)` | Join: each list contributes its elements, each scalar itself. |
 | `ZIP(a, b, ...)` | Equal-length lists into a list of tuples: `ZIP({1,2},{3,4})` is `{{1,3},{2,4}}`. |
@@ -240,13 +241,13 @@ All broadcast; trigonometry is in radians.
 | `SORT(L [, key...])` | Sort ascending by numeric key; extra arguments subscript each element to find its key (`SORT(L, 0)` sorts on first items). |
 | `SUM(x [, axis])`, `PRODUCT(x [, axis])` | With no axis, fold *every* leaf to one scalar (`SUM({{1,2,3},{4,5,6}})` is 21; `SUM({})` is 0). With an axis (0 = outermost), collapse just that one: axis 0 folds rows together (`{5, 7, 9}`), axis 1 folds within each row (`{6, 15}`). |
 | `MIN(x [, axis])`, `MAX(x [, axis])` | Smallest / largest, same axis rules. `MIN({})` errors - no identity. |
-| `DEFINED(name)` | 1 if the symbol resolves (yet), 0 if not - the one function happy to receive an undefined name. |
+| `DEFINED(name)` | `TRUE` if the symbol resolves (yet), `FALSE` if not - the one function happy to receive an undefined name. |
 
 ### Constants ###
 
 | Constant | Meaning |
 |----------|---------|
-| `TRUE`, `FALSE` | 1 and 0. |
+| `TRUE`, `FALSE` | The boolean values. Coerce to 1 and 0 in numeric contexts. |
 | `PI` | 3.14159... |
 | `*`, `P%` | The current assembly address - of *this* statement, so `JMP *` is jump-to-self and `EQUB *,*,*` advances per byte. Read-only. |
 | `@-`, `@+` | The nearest `.@` local label behind / ahead, within the current scope. |
@@ -255,4 +256,18 @@ Your own `FUNCTION` names join the table as they are defined, callable as `name(
 
 ## Version history ##
 
-- **0.1.0** (August 2026) - first release: the full assembler described here.
+- **0.1.3** (2026-08-28) - everything since the first release:
+  - A proper boolean type: comparisons and the predicates return `TRUE` / `FALSE`, which coerce
+    to 1 / 0 in any numeric context; `AND` / `OR` / `EOR` / `NOT` are logical on booleans and
+    bitwise on numbers.
+  - Strings and characters: `CODES`, `CHR` and `FIND`, and the `IS_STRING` / `IS_NUMBER`
+    type predicates.
+  - `ERROR`: fail the build with your own message - as a statement, or as the `ERROR(...)`
+    value for `FUNCTION` guards.
+  - `ROUND` now rounds to nearest (halves away from zero); truncation toward zero is the new
+    `TRUNC`.
+  - Zero-page allocator additions: `ZPENTRY` / `ZPINTERRUPT` root markers (with
+    unreachable-code warnings) and the `DISCARD` dead-value annotation.
+  - `-D <sym>=<expr>` predefines symbols from the command line.
+  - `REPEATED` joins as the friendlier name for `FULL`.
+- **0.1.0** (2026-08-26) - first release: the full assembler described here.

@@ -9,8 +9,8 @@
 
 
 // The single value type flowing through Baron's expression machinery. It is a
-// tagged union: none (uninitialised), a number, a string, a list of values, a
-// numeric range, an error, or a ZPAUTO address. Evaluation errors (unknown
+// tagged union: none (uninitialised), a number, a boolean, a string, a list of
+// values, a numeric range, an error, or a ZPAUTO address. Evaluation errors (unknown
 // symbol, divide by zero, ...) are carried as a value rather than aborting, so
 // they can propagate to the end of an expression and let assembly continue
 // across an as-yet-unresolvable reference.
@@ -38,6 +38,7 @@ typedef rc_view_value value_list;
 typedef enum value_type {
     value_type_none,                    // zero/default: uninitialised
     value_type_numeric,
+    value_type_boolean,                 // TRUE / FALSE; coerces to 1 / 0 in any numeric context
     value_type_string,
     value_type_list,
     value_type_range,
@@ -84,7 +85,7 @@ typedef struct value_zpauto {
 struct value {
     value_type type;
     union {
-        double       numeric;
+        double       numeric;           // also the boolean payload, canonically 1.0 / 0.0
         rc_str       string;            // view into source or arena; concat allocates
         value_list   list;              // rc_view_value: const value *, num
         value_range  range;
@@ -103,6 +104,7 @@ struct value {
 // Constructors (by value).
 value value_make_none(void);
 value value_make_numeric(double n);
+value value_make_bool(bool b);
 value value_make_string(rc_str s);
 value value_make_error(error_type e);
 value value_make_error_detail(error_type e, rc_str detail);   // + a payload string (e.g. the symbol name)
@@ -134,12 +136,14 @@ int64_t value_range_step(value_range r);
 value_type value_type_of(value v);
 bool value_is_none(value v);
 bool value_is_numeric(value v);
+bool value_is_boolean(value v);
+bool value_is_number(value v);     // numeric or boolean: anything that coerces to a number
 bool value_is_string(value v);
 bool value_is_list(value v);
 bool value_is_range(value v);
 bool value_is_error(value v);
 bool value_is_zpauto(value v);
-bool value_is_simple(value v);     // numeric, string, error, or zpauto: stands alone
+bool value_is_simple(value v);     // numeric, boolean, string, error, or zpauto: stands alone
 bool value_is_compound(value v);   // list or range: gathers other values
 
 // Structural equality: types must match, then compared field-wise (lists

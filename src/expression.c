@@ -71,20 +71,20 @@ static value op_add(value a, value b, rc_arena *arena)
     // A zpauto address plus an integer is the same address further in: ptr+1 is the pointer's high
     // byte, whichever byte the allocator eventually picks. This and subtraction below are the ONLY
     // arithmetic a zpauto value supports - every other operator's numeric check refuses it.
-    if (value_is_zpauto(a) && value_is_numeric(b)) {
+    if (value_is_zpauto(a) && value_is_number(b)) {
         return zp_offset_add(a, b.numeric);
     }
-    if (value_is_numeric(a) && value_is_zpauto(b)) {
+    if (value_is_number(a) && value_is_zpauto(b)) {
         return zp_offset_add(b, a.numeric);
     }
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric + b.numeric);
 }
 
 static value op_sub(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    if (value_is_zpauto(a) && value_is_numeric(b)) {
+    if (value_is_zpauto(a) && value_is_number(b)) {
         return zp_offset_add(a, -b.numeric);
     }
     if (value_is_zpauto(a) && value_is_zpauto(b)) {
@@ -95,21 +95,21 @@ static value op_sub(value a, value b, rc_arena *arena)
         }
         return value_make_error(error_type_domain);
     }
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric - b.numeric);
 }
 
 static value op_mul(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric * b.numeric);
 }
 
 static value op_div(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     if (b.numeric == 0.0) {
         return value_make_error(error_type_divide_by_zero);
     }
@@ -119,7 +119,7 @@ static value op_div(value a, value b, rc_arena *arena)
 static value op_pow(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     double r = pow(a.numeric, b.numeric);
     if (isnan(r)) {
         return value_make_error(error_type_domain);   // e.g. a negative base, fractional exponent
@@ -131,7 +131,7 @@ static value op_pow(value a, value b, rc_arena *arena)
 static value op_idiv(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     int32_t ib = as_i32(b);
     if (ib == 0) {
         return value_make_error(error_type_divide_by_zero);
@@ -146,7 +146,7 @@ static value op_idiv(value a, value b, rc_arena *arena)
 static value op_mod(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     int32_t ib = as_i32(b);
     if (ib == 0) {
         return value_make_error(error_type_divide_by_zero);
@@ -163,7 +163,7 @@ static value op_mod(value a, value b, rc_arena *arena)
 static value op_shl(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     uint32_t n = as_u32(b);
     return value_make_numeric(n >= 32 ? 0.0 : (double)(as_u32(a) << n));
 }
@@ -171,14 +171,21 @@ static value op_shl(value a, value b, rc_arena *arena)
 static value op_shr(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     uint32_t n = as_u32(b);
     return value_make_numeric(n >= 32 ? 0.0 : (double)(as_u32(a) >> n));
 }
 
+// AND, OR and EOR are overloaded on their operand types: two booleans get the logical
+// operation (yielding a boolean), two numbers the bitwise one on the 32-bit pattern.
+// A mixed pair is refused rather than coerced - there is no honest reading of
+// TRUE AND 4, so we make the caller say which they meant.
 static value op_and(value a, value b, rc_arena *arena)
 {
     (void)arena;
+    if (value_is_boolean(a) && value_is_boolean(b)) {
+        return value_make_bool(a.numeric != 0.0 && b.numeric != 0.0);
+    }
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric((double)(as_u32(a) & as_u32(b)));
 }
@@ -186,6 +193,9 @@ static value op_and(value a, value b, rc_arena *arena)
 static value op_or(value a, value b, rc_arena *arena)
 {
     (void)arena;
+    if (value_is_boolean(a) && value_is_boolean(b)) {
+        return value_make_bool(a.numeric != 0.0 || b.numeric != 0.0);
+    }
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric((double)(as_u32(a) | as_u32(b)));
 }
@@ -193,73 +203,102 @@ static value op_or(value a, value b, rc_arena *arena)
 static value op_eor(value a, value b, rc_arena *arena)
 {
     (void)arena;
+    if (value_is_boolean(a) && value_is_boolean(b)) {
+        return value_make_bool((a.numeric != 0.0) != (b.numeric != 0.0));
+    }
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric((double)(as_u32(a) ^ as_u32(b)));
 }
 
 // Order two operands of the same kind - both numbers, or both strings (lexicographic) -
-// as -1 / 0 / +1; sets *ok false on a type mismatch, which makes the comparison an error.
-static int compare_values(value a, value b, bool *ok)
+// as order -1 / 0 / +1; ok false on a type mismatch, which makes the comparison an error.
+typedef struct compare_result {
+    int  order;
+    bool ok;
+} compare_result;
+
+static compare_result compare_values(value a, value b)
 {
-    *ok = true;
-    if (value_is_numeric(a) && value_is_numeric(b)) {
-        return (a.numeric > b.numeric) - (a.numeric < b.numeric);
+    if (value_is_number(a) && value_is_number(b)) {
+        return (compare_result) {.order = (a.numeric > b.numeric) - (a.numeric < b.numeric), .ok = true};
     }
     if (value_is_string(a) && value_is_string(b)) {
         int c = rc_str_compare(a.string, b.string);
-        return (c > 0) - (c < 0);
+        return (compare_result) {.order = (c > 0) - (c < 0), .ok = true};
     }
-    *ok = false;
-    return 0;
+    return (compare_result) {0};
 }
 
-// The comparisons each yield 1 for true, 0 for false, and read the ordering c from
-// compare_values (so they all work on numbers or on strings). COMP is the test on c.
-#define COMPARE_OP(name, COMP)                                            \
-    static value name(value a, value b, rc_arena *arena)                  \
-    {                                                                     \
-        (void)arena;                                                      \
-        bool ok;                                                          \
-        int c = compare_values(a, b, &ok);                               \
-        return ok ? value_make_numeric((COMP) ? 1.0 : 0.0)               \
-                  : value_make_error(error_type_type_mismatch);         \
-    }
+// The comparisons each yield a boolean, reading the ordering from compare_values
+// (so they all work on numbers or on strings).
+static value op_eq(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    compare_result r = compare_values(a, b);
+    return r.ok ? value_make_bool(r.order == 0) : value_make_error(error_type_type_mismatch);
+}
 
-COMPARE_OP(op_eq, c == 0)
-COMPARE_OP(op_ne, c != 0)
-COMPARE_OP(op_lt, c <  0)
-COMPARE_OP(op_gt, c >  0)
-COMPARE_OP(op_le, c <= 0)
-COMPARE_OP(op_ge, c >= 0)
+static value op_ne(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    compare_result r = compare_values(a, b);
+    return r.ok ? value_make_bool(r.order != 0) : value_make_error(error_type_type_mismatch);
+}
 
-#undef COMPARE_OP
+static value op_lt(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    compare_result r = compare_values(a, b);
+    return r.ok ? value_make_bool(r.order < 0) : value_make_error(error_type_type_mismatch);
+}
+
+static value op_gt(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    compare_result r = compare_values(a, b);
+    return r.ok ? value_make_bool(r.order > 0) : value_make_error(error_type_type_mismatch);
+}
+
+static value op_le(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    compare_result r = compare_values(a, b);
+    return r.ok ? value_make_bool(r.order <= 0) : value_make_error(error_type_type_mismatch);
+}
+
+static value op_ge(value a, value b, rc_arena *arena)
+{
+    (void)arena;
+    compare_result r = compare_values(a, b);
+    return r.ok ? value_make_bool(r.order >= 0) : value_make_error(error_type_type_mismatch);
+}
 
 // The fold operators behind min()/max(); they are not in the tables, only used by reduce().
 static value op_min(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric < b.numeric ? a.numeric : b.numeric);
 }
 
 static value op_max(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
+    NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric > b.numeric ? a.numeric : b.numeric);
 }
 
 static value op_neg(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric(-v.numeric);
 }
 
 static value op_pos(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return v;
 }
 
@@ -282,7 +321,7 @@ void expression_reset_random(void)
 static value fn_rnd(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     int64_t bound = (int64_t)v.numeric;   // truncate toward zero: RND(2.9) == RND(2)
     if (bound <= 0) {
         return value_make_error(error_type_domain);   // no 0..n-1 range for n <= 0
@@ -293,7 +332,7 @@ static value fn_rnd(value v, rc_arena *arena)
 static value fn_abs(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric(fabs(v.numeric));
 }
 
@@ -301,14 +340,14 @@ static value fn_abs(value v, rc_arena *arena)
 static value fn_lo(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric((double)(as_u32(v) & 0xFFu));
 }
 
 static value fn_hi(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric((double)((as_u32(v) >> 8) & 0xFFu));
 }
 
@@ -319,7 +358,7 @@ static value fn_hex(value v, rc_arena *arena)
 {
     // A ZPAUTO address stands in with its offset until allocation, exactly as an instruction operand
     // does; the real byte arrives on the output pass, which is the pass PRINT speaks on.
-    NEEDS_NUM(value_is_numeric(v) || value_is_zpauto(v));
+    NEEDS_NUM(value_is_number(v) || value_is_zpauto(v));
     uint32_t u = value_is_zpauto(v) ? (uint32_t) v.zpauto.offset : as_u32(v);
 
     rc_mstr m = rc_mstr_make(8, arena);
@@ -352,26 +391,22 @@ static value fn_codes(value v, rc_arena *arena)
     return value_make_list(out.view);
 }
 
+// Overloaded like AND/OR/EOR: logical on a boolean, bitwise complement on a number.
+// NOT(TRUE) really is FALSE now.
 static value fn_not(value v, rc_arena *arena)
 {
     (void)arena;
+    if (value_is_boolean(v)) {
+        return value_make_bool(v.numeric == 0.0);
+    }
     NEEDS_NUM(value_is_numeric(v));
     return value_make_numeric((double)(~as_u32(v)));
-}
-
-// The logical-NOT counterpart. Exists because NOT(TRUE) != FALSE.
-// Is this horrible? Maybe a little bit.
-static value fn_pling(value v, rc_arena *arena)
-{
-    (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
-    return value_make_numeric(v.numeric == 0.0 ? 1.0 : 0.0);
 }
 
 static value fn_sqrt(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     double r = sqrt(v.numeric);
     if (isnan(r)) {
         return value_make_error(error_type_domain);   // negative argument
@@ -383,28 +418,28 @@ static value fn_sqrt(value v, rc_arena *arena)
 static value fn_int(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric(floor(v.numeric));
 }
 
 static value fn_trunc(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric(trunc(v.numeric));
 }
 
 static value fn_round(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric(round(v.numeric));   // halves go away from zero: round(2.5) = 3, round(-2.5) = -3
 }
 
 static value fn_ceil(value v, rc_arena *arena)
 {
     (void)arena;
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     return value_make_numeric(ceil(v.numeric));
 }
 
@@ -412,7 +447,7 @@ static value fn_ceil(value v, rc_arena *arena)
 // asin(2) or ln(-1)) into a domain error value. The trig/log builtins are thin wrappers.
 static value math1(double (*f)(double), value v)
 {
-    NEEDS_NUM(value_is_numeric(v));
+    NEEDS_NUM(value_is_number(v));
     double r = f(v.numeric);
     if (isnan(r)) {
         return value_make_error(error_type_domain);
@@ -680,7 +715,7 @@ static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
 // selectors must land on a real element (only ranges are forgiving, by clamping).
 static uint32_t selector_index(value sel, uint32_t len)
 {
-    if (!value_is_numeric(sel) || sel.numeric < 0.0 || sel.numeric >= (double)len) {
+    if (!value_is_number(sel) || sel.numeric < 0.0 || sel.numeric >= (double)len) {
         return RC_INDEX_NONE;
     }
 
@@ -729,7 +764,7 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
 
     value index = rc_view_value_get(indices, 0);
 
-    if (value_is_numeric(index)) {
+    if (value_is_number(index)) {
         uint32_t i = selector_index(index, s.len);
 
         if (i == RC_INDEX_NONE) {
@@ -797,7 +832,7 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
     rc_view_value rest = rc_view_value_get_tail(indices, 1);
     uint32_t len = v.list.num;
 
-    if (value_is_numeric(sel)) {   // an integer drops this axis
+    if (value_is_number(sel)) {   // an integer drops this axis
         uint32_t i = selector_index(sel, len);
         if (i == RC_INDEX_NONE) {
             return value_make_error(error_type_subscript_range);
@@ -1012,7 +1047,7 @@ static value fn_full(rc_view_value args, rc_arena *arena)
     if (value_is_error(fill)) {
         return fill;                                     // propagate a forward reference / eval error
     }
-    if (!value_is_numeric(count)) {
+    if (!value_is_number(count)) {
         return value_make_error(error_type_type_mismatch);
     }
 
@@ -1223,7 +1258,7 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
             return key;
         }
 
-        if (!value_is_numeric(key)) {
+        if (!value_is_number(key)) {
             return value_make_error(error_type_type_mismatch);   // the key must be a number
         }
 
@@ -1258,7 +1293,7 @@ static value fn_defined(rc_view_value args, rc_arena *arena)
 
     value v = rc_view_value_get(args, 0);
     bool unresolved = value_is_error(v) && v.error.code == error_type_unknown_symbol;
-    return value_make_numeric(unresolved ? 0.0 : 1.0);
+    return value_make_bool(!unresolved);
 }
 
 // chr: the inverse of codes - every numeric leaf of the argument (flattened, ranges enumerated)
@@ -1286,7 +1321,7 @@ static value fn_chr(rc_view_value args, rc_arena *arena)
         if (value_is_error(e)) {
             return e;   // an unbounded / oversized range arrives from the flatten as an error leaf
         }
-        if (!value_is_numeric(e)) {
+        if (!value_is_number(e)) {
             return value_make_error(error_type_type_mismatch);
         }
         double code = trunc(e.numeric);
@@ -1400,9 +1435,10 @@ static value fn_find(rc_view_value args, rc_arena *arena)
     return find_one(hay, rc_view_value_get(args, 1), arena);
 }
 
-// Whole-value type predicates: 1 or 0 for the value as a whole, deliberately NOT element-wise
-// (a list is neither a string nor a number - list-ness is already spelled shape(x) != {}).
-// Errors propagate as usual (only defined() inspects), so a forward reference still defers.
+// Whole-value type predicates: TRUE or FALSE for the value as a whole, deliberately NOT
+// element-wise (a list is neither a string nor a number - list-ness is already spelled
+// shape(x) != {}). Errors propagate as usual (only defined() inspects), so a forward
+// reference still defers.
 static value fn_is_string(rc_view_value args, rc_arena *arena)
 {
     (void)arena;
@@ -1415,7 +1451,7 @@ static value fn_is_string(rc_view_value args, rc_arena *arena)
     if (value_is_error(v)) {
         return v;
     }
-    return value_make_numeric(value_is_string(v) ? 1.0 : 0.0);
+    return value_make_bool(value_is_string(v));
 }
 
 static value fn_is_number(rc_view_value args, rc_arena *arena)
@@ -1432,7 +1468,8 @@ static value fn_is_number(rc_view_value args, rc_arena *arena)
     }
     // A ZPAUTO address counts: it denotes the number it becomes at allocation, and answering
     // by its transient type would flip the answer between the settling and output passes.
-    return value_make_numeric(value_is_numeric(v) || value_is_zpauto(v) ? 1.0 : 0.0);
+    // A boolean counts too: it coerces to a number wherever one is wanted.
+    return value_make_bool(value_is_number(v) || value_is_zpauto(v));
 }
 
 // error(...): the ERROR statement as a value. The arguments format PRINT-style (strings raw,
@@ -1459,9 +1496,9 @@ static value fn_error(rc_view_value args, rc_arena *arena)
 
 // ---- named constants ----
 // Each hands back its value given the evaluation environment. The pure ones ignore it; const_pc reads the
-// live PC. Booleans are numbers (1 / 0), the same shape comparisons and IF already speak.
-static value const_true(const expr_env *env)  { (void) env; return value_make_numeric(1.0); }
-static value const_false(const expr_env *env) { (void) env; return value_make_numeric(0.0); }
+// live PC. TRUE and FALSE are proper booleans, coercing to 1 / 0 wherever a number is wanted.
+static value const_true(const expr_env *env)  { (void) env; return value_make_bool(true); }
+static value const_false(const expr_env *env) { (void) env; return value_make_bool(false); }
 static value const_pi(const expr_env *env)    { (void) env; return value_make_numeric(3.14159265358979323846); }
 static value const_pc(const expr_env *env)    { return value_make_numeric((double) env->pc); }
 
@@ -1486,7 +1523,6 @@ static const token even_entries[] = {
 
     {RC_STR_INIT("+"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_pos, .precedence = prec_neg}}},
     {RC_STR_INIT("-"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = op_neg, .precedence = prec_neg}}},
-    {RC_STR_INIT("!"),     {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_pling, .precedence = prec_neg}}},
 
     // Bare low/high-byte operators (6502 style): '<' is the low byte, '>' the high byte. Very
     // low precedence, so they swallow the whole following expression: <start+1 is lo(start+1).
@@ -1525,6 +1561,7 @@ static const token even_entries[] = {
     {RC_STR_INIT("len("),     {.type = lexeme_type_function, .function = {.apply = fn_len}}},
     {RC_STR_INIT("rank("),    {.type = lexeme_type_function, .function = {.apply = fn_rank}}},
     {RC_STR_INIT("full("),    {.type = lexeme_type_function, .function = {.apply = fn_full}}},
+    {RC_STR_INIT("repeated("), {.type = lexeme_type_function, .function = {.apply = fn_full}}},   // full by a friendlier name
     {RC_STR_INIT("flatten("), {.type = lexeme_type_function, .function = {.apply = fn_flatten}}},
     {RC_STR_INIT("concat("),  {.type = lexeme_type_function, .function = {.apply = fn_concat}}},
     {RC_STR_INIT("zip("),      {.type = lexeme_type_function, .function = {.apply = fn_zip}}},
@@ -1824,9 +1861,10 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
         return body_fail(error_type_expression, cond.error_at);
     }
 
-    // A live IF with a KNOWN numeric condition picks a branch; an unknown / non-numeric condition is
-    // undecidable, so no branch runs and the eventual return defers (resolves on a later pass).
-    bool decided     = active && value_is_numeric(cond.value);
+    // A live IF with a KNOWN condition (a number or a boolean) picks a branch; an unknown /
+    // non-numeric condition is undecidable, so no branch runs and the eventual return defers
+    // (resolves on a later pass).
+    bool decided     = active && value_is_number(cond.value);
     bool run_if      = decided && cond.value.numeric != 0.0;
     bool else_active = decided && !run_if;
 
@@ -2314,14 +2352,14 @@ RC_TEST_STEP(expression, arithmetic_and_precedence, fix)
 
 RC_TEST_STEP(expression, constants, fix)
 {
-    // Pure named constants evaluate to their value, case-insensitively (booleans are numbers).
-    RC_CHECK_TRUE(value_is_equal(VAL("TRUE"),  value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("FALSE"), value_make_numeric(0.0)));
+    // Pure named constants evaluate to their value, case-insensitively.
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE"),  value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("FALSE"), value_make_bool(false)));
     RC_CHECK_TRUE(value_is_equal(VAL("PI"),    value_make_numeric(3.14159265358979323846)));
-    RC_CHECK_TRUE(value_is_equal(VAL("true"),  value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("true"),  value_make_bool(true)));
     RC_CHECK_TRUE(value_is_equal(VAL("Pi"),    value_make_numeric(3.14159265358979323846)));
-    // They compose like any other operand.
-    RC_CHECK_TRUE(value_is_equal(VAL("TRUE and FALSE"), value_make_numeric(0.0)));
+    // They compose like any other operand; two booleans get the logical AND.
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE and FALSE"), value_make_bool(false)));
     RC_CHECK_TRUE(value_is_equal(VAL("2*PI"), value_make_numeric(2.0 * 3.14159265358979323846)));
     // A longer identifier still wins: PICKLE is a symbol (here unbound), not PI followed by CKLE.
     value pickle = VAL("PICKLE");
@@ -2344,9 +2382,10 @@ RC_TEST_STEP(expression, random, fix)
     value r = VAL("RND(256)");
     RC_CHECK_TRUE(value_is_numeric(r) && r.numeric >= 0 && r.numeric < 256);
 
-    // full builds a list of copies...
+    // full builds a list of copies (REPEATED is the same function by a friendlier name)...
     value sevens[] = {value_make_numeric(7), value_make_numeric(7), value_make_numeric(7)};
     RC_CHECK_TRUE(value_is_equal(VAL("full(3, 7)"), value_make_list((rc_view_value) RC_VIEW(sevens))));
+    RC_CHECK_TRUE(value_is_equal(VAL("REPEATED(3, 7)"), value_make_list((rc_view_value) RC_VIEW(sevens))));
     value empty = VAL("full(0, 9)");
     RC_CHECK_TRUE(value_is_list(empty) && empty.list.num == 0);
 
@@ -2378,23 +2417,13 @@ RC_TEST_STEP(expression, unary, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("+5"),   value_make_numeric(5.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("--5"),  value_make_numeric(5.0)));    // -(-5)
 
-    // '!' - logical NOT: 1 for zero, 0 for anything else (0.5 is truthy, like a body IF)
-    RC_CHECK_TRUE(value_is_equal(VAL("!0"),      value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("!1"),      value_make_numeric(0.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("!255"),    value_make_numeric(0.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("!0.5"),    value_make_numeric(0.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("!TRUE"),   value_make_numeric(0.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("!FALSE"),  value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("!!5"),     value_make_numeric(1.0)));    // prefixes chain
-    RC_CHECK_TRUE(value_is_equal(VAL("-!0"),     value_make_numeric(-1.0)));   // and mix with minus
-    RC_CHECK_TRUE(value_is_equal(VAL("!0 + 1"),  value_make_numeric(2.0)));    // tight: (!0)+1, not !(0+1)
-    RC_CHECK_TRUE(value_is_equal(VAL("!0 = 1"),  value_make_numeric(1.0)));    // (!0) compared with 1
-    RC_CHECK_TRUE(value_is_equal(VAL("3 != 3"),  value_make_numeric(0.0)));    // '!=' still means not-equal
-    RC_CHECK_TRUE(value_is_error(VAL("!\"abc\"")));                            // type mismatch, not silence
+    // '!' is no longer an operator (NOT on a boolean does its old job); '!=' still means not-equal.
+    RC_CHECK_TRUE(RESULT("!5").error == expr_error_expected_expression);
+    RC_CHECK_TRUE(value_is_equal(VAL("3 != 3"), value_make_bool(false)));
 
-    // and it maps element-wise over a list, like any unary op
-    value mask[] = {value_make_numeric(1), value_make_numeric(0), value_make_numeric(1)};
-    RC_CHECK_TRUE(value_is_equal(VAL("!{0, 3, 0}"), value_make_list((rc_view_value) RC_VIEW(mask))));
+    // NOT maps element-wise over a list, like any unary op: logical per boolean element.
+    value mask[] = {value_make_bool(false), value_make_bool(true)};
+    RC_CHECK_TRUE(value_is_equal(VAL("NOT({TRUE, FALSE})"), value_make_list((rc_view_value) RC_VIEW(mask))));
 }
 
 RC_TEST_STEP(expression, functions, fix)
@@ -2488,22 +2517,39 @@ RC_TEST_STEP(expression, bitwise, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("12 eor 10"), value_make_numeric(6.0)));
     RC_CHECK_TRUE(value_is_equal(VAL("NOT(0)"),    value_make_numeric(4294967295.0)));   // unsigned ~0
     RC_CHECK_TRUE(value_is_equal(VAL("NOT(255)"),  value_make_numeric(4294967040.0)));
+
+    // The same operators on two booleans are logical, yielding a boolean.
+    RC_CHECK_TRUE(value_is_equal(VAL("NOT(TRUE)"),      value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("NOT(FALSE)"),     value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE or FALSE"),  value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE and FALSE"), value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE eor TRUE"),  value_make_bool(false)));
+    // A mixed boolean/number pair is refused - neither reading is honest.
+    RC_CHECK_TRUE(value_is_error(VAL("1 and TRUE")));
+    RC_CHECK_TRUE(value_is_error(VAL("FALSE or 12")));
 }
 
 RC_TEST_STEP(expression, comparisons, fix)
 {
-    RC_CHECK_TRUE(value_is_equal(VAL("3=3"),   value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("3=4"),   value_make_numeric(0.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("3==3"),  value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("3!=4"),  value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("3<>3"),  value_make_numeric(0.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("2<3"),   value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("3<=3"),  value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("4>=5"),  value_make_numeric(0.0)));
-    // arithmetic binds tighter than comparison, comparison tighter than and/or.
-    RC_CHECK_TRUE(value_is_equal(VAL("1+1=2"),         value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("2<3 and 4<5"),   value_make_numeric(1.0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("0 or 1"),        value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("3=3"),   value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("3=4"),   value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("3==3"),  value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("3!=4"),  value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("3<>3"),  value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("2<3"),   value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("3<=3"),  value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("4>=5"),  value_make_bool(false)));
+    // arithmetic binds tighter than comparison, comparison tighter than and/or; two
+    // comparison results are booleans, so the 'and' between them is the logical one.
+    RC_CHECK_TRUE(value_is_equal(VAL("1+1=2"),         value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("2<3 and 4<5"),   value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("0 or 1"),        value_make_numeric(1.0)));   // two numbers: bitwise
+    // A boolean coerces to 1 / 0 in any numeric context, comparisons included.
+    RC_CHECK_TRUE(value_is_equal(VAL("1 = TRUE"),      value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("2 = TRUE"),      value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE > FALSE"),  value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("TRUE + 1"),      value_make_numeric(2.0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("(2>1)*(3>2)*5"), value_make_numeric(5.0)));   // the mask idiom
 }
 
 RC_TEST_STEP(expression, more_functions, fix)
@@ -2661,7 +2707,7 @@ RC_TEST_STEP(expression, list_broadcast, fix)
     value r3[] = {value_make_numeric(10), value_make_numeric(40)};
     RC_CHECK_TRUE(value_is_equal(VAL("{1,2}*{10,20}"), value_make_list((rc_view_value) RC_VIEW(r3))));
 
-    value r4[] = {value_make_numeric(0), value_make_numeric(1), value_make_numeric(0)};   // comparisons map (1/0)
+    value r4[] = {value_make_bool(false), value_make_bool(true), value_make_bool(false)};   // comparisons map
     RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3}=2"), value_make_list((rc_view_value) RC_VIEW(r4))));
 
     // nested: a scalar broadcasts into every leaf
@@ -2895,8 +2941,8 @@ RC_TEST_STEP(expression, list_functions, fix)
 RC_TEST_STEP(expression, defined_lohi_strings, fix)
 {
     scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (cursor){0, 0});
-    RC_CHECK_TRUE(value_is_equal(VAL("defined(foo)"), value_make_numeric(1)));   // resolves
-    RC_CHECK_TRUE(value_is_equal(VAL("defined(bar)"), value_make_numeric(0)));   // an unknown symbol
+    RC_CHECK_TRUE(value_is_equal(VAL("defined(foo)"), value_make_bool(true)));    // resolves
+    RC_CHECK_TRUE(value_is_equal(VAL("defined(bar)"), value_make_bool(false)));   // an unknown symbol
 
     // '<' low byte, '>' high byte (6502 style), super low precedence so they grab the tail
     RC_CHECK_TRUE(value_is_equal(VAL("<258"),     value_make_numeric(2)));       // low byte of 0x102
@@ -2967,16 +3013,16 @@ RC_TEST_STEP(expression, strings_and_zip, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("\"\"\"\""),   value_make_string(RC_STR("\""))));     // """" -> "
 
     // string comparisons (equality and lexicographic ordering)
-    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" = \"abc\""), value_make_numeric(1)));
-    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" = \"abd\""), value_make_numeric(0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" != \"abd\""), value_make_numeric(1)));
-    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" < \"abd\""), value_make_numeric(1)));
-    RC_CHECK_TRUE(value_is_equal(VAL("\"abd\" > \"abc\""), value_make_numeric(1)));
-    RC_CHECK_TRUE(value_is_equal(VAL("\"ab\" < \"abc\""),  value_make_numeric(1)));   // prefix is less
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" = \"abc\""), value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" = \"abd\""), value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" != \"abd\""), value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abc\" < \"abd\""), value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"abd\" > \"abc\""), value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"ab\" < \"abc\""),  value_make_bool(true)));   // prefix is less
     RC_CHECK_TRUE(value_is_error(VAL("\"a\" = 1")));                                  // mixed types
 
     // comparisons broadcast over a list of strings
-    value cmp[] = {value_make_numeric(1), value_make_numeric(0)};
+    value cmp[] = {value_make_bool(true), value_make_bool(false)};
     RC_CHECK_TRUE(value_is_equal(VAL("{\"a\",\"b\"} = \"a\""), value_make_list((rc_view_value) RC_VIEW(cmp))));
 
     // zip: equal-length lists into tuples (transpose of the stacked args)
@@ -3066,13 +3112,14 @@ RC_TEST_STEP(expression, find, fix)
 RC_TEST_STEP(expression, type_predicates, fix)
 {
     // Whole-value predicates, deliberately not element-wise: a list is neither.
-    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING(\"a\")"),   value_make_numeric(1)));
-    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING(5)"),       value_make_numeric(0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING({\"a\"})"), value_make_numeric(0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(5)"),       value_make_numeric(1)));
-    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(\"a\")"),   value_make_numeric(0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER({1,2})"),   value_make_numeric(0)));
-    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(1..3)"),    value_make_numeric(0)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING(\"a\")"),   value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING(5)"),       value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_STRING({\"a\"})"), value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(5)"),       value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(TRUE)"),    value_make_bool(true)));   // a bool coerces to a number
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(\"a\")"),   value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER({1,2})"),   value_make_bool(false)));
+    RC_CHECK_TRUE(value_is_equal(VAL("IS_NUMBER(1..3)"),    value_make_bool(false)));
 
     // Errors propagate (only defined() inspects), so a forward reference defers, not answers.
     value fwd = VAL("IS_NUMBER(nosuch)");

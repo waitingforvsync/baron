@@ -275,10 +275,17 @@ bytes is refused.
 ## Expressions ##
 
 Anywhere Baron wants a value, you get the full expression language: the usual arithmetic (`+ - * / ^`),
-integer `DIV` and `MOD`, shifts `<<` `>>`, bitwise `AND` `OR` `EOR` `NOT()`, comparisons, logical
-`!` (`!x` is 1 if `x` is 0, else 0 - `NOT()` is the bitwise complement, `!` the truthy one), and a
-ton of functions (`SIN`, `SQRT`, `LO`, `HI`, ...) - the whole list is in the
+integer `DIV` and `MOD`, shifts `<<` `>>`, `AND` `OR` `EOR` `NOT()`, comparisons, and a ton of
+functions (`SIN`, `SQRT`, `LO`, `HI`, ...) - the whole list is in the
 [reference](reference.md#expression-reference).
+
+Comparisons yield booleans (`TRUE` / `FALSE`), and `AND`, `OR`, `EOR` and `NOT()` are
+overloaded on what you hand them: two booleans get the logical operation (`NOT(TRUE)` is `FALSE`,
+`a < b AND c < d` reads exactly as it looks), two numbers the bitwise 32-bit one (`12 AND 10` is 8),
+and a mixed pair is refused rather than guessed at. A boolean quietly coerces to 1 / 0 anywhere a
+number is wanted - `(x > 5) * 10`, `EQUB flag`.
+
+**Note, this is different to BeebAsm, which represented TRUE as -1, not 1.**
 
 ```
 LDA #LO(screenbase)             ; low byte - or the 6502-style  LDA #<screenbase
@@ -347,8 +354,8 @@ Since `EQUB` flattens whatever it is given into bytes, lists and ranges make dat
 
 ```
 EQUB 1..5                       ; 01 02 03 04 05
-EQUB FULL(16, &FF)              ; sixteen &FFs
-EQUB RND(FULL(8, 256))          ; eight random bytes
+EQUB REPEATED(16, &FF)          ; sixteen &FFs
+EQUB RND(REPEATED(8, 256))      ; eight random bytes
 EQUW table + (0..<32) * 8       ; a table of 32 pointers, stride 8
 ```
 
@@ -503,9 +510,9 @@ EQUS CODES("HELLO WORLD") - CODES(" ")   ; font starts at space = 0
 A character missing from the set fails the assemble with `Not found: '81'` naming the stray code -
 which is exactly what you want from a font with holes in it.
 
-Two type predicates round the toolkit out: `IS_STRING(x)` and `IS_NUMBER(x)` answer 1 or 0 for the
-value *as a whole* (a list is neither; test list-ness with `RANK(x) > 0`) - handy for a `FUNCTION`
-that accepts either a string or a list of codes.
+Two type predicates round the toolkit out: `IS_STRING(x)` and `IS_NUMBER(x)` answer `TRUE` or `FALSE`
+for the value *as a whole* (a list is neither; test list-ness with `RANK(x) > 0`) - handy for a
+`FUNCTION` that accepts either a string or a list of codes.
 
 ## Zero-page allocation ##
 
@@ -531,8 +538,9 @@ has a whole guide to itself: [Zero page allocation](zero-page-allocation.md).
 
 ## IF and FOR ##
 
-`IF` / `ELIF` / `ELSE` / `ENDIF` assembles conditionally. The condition is any expression (`TRUE` and
-`FALSE` are built in), and a dead branch emits nothing at all:
+`IF` / `ELIF` / `ELSE` / `ENDIF` assembles conditionally. The condition is any expression - a boolean
+(`TRUE`, `FALSE`, a comparison), or a number read as nonzero-is-true - and a dead branch emits nothing
+at all:
 
 ```
 debugrasters = FALSE

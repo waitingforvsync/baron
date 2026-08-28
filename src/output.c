@@ -49,7 +49,7 @@ typedef struct address_result {
 
 static address_result address_from_value(value v)
 {
-    if (!value_is_numeric(v) || v.numeric < 0.0 || v.numeric > 4294967295.0) {
+    if (!value_is_number(v) || v.numeric < 0.0 || v.numeric > 4294967295.0) {
         return (address_result) {0};
     }
     uint32_t u = (uint32_t) v.numeric;

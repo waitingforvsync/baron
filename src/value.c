@@ -14,6 +14,13 @@ value value_make_numeric(double n)
     return (value) {.type = value_type_numeric, .numeric = n};
 }
 
+value value_make_bool(bool b)
+{
+    // The payload rides in .numeric as canonical 1.0 / 0.0, so numeric contexts
+    // (arithmetic, comparisons, int_argument) read a bool without a conversion step.
+    return (value) {.type = value_type_boolean, .numeric = b ? 1.0 : 0.0};
+}
+
 value value_make_string(rc_str s)
 {
     return (value) {.type = value_type_string, .string = s};
@@ -55,6 +62,7 @@ value value_make_copy(value v, rc_arena *arena)
     switch (v.type) {
         case value_type_none:
         case value_type_numeric:
+        case value_type_boolean:
         case value_type_range:
         case value_type_zpauto:   // the name view is into permanent source text, so no copy needed
             return v;   // wholly inline: nothing to deep-copy
@@ -94,7 +102,7 @@ static value range_int(value v, int64_t *out)
     if (value_is_error(v)) {
         return v;
     }
-    if (!value_is_numeric(v)) {
+    if (!value_is_number(v)) {
         return value_make_error(error_type_type_mismatch);
     }
     double d = v.numeric;
@@ -212,17 +220,20 @@ int64_t value_range_step(value_range r)
 value_type value_type_of(value v)  { return v.type; }
 bool value_is_none(value v)        { return v.type == value_type_none; }
 bool value_is_numeric(value v)     { return v.type == value_type_numeric; }
+bool value_is_boolean(value v)     { return v.type == value_type_boolean; }
+bool value_is_number(value v)      { return value_is_numeric(v) || value_is_boolean(v); }
 bool value_is_string(value v)      { return v.type == value_type_string; }
 bool value_is_list(value v)        { return v.type == value_type_list; }
 bool value_is_range(value v)       { return v.type == value_type_range; }
 bool value_is_error(value v)       { return v.type == value_type_error; }
 bool value_is_zpauto(value v)      { return v.type == value_type_zpauto; }
 
-// Simple values stand alone (a number, a string, an error, a zpauto address); compound values
-// gather others (a list of values, a range that enumerates to one). none belongs to neither.
-// zpauto being simple is load-bearing: it routes through the broadcast machinery as a scalar,
-// reaching the operator handlers (whose numeric checks refuse it) instead of the list paths.
-bool value_is_simple(value v)      { return value_is_numeric(v) || value_is_string(v) || value_is_error(v) || value_is_zpauto(v); }
+// Simple values stand alone (a number, a boolean, a string, an error, a zpauto address); compound
+// values gather others (a list of values, a range that enumerates to one). none belongs to neither.
+// zpauto and boolean being simple is load-bearing: it routes them through the broadcast machinery
+// as scalars, reaching the operator handlers (whose type checks accept or refuse them) instead of
+// the list paths.
+bool value_is_simple(value v)      { return value_is_number(v) || value_is_string(v) || value_is_error(v) || value_is_zpauto(v); }
 bool value_is_compound(value v)    { return value_is_list(v) || value_is_range(v); }
 
 
@@ -236,6 +247,7 @@ bool value_is_equal(value a, value b)
         case value_type_none:
             return true;
         case value_type_numeric:
+        case value_type_boolean:   // canonical 1.0 / 0.0 payload, so the numeric compare is exact
             return a.numeric == b.numeric;
         case value_type_string:
             return rc_str_is_equal(a.string, b.string);
@@ -279,6 +291,9 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
             return;
         case value_type_numeric:
             rc_mstr_append_f64(out, v.numeric, arena);
+            return;
+        case value_type_boolean:
+            rc_mstr_append(out, v.numeric != 0.0 ? RC_STR("TRUE") : RC_STR("FALSE"), arena);
             return;
         case value_type_string:
             rc_mstr_append_char(out, '"', arena);
@@ -345,6 +360,14 @@ RC_TEST(value, constructors_and_predicates)
     RC_CHECK_TRUE(value_is_numeric(num));
     RC_CHECK(num.numeric, ==, 42.0);
 
+    value yes = value_make_bool(true);
+    RC_CHECK_TRUE(value_is_boolean(yes));
+    RC_CHECK_FALSE(value_is_numeric(yes));
+    RC_CHECK_TRUE(value_is_number(yes));   // a bool coerces to a number...
+    RC_CHECK_TRUE(value_is_simple(yes));   // ...and broadcasts as a scalar
+    RC_CHECK(yes.numeric, ==, 1.0);
+    RC_CHECK(value_make_bool(false).numeric, ==, 0.0);
+
     value str = value_make_string(RC_STR("hi"));
     RC_CHECK_TRUE(value_is_string(str));
     RC_CHECK(str.string, ==, RC_STR("hi"));
@@ -358,7 +381,11 @@ RC_TEST(value, scalar_equality)
 {
     RC_CHECK_TRUE(value_is_equal(value_make_numeric(1), value_make_numeric(1)));
     RC_CHECK_FALSE(value_is_equal(value_make_numeric(1), value_make_numeric(2)));
-    // Different types are never equal.
+    RC_CHECK_TRUE(value_is_equal(value_make_bool(true), value_make_bool(true)));
+    RC_CHECK_FALSE(value_is_equal(value_make_bool(true), value_make_bool(false)));
+    // Different types are never equal - TRUE and numeric 1 included: the symbol table's
+    // convergence gate must notice a binding changing type, or the stale type would stick.
+    RC_CHECK_FALSE(value_is_equal(value_make_bool(true), value_make_numeric(1)));
     RC_CHECK_FALSE(value_is_equal(value_make_numeric(0), value_make_none()));
     RC_CHECK_TRUE(value_is_equal(value_make_none(), value_make_none()));
     RC_CHECK_TRUE(value_is_equal(value_make_string(RC_STR("a")), value_make_string(RC_STR("a"))));
@@ -414,6 +441,14 @@ RC_TEST(value, formatting)
     out = rc_mstr_make(16, &arena);
     value_format(&out, value_make_numeric(3.5), &arena);
     RC_CHECK(out.view, ==, RC_STR("3.5"));
+
+    out = rc_mstr_make(16, &arena);
+    value_format(&out, value_make_bool(true), &arena);
+    RC_CHECK(out.view, ==, RC_STR("TRUE"));
+
+    out = rc_mstr_make(16, &arena);
+    value_format(&out, value_make_bool(false), &arena);
+    RC_CHECK(out.view, ==, RC_STR("FALSE"));
 
     out = rc_mstr_make(16, &arena);
     value_format(&out, value_make_string(RC_STR("hi")), &arena);
