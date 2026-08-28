@@ -26,7 +26,7 @@ blue = 4
 magenta = 5
 cyan = 6
 white = 7
-boundaries = {4, 10, 18}
+boundaries = {4, 10, 13, 18, 21}
 colours = {...
 .init
 {
@@ -106,7 +106,7 @@ state = &70 [auto]
   09A0  48              PHA
   09A1  A6 70           LDX state
   09A3                  setcolour colour0tab
-  09A3  BD 19 0A        LDA table,X
+  09A3  BD 1D 0A        LDA table,X
   09A6  8D 21 FE        STA &FE21
   09A9  49 10           EOR #&10
   09AB  8D 21 FE        STA &FE21
@@ -115,7 +115,7 @@ state = &70 [auto]
   09B3  49 10           EOR #&10
   09B5  8D 21 FE        STA &FE21
   09B8                  setcolour colour1tab
-  09B8  BD 1D 0A        LDA table,X
+  09B8  BD 23 0A        LDA table,X
   09BB  8D 21 FE        STA &FE21
   09BE  49 10           EOR #&10
   09C0  8D 21 FE        STA &FE21
@@ -124,7 +124,7 @@ state = &70 [auto]
   09C8  49 10           EOR #&10
   09CA  8D 21 FE        STA &FE21
   09CD                  setcolour colour2tab
-  09CD  BD 21 0A        LDA table,X
+  09CD  BD 29 0A        LDA table,X
   09D0  8D 21 FE        STA &FE21
   09D3  49 10           EOR #&10
   09D5  8D 21 FE        STA &FE21
@@ -133,7 +133,7 @@ state = &70 [auto]
   09DD  49 10           EOR #&10
   09DF  8D 21 FE        STA &FE21
   09E2                  setcolour colour3tab
-  09E2  BD 25 0A        LDA table,X
+  09E2  BD 2F 0A        LDA table,X
   09E5  8D 21 FE        STA &FE21
   09E8  49 10           EOR #&10
   09EA  8D 21 FE        STA &FE21
@@ -148,7 +148,7 @@ state = &70 [auto]
   09FF  E9 00           SBC #0
   0A01  8D 67 FE        STA &FE67
   0A04  E8              INX
-  0A05  E0 04           CPX #4
+  0A05  E0 06           CPX #LEN(boundaries)+1
   0A07  D0 02           BNE @+
   0A09  A2 00           LDX #0
 .@
@@ -159,14 +159,14 @@ state = &70 [auto]
   0A0F  4C FF FF        JMP &FFFF
 }
 .boundarytab
-  0A12  04 0A 12 19...  EQUB boundaries, screenheight, boundaries + 39
+  0A12  04 0A 0D 12...  EQUB boundaries, screenheight, boundaries + 39
 .colour0tab
-  0A19  03 07 03 07     EQUB (colours[.., 0] EOR 7) OR &00
+  0A1D  03 07 03 07...  EQUB (colours[.., 0] EOR 7) OR &00
 .colour1tab
-  0A1D  26 22 25 23     EQUB (colours[.., 1] EOR 7) OR &20
+  0A23  26 22 25 23...  EQUB (colours[.., 1] EOR 7) OR &20
 .colour2tab
-  0A21  85 81 82 85     EQUB (colours[.., 2] EOR 7) OR &80
+  0A29  85 81 82 85...  EQUB (colours[.., 2] EOR 7) OR &80
 .colour3tab
-  0A25  A0 A4 A1 A6     EQUB (colours[.., 3] EOR 7) OR &A0
+  0A2F  A0 A4 A1 A6...  EQUB (colours[.., 3] EOR 7) OR &A0
 ENDSECTION
 

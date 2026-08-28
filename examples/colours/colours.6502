@@ -20,16 +20,23 @@ magenta = 5
 cyan = 6
 white = 7
 
-\ List of colour boundary row positions (3 boundaries, 4 colour zones)
-boundaries = {4, 10, 18}
+\ List of colour boundary row positions
+boundaries = {4, 10, 13, 18, 21}
 
 \ Colours for each zone
 colours = {
     {blue, red, green, white},
     {black, magenta, cyan, yellow},
     {blue, green, magenta, cyan},
-    {black, blue, green, red}
+    {black, blue, green, red},
+    {blue, black, red, green},
+    {black, red, yellow, cyan}
 }
+
+IF LEN(colours)<>LEN(boundaries)+1
+    ERROR "Missing colour zone"
+ENDIF
+
 
 ZPRESERVE &70..&8F
 
@@ -124,7 +131,7 @@ ZPRESERVE &70..&8F
     ASL A:SBC #0
     STA &FE67
 
-    INX:CPX #4:BNE @+:LDX #0:.@
+    INX:CPX #LEN(boundaries)+1:BNE @+:LDX #0:.@
     STX state
 
     PLA:TAX
