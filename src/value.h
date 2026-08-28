@@ -101,6 +101,10 @@ struct value {
 #include "richc/template/array.h"
 
 
+// BeebAsm compatibility: when enabled, a true boolean coerces to -1.0 (all bits set, how BBC
+// BASIC and BeebAsm spell truth) instead of 1.0. Global - set once, before any assembly.
+void value_set_beebasm_true(bool enable);
+
 // Constructors (by value).
 value value_make_none(void);
 value value_make_numeric(double n);

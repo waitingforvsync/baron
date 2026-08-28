@@ -6429,6 +6429,14 @@ RC_TEST_STEP(assemble, boolean_values_coerce, fix)
     RC_CHECK_TRUE(ERR("EQUB TRUE and 1") == error_type_type_mismatch);
 }
 
+RC_TEST_STEP(assemble, beebasm_true_mode, fix)
+{
+    // --beebasm-true: TRUE coerces to -1, so it emits as &FF and equals -1 rather than 1.
+    value_set_beebasm_true(true);
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB TRUE, FALSE, -1 = TRUE"), (uint8_t[]){0xFF, 0x00, 0xFF}, 3));
+    value_set_beebasm_true(false);
+}
+
 RC_TEST_STEP(assemble, equw_emits_little_endian_words, fix)
 {
     RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUW &1234"),   (uint8_t[]){0x34, 0x12}, 2));

@@ -285,7 +285,8 @@ overloaded on what you hand them: two booleans get the logical operation (`NOT(T
 and a mixed pair is refused rather than guessed at. A boolean quietly coerces to 1 / 0 anywhere a
 number is wanted - `(x > 5) * 10`, `EQUB flag`.
 
-**Note, this is different to BeebAsm, which represented TRUE as -1, not 1.**
+**Note, this is different to BeebAsm, which represented TRUE as -1, not 1.** The command-line switch
+`--beebasm-true` can be used for BeebAsm compatibility, to set TRUE to -1.
 
 ```
 LDA #LO(screenbase)             ; low byte - or the 6502-style  LDA #<screenbase

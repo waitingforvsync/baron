@@ -32,6 +32,7 @@ static void display_help(void) {
     puts("  -D <sym>=<expr>  Predefine a symbol before assembly (e.g. -D DEBUG=TRUE)");
     puts("  -log<N> <file>   Output messages to stream N (0-9) to the given file");
     puts("  -v               Output listing for assembled source code");
+    puts("  --beebasm-true   BeebAsm compatibility: TRUE coerces to -1 rather than 1");
     puts("");
     puts("Options for generating a .ssd disk image:");
     puts("  -o <file>        Create a .ssd disk image containing the saved sections");
@@ -140,6 +141,9 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--inf") == 0) {
             inf = true;
+        }
+        else if (strcmp(argv[i], "--beebasm-true") == 0) {
+            value_set_beebasm_true(true);
         }
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];

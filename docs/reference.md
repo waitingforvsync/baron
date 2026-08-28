@@ -134,7 +134,7 @@ message.
 | Kind | Examples |
 |------|----------|
 | Number | `42`, `1.5`, `&FF` or `$FF` (hex), `%1010` (binary). All numbers are one type. |
-| Boolean | `TRUE`, `FALSE` - what comparisons and the predicates return. Coerces to 1 / 0 in any numeric context (`(x>5)*10`, `EQUB flag`), so a boolean goes anywhere a number does; only `AND`/`OR`/`EOR`/`NOT` care about the difference (logical on booleans, bitwise on numbers, a mixed pair refused). **Note: This is a breaking change from BeebAsm, which represents TRUE as -1, not 1.** |
+| Boolean | `TRUE`, `FALSE` - what comparisons and the predicates return. Coerces to 1 / 0 in any numeric context (`(x>5)*10`, `EQUB flag`), so a boolean goes anywhere a number does; only `AND`/`OR`/`EOR`/`NOT` care about the difference (logical on booleans, bitwise on numbers, a mixed pair refused). **Note: This is a breaking change from BeebAsm, which represents TRUE as -1, not 1.** The switch `--beebasm-true` can be used to restore TRUE as -1. |
 | String | `"hello"` - write `""` for a literal quote. |
 | List | `{1, 2, 3}` - nestable, mixed types welcome, newlines allowed inside the braces. Nested equal-length lists act as higher-rank arrays; `SHAPE`/`RANK` report the axes all elements agree on (ragged lists keep only their uniform leading axes). |
 | Range | A compact list of consecutive integers - see [Range forms](#range-forms). |
@@ -260,6 +260,7 @@ Your own `FUNCTION` names join the table as they are defined, callable as `name(
   - A proper boolean type: comparisons and the predicates return `TRUE` / `FALSE`, which coerce
     to 1 / 0 in any numeric context; `AND` / `OR` / `EOR` / `NOT` are logical on booleans and
     bitwise on numbers.
+  - Added `--beebasm-true` command-line switch for BeebAsm compatibility, making TRUE equal to -1.
   - Strings and characters: `CODES`, `CHR` and `FIND`, and the `IS_STRING` / `IS_NUMBER`
     type predicates.
   - `ERROR`: fail the build with your own message - as a statement, or as the `ERROR(...)`

@@ -14,11 +14,20 @@ value value_make_numeric(double n)
     return (value) {.type = value_type_numeric, .numeric = n};
 }
 
+// --beebasm-true: truth spelt -1.0 (BBC BASIC's all-bits-set), constant for a whole run.
+static bool beebasm_true;
+
+void value_set_beebasm_true(bool enable)
+{
+    beebasm_true = enable;
+}
+
 value value_make_bool(bool b)
 {
-    // The payload rides in .numeric as canonical 1.0 / 0.0, so numeric contexts
-    // (arithmetic, comparisons, int_argument) read a bool without a conversion step.
-    return (value) {.type = value_type_boolean, .numeric = b ? 1.0 : 0.0};
+    // The payload rides in .numeric as a canonical 1.0 / 0.0 (-1.0 in BeebAsm mode), so numeric
+    // contexts (arithmetic, comparisons, int_argument) read a bool without a conversion step.
+    // Every consumer tests truth as != 0.0, never == 1.0, so either spelling flows unchanged.
+    return (value) {.type = value_type_boolean, .numeric = b ? (beebasm_true ? -1.0 : 1.0) : 0.0};
 }
 
 value value_make_string(rc_str s)
@@ -375,6 +384,18 @@ RC_TEST(value, constructors_and_predicates)
     value err = value_make_error(error_type_divide_by_zero);
     RC_CHECK_TRUE(value_is_error(err));
     RC_CHECK_FALSE(value_is_numeric(err));
+}
+
+RC_TEST(value, beebasm_true_mode)
+{
+    // --beebasm-true swaps the true payload to -1.0; false and everything downstream
+    // (equality, truth tests) are payload-agnostic. Restore the default before leaving.
+    value_set_beebasm_true(true);
+    RC_CHECK(value_make_bool(true).numeric, ==, -1.0);
+    RC_CHECK(value_make_bool(false).numeric, ==, 0.0);
+    RC_CHECK_TRUE(value_is_equal(value_make_bool(true), value_make_bool(true)));
+    value_set_beebasm_true(false);
+    RC_CHECK(value_make_bool(true).numeric, ==, 1.0);
 }
 
 RC_TEST(value, scalar_equality)
