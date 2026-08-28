@@ -63,7 +63,7 @@ ZPRESERVE &70..&8F
     STA &FE4D
 
     \ Set interrupt to fire below visible screen
-    inittimer = (39-vsyncpos+screenheight) * 512 - 2*64 - 71
+    inittimer = (39-vsyncpos+screenheight) * 512 - 2*64 - 69
     LDA #LO(inittimer):STA &FE64
     LDA #HI(inittimer):STA &FE65
 

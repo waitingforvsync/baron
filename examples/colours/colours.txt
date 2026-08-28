@@ -64,8 +64,8 @@ colours = {...
   0949  2C 4D FE        BIT &FE4D
   094C  F0 FB           BEQ @-
   094E  8D 4D FE        STA &FE4D
-inittimer = (39-vsyncpos+screenheight) * 512 - 2*64 - 71
-  0951  A9 39           LDA #LO(inittimer)
+inittimer = (39-vsyncpos+screenheight) * 512 - 2*64 - 69
+  0951  A9 3B           LDA #LO(inittimer)
   0953  8D 64 FE        STA &FE64
   0956  A9 3F           LDA #HI(inittimer)
   0958  8D 65 FE        STA &FE65
