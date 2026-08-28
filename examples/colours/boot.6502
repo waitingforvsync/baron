@@ -1,0 +1,6 @@
+SECTION Boot, filename="!BOOT", exec=&FFFFFFFF
+
+EQUS "*BASIC",13
+EQUS "CHAIN ""LOADER""",13
+
+ENDSECTION

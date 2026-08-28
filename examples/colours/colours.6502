@@ -1,0 +1,152 @@
+\\ Colour interrupt demo
+\\
+\\ Build with:
+\\ baron boot.6502 loader.6502 colours.6502 -o colours.ssd --opt 3 [-v]
+
+
+SECTION Colours, filename="COLOURS", org=&900, load=&FFFF0900
+
+\ Screen properties
+screenheight = 25
+vsyncpos = 32
+
+\ Names of physical colours
+black = 0
+red = 1
+green = 2
+yellow = 3
+blue = 4
+magenta = 5
+cyan = 6
+white = 7
+
+\ List of colour boundary row positions (3 boundaries, 4 colour zones)
+boundaries = {4, 10, 18}
+
+\ Colours for each zone
+colours = {
+    {blue, red, green, white},
+    {black, magenta, cyan, yellow},
+    {blue, green, magenta, cyan},
+    {black, blue, green, red}
+}
+
+ZPRESERVE &70..&8F
+
+.init
+{
+    ZPENTRY
+
+    \ Set MODE 1
+    LDA #22:JSR &FFEE
+    LDA #1:JSR &FFEE
+
+    \ Turn off ADC
+    LDA #16:LDX #0:JSR &FFF4
+
+    \ Configure CRTC for custom screen height
+    LDA #6:STA &FE00:LDA #screenheight:STA &FE01
+    LDA #7:STA &FE00:LDA #vsyncpos:STA &FE01
+    LDA #8:STA &FE00:LDA #0:STA &FE01       ; interlace off!
+
+    SEI
+
+    \ Enable User VIA timer 1 and configure for free-run
+    LDA #&7F:STA &FE6E          ; disable all User VIA interrupts
+    LDA #&C0:STA &FE6E          ; now enable just Timer 1
+    LDA #&40:STA &FE6B          ; timer 1 free running mode
+    LDA #&00:STA &FE6C          ; default PCR
+
+    \ Wait for vsync
+    LDA #2:STA &FE4D
+    .@ BIT &FE4D:BEQ @-
+    STA &FE4D
+
+    \ Set interrupt to fire below visible screen
+    inittimer = (39-vsyncpos+screenheight) * 512 - 2*64 - 71
+    LDA #LO(inittimer):STA &FE64
+    LDA #HI(inittimer):STA &FE65
+
+    \ Set latch ready for first boundary
+    initlatch = (39+boundaries[0]-screenheight) * 512 - 2
+    LDA #LO(initlatch):STA &FE66
+    LDA #HI(initlatch):STA &FE67
+
+    \ Put OS timer in lockstep with us
+    LDA #64:STA &FE44
+    LDA #0:STA &FE45
+    LDA #LO(312*64-2):STA &FE46
+    LDA #HI(312*64-2):STA &FE47
+
+    \ Install new IRQ handler
+    LDA &204:STA irq.old+1
+    LDA &205:STA irq.old+2
+    LDA #LO(irq):STA &204
+    LDA #HI(irq):STA &205
+
+    LDA #0:STA irq.state
+
+    CLI
+    RTS
+}
+
+
+.irq
+{
+    ZPINTERRUPT
+    ZPAUTO1 state
+
+    \ If not our user timer, just hand off to the OS
+    LDA &FE6D:AND #&40:BEQ old
+    STA &FE6D
+
+    \ We need to program the palette for the current state here
+    TXA:PHA
+    LDX state
+
+    MACRO setcolour table
+        LDA table,X:STA &FE21
+        EOR #&10:STA &FE21
+        EOR #&40:STA &FE21
+        EOR #&10:STA &FE21
+    ENDMACRO
+
+    \ Program the palette register
+    setcolour colour0tab
+    setcolour colour1tab
+    setcolour colour2tab
+    setcolour colour3tab
+
+    \ Set the latch to interrupt at (state+2) % 4
+    SEC
+    LDA boundarytab+1,X
+    SBC boundarytab+0,X
+    ASL A:SBC #0
+    STA &FE67
+
+    INX:CPX #4:BNE @+:LDX #0:.@
+    STX state
+
+    PLA:TAX
+
+    .old JMP &FFFF
+}
+
+\ Boundary table
+.boundarytab
+    EQUB boundaries, screenheight, boundaries + 39
+
+\ Build colour tables, one per index, for each screen zone
+\ colours[.., 0] is a list of the element 0 of each sublist in colours
+.colour0tab
+    EQUB (colours[.., 0] EOR 7) OR &00
+.colour1tab
+    EQUB (colours[.., 1] EOR 7) OR &20
+.colour2tab
+    EQUB (colours[.., 2] EOR 7) OR &80
+.colour3tab
+    EQUB (colours[.., 3] EOR 7) OR &A0
+
+
+
+ENDSECTION
