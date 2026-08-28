@@ -2,12 +2,17 @@ SECTION Loader, filename="LOADER", org=&1900, load=&FFFF1900, exec=&FFFF8023
 
 BASIC
     10*/COLOURS
+    15REM Draw a demo screen
     20FORN%=0TO24
     30COLOUR1:PRINTSPC(1-(N%<10)+ABS(N%MOD9-4));N%;"  COLOUR 1   ";
     40COLOUR2:PRINT"COLOUR 2   ";
     50COLOUR3:PRINT"COLOUR 3"
     60NEXT
     70VDU30
+    75REM Wait for a key
+    80IFGET
+    90REM Set new row boundaries: ?&80 has to be the last write
+   100?&82=22:?&81=16:?&80=9
 ENDBASIC
 
 ENDSECTION

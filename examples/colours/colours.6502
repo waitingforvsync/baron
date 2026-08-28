@@ -21,16 +21,14 @@ cyan = 6
 white = 7
 
 \ List of colour boundary row positions
-boundaries = {4, 10, 13, 18, 21}
+boundaries = {4, 10, 18}
 
 \ Colours for each zone
 colours = {
     {blue, red, green, white},
     {black, magenta, cyan, yellow},
     {blue, green, magenta, cyan},
-    {black, blue, green, red},
-    {blue, black, red, green},
-    {black, red, yellow, cyan}
+    {black, blue, green, red}
 }
 
 IF LEN(colours)<>LEN(boundaries)+1
@@ -38,7 +36,8 @@ IF LEN(colours)<>LEN(boundaries)+1
 ENDIF
 
 
-ZPRESERVE &70..&8F
+ZPRESERVE &70..&7F
+new_boundaries = &80
 
 .init
 {
@@ -93,6 +92,9 @@ ZPRESERVE &70..&8F
 
     LDA #0:STA irq.state
 
+    \\ Tell IRQ no new boundaries to initialise
+    STA new_boundaries
+
     CLI
     RTS
 }
@@ -104,7 +106,11 @@ ZPRESERVE &70..&8F
     ZPAUTO1 state
 
     \ If not our user timer, just hand off to the OS
-    LDA &FE6D:AND #&40:BEQ old
+    LDA &FE6D:AND #&40:BNE ours
+    .old JMP &FFFF
+
+    \ This is our handler
+    .ours
     STA &FE6D
 
     \ We need to program the palette for the current state here
@@ -131,17 +137,31 @@ ZPRESERVE &70..&8F
     ASL A:SBC #0
     STA &FE67
 
+    \ See if there's a request to change boundaries
+    \ We add these atomically in the final boundary
+    CPX #LEN(boundaries)-1:BNE nochange
+    LDA new_boundaries:BEQ nochange
+    CLC
+    STA boundarytab:ADC #39:STA boundarytab2
+    LDA new_boundaries+1:STA boundarytab+1
+    LDA new_boundaries+2:STA boundarytab+2
+    LDA #0:STA new_boundaries
+    .nochange
+
+    \ Advance state
     INX:CPX #LEN(boundaries)+1:BNE @+:LDX #0:.@
     STX state
 
     PLA:TAX
-
-    .old JMP &FFFF
+    LDA &FC
+    RTI
 }
 
 \ Boundary table
 .boundarytab
-    EQUB boundaries, screenheight, boundaries + 39
+    EQUB boundaries, screenheight
+.boundarytab2
+    EQUB boundaries[0] + 39
 
 \ Build colour tables, one per index, for each screen zone
 \ colours[.., 0] is a list of the element 0 of each sublist in colours
@@ -153,7 +173,6 @@ ZPRESERVE &70..&8F
     EQUB (colours[.., 2] EOR 7) OR &80
 .colour3tab
     EQUB (colours[.., 3] EOR 7) OR &A0
-
 
 
 ENDSECTION

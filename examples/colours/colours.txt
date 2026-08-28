@@ -6,13 +6,18 @@ ENDSECTION
 SECTION Loader, filename="LOADER", org=&1900, load=&FFFF1900, exec=&FFFF8023
 BASIC
   1900  0D 00 0A 0D...  10*/COLOURS
-  190D  0D 00 14 0C...  20FORN%=0TO24
-  1919  0D 00 1E 32...  30COLOUR1:PRINTSPC(1-(N%<10)+ABS(N%MOD9-4));N%;"  COLOUR 1   ";
-  194B  0D 00 28 16...  40COLOUR2:PRINT"COLOUR 2   ";
-  1961  0D 00 32 12...  50COLOUR3:PRINT"COLOUR 3"
-  1973  0D 00 3C 05...  60NEXT
-  1978  0D 00 46 07...  70VDU30
-  197F  0D FF           ENDBASIC
+  190D  0D 00 0F 18...  15REM Draw a demo screen
+  1925  0D 00 14 0C...  20FORN%=0TO24
+  1931  0D 00 1E 32...  30COLOUR1:PRINTSPC(1-(N%<10)+ABS(N%MOD9-4));N%;"  COLOUR 1   ";
+  1963  0D 00 28 16...  40COLOUR2:PRINT"COLOUR 2   ";
+  1979  0D 00 32 12...  50COLOUR3:PRINT"COLOUR 3"
+  198B  0D 00 3C 05...  60NEXT
+  1990  0D 00 46 07...  70VDU30
+  1997  0D 00 4B 14...  75REM Wait for a key
+  19AB  0D 00 50 06...  80IFGET
+  19B1  0D 00 5A 3B...  90REM Set new row boundaries: ?&80 has to be the last write
+  19EC  0D 00 64 1A...  100?&82=22:?&81=16:?&80=9
+  1A06  0D FF           ENDBASIC
 ENDSECTION
 
 SECTION Colours, filename="COLOURS", org=&900, load=&FFFF0900
@@ -26,8 +31,9 @@ blue = 4
 magenta = 5
 cyan = 6
 white = 7
-boundaries = {4, 10, 13, 18, 21}
+boundaries = {4, 10, 18}
 colours = {...
+new_boundaries = &80
 .init
 {
   0900  A9 16           LDA #22
@@ -83,90 +89,111 @@ initlatch = (39+boundaries[0]-screenheight) * 512 - 2
   0974  A9 4D           LDA #HI(312*64-2)
   0976  8D 47 FE        STA &FE47
   0979  AD 04 02        LDA &204
-  097C  8D 10 0A        STA irq.old+1
+  097C  8D 9F 09        STA irq.old+1
   097F  AD 05 02        LDA &205
-  0982  8D 11 0A        STA irq.old+2
-  0985  A9 95           LDA #LO(irq)
+  0982  8D A0 09        STA irq.old+2
+  0985  A9 97           LDA #LO(irq)
   0987  8D 04 02        STA &204
   098A  A9 09           LDA #HI(irq)
   098C  8D 05 02        STA &205
   098F  A9 00           LDA #0
   0991  85 70           STA irq.state
-  0993  58              CLI
-  0994  60              RTS
+  0993  85 80           STA new_boundaries
+  0995  58              CLI
+  0996  60              RTS
 }
 .irq
 {
 state = &70 [auto]
-  0995  AD 6D FE        LDA &FE6D
-  0998  29 40           AND #&40
-  099A  F0 73           BEQ old
-  099C  8D 6D FE        STA &FE6D
-  099F  8A              TXA
-  09A0  48              PHA
-  09A1  A6 70           LDX state
-  09A3                  setcolour colour0tab
-  09A3  BD 1D 0A        LDA table,X
-  09A6  8D 21 FE        STA &FE21
-  09A9  49 10           EOR #&10
-  09AB  8D 21 FE        STA &FE21
-  09AE  49 40           EOR #&40
-  09B0  8D 21 FE        STA &FE21
-  09B3  49 10           EOR #&10
-  09B5  8D 21 FE        STA &FE21
-  09B8                  setcolour colour1tab
-  09B8  BD 23 0A        LDA table,X
-  09BB  8D 21 FE        STA &FE21
-  09BE  49 10           EOR #&10
-  09C0  8D 21 FE        STA &FE21
-  09C3  49 40           EOR #&40
-  09C5  8D 21 FE        STA &FE21
-  09C8  49 10           EOR #&10
-  09CA  8D 21 FE        STA &FE21
-  09CD                  setcolour colour2tab
-  09CD  BD 29 0A        LDA table,X
-  09D0  8D 21 FE        STA &FE21
-  09D3  49 10           EOR #&10
-  09D5  8D 21 FE        STA &FE21
-  09D8  49 40           EOR #&40
-  09DA  8D 21 FE        STA &FE21
-  09DD  49 10           EOR #&10
-  09DF  8D 21 FE        STA &FE21
-  09E2                  setcolour colour3tab
-  09E2  BD 2F 0A        LDA table,X
-  09E5  8D 21 FE        STA &FE21
-  09E8  49 10           EOR #&10
-  09EA  8D 21 FE        STA &FE21
-  09ED  49 40           EOR #&40
-  09EF  8D 21 FE        STA &FE21
-  09F2  49 10           EOR #&10
-  09F4  8D 21 FE        STA &FE21
-  09F7  38              SEC
-  09F8  BD 13 0A        LDA boundarytab+1,X
-  09FB  FD 12 0A        SBC boundarytab+0,X
-  09FE  0A              ASL A
-  09FF  E9 00           SBC #0
-  0A01  8D 67 FE        STA &FE67
-  0A04  E8              INX
-  0A05  E0 06           CPX #LEN(boundaries)+1
-  0A07  D0 02           BNE @+
-  0A09  A2 00           LDX #0
-.@
-  0A0B  86 70           STX state
-  0A0D  68              PLA
-  0A0E  AA              TAX
+  0997  AD 6D FE        LDA &FE6D
+  099A  29 40           AND #&40
+  099C  D0 03           BNE ours
 .old
-  0A0F  4C FF FF        JMP &FFFF
+  099E  4C FF FF        JMP &FFFF
+.ours
+  09A1  8D 6D FE        STA &FE6D
+  09A4  8A              TXA
+  09A5  48              PHA
+  09A6  A6 70           LDX state
+  09A8                  setcolour colour0tab
+  09A8  BD 3B 0A        LDA table,X
+  09AB  8D 21 FE        STA &FE21
+  09AE  49 10           EOR #&10
+  09B0  8D 21 FE        STA &FE21
+  09B3  49 40           EOR #&40
+  09B5  8D 21 FE        STA &FE21
+  09B8  49 10           EOR #&10
+  09BA  8D 21 FE        STA &FE21
+  09BD                  setcolour colour1tab
+  09BD  BD 3F 0A        LDA table,X
+  09C0  8D 21 FE        STA &FE21
+  09C3  49 10           EOR #&10
+  09C5  8D 21 FE        STA &FE21
+  09C8  49 40           EOR #&40
+  09CA  8D 21 FE        STA &FE21
+  09CD  49 10           EOR #&10
+  09CF  8D 21 FE        STA &FE21
+  09D2                  setcolour colour2tab
+  09D2  BD 43 0A        LDA table,X
+  09D5  8D 21 FE        STA &FE21
+  09D8  49 10           EOR #&10
+  09DA  8D 21 FE        STA &FE21
+  09DD  49 40           EOR #&40
+  09DF  8D 21 FE        STA &FE21
+  09E2  49 10           EOR #&10
+  09E4  8D 21 FE        STA &FE21
+  09E7                  setcolour colour3tab
+  09E7  BD 47 0A        LDA table,X
+  09EA  8D 21 FE        STA &FE21
+  09ED  49 10           EOR #&10
+  09EF  8D 21 FE        STA &FE21
+  09F2  49 40           EOR #&40
+  09F4  8D 21 FE        STA &FE21
+  09F7  49 10           EOR #&10
+  09F9  8D 21 FE        STA &FE21
+  09FC  38              SEC
+  09FD  BD 37 0A        LDA boundarytab+1,X
+  0A00  FD 36 0A        SBC boundarytab+0,X
+  0A03  0A              ASL A
+  0A04  E9 00           SBC #0
+  0A06  8D 67 FE        STA &FE67
+  0A09  E0 02           CPX #LEN(boundaries)-1
+  0A0B  D0 1B           BNE nochange
+  0A0D  A5 80           LDA new_boundaries
+  0A0F  F0 17           BEQ nochange
+  0A11  18              CLC
+  0A12  8D 36 0A        STA boundarytab
+  0A15  69 27           ADC #39
+  0A17  8D 3A 0A        STA boundarytab2
+  0A1A  A5 81           LDA new_boundaries+1
+  0A1C  8D 37 0A        STA boundarytab+1
+  0A1F  A5 82           LDA new_boundaries+2
+  0A21  8D 38 0A        STA boundarytab+2
+  0A24  A9 00           LDA #0
+  0A26  85 80           STA new_boundaries
+.nochange
+  0A28  E8              INX
+  0A29  E0 04           CPX #LEN(boundaries)+1
+  0A2B  D0 02           BNE @+
+  0A2D  A2 00           LDX #0
+.@
+  0A2F  86 70           STX state
+  0A31  68              PLA
+  0A32  AA              TAX
+  0A33  A5 FC           LDA &FC
+  0A35  40              RTI
 }
 .boundarytab
-  0A12  04 0A 0D 12...  EQUB boundaries, screenheight, boundaries + 39
+  0A36  04 0A 12 19     EQUB boundaries, screenheight
+.boundarytab2
+  0A3A  2B              EQUB boundaries[0] + 39
 .colour0tab
-  0A1D  03 07 03 07...  EQUB (colours[.., 0] EOR 7) OR &00
+  0A3B  03 07 03 07     EQUB (colours[.., 0] EOR 7) OR &00
 .colour1tab
-  0A23  26 22 25 23...  EQUB (colours[.., 1] EOR 7) OR &20
+  0A3F  26 22 25 23     EQUB (colours[.., 1] EOR 7) OR &20
 .colour2tab
-  0A29  85 81 82 85...  EQUB (colours[.., 2] EOR 7) OR &80
+  0A43  85 81 82 85     EQUB (colours[.., 2] EOR 7) OR &80
 .colour3tab
-  0A2F  A0 A4 A1 A6...  EQUB (colours[.., 3] EOR 7) OR &A0
+  0A47  A0 A4 A1 A6     EQUB (colours[.., 3] EOR 7) OR &A0
 ENDSECTION
 
