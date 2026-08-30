@@ -1,6 +1,6 @@
 #include "file_utils.h"
 
-#include "richc/mstr.h"   // rc_mstr, rc_mstr_replace
+#include "richc/mstr.h"
 
 
 rc_str file_path_normalize(rc_str path, rc_arena *arena)
@@ -10,6 +10,7 @@ rc_str file_path_normalize(rc_str path, rc_arena *arena)
     rc_mstr_replace(&m, RC_STR("\\"), RC_STR("/"), arena);
     return m.view;
 }
+
 
 rc_str file_path_resolve(rc_str base, rc_str include, rc_arena *arena)
 {
@@ -26,10 +27,12 @@ rc_str file_path_resolve(rc_str base, rc_str include, rc_arena *arena)
     return m.view;
 }
 
+
 rc_str file_path_join(rc_str dir, rc_str name, rc_arena *arena)
 {
     rc_str dir_n  = file_path_normalize(dir, arena);
     rc_str name_n = file_path_normalize(name, arena);
+
     if (dir_n.len == 0) {
         return name_n;
     }
@@ -38,6 +41,7 @@ rc_str file_path_join(rc_str dir, rc_str name, rc_arena *arena)
     if (dir_n.data[dir_n.len - 1] != '/') {
         rc_mstr_append_char(&m, '/', arena);
     }
+
     rc_mstr_append(&m, name_n, arena);
     return m.view;
 }

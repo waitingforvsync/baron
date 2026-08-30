@@ -1,7 +1,7 @@
 #include "source_files.h"
 
-#include "richc/file.h"    // rc_file_load_text
-#include "richc/mstr.h"    // rc_mstr_from_str
+#include "richc/file.h"
+#include "richc/mstr.h"
 #include "richc/macros.h"
 
 
@@ -10,9 +10,11 @@ enum { source_files_nodes_reserve = 128 };   // a master file plus ~100 includes
 void source_files_init(source_files *sf, rc_arena *permanent)
 {
     RC_ASSERT(sf != NULL && permanent != NULL);
-    sf->arena = permanent;   // borrowed; baron owns it
+
+    sf->arena = permanent;
     sf->nodes = rc_array_source_file_make(source_files_nodes_reserve, sf->arena);
 }
+
 
 // Push a node whose name/text bytes already live in the permanent arena.
 static uint32_t add(source_files *sf, rc_str name, rc_str text)
@@ -20,50 +22,62 @@ static uint32_t add(source_files *sf, rc_str name, rc_str text)
     return rc_array_source_file_push(&sf->nodes, (source_file) { .name = name, .text = text }, sf->arena);
 }
 
+
 uint32_t source_files_add_file(source_files *sf, rc_str path)
 {
     RC_ASSERT(sf != NULL);
+
     uint32_t existing = source_files_find(sf, path);
     if (existing != RC_INDEX_NONE) {
         return existing;                   // already cached under this path - do not re-read it
     }
+
     rc_file_load_text_result loaded = rc_file_load_text(path, 0, sf->arena);
     if (loaded.error != RC_FILE_OK) {
         return RC_INDEX_NONE;
     }
+
     // Own the name too, so a transient path stays valid for the manager's lifetime.
     rc_str name = rc_mstr_from_str(path, path.len, sf->arena).view;
     return add(sf, name, loaded.text.view);
 }
 
+
 uint32_t source_files_add_string(source_files *sf, rc_str name, rc_str text)
 {
     RC_ASSERT(sf != NULL);
+
     uint32_t existing = source_files_find(sf, name);
     if (existing != RC_INDEX_NONE) {
         return existing;                   // a source is already registered under this name
     }
+
     rc_str owned_name = rc_mstr_from_str(name, name.len, sf->arena).view;
     rc_str owned_text = rc_mstr_from_str(text, text.len, sf->arena).view;
     return add(sf, owned_name, owned_text);
 }
 
+
 uint32_t source_files_find(const source_files *sf, rc_str name)
 {
     RC_ASSERT(sf != NULL);
+
     for (uint32_t i = 0; i < sf->nodes.num; i++) {
         if (rc_str_is_equal(rc_array_source_file_get(&sf->nodes, i).name, name)) {
             return i;
         }
     }
+
     return RC_INDEX_NONE;
 }
+
 
 rc_str source_files_text(const source_files *sf, uint32_t index)
 {
     RC_ASSERT(sf != NULL);
     return rc_array_source_file_get(&sf->nodes, index).text;
 }
+
 
 rc_str source_files_name(const source_files *sf, uint32_t index)
 {

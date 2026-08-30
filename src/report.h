@@ -1,7 +1,7 @@
 #ifndef BARON_REPORT_H_
 #define BARON_REPORT_H_
 
-#include "assemble.h"   // baron_result, diagnostic, severity_*; brings rc_str + rc_arena
+#include "assemble.h"
 
 
 // Rendering a result's diagnostics for human eyes. Everything here is pure string work into a caller
@@ -28,7 +28,7 @@ line_col line_col_from_offset(rc_str text, uint32_t pos);
 //                                              expanded from - context for the error above them)
 //
 // A cursor whose source index is not in r->sources - the unreadable-root-file case, where there was never a
-// source to register - renders location-free as "<origin>: error: <message>"; `origin` is whatever name the
+// source to register - renders location-free as "<origin>: error: <message>"; origin is whatever name the
 // caller knows the input by (the command-line path). An empty return means nothing to report at this
 // threshold.
 rc_str report_render(const baron_result *r, rc_str origin, uint8_t severity_threshold, rc_arena *arena);

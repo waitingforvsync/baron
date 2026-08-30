@@ -9,7 +9,7 @@
 typedef struct fp_ctx {
     cfg              g;
     rc_view_zp_insn  insns;
-    rc_view_zp_cflow cflows;   // ZA_CANCALL overrides: a JSR's declared target set
+    rc_view_zp_cflow cflows;    // ZA_CANCALL overrides: a JSR's declared target set
     rc_bitset       *touched;   // accumulate vregs here (in the caller's arena)
     rc_bitset       *killed;    // vregs given a write-only def here (a fresh value, per the footprint doc)
     rc_bitset       *on_stack;  // routine-entry blocks currently being computed - a revisit is recursion
@@ -20,7 +20,7 @@ typedef struct fp_ctx {
 // fp_visit and fp_visit_call are mutually recursive (a call reaches a routine, whose blocks make more calls).
 static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch);
 
-// Descend into what call site `n` reaches. cfg_call_targets applies the whole target policy - a ZA_CANCALL
+// Descend into what call site n reaches. cfg_call_targets applies the whole target policy - a ZA_CANCALL
 // override, label resolution (so a JSR into another section finds the right block), external arms
 // contributing nothing - and flags the one shape we cannot follow, a computed unannotated call.
 static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
@@ -29,13 +29,15 @@ static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
     if (t.unknown) {
         *c->unknown = true;
     }
+
     for (uint32_t i = 0; i < t.blocks.num; i++) {
         fp_visit(c, rc_view_u32_get(t.blocks, i), scratch);
     }
 }
 
-// Walk the routine entered at `entry`: gather its own blocks' vreg touches (BFS over intraprocedural edges),
-// and recurse into each JSR target. `scratch` is by value, so each recursion level allocates its BFS sets in
+
+// Walk the routine entered at entry: gather its own blocks' vreg touches (BFS over intraprocedural edges),
+// and recurse into each JSR target. scratch is by value, so each recursion level allocates its BFS sets in
 // fresh space after its parent's and they are reclaimed on return.
 static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
 {
@@ -43,6 +45,7 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
         *c->recursive = true;   // a call cycle: this routine is (transitively) already being computed
         return;
     }
+
     rc_bitset_set(c->on_stack, entry);
 
     uint32_t nb = c->g.blocks.num;
@@ -62,9 +65,10 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
             zp_insn n = rc_view_zp_insn_get(c->insns, blk.first_insn + k);
             if (n.vreg != RC_INDEX_NONE && !n.var_kill) {
                 // A ZA_DISCARD marker is not a touch: it stores nothing, so a caller's variable sharing the
-                // byte is safe across a callee that merely discards - and it must not feed `killed`, whose
+                // byte is safe across a callee that merely discards - and it must not feed killed, whose
                 // job is spotting FRESH per-level values across recursion.
                 rc_bitset_set(c->touched, n.vreg);
+
                 // A write with no accompanying read is a fresh assignment - the value came from nowhere prior.
                 // If the recursion does this and holds it live across itself, one static byte cannot serve it.
                 if ((n.rw & vref_write) && !(n.rw & vref_read)) {
@@ -87,6 +91,7 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
     rc_bitset_clear(c->on_stack, entry);
 }
 
+
 footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t entry_block,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
 {
@@ -96,6 +101,7 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
     rc_bitset_resize(&killed, num_vars, arena);
     bool unknown   = false;
     bool recursive = false;
+
     if (entry_block < g.blocks.num && num_vars != 0) {
         rc_bitset on_stack = {0};
         rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
@@ -111,6 +117,7 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
         };
         fp_visit(&c, entry_block, scratch);
     }
+
     return (footprint) {
         .touched      = touched,
         .killed       = killed,
@@ -118,6 +125,7 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
         .recursive    = recursive,
     };
 }
+
 
 footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, zp_insn call,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
@@ -128,6 +136,7 @@ footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
     rc_bitset_resize(&killed, num_vars, arena);
     bool unknown   = false;
     bool recursive = false;
+
     if (num_vars != 0) {
         rc_bitset on_stack = {0};
         rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
@@ -143,6 +152,7 @@ footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
         };
         fp_visit_call(&c, call, scratch);
     }
+
     return (footprint) {
         .touched      = touched,
         .killed       = killed,

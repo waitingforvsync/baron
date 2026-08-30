@@ -10,20 +10,24 @@ line_col line_col_from_offset(rc_str text, uint32_t pos)
     if (pos > text.len) {
         pos = text.len;
     }
+
     // One forward scan, counting newlines and remembering where the current line began. O(pos) per call is
     // plenty: this only ever runs while rendering diagnostics, of which a sane program has few. Columns are
     // counted in BYTES ('\n' alone ends a line; tabs and multi-byte characters count one per byte) - a
     // deliberate simplification until someone's editor complains.
     uint32_t line = 1;
     uint32_t line_start = 0;
+
     for (uint32_t i = 0; i < pos; i++) {
         if (text.data[i] == '\n') {
             line += 1;
             line_start = i + 1;
         }
     }
+
     return (line_col) {.line = line, .col = pos - line_start + 1};
 }
+
 
 // The label after the location: companion frames are context for the error above them, not fresh failures,
 // so they read as notes whatever their severity says.
@@ -34,8 +38,10 @@ static rc_str severity_label(diagnostic d)
         d.code == error_type_expanded_from) {
         return RC_STR("note");
     }
+
     return d.severity == severity_error ? RC_STR("error") : RC_STR("warning");
 }
+
 
 // One diagnostic, one line: "<name>:<line>:<col>: <label>: <message>\n". A source index we cannot resolve
 // (the unreadable-root case, or a future cursor_none) falls back to the caller-supplied origin, location-free.
@@ -54,6 +60,7 @@ static void append_diagnostic(rc_mstr *out, diagnostic d, rc_view_source_file so
     else {
         rc_mstr_append(out, origin, arena);
     }
+
     rc_mstr_append(out, RC_STR(": "), arena);
     rc_mstr_append(out, severity_label(d), arena);
     rc_mstr_append(out, RC_STR(": "), arena);
@@ -61,21 +68,26 @@ static void append_diagnostic(rc_mstr *out, diagnostic d, rc_view_source_file so
     rc_mstr_append_char(out, '\n', arena);
 }
 
+
 rc_str report_render(const baron_result *r, rc_str origin, uint8_t severity_threshold, rc_arena *arena)
 {
     RC_ASSERT(r != NULL && arena != NULL);
+
     // The flat diagnostics array is already in narrative order - each companion note directly follows the
     // error it annotates (by construction in the assembler) - so rendering is a straight filtered pass.
     // Notes carry severity 0, so they can never be filtered away from under their error.
     rc_mstr out = {0};
+
     for (uint32_t i = 0; i < r->diagnostics.num; i++) {
         diagnostic d = rc_view_diagnostic_get(r->diagnostics, i);
         if (d.severity <= severity_threshold) {
             append_diagnostic(&out, d, r->sources, origin, arena);
         }
     }
+
     return out.view;
 }
+
 
 #ifdef BARON_TESTS
 

@@ -6,23 +6,29 @@
 baron baron_make(baron_desc *a)
 {
     RC_ASSERT(a != NULL);
-    baron b = {0};   // zero-init covers the depth counters and the channel handles
-    b.permanent = &a->permanent;   // borrowed: the arenas stay the caller's to free
+
+    // Zero-init covers the depth counters and the channel handles. The arenas are borrowed - they
+    // stay the caller's to free.
+    baron b = {0};
+    b.permanent = &a->permanent;
     b.per_pass  = &a->per_pass;
 
+    // The per_pass managers are re-made / reseeded by run_pass each pass; sections also borrows
+    // permanent for the cross-pass splice sizes.
     scopes_init(&b.scopes, &a->permanent);
-    scopes_make_root(&b.scopes);              // the root is scope index 0
-    sections_init(&b.sections, &a->per_pass, &a->permanent);   // default section (re)made per pass; permanent backs the cross-pass splice sizes
-    zeropage_init(&b.zeropage, &a->permanent);   // empty + dormant; run_pass clears it, ZA_POOL fills it
+    scopes_make_root(&b.scopes);
+    sections_init(&b.sections, &a->per_pass, &a->permanent);
+    zeropage_init(&b.zeropage, &a->permanent);
     source_files_init(&b.source_files, &a->permanent);
-    macros_init(&b.macros, &a->per_pass);         // run_pass reseeds its store + token table each pass
-    functions_init(&b.functions, &a->per_pass);   // ditto for the operand table
+    macros_init(&b.macros, &a->per_pass);
+    functions_init(&b.functions, &a->per_pass);
 
     b.diagnostics  = rc_array_diagnostic_make(256, &a->permanent);
-    b.want_verbose = a->verbose;   // whether to run the listing pass at all
-    b.defines      = a->defines;   // "name=expression" predefines, applied at the top of every pass
+    b.want_verbose = a->verbose;
+    b.defines      = a->defines;
     return b;
 }
+
 
 // The payload is COPIED into the permanent arena (where the diagnostics themselves live), so a caller may
 // hand in a view into scratch, per_pass or source text without a thought for lifetime - diagnostics are
@@ -31,6 +37,7 @@ static rc_str payload_copy(baron *b, rc_str payload)
 {
     return payload.len == 0 ? (rc_str) {0} : rc_mstr_from_str(payload, 0, b->permanent).view;
 }
+
 
 void baron_error_payload(baron *b, error_type code, cursor at, rc_str payload)
 {
@@ -45,6 +52,7 @@ void baron_error_payload(baron *b, error_type code, cursor at, rc_str payload)
         b->permanent);
 }
 
+
 void baron_warning_payload(baron *b, error_type code, cursor at, uint8_t severity, rc_str payload)
 {
     RC_ASSERT(b != NULL && severity != severity_error);   // a warning is a positive level; 0 would fail the assemble
@@ -58,27 +66,33 @@ void baron_warning_payload(baron *b, error_type code, cursor at, uint8_t severit
         b->permanent);
 }
 
+
 void baron_error(baron *b, error_type code, cursor at)
 {
     baron_error_payload(b, code, at, (rc_str) {0});
 }
+
 
 void baron_warning(baron *b, error_type code, cursor at, uint8_t severity)
 {
     baron_warning_payload(b, code, at, severity, (rc_str) {0});
 }
 
+
 uint32_t baron_error_count(const baron *b)
 {
     RC_ASSERT(b != NULL);
+
     uint32_t count = 0;
     for (uint32_t i = 0; i < b->diagnostics.num; i++) {
         if (rc_view_diagnostic_get(b->diagnostics.view, i).severity == severity_error) {
             count++;
         }
     }
+
     return count;
 }
+
 
 bool baron_has_errors(const baron *b)
 {

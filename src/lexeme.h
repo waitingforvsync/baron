@@ -1,7 +1,7 @@
 #ifndef BARON_LEXEME_H_
 #define BARON_LEXEME_H_
 
-#include "value.h"   // value, and rc_str / rc_arena via value.h
+#include "value.h"
 
 
 // A lexeme is one token emitted by the lexer. It is a tagged union: the lexer
@@ -36,8 +36,7 @@ typedef enum lexeme_type {
     lexeme_type_close_bracket,
     lexeme_type_open_brace,
     lexeme_type_close_brace,
-    lexeme_type_closer,                 // a statement-block closer: '}', an IF-chain keyword
-                                        //   (ELIF/ELSE/ENDIF), or FOR's NEXT (carries a closer id)
+    lexeme_type_closer,                 // a statement-block closer: '}', ELIF/ELSE/ENDIF, or NEXT (carries a closer id)
     lexeme_type_unary_op,
     lexeme_type_binary_op,
     lexeme_type_function,               // a bracketed call like ABS(x)
@@ -100,15 +99,15 @@ typedef struct lexeme_unary_op {
 
 typedef struct lexeme_binary_op {
     value (*apply)(value a, value b, rc_arena *arena);
-    uint8_t precedence;                 // higher binds tighter
-    uint8_t  associativity;   // assoc
+    uint8_t precedence;      // higher binds tighter
+    uint8_t associativity;   // assoc
 } lexeme_binary_op;
 
 
+// Variadic and structural: the handler gets the whole evaluated argument list and checks the count
+// and types itself. Element-wise things (abs, sqrt, ...) are unary ops, not functions, so they keep
+// their simple scalar handler.
 typedef struct lexeme_function {
-    // Variadic and structural: the handler gets the whole evaluated argument list and is
-    // responsible for checking the count and types. Element-wise things (abs, sqrt, ...)
-    // are unary ops, not functions, so they keep their simple scalar handler.
     value (*apply)(rc_view_value args, rc_arena *arena);
 } lexeme_function;
 
@@ -118,36 +117,39 @@ typedef struct lexeme_range {
 } lexeme_range;
 
 
-// A 6502 mnemonic. id is a `mnemonic` enum value, kept as a uint16_t because lexeme.h must
+// A 6502 mnemonic. id is a mnemonic enum value, kept as a uint16_t because lexeme.h must
 // not depend on opcodes.h; the operand handler decodes it.
 typedef struct lexeme_opcode {
     uint16_t id;
 } lexeme_opcode;
 
-// A macro name met at statement start. `index` addresses the macro in the manager's list, from which
+
+// A macro name met at statement start. index addresses the macro in the manager's list, from which
 // the invocation reads the overload signatures and body. The name-tokens live in a dynamic statement
 // table built as definitions are parsed (see assemble.c), never in a static one.
 typedef struct lexeme_macro {
     uint32_t index;
 } lexeme_macro;
 
+
 // A signature literal, recognised during overload matching. It only appears in a macro's OWN token
-// table (one per name), where `id` identifies which of that macro's distinct literals matched.
+// table (one per name), where id identifies which of that macro's distinct literals matched.
 typedef struct lexeme_macro_literal {
     uint32_t id;
 } lexeme_macro_literal;
 
-// A user-defined FUNCTION call, met in operand position (its `name(` spelling is a token in the dynamic
-// operand table). `index` addresses the function in the manager's list, from which the evaluator reads the
+
+// A user-defined FUNCTION call, met in operand position (its "name(" spelling is a token in the dynamic
+// operand table). index addresses the function in the manager's list, from which the evaluator reads the
 // overload signatures (params + body cursor) to interpret the call.
 typedef struct lexeme_user_function {
     uint32_t index;
 } lexeme_user_function;
 
 
-// A statement-block closer: '}', an IF-chain keyword (ELIF/ELSE/ENDIF) or FOR's NEXT. `id` is a
-// `closer_kind` saying which one (so handle_if / handle_for / parse_scope can dispatch); `unexpected`
-// is the `error_type` to raise when the closer turns up with nothing to match. Both are held as
+// A statement-block closer: '}', an IF-chain keyword (ELIF/ELSE/ENDIF) or FOR's NEXT. id is a
+// closer_kind saying which one (so handle_if / handle_for / parse_scope can dispatch); unexpected
+// is the error_type to raise when the closer turns up with nothing to match. Both are held as
 // fixed-width ints - the same trick as lexeme_opcode - so lexeme.h depends on neither header.
 typedef struct lexeme_closer {
     uint8_t  id;
@@ -175,7 +177,7 @@ typedef struct parse_result parse_result;
 typedef struct parse_flags parse_flags;
 typedef struct cursor cursor;
 typedef struct lexeme_keyword {
-    // `stmt` is the statement's true start (before the keyword token itself); `at` is just past it.
+    // stmt is the statement's true start (before the keyword token itself); at is just past it.
     // Handlers that echo source into the verbose listing slice from stmt, everyone else ignores it.
     parse_result (*handle)(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section,
                            parse_flags flags, rc_arena scratch);
@@ -209,7 +211,6 @@ typedef struct lexeme {
         lexeme_error error;
     };
 } lexeme;
-
 
 
 #endif // ifndef BARON_LEXEME_H_

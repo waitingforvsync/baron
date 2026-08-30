@@ -168,17 +168,19 @@ static bool basic_is_digit(uint8_t c)
     return c >= '0' && c <= '9';
 }
 
+
 // Valid in a BASIC variable name (the ROM's classifier at &8D84): letters of either case, digits,
-// '_' and '`'. Note '`' really is in - it displays as the pound sign on the Beeb.
+// '_' and ''. Note '' really is in - it displays as the pound sign on the Beeb.
 static bool basic_is_var_char(uint8_t c)
 {
     if (c >= 0x7B) return false;
-    if (c >= 0x5F) return true;    // '_', '`', 'a'-'z'
+    if (c >= 0x5F) return true;    // '_', '', 'a'-'z'
     if (c >= 0x5B) return false;   // '[' '\' ']' '^'
     if (c >= 0x41) return true;    // 'A'-'Z'
     if (c >= 0x3A) return false;   // ':' ';' '<' '=' '>' '?' '@'
     return c >= 0x30;              // '0'-'9'
 }
+
 
 // A digit or UPPERCASE hex letter: the run a '&' literal consumes. Lowercase ends the run, just as
 // it does in the ROM (a-f sort above 'G' and fail its range check).
@@ -186,6 +188,7 @@ static bool basic_is_hex_char(uint8_t c)
 {
     return basic_is_digit(c) || (c >= 'A' && c <= 'F');
 }
+
 
 static uint8_t basic_at(rc_str text, uint32_t pos)
 {
@@ -206,6 +209,7 @@ static void basic_push_line_number(rc_array_bytes *out, uint32_t n, rc_arena *ar
     rc_array_bytes_push(out, (uint8_t) ((n & 0x3F) | 0x40), arena);
     rc_array_bytes_push(out, (uint8_t) (((n >> 8) & 0x3F) | 0x40), arena);
 }
+
 
 // Copy [pos, end) through untouched.
 static void basic_push_raw(rc_array_bytes *out, rc_str text, uint32_t pos, uint32_t end, rc_arena *arena)
@@ -258,10 +262,10 @@ static basic_match basic_find_keyword(rc_str text, uint32_t pos)
 
 // ---- the tokeniser proper ----
 
-// Tokenise `text` (the line with its number already peeled off) into `out`, following the ROM's
-// dispatch at &8DB2 case for case. Two state flags drive everything: `sos` ("start of statement" -
+// Tokenise text (the line with its number already peeled off) into out, following the ROM's
+// dispatch at &8DB2 case for case. Two state flags drive everything: sos ("start of statement" -
 // cleared by nearly anything, set again by ':' and a few keywords) decides '*' commands and the
-// pseudo-variable +&40 rule; `lnexp` ("a line number would tokenise here") starts TRUE - the ROM
+// pseudo-variable +&40 rule; lnexp ("a line number would tokenise here") starts TRUE - the ROM
 // leaves it set after the leading line number, which is why 10 GOTO10 and even a bare 10 20 embed
 // &8D forms - and survives spaces, commas, '&' literals and strings, exactly as the ROM's does.
 static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *arena)
@@ -337,6 +341,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
                 pos = end;
                 continue;                                   // lnexp deliberately stays set
             }
+
             // Too big for a line number: fall through and let it be an ordinary numeric literal.
         }
         if (c == '.' || basic_is_digit(c)) {
@@ -385,6 +390,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
                     continue;
                 }
             }
+
             // No keyword (or a conditional one vetoed): it is a variable name - fall through.
         }
         if (basic_is_var_char(c)) {
@@ -402,6 +408,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
     }
 }
 
+
 basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
 {
     RC_ASSERT(line.len > 0 && basic_is_digit((uint8_t) line.data[0]));
@@ -416,6 +423,7 @@ basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
         }
         pos++;
     }
+
     if (number > basic_max_line_number) {
         return (basic_line_result) {.error = error_type_bad_basic_line_number};
     }
@@ -427,6 +435,7 @@ basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
     if (end > pos && line.data[end - 1] == '\r') {
         end--;
     }
+
     while (end > pos && line.data[end - 1] == ' ') {
         end--;
     }
@@ -440,6 +449,7 @@ basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
     if (out.num > basic_max_record) {
         return (basic_line_result) {.error = error_type_basic_line_too_long};
     }
+
     rc_array_bytes_set(&out, 3, (uint8_t) out.num);
     return (basic_line_result) {.bytes = out.view};
 }

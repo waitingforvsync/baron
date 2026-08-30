@@ -25,6 +25,7 @@ void zeropage_init(zeropage *zp, rc_arena *permanent)
     zp->enabled  = false;
 }
 
+
 void zeropage_reset(zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
@@ -37,11 +38,13 @@ void zeropage_reset(zeropage *zp)
     zp->enabled = false;
 }
 
+
 void zeropage_enable(zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     zp->enabled = true;
 }
+
 
 void zeropage_reserve(zeropage *zp, uint32_t byte)
 {
@@ -50,11 +53,13 @@ void zeropage_reserve(zeropage *zp, uint32_t byte)
     zp->enabled = true;   // reserving a byte implies the feature is on, even before an explicit enable
 }
 
+
 bool zeropage_is_enabled(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->enabled;
 }
+
 
 bool zeropage_is_reserved(const zeropage *zp, uint32_t byte)
 {
@@ -62,17 +67,21 @@ bool zeropage_is_reserved(const zeropage *zp, uint32_t byte)
     return byte < zeropage_size && rc_bitset_is_set(&zp->reserved, byte);
 }
 
+
 uint32_t zeropage_reserved_count(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
+
     uint32_t count = 0;
     for (uint32_t b = rc_bitset_get_first_set(&zp->reserved);
          b != RC_INDEX_NONE;
          b = rc_bitset_get_next_set(&zp->reserved, b + 1)) {
         count++;
     }
+
     return count;
 }
+
 
 uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint16_t width, cursor def)
 {
@@ -88,11 +97,13 @@ uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint16_t wi
         zp->arena);
 }
 
+
 uint32_t zeropage_var_count(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->vars.num;
 }
+
 
 zp_var zeropage_var_get(const zeropage *zp, uint32_t index)
 {
@@ -100,11 +111,13 @@ zp_var zeropage_var_get(const zeropage *zp, uint32_t index)
     return rc_array_zp_var_get(&zp->vars, index);
 }
 
+
 rc_view_zp_var zeropage_vars(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->vars.view;
 }
+
 
 const rc_bitset *zeropage_reserved(const zeropage *zp)
 {
@@ -112,17 +125,21 @@ const rc_bitset *zeropage_reserved(const zeropage *zp)
     return &zp->reserved;
 }
 
+
 uint32_t zeropage_find_var(const zeropage *zp, uint32_t scope, cursor def)
 {
     RC_ASSERT(zp != NULL);
+
     for (uint32_t i = 0; i < zp->vars.num; i++) {
         zp_var v = rc_array_zp_var_get(&zp->vars, i);
         if (v.scope == scope && cursor_is_equal(v.def, def)) {
             return i;
         }
     }
+
     return RC_INDEX_NONE;
 }
+
 
 uint32_t zeropage_add_insn(zeropage *zp, zp_insn insn)
 {
@@ -130,13 +147,16 @@ uint32_t zeropage_add_insn(zeropage *zp, zp_insn insn)
     return rc_array_zp_insn_push(&zp->insns, insn, zp->arena);
 }
 
+
 void zeropage_resolve_vregs(zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
+
     for (uint32_t i = 0; i < zp->insns.num; i++) {
         zp_insn *n = rc_array_zp_insn_at(&zp->insns, i);
         n->vreg = cursor_is_none(n->var_def) ? RC_INDEX_NONE
                                              : zeropage_find_var(zp, n->var_scope, n->var_def);
+
         // A control transfer's target identity may name a ZA_AUTO variable rather than a label - a
         // JMP through a vector cell the allocator owns. Marked here (the registry is complete now,
         // like the vreg resolution above) so the CFG treats it as computed flow, not an OS vector.
@@ -145,11 +165,13 @@ void zeropage_resolve_vregs(zeropage *zp)
     }
 }
 
+
 uint32_t zeropage_insn_count(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->insns.num;
 }
+
 
 zp_insn zeropage_insn_get(const zeropage *zp, uint32_t index)
 {
@@ -157,11 +179,13 @@ zp_insn zeropage_insn_get(const zeropage *zp, uint32_t index)
     return rc_array_zp_insn_get(&zp->insns, index);
 }
 
+
 rc_view_zp_insn zeropage_insns(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->insns.view;
 }
+
 
 uint32_t zeropage_add_cflow(zeropage *zp, zp_cflow cf)
 {
@@ -171,11 +195,13 @@ uint32_t zeropage_add_cflow(zeropage *zp, zp_cflow cf)
     return index;
 }
 
+
 rc_view_zp_cflow zeropage_cflows(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->cflows.view;
 }
+
 
 uint32_t zeropage_add_label(zeropage *zp, uint32_t scope, cursor def, uint32_t section, uint32_t pc)
 {
@@ -191,11 +217,13 @@ uint32_t zeropage_add_label(zeropage *zp, uint32_t scope, cursor def, uint32_t s
         zp->arena);
 }
 
+
 rc_view_zp_label zeropage_labels(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->labels.view;
 }
+
 
 uint32_t zeropage_add_entry(zeropage *zp, zp_entry e)
 {
@@ -205,12 +233,12 @@ uint32_t zeropage_add_entry(zeropage *zp, zp_entry e)
     return index;
 }
 
+
 rc_view_zp_entry zeropage_entries(const zeropage *zp)
 {
     RC_ASSERT(zp != NULL);
     return zp->entries.view;
 }
-
 
 
 #ifdef BARON_TESTS

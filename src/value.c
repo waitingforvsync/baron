@@ -9,10 +9,12 @@ value value_make_none(void)
     return (value) {.type = value_type_none};
 }
 
+
 value value_make_numeric(double n)
 {
     return (value) {.type = value_type_numeric, .numeric = n};
 }
+
 
 // --beebasm-true: truth spelt -1.0 (BBC BASIC's all-bits-set), constant for a whole run.
 static bool beebasm_true;
@@ -22,6 +24,7 @@ void value_set_beebasm_true(bool enable)
     beebasm_true = enable;
 }
 
+
 value value_make_bool(bool b)
 {
     // The payload rides in .numeric as a canonical 1.0 / 0.0 (-1.0 in BeebAsm mode), so numeric
@@ -30,25 +33,30 @@ value value_make_bool(bool b)
     return (value) {.type = value_type_boolean, .numeric = b ? (beebasm_true ? -1.0 : 1.0) : 0.0};
 }
 
+
 value value_make_string(rc_str s)
 {
     return (value) {.type = value_type_string, .string = s};
 }
+
 
 value value_make_error(error_type e)
 {
     return (value) {.type = value_type_error, .error = {.code = e}};
 }
 
+
 value value_make_error_detail(error_type e, rc_str detail)
 {
     return (value) {.type = value_type_error, .error = {.code = e, .detail = detail}};
 }
 
+
 value value_make_range(value_range r)
 {
     return (value) {.type = value_type_range, .range = r};
 }
+
 
 value value_make_list(rc_view_value items)
 {
@@ -58,6 +66,7 @@ value value_make_list(rc_view_value items)
     // boundary, not something hidden in here.
     return (value) {.type = value_type_list, .list = items};
 }
+
 
 value value_make_za_auto(uint32_t scope, cursor def, int32_t offset, rc_str name)
 {
@@ -110,8 +119,8 @@ value value_make_copy(value v, rc_arena *arena)
 }
 
 
-// A range endpoint is a whole number, pulled from v - or the reason it cannot be one, carried in `err`
-// as an error value (none means success and `v` holds the integer). An error operand passes straight
+// A range endpoint is a whole number, pulled from v - or the reason it cannot be one, carried in err
+// as an error value (none means success and v holds the integer). An error operand passes straight
 // through so it can propagate.
 typedef struct range_endpoint {
     int64_t v;
@@ -123,15 +132,19 @@ static range_endpoint range_int(value v)
     if (value_is_error(v)) {
         return (range_endpoint) {.err = v};
     }
+
     if (!value_is_number(v)) {
         return (range_endpoint) {.err = value_make_error(error_type_type_mismatch)};
     }
+
     double d = v.numeric;
     if (floor(d) != d || d < (double)INT64_MIN || d > (double)INT64_MAX) {
         return (range_endpoint) {.err = value_make_error(error_type_domain)};   // not whole (or out of range / NaN)
     }
+
     return (range_endpoint) {.v = (int64_t)d, .err = value_make_none()};
 }
+
 
 // The sign of x as -1 / 0 / +1.
 static int64_t sign64(int64_t x)
@@ -139,12 +152,14 @@ static int64_t sign64(int64_t x)
     return (x > 0) - (x < 0);
 }
 
+
 value value_make_range_pair(value lhs, value rhs, bool exclusive)
 {
     range_endpoint lo = range_int(lhs);
     if (!value_is_none(lo.err)) {
         return lo.err;
     }
+
     int64_t start = lo.v;
 
     if (value_is_range(rhs)) {
@@ -186,6 +201,7 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
     if (!value_is_none(hi.err)) {
         return hi.err;
     }
+
     int64_t end = hi.v;
     if (exclusive) {
         if (start >= end) {
@@ -193,6 +209,7 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
         }
         end -= 1;
     }
+
     return value_make_range((value_range) {
         .start     = start,
         .end       = end,
@@ -201,17 +218,21 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
     });
 }
 
+
 value value_make_range_open_end(value lhs, bool exclusive)
 {
     if (exclusive) {
         return value_make_error(error_type_domain);   // 'a..<' has nothing to exclude
     }
+
     range_endpoint lo = range_int(lhs);
     if (!value_is_none(lo.err)) {
         return lo.err;
     }
+
     return value_make_range((value_range) {.start = lo.v, .has_start = true});
 }
+
 
 value value_make_range_open_start(value rhs, bool exclusive)
 {
@@ -219,8 +240,10 @@ value value_make_range_open_start(value rhs, bool exclusive)
     if (!value_is_none(hi.err)) {
         return hi.err;
     }
+
     return value_make_range((value_range) {.end = hi.v - (exclusive ? 1 : 0), .has_end = true});
 }
+
 
 value value_make_range_open(bool exclusive)
 {
@@ -228,11 +251,13 @@ value value_make_range_open(bool exclusive)
     return value_make_range((value_range) {0});
 }
 
+
 int64_t value_range_step(value_range r)
 {
     if (r.step != 0) {
         return r.step;
     }
+
     // A stored step of 0 means "infer the direction": descend only when both ends are
     // present and the end sits below the start; otherwise (including any open end) ascend.
     return (r.has_start && r.has_end && r.end < r.start) ? -1 : 1;
@@ -250,11 +275,10 @@ bool value_is_range(value v)       { return v.type == value_type_range; }
 bool value_is_error(value v)       { return v.type == value_type_error; }
 bool value_is_za_auto(value v)      { return v.type == value_type_za_auto; }
 
-// Simple values stand alone (a number, a boolean, a string, an error, a za_auto address); compound
-// values gather others (a list of values, a range that enumerates to one). none belongs to neither.
-// za_auto and boolean being simple is load-bearing: it routes them through the broadcast machinery
-// as scalars, reaching the operator handlers (whose type checks accept or refuse them) instead of
-// the list paths.
+// Simple values stand alone; compound values gather others (a list, a range that enumerates to one);
+// none belongs to neither. za_auto and boolean being simple is load-bearing: it routes them through
+// the broadcast machinery as scalars, reaching the operator handlers (whose type checks accept or
+// refuse them) instead of the list paths.
 bool value_is_simple(value v)      { return value_is_number(v) || value_is_string(v) || value_is_error(v) || value_is_za_auto(v); }
 bool value_is_compound(value v)    { return value_is_list(v) || value_is_range(v); }
 
@@ -293,7 +317,7 @@ bool value_is_equal(value a, value b)
             return true;
         case value_type_za_auto:
             // Identity plus offset - the name is descriptive. This equality is what lets a derived
-            // binding (x = var + 1) report `unchanged` pass after pass, so the assemble converges.
+            // binding (x = var + 1) report unchanged pass after pass, so the assemble converges.
             return a.za_auto.scope == b.za_auto.scope
                 && cursor_is_equal(a.za_auto.def, b.za_auto.def)
                 && a.za_auto.offset == b.za_auto.offset;
@@ -301,8 +325,6 @@ bool value_is_equal(value a, value b)
 
     RC_UNREACHABLE();
 }
-
-
 
 
 void value_format(rc_mstr *out, value v, rc_arena *arena)

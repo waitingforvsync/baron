@@ -1,28 +1,26 @@
 #ifndef BARON_ZEROPAGE_H_
 #define BARON_ZEROPAGE_H_
 
-#include "cursor.h"   // cursor: a ZA_AUTO's defining position, its stable identity across passes
+#include "cursor.h"
 #include "richc/arena.h"
 #include "richc/bitset.h"
-#include "richc/str.h"   // rc_str (a ZA_AUTO's name)
+#include "richc/str.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 
-// The zero-page auto-allocation subsystem. Today it holds only the ZA_POOL set: which of the 256
-// zero-page bytes the allocator (ZA_AUTO1/ZA_AUTO2, still to come) may draw from, plus whether the feature has
-// been switched on at all. A ZA_POOL directive in the source is what enables it; with no ZA_POOL the
-// whole subsystem stays dormant and costs nothing. The instruction IR, liveness, interference and
-// colouring will grow onto this manager as the feature is built out.
+// The zero-page auto-allocation subsystem: the ZA_POOL byte set the allocator may draw from, plus
+// the IR the analyses walk - declared variables, recorded instructions, control-flow annotations,
+// label and entry markers. A ZA_POOL directive in the source enables the feature; with no ZA_POOL
+// the whole subsystem stays dormant and costs nothing.
 //
-// The reserve set is GLOBAL - there is one physical zero page shared by all resident code, so one map
-// for the whole program (per-section reuse is a later refinement). It lives in the borrowed permanent
-// arena, but nothing after init allocates: the 256-bit set is stood up once and only its bits move.
-// ZA_POOL re-executes every pass, so the set is cleared at the top of each pass (zeropage_reset) and
-// refilled as the directive runs; after the final pass it holds the settled reservation.
-// One declared zero-page variable - the seed of a "vreg" for the allocator still to come. For now it
-// records just what a later allocation pass will need: the name (a view into permanent source text), the
-// owning scope, the byte width (1 for ZA_AUTO1, 2 for ZA_AUTO2), and the defining cursor, which is the variable's
+// The pool set is GLOBAL - there is one physical zero page shared by all resident code, so one map
+// for the whole program. Everything lives in the borrowed permanent arena. ZA_POOL re-executes every
+// pass, so the state is cleared at the top of each pass (zeropage_reset) and refilled as the source
+// runs; after the final pass it holds the settled program.
+
+// One declared zero-page variable - a "vreg" for the allocator: the name (a view into permanent
+// source text), the owning scope, the byte width, and the defining cursor, which is the variable's
 // identity across passes (the same statement re-walked keeps the same def).
 typedef struct zp_var {
     rc_str   name;
@@ -71,44 +69,35 @@ typedef enum zp_target_via {
     zp_target_via_table,         // JMP (addr,X)
 } zp_target_via;
 
-// One recorded instruction - the IR the CFG + liveness passes walk. EVERY instruction on the final pass is
-// recorded (so pc ordering and branch targets are complete), each carrying its address + size (to find the
-// fall-through / next block), its control-flow class + resolved target address (branch/jump/call; else
-// RC_INDEX_NONE), and - if it touches a ZA_AUTO variable - which vreg and how (`rw`; for an indirect access
-// through a pointer the pointer is always READ, whatever the instruction does to the pointed-to data).
-// `vreg` is RC_INDEX_NONE for an instruction that touches no variable. Recorded on the final pass only.
+// One recorded instruction - the IR the CFG + liveness passes walk. EVERY instruction on the final
+// pass is recorded (so pc ordering and branch targets are complete), each carrying its address +
+// size, control-flow class + target, and - if it touches a ZA_AUTO variable - which vreg and how.
+//
+// Identities resolve LATE: vreg comes from the (var_scope, var_def) pair once the whole registry is
+// populated (zeropage_resolve_vregs), so a use before its declaration still attributes; a target's
+// (target_scope, target_def) likewise names the exact label - and so the exact block - even where
+// paged banks share an address. For an INDIRECT jump the operand names the VECTOR, never the
+// destination, so the CFG must not wire an edge to the vector cell's own address. A raw target
+// address resolves within its own section only; crossing a section takes a named label.
 typedef struct zp_insn {
-    uint32_t pc;              // this instruction's address
-    uint16_t size;           // its length in bytes (1 + operand bytes)
-    uint8_t  flow;           // zp_flow
-    uint8_t  skip_bytes;     // zp_flow_skip only: run-time bytes the BIT swallows (BITZP 1, BITABS 2); else 0
-    uint8_t  rw;             // vref_rw, if it touches `vreg`
-    uint32_t vreg;           // the ZA_AUTO it touches, or RC_INDEX_NONE - RESOLVED from (var_scope, var_def)
-    uint32_t var_scope;      // scope the operand's base name was declared in (with var_def, the vreg identity)
-    cursor   var_def;        // def cursor of the operand's base name, or cursor_none; with var_scope resolves vreg
-    bool     var_indexed;    // the operand reaches its var by an indexed / indexed-indirect mode (var,X etc.) -
-                             // outside the direct-addressing envelope, so the allocation would be unsound; a
-                             // final-pass check refuses it (see zeropage_finalize)
-    bool     var_indirect;   // the operand dereferences its var as a zero-page POINTER ((var),Y / (var)) - a
-                             // 2-byte access, so a 1-byte ZA_AUTO1 here is refused (final-pass width check)
-    uint32_t var_offset;     // the compile-time-known byte offset into the var (0 for `var`, k for `var+k`), or
-                             // RC_INDEX_NONE if not statically known; a final-pass check bounds it against width
-    bool     var_kill;       // a ZA_DISCARD marker, not a real instruction: the programmer's promise that the
-                             // value `vreg` holds at this pc is never read again. Size 0, flow normal, rw none;
-                             // the analyses treat it as a full-width kill that pins nothing, touches nothing
-    uint32_t target;         // branch/jump/call target address, or RC_INDEX_NONE. Resolves WITHIN this
-                             // instruction's own section only (locals @+/@-, in-section expression branches);
-                             // it never crosses a section - only a named label (below) can do that.
-    uint32_t target_scope;   // scope of the target LABEL, when the operand named one, else RC_INDEX_NONE
-    cursor   target_def;     // def cursor of the target label, or cursor_none; with target_scope it identifies
-                             // the label - and so the exact block - even where banks share the address
-    uint8_t  target_via;     // zp_target_via: how the transfer reaches its destination. For an indirect jump
-                             // the operand (and so target_scope/def) names the VECTOR, never the destination -
-                             // the CFG must not wire an edge to the vector cell's own address
-    bool     target_is_zpvar;// the target identity names a ZA_AUTO variable (resolved post-pass, like vreg):
-                             // a JMP through such a vector is a cell WE own - computed flow needing ZA_CANJUMP,
-                             // never the external-OS-vector exit
-    uint32_t section;        // which section this instruction's bytes live in (half of a block's identity)
+    uint32_t pc;               // this instruction's address
+    uint16_t size;             // its length in bytes (1 + operand bytes)
+    uint8_t  flow;             // zp_flow
+    uint8_t  skip_bytes;       // zp_flow_skip only: run-time bytes the BIT swallows (BITZP 1, BITABS 2); else 0
+    uint8_t  rw;               // vref_rw, if it touches vreg (an indirect access READS its pointer, whatever else it does)
+    uint32_t vreg;             // the ZA_AUTO it touches, or RC_INDEX_NONE (resolved post-pass)
+    uint32_t var_scope;        // scope the operand's base name was declared in (with var_def, the vreg identity)
+    cursor   var_def;          // def cursor of the operand's base name, or cursor_none
+    bool     var_indexed;      // reached by an indexed / indexed-indirect mode: outside the envelope (finalize warns)
+    bool     var_indirect;     // dereferenced as a zero-page POINTER ((var),Y / (var)): ZA_AUTO1 here is refused
+    uint32_t var_offset;       // compile-time byte offset into the var (k for var+k), or RC_INDEX_NONE if unknown
+    bool     var_kill;         // a ZA_DISCARD marker, not a real instruction: a full-width kill that pins nothing
+    uint32_t target;           // branch/jump/call target address (same section only), or RC_INDEX_NONE
+    uint32_t target_scope;     // scope of the target LABEL, when the operand named one, else RC_INDEX_NONE
+    cursor   target_def;       // def cursor of the target label, or cursor_none; with target_scope, its identity
+    uint8_t  target_via;       // zp_target_via: how the transfer reaches its destination
+    bool     target_is_zpvar;  // the target names a ZA_AUTO vector WE own: computed flow, never an external OS vector
+    uint32_t section;          // which section this instruction's bytes live in (half of a block's identity)
     cursor   at;
 } zp_insn;
 
@@ -116,15 +105,12 @@ typedef struct zp_insn {
 #define RC_ARRAY_NAME zp_insn
 #include "richc/template/array.h"
 
-// Does this instruction's write, ON ITS OWN, fully redefine its variable - so the old value is dead just
-// before it? A 6502 store writes ONE byte, so a single write covers the variable only when the variable IS
-// one byte (a direct store at known offset 0). Everything else - the LSB store of a ZA_AUTO2 pointer, an
-// indexed store into a table, an unknown offset - is a PARTIAL def: the bytes it does not touch flow
-// through it. Treating a partial def as a kill is how a pointer's MSB, written once at init, got severed
-// from its derefs and clobbered by an overlapping allocation. The liveness analysis itself tracks bytes
-// (liveness.c) so an LSB+MSB store PAIR does accumulate into a kill there; this per-instruction test
-// serves the finalizer's variable-granularity live-across-call sweep, where the pair conservatively does
-// not (a too-live set only adds interference - sound).
+// Does this instruction's write, ON ITS OWN, fully redefine its variable - so the old value is dead
+// just before it? A 6502 store writes ONE byte, so a single write covers the variable only when the
+// variable IS one byte (a direct store at known offset 0); everything else is a PARTIAL def whose
+// untouched bytes flow through it. The byte-level liveness (liveness.c) does let an LSB+MSB store
+// PAIR accumulate into a kill; this per-instruction test serves the finalizer's variable-granularity
+// live-across-call sweep, where the pair conservatively does not (extra interference only - sound).
 static inline bool zp_insn_write_kills(zp_insn n, uint16_t width)
 {
     return (n.rw & vref_write) != 0
@@ -134,24 +120,16 @@ static inline bool zp_insn_write_kills(zp_insn n, uint16_t width)
 }
 
 
-// A control-flow annotation: the programmer's assertion where static analysis cannot see the truth on its
-// own. ZA_UNREACHABLE says control cannot fall through to its own pc (an always-taken branch's dead edge, or
-// the point past a never-returning JSR - the CFG prunes that fall-through); ZA_CANCALL names the real
-// target(s) of a JSR the analysis cannot follow (a self-modified or dispatched call), so the callee footprint
-// can still be bounded; ZA_CANJUMP names the possible targets of a computed JMP or self-modified branch (a
-// jump table), which the CFG wires as real successor edges IN PLACE of the literal one; ZA_RETURN says the
-// jump/branch before it hands control back to whoever called this routine (the inline-data trick's computed
-// exit - a jump in a return's clothing); ZA_RETURNTO names where the JSR before it resumes (the caller side
-// of the same trick, when the resumption is not simply the next instruction). All are TRUSTED overrides -
-// a wrong one is the single way to defeat the certainty contract - but they sit exactly where the analysis
-// would otherwise refuse, turning a "cannot prove it" into the programmer's explicit "I promise it is these".
-// Recorded on the final pass only, like insns.
+// A control-flow annotation: the programmer's assertion where static analysis cannot see the truth
+// on its own. All are TRUSTED overrides - a wrong one is the single way to defeat the certainty
+// contract - but they sit exactly where the analysis would otherwise refuse, turning a "cannot prove
+// it" into the programmer's explicit "I promise it is these". Recorded on the final pass only.
 typedef enum zp_cflow_kind {
-    zp_cflow_za_unreachable = 0,   // control cannot fall through to `site`
-    zp_cflow_za_cancall,           // the JSR at `site` may call `target` (overrides its literal target)
-    zp_cflow_za_canjump,           // the computed JMP/branch at `site` may go to `target` (a jump-table edge)
-    zp_cflow_za_return,            // the jump/branch at `site` hands control back to our caller (no target)
-    zp_cflow_za_returnto,          // the call at `site` resumes at `target`, not at the next instruction
+    zp_cflow_za_unreachable = 0,   // control cannot fall through to site
+    zp_cflow_za_cancall,           // the JSR at site may call target (overrides its literal target)
+    zp_cflow_za_canjump,           // the computed JMP/branch at site may go to target (a jump-table edge)
+    zp_cflow_za_return,            // the jump/branch at site hands control back to our caller (no target)
+    zp_cflow_za_returnto,          // the call at site resumes at target, not at the next instruction
 } zp_cflow_kind;
 
 typedef struct zp_cflow {
@@ -169,7 +147,7 @@ typedef struct zp_cflow {
 // A label marker: where in the object a label sits. It ties the label's identity - its (scope, def), the same
 // pair scopes_resolve_symbol_def hands back for a reference - to its physical placement (section + address).
 // The CFG uses it to turn a control-transfer target that named a label into the exact block, which is what
-// lets two sections (paged banks) share an address yet resolve a `JSR bank5.entry` unambiguously - the label
+// lets two sections (paged banks) share an address yet resolve a JSR bank5.entry unambiguously - the label
 // picks the section, the raw address never could. Recorded by handle_label on the final pass, feature on.
 typedef struct zp_label {
     uint32_t scope;    // scope the label was defined in (matches scopes_resolve_symbol_def's .scope)
@@ -213,7 +191,7 @@ typedef struct zeropage {
 
 enum { zeropage_size = 256 };   // the 6502 zero page is one 256-byte page
 
-// Stand up an empty reserve set (256 zeroed bits) with the feature off. Borrows `permanent`.
+// Stand up an empty reserve set (256 zeroed bits) with the feature off. Borrows permanent.
 void zeropage_init(zeropage *zp, rc_arena *permanent);
 
 // Clear for a fresh pass: no reserved bytes, feature off. Keeps the backing (only the bits move).
@@ -222,7 +200,7 @@ void zeropage_reset(zeropage *zp);
 // Switch the feature on without reserving any byte (ZA_POOL with an empty list still enables it).
 void zeropage_enable(zeropage *zp);
 
-// Reserve one zero-page byte for auto-allocation (idempotent) and enable the feature. `byte` must be
+// Reserve one zero-page byte for auto-allocation (idempotent) and enable the feature. byte must be
 // < zeropage_size (the caller range-checks the operand first).
 void zeropage_reserve(zeropage *zp, uint32_t byte);
 
@@ -239,7 +217,7 @@ zp_var           zeropage_var_get(const zeropage *zp, uint32_t index);
 rc_view_zp_var   zeropage_vars(const zeropage *zp);          // the whole var list, for the allocator
 const rc_bitset *zeropage_reserved(const zeropage *zp);      // the free-byte set the allocator draws from
 
-// The index of the variable declared in `scope` at `def`, or RC_INDEX_NONE if that pair is not a ZA_AUTO
+// The index of the variable declared in scope at def, or RC_INDEX_NONE if that pair is not a ZA_AUTO
 // declaration. A linear scan - variables are few. The (scope, def) PAIR is the identity: the def cursor alone
 // collides across a macro / FOR body's instantiations (all share one def), but each instantiation runs in its
 // own child scope, so the scope tells them apart.

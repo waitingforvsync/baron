@@ -14,18 +14,23 @@ enum {
 void functions_init(functions *f, rc_arena *per_pass)
 {
     RC_ASSERT(f != NULL && per_pass != NULL);
-    f->arena          = per_pass;               // borrowed; baron owns it
-    f->list           = (rc_array_function) {0};   // functions_reset builds the store each pass
-    f->operand_tokens = (rc_array_token) {0};   // functions_reset seeds it from the base each pass
+
+    // The store stays empty here: functions_reset builds it and seeds the token table each pass.
+    f->arena          = per_pass;
+    f->list           = (rc_array_function) {0};
+    f->operand_tokens = (rc_array_token) {0};
 }
+
 
 void functions_reset(functions *f, token_table base, uint32_t reserve_extra)
 {
     RC_ASSERT(f != NULL);
+
     // The caller resets the shared per_pass arena once before this; we only re-make the containers.
     f->list           = rc_array_function_make(functions_list_reserve, f->arena);
     f->operand_tokens = rc_array_token_make_copy(base, base.num + reserve_extra, f->arena);
 }
+
 
 token_table functions_operand_tokens(const functions *f)
 {
@@ -33,17 +38,19 @@ token_table functions_operand_tokens(const functions *f)
     return f->operand_tokens.view;
 }
 
+
 static uint32_t functions_add(functions *f)
 {
     function entry = { .signatures = rc_array_function_signature_make(function_signatures_reserve, f->arena) };
     return rc_array_function_push(&f->list, entry, f->arena);
 }
 
+
 uint32_t functions_index_for_name(functions *f, rc_str name)
 {
     RC_ASSERT(f != NULL);
 
-    // The operand token spells `name(` (the '(' baked in, like every builtin). Intern it so a call `name(`
+    // The operand token spells name( (the '(' baked in, like every builtin). Intern it so a call name(
     // matches regardless of any whitespace at the definition.
     rc_mstr spelling = rc_mstr_make(name.len + 2, f->arena);
     rc_mstr_append(&spelling, name, f->arena);
@@ -65,13 +72,15 @@ uint32_t functions_index_for_name(functions *f, rc_str name)
     return index;
 }
 
+
 function *functions_at(functions *f, uint32_t index)
 {
     RC_ASSERT(f != NULL);
     return rc_array_function_at(&f->list, index);
 }
 
-function_add_status functions_add_signature(functions *f, uint32_t index, rc_view_rc_str params,
+
+function_add_status functions_add_signature(functions *f, uint32_t index, rc_view_str params,
                                             cursor body, uint32_t def_scope, bool defined)
 {
     function *e = functions_at(f, index);
@@ -107,9 +116,11 @@ function_add_status functions_add_signature(functions *f, uint32_t index, rc_vie
     return function_add_inserted;
 }
 
+
 const function_signature *functions_match(const functions *f, uint32_t index, uint32_t argc)
 {
     RC_ASSERT(f != NULL);
+
     const function *fn = rc_view_function_at(f->list.view, index);
     for (uint32_t i = 0; i < fn->signatures.view.num; i++) {
         const function_signature *sig = rc_view_function_signature_at(fn->signatures.view, i);
@@ -117,6 +128,7 @@ const function_signature *functions_match(const functions *f, uint32_t index, ui
             return sig;
         }
     }
+
     return NULL;
 }
 
@@ -126,9 +138,9 @@ const function_signature *functions_match(const functions *f, uint32_t index, ui
 #include "richc/test.h"
 
 // A parameter-name view over a caller-owned array (arity is all the reconcile / match logic reads).
-static rc_view_rc_str t_params(const rc_str *names, uint32_t n)
+static rc_view_str t_params(const rc_str *names, uint32_t n)
 {
-    return (rc_view_rc_str) {.data = names, .num = n};
+    return (rc_view_str) {.data = names, .num = n};
 }
 
 RC_TEST(functions, index_for_name_reuses)

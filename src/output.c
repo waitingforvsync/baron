@@ -1,6 +1,6 @@
 #include "output.h"
 
-#include "file_utils.h"   // file_path_join: entries land inside -p's directory
+#include "file_utils.h"
 
 #include "richc/file.h"
 #include "richc/macros.h"
@@ -18,6 +18,7 @@ static rc_str spec_error(rc_str name, const char *what, rc_arena *arena)
     return s.view;
 }
 
+
 // "cannot write 'name'" - the shape every writer complaint takes.
 static rc_str write_error(rc_str filename, rc_arena *arena)
 {
@@ -28,7 +29,8 @@ static rc_str write_error(rc_str filename, rc_arena *arena)
     return s.view;
 }
 
-// The value of the attribute named `key` on a section, or none when absent.
+
+// The value of the attribute named key on a section, or none when absent.
 static value section_attr(section s, rc_str key)
 {
     for (uint32_t i = 0; i < s.attributes.num; i++) {
@@ -37,10 +39,12 @@ static value section_attr(section s, rc_str key)
             return a.v;
         }
     }
+
     return value_make_none();
 }
 
-// A numeric value squeezed into an address: it must be whole and fit unsigned 32 bits. `ok` false means
+
+// A numeric value squeezed into an address: it must be whole and fit unsigned 32 bits. ok false means
 // it was neither (or not a number at all).
 typedef struct address_result {
     uint32_t v;
@@ -52,12 +56,15 @@ static address_result address_from_value(value v)
     if (!value_is_number(v) || v.numeric < 0.0 || v.numeric > 4294967295.0) {
         return (address_result) {0};
     }
+
     uint32_t u = (uint32_t) v.numeric;
     if ((double) u != v.numeric) {
         return (address_result) {0};   // fractional
     }
+
     return (address_result) {.v = u, .ok = true};
 }
+
 
 output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint32_t boot, uint32_t cycle,
                                     rc_arena *arena)
@@ -67,7 +74,7 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
     for (uint32_t i = 0; i < sections.num; i++) {
         section s = rc_view_section_get(sections, i);
 
-        // `filename` is the opt-in: a section becomes an output by naming the file it saves to. Absent
+        // filename is the opt-in: a section becomes an output by naming the file it saves to. Absent
         // means not an output (which quietly covers the nameless default sections too - they can never
         // carry attributes), and an EMPTY filename opts back out, cancelling an inherited one.
         value fname = section_attr(s, RC_STR("filename"));
@@ -82,7 +89,7 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
         }
         rc_str filename = fname.string;
 
-        // load: the `load` attribute, else `org` (the section's start address), else where the code
+        // load: the load attribute, else org (the section's start address), else where the code
         // started - pc ran on to the end of it, so back the length off.
         uint32_t load = s.pc - s.code.num;
         address_result org = address_from_value(section_attr(s, RC_STR("org")));
@@ -129,15 +136,19 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
     };
 }
 
+
 rc_str output_write_files(const output_spec *spec, rc_str dir, bool inf, rc_arena *arena)
 {
     RC_ASSERT(spec != NULL && arena != NULL);
+
     for (uint32_t i = 0; i < spec->entries.num; i++) {
         output_entry e = rc_view_output_entry_get(spec->entries, i);
         rc_str path = file_path_join(dir, e.filename, arena);
+
         if (rc_file_save_binary(path, e.code) != RC_FILE_OK) {
             return write_error(path, arena);
         }
+
         if (inf) {
             // The sidecar line: the DFS-style name (the filename as given when it already carries a "d."
             // directory prefix, "$." glued on otherwise), then load / exec / length in hex.
@@ -161,8 +172,10 @@ rc_str output_write_files(const output_spec *spec, rc_str dir, bool inf, rc_aren
             }
         }
     }
+
     return (rc_str) {0};
 }
+
 
 #ifdef BARON_TESTS
 

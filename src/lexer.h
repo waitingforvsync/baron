@@ -25,11 +25,10 @@ bool lexer_at_end(rc_str text, uint32_t pos);
 // (BASIC blocks hand it to the tokeniser whole) and lexes the terminator itself.
 uint32_t lexer_line_end(rc_str text, uint32_t pos);
 
-// The offset past any blanks and a trailing comment at pos - the same skip lexer_next
-// performs before every token, so a caller peeking at raw text (BASIC's is-this-a-
-// numbered-line check) shares the lexer's definition of "blank". Newlines and ':' are
-// terminator LEXEMES, not blanks, so the skip stops at them (a comment ends at its
-// newline, which is left in place).
+// The offset past any blanks and a trailing comment at pos - the same skip lexer_next performs
+// before every token, so a caller peeking at raw text (BASIC's numbered-line check) shares the
+// lexer's definition of blank. Newlines and ':' are terminator lexemes, not blanks, so the skip
+// stops at them (a comment ends at its newline, which is left in place).
 uint32_t lexer_skip_whitespace(rc_str text, uint32_t pos);
 
 

@@ -1,12 +1,12 @@
 #include "expression.h"
 
-#include "scopes.h"   // scopes_get_symbol / _set_symbol / _get_or_make_child (a FUNCTION body binds locals)
-#include "functions.h"   // the FUNCTION registry: functions_match, function_signature
-#include "source_files.h"   // source_files_text: a body's source may differ from the call's
+#include "scopes.h"
+#include "functions.h"
+#include "source_files.h"
 #include "lexer.h"
-#include "richc/random.h"   // the RND stream
-#include "richc/array/u32.h"   // rc_array_u32, for the indices a subscript selector picks
-#include "richc/mstr.h"   // rc_mstr, to build a call's child-scope key
+#include "richc/random.h"
+#include "richc/array/u32.h"
+#include "richc/mstr.h"
 #include "richc/macros.h"
 #include <math.h>
 
@@ -52,13 +52,16 @@ static value zp_offset_add(value zp, double delta)
     if (floor(delta) != delta) {
         return value_make_error(error_type_domain);
     }
+
     int64_t off = (int64_t) zp.za_auto.offset + (int64_t) delta;
     if (off < 0 || off > INT32_MAX) {
         return value_make_error(error_type_domain);
     }
+
     zp.za_auto.offset = (int32_t) off;
     return zp;
 }
+
 
 static value op_add(value a, value b, rc_arena *arena)
 {
@@ -68,18 +71,22 @@ static value op_add(value a, value b, rc_arena *arena)
         rc_mstr_append(&m, b.string, arena);
         return value_make_string(m.view);   // '+' concatenates two strings
     }
+
     // A za_auto address plus an integer is the same address further in: ptr+1 is the pointer's high
     // byte, whichever byte the allocator eventually picks. This and subtraction below are the ONLY
     // arithmetic a za_auto value supports - every other operator's numeric check refuses it.
     if (value_is_za_auto(a) && value_is_number(b)) {
         return zp_offset_add(a, b.numeric);
     }
+
     if (value_is_number(a) && value_is_za_auto(b)) {
         return zp_offset_add(b, a.numeric);
     }
+
     NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric + b.numeric);
 }
+
 
 static value op_sub(value a, value b, rc_arena *arena)
 {
@@ -87,6 +94,7 @@ static value op_sub(value a, value b, rc_arena *arena)
     if (value_is_za_auto(a) && value_is_number(b)) {
         return zp_offset_add(a, -b.numeric);
     }
+
     if (value_is_za_auto(a) && value_is_za_auto(b)) {
         // The distance between two offsets into the SAME variable is a plain number; two different
         // variables have no knowable distance before allocation.
@@ -95,9 +103,11 @@ static value op_sub(value a, value b, rc_arena *arena)
         }
         return value_make_error(error_type_domain);
     }
+
     NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric - b.numeric);
 }
+
 
 static value op_mul(value a, value b, rc_arena *arena)
 {
@@ -106,6 +116,7 @@ static value op_mul(value a, value b, rc_arena *arena)
     return value_make_numeric(a.numeric * b.numeric);
 }
 
+
 static value op_div(value a, value b, rc_arena *arena)
 {
     (void)arena;
@@ -113,8 +124,10 @@ static value op_div(value a, value b, rc_arena *arena)
     if (b.numeric == 0.0) {
         return value_make_error(error_type_divide_by_zero);
     }
+
     return value_make_numeric(a.numeric / b.numeric);
 }
+
 
 static value op_pow(value a, value b, rc_arena *arena)
 {
@@ -124,8 +137,10 @@ static value op_pow(value a, value b, rc_arena *arena)
     if (isnan(r)) {
         return value_make_error(error_type_domain);   // e.g. a negative base, fractional exponent
     }
+
     return value_make_numeric(r);
 }
+
 
 // Integer division and modulo, signed and truncating toward zero (C semantics).
 static value op_idiv(value a, value b, rc_arena *arena)
@@ -136,12 +151,15 @@ static value op_idiv(value a, value b, rc_arena *arena)
     if (ib == 0) {
         return value_make_error(error_type_divide_by_zero);
     }
+
     int32_t ia = as_i32(a);
     if (ia == INT32_MIN && ib == -1) {
         return value_make_numeric((double)INT32_MIN);   // sidestep the signed-overflow UB
     }
+
     return value_make_numeric((double)(ia / ib));
 }
+
 
 static value op_mod(value a, value b, rc_arena *arena)
 {
@@ -151,12 +169,15 @@ static value op_mod(value a, value b, rc_arena *arena)
     if (ib == 0) {
         return value_make_error(error_type_divide_by_zero);
     }
+
     int32_t ia = as_i32(a);
     if (ia == INT32_MIN && ib == -1) {
         return value_make_numeric(0.0);                 // a mod -1 is 0; avoid the UB
     }
+
     return value_make_numeric((double)(ia % ib));
 }
+
 
 // Bitwise ops work on the unsigned 32-bit pattern. A shift count of 32 or more
 // (which includes any negative count, having wrapped) yields zero.
@@ -168,6 +189,7 @@ static value op_shl(value a, value b, rc_arena *arena)
     return value_make_numeric(n >= 32 ? 0.0 : (double)(as_u32(a) << n));
 }
 
+
 static value op_shr(value a, value b, rc_arena *arena)
 {
     (void)arena;
@@ -175,6 +197,7 @@ static value op_shr(value a, value b, rc_arena *arena)
     uint32_t n = as_u32(b);
     return value_make_numeric(n >= 32 ? 0.0 : (double)(as_u32(a) >> n));
 }
+
 
 // AND, OR and EOR are overloaded on their operand types: two booleans get the logical
 // operation (yielding a boolean), two numbers the bitwise one on the 32-bit pattern.
@@ -186,9 +209,11 @@ static value op_and(value a, value b, rc_arena *arena)
     if (value_is_boolean(a) && value_is_boolean(b)) {
         return value_make_bool(a.numeric != 0.0 && b.numeric != 0.0);
     }
+
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric((double)(as_u32(a) & as_u32(b)));
 }
+
 
 static value op_or(value a, value b, rc_arena *arena)
 {
@@ -196,9 +221,11 @@ static value op_or(value a, value b, rc_arena *arena)
     if (value_is_boolean(a) && value_is_boolean(b)) {
         return value_make_bool(a.numeric != 0.0 || b.numeric != 0.0);
     }
+
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric((double)(as_u32(a) | as_u32(b)));
 }
+
 
 static value op_eor(value a, value b, rc_arena *arena)
 {
@@ -206,9 +233,11 @@ static value op_eor(value a, value b, rc_arena *arena)
     if (value_is_boolean(a) && value_is_boolean(b)) {
         return value_make_bool((a.numeric != 0.0) != (b.numeric != 0.0));
     }
+
     NEEDS_NUM(value_is_numeric(a) && value_is_numeric(b));
     return value_make_numeric((double)(as_u32(a) ^ as_u32(b)));
 }
+
 
 // Order two operands of the same kind - both numbers, or both strings (lexicographic) -
 // as order -1 / 0 / +1; ok false on a type mismatch, which makes the comparison an error.
@@ -222,12 +251,15 @@ static compare_result compare_values(value a, value b)
     if (value_is_number(a) && value_is_number(b)) {
         return (compare_result) {.order = (a.numeric > b.numeric) - (a.numeric < b.numeric), .ok = true};
     }
+
     if (value_is_string(a) && value_is_string(b)) {
         int c = rc_str_compare(a.string, b.string);
         return (compare_result) {.order = (c > 0) - (c < 0), .ok = true};
     }
+
     return (compare_result) {0};
 }
+
 
 // The comparisons each yield a boolean, reading the ordering from compare_values
 // (so they all work on numbers or on strings).
@@ -238,12 +270,14 @@ static value op_eq(value a, value b, rc_arena *arena)
     return r.ok ? value_make_bool(r.order == 0) : value_make_error(error_type_type_mismatch);
 }
 
+
 static value op_ne(value a, value b, rc_arena *arena)
 {
     (void)arena;
     compare_result r = compare_values(a, b);
     return r.ok ? value_make_bool(r.order != 0) : value_make_error(error_type_type_mismatch);
 }
+
 
 static value op_lt(value a, value b, rc_arena *arena)
 {
@@ -252,12 +286,14 @@ static value op_lt(value a, value b, rc_arena *arena)
     return r.ok ? value_make_bool(r.order < 0) : value_make_error(error_type_type_mismatch);
 }
 
+
 static value op_gt(value a, value b, rc_arena *arena)
 {
     (void)arena;
     compare_result r = compare_values(a, b);
     return r.ok ? value_make_bool(r.order > 0) : value_make_error(error_type_type_mismatch);
 }
+
 
 static value op_le(value a, value b, rc_arena *arena)
 {
@@ -266,12 +302,14 @@ static value op_le(value a, value b, rc_arena *arena)
     return r.ok ? value_make_bool(r.order <= 0) : value_make_error(error_type_type_mismatch);
 }
 
+
 static value op_ge(value a, value b, rc_arena *arena)
 {
     (void)arena;
     compare_result r = compare_values(a, b);
     return r.ok ? value_make_bool(r.order >= 0) : value_make_error(error_type_type_mismatch);
 }
+
 
 // The fold operators behind min()/max(); they are not in the tables, only used by reduce().
 static value op_min(value a, value b, rc_arena *arena)
@@ -281,6 +319,7 @@ static value op_min(value a, value b, rc_arena *arena)
     return value_make_numeric(a.numeric < b.numeric ? a.numeric : b.numeric);
 }
 
+
 static value op_max(value a, value b, rc_arena *arena)
 {
     (void)arena;
@@ -288,12 +327,14 @@ static value op_max(value a, value b, rc_arena *arena)
     return value_make_numeric(a.numeric > b.numeric ? a.numeric : b.numeric);
 }
 
+
 static value op_neg(value v, rc_arena *arena)
 {
     (void)arena;
     NEEDS_NUM(value_is_number(v));
     return value_make_numeric(-v.numeric);
 }
+
 
 static value op_pos(value v, rc_arena *arena)
 {
@@ -315,6 +356,7 @@ void expression_reset_random(void)
     expr_prng = rc_random_make(EXPR_RANDOM_SEED);
 }
 
+
 // RND(n) -> one integer in [0, n). A unary op, so apply_unary maps it element-wise over a list/range (each
 // element supplying its own bound) and screens error values first - this only ever sees one scalar, and
 // draws exactly once, so the number of draws tracks the number of outputs (structurally determined).
@@ -326,8 +368,10 @@ static value fn_rnd(value v, rc_arena *arena)
     if (bound <= 0) {
         return value_make_error(error_type_domain);   // no 0..n-1 range for n <= 0
     }
+
     return value_make_numeric((double)((uint64_t)rc_random_next(&expr_prng) % (uint64_t)bound));
 }
+
 
 static value fn_abs(value v, rc_arena *arena)
 {
@@ -335,6 +379,7 @@ static value fn_abs(value v, rc_arena *arena)
     NEEDS_NUM(value_is_number(v));
     return value_make_numeric(fabs(v.numeric));
 }
+
 
 // Low and high bytes of the 32-bit pattern.
 static value fn_lo(value v, rc_arena *arena)
@@ -344,12 +389,14 @@ static value fn_lo(value v, rc_arena *arena)
     return value_make_numeric((double)(as_u32(v) & 0xFFu));
 }
 
+
 static value fn_hi(value v, rc_arena *arena)
 {
     (void)arena;
     NEEDS_NUM(value_is_number(v));
     return value_make_numeric((double)((as_u32(v) >> 8) & 0xFFu));
 }
+
 
 // A number as an uppercase hex string, in the narrowest of richc's fixed widths that holds it: a byte, a
 // word, or the whole 32 bits. 10 -> "0A", &123 -> "0123", &123456 -> "00123456". No "&" - that is the
@@ -371,8 +418,10 @@ static value fn_hex(value v, rc_arena *arena)
     else {
         rc_mstr_append_hex32(&m, u, arena);
     }
+
     return value_make_string(m.view);
 }
+
 
 // A string's character codes as a rank-1 list of numbers: codes("AB") is {65, 66}, codes("") the
 // empty list. This is the bridge from text to arithmetic - subscript for one character's code
@@ -388,8 +437,10 @@ static value fn_codes(value v, rc_arena *arena)
     for (uint32_t i = 0; i < v.string.len; i++) {
         rc_array_value_push(&out, value_make_numeric((double) (uint8_t) v.string.data[i]), arena);
     }
+
     return value_make_list(out.view);
 }
+
 
 // Overloaded like AND/OR/EOR: logical on a boolean, bitwise complement on a number.
 // NOT(TRUE) really is FALSE now.
@@ -399,9 +450,11 @@ static value fn_not(value v, rc_arena *arena)
     if (value_is_boolean(v)) {
         return value_make_bool(v.numeric == 0.0);
     }
+
     NEEDS_NUM(value_is_numeric(v));
     return value_make_numeric((double)(~as_u32(v)));
 }
+
 
 static value fn_sqrt(value v, rc_arena *arena)
 {
@@ -411,8 +464,10 @@ static value fn_sqrt(value v, rc_arena *arena)
     if (isnan(r)) {
         return value_make_error(error_type_domain);   // negative argument
     }
+
     return value_make_numeric(r);
 }
+
 
 // Rounding to an integral value, the four flavours: down, toward zero, to nearest, up.
 static value fn_int(value v, rc_arena *arena)
@@ -422,12 +477,14 @@ static value fn_int(value v, rc_arena *arena)
     return value_make_numeric(floor(v.numeric));
 }
 
+
 static value fn_trunc(value v, rc_arena *arena)
 {
     (void)arena;
     NEEDS_NUM(value_is_number(v));
     return value_make_numeric(trunc(v.numeric));
 }
+
 
 static value fn_round(value v, rc_arena *arena)
 {
@@ -436,12 +493,14 @@ static value fn_round(value v, rc_arena *arena)
     return value_make_numeric(round(v.numeric));   // halves go away from zero: round(2.5) = 3, round(-2.5) = -3
 }
 
+
 static value fn_ceil(value v, rc_arena *arena)
 {
     (void)arena;
     NEEDS_NUM(value_is_number(v));
     return value_make_numeric(ceil(v.numeric));
 }
+
 
 // Apply a one-argument C math function, turning a NaN result (a domain error such as
 // asin(2) or ln(-1)) into a domain error value. The trig/log builtins are thin wrappers.
@@ -452,8 +511,10 @@ static value math1(double (*f)(double), value v)
     if (isnan(r)) {
         return value_make_error(error_type_domain);
     }
+
     return value_make_numeric(r);
 }
+
 
 static value fn_sin(value v, rc_arena *arena)  { (void)arena; return math1(sin,   v); }
 static value fn_cos(value v, rc_arena *arena)  { (void)arena; return math1(cos,   v); }
@@ -478,6 +539,7 @@ static value op_range(value a, value b, rc_arena *arena)
     return value_make_range_pair(a, b, false);
 }
 
+
 static value op_range_excl(value a, value b, rc_arena *arena)
 {
     (void)arena;
@@ -501,6 +563,7 @@ static uint32_t range_count(value_range r)
     return n > (int64_t) UINT32_MAX ? UINT32_MAX : (uint32_t) n;
 }
 
+
 // The uniform-length-prefix shape of v written into dims[], returning its rank: descend
 // while every node at a level is a list of the same length, stopping at the first axis
 // that is not uniform (so a ragged list reports the axes that ARE uniform). A scalar is
@@ -523,16 +586,20 @@ static shape shape_of(value v, uint32_t max)
     if (max == 0) {
         return (shape) {0};   // out of room: report no further axes
     }
+
     if (value_is_range(v)) {
         if (!v.range.has_start || !v.range.has_end) {
             return (shape) {0};   // unbounded: no length to report
         }
+
         // A bounded range is a compact rank-1 list of numbers.
         return (shape) {.rank = 1, .dims[0] = range_count(v.range)};
     }
+
     if (!value_is_list(v)) {
         return (shape) {0};   // a scalar: empty shape, rank 0
     }
+
     if (v.list.num == 0) {
         return (shape) {.rank = 1};   // empty list: shape {0}, no elements to descend into
     }
@@ -556,14 +623,17 @@ static shape shape_of(value v, uint32_t max)
     for (uint32_t k = 0; k < inner; k++) {
         s.dims[1 + k] = first.dims[k];
     }
+
     return s;
 }
+
 
 // The rank of v: the length of its uniform-length-prefix shape (0 for a scalar).
 static uint32_t rank_of(value v)
 {
     return shape_of(v, MAX_RANK).rank;
 }
+
 
 // The shape() function: the axis lengths as a list of numbers (a scalar -> the empty list).
 // A function, so it takes the whole argument list and checks it wants exactly one.
@@ -577,6 +647,7 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
     if (value_is_error(v)) {
         return v;   // functions get raw args now, so propagate an error operand ourselves
     }
+
     if (value_is_range(v) && (!v.range.has_start || !v.range.has_end)) {
         return value_make_error(error_type_domain);   // an unbounded range has no length to report
     }
@@ -593,14 +664,15 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
 
 
 // ---- the parser ----
-// The invariants for one parse, bundled so the recursive helpers stay readable.
+// The invariants for one parse, bundled so the recursive helpers stay readable. live is false during
+// a FUNCTION-body definition scan or inside a dead body branch: a user-FUNCTION call then
+// short-circuits rather than executing (the branch is still PARSED, to find where it ends, so its
+// calls must not run).
 typedef struct parser {
     rc_str          text;
     const expr_env *env;
     rc_arena       *arena;
-    bool            live;   // false during a FUNCTION-body definition scan OR inside a dead body branch:
-                            //   a user-FUNCTION call short-circuits (no body run) rather than executing. A
-                            //   dead branch is still PARSED, to find where it ends, so its calls must not run.
+    bool            live;   // a call executes its body only when live
 } parser;
 
 // Expand a bounded range into its rank-1 list of numeric values; an unbounded range has
@@ -623,6 +695,7 @@ value range_to_list(value_range r, rc_arena *arena)
 
     return value_make_list(out.view);
 }
+
 
 // Apply a binary operator, broadcasting component-wise over lists (NumPy-style) by
 // recursing into itself - so a ragged tail just broadcasts on its own. Two simple
@@ -681,6 +754,7 @@ static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena
     return value_make_list(out.view);
 }
 
+
 // A scalar applies the operator directly; a list maps it element-wise, recursing so nested
 // lists map too; a range maps as its enumerated list would; an error short-circuits. The
 // new list is built in the (scratch) arena and wrapped - value_make_list does not copy.
@@ -725,6 +799,7 @@ static uint32_t selector_index(value sel, uint32_t len)
     return (double)i == sel.numeric ? i : RC_INDEX_NONE;   // reject a fractional index
 }
 
+
 // The indices a range selector picks along an axis of the given length: the range
 // enumerated with unbounded ends standing in for the axis bounds, then kept only where
 // they fall in [0,len). Slice semantics - forgiving, never an error (may come back empty).
@@ -743,6 +818,7 @@ static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
     if (step > 0 && end > (int64_t)len - 1) {
         end = (int64_t)len - 1;
     }
+
     if (step < 0 && end < 0) {
         end = 0;
     }                
@@ -752,8 +828,10 @@ static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
             rc_array_u32_push(&out, (uint32_t)n, arena);
         }
     }
+
     return out;
 }
+
 
 // Index a string. A string is rank 1 and always yields a string (there is no character
 // type to drop to), so it consumes exactly one selector: an integer gives a 1-char string,
@@ -800,6 +878,7 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
 
     return value_make_string(m.view);
 }
+
 
 // Index a value by indices: the first selector applies to this axis, the rest (a right-
 // slice) descend per selected element, so each selector hits one axis and the selectors
@@ -871,6 +950,7 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
     return value_make_list(out.view);
 }
 
+
 static expr_result ok(value v, uint32_t next)
 {
     return (expr_result) {
@@ -880,6 +960,7 @@ static expr_result ok(value v, uint32_t next)
     };
 }
 
+
 static expr_result fail(expr_error error, uint32_t at)
 {
     return (expr_result) {
@@ -888,6 +969,7 @@ static expr_result fail(expr_error error, uint32_t at)
         .error_at = at
     };
 }
+
 
 // ---- list, reduction and query functions ----
 
@@ -911,6 +993,7 @@ static value fold(rc_view_value elems, value (*op)(value, value, rc_arena *), va
     return acc;
 }
 
+
 // Reduce v over a single axis: axis 0 folds the elements together (collapsing the outer
 // axis); a deeper axis recurses into each element. The axis is assumed in range.
 static value reduce_axis(value v, uint32_t axis, value (*op)(value, value, rc_arena *), value identity, rc_arena *arena)
@@ -932,6 +1015,7 @@ static value reduce_axis(value v, uint32_t axis, value (*op)(value, value, rc_ar
     return value_make_list(out.view);
 }
 
+
 // Collect every leaf of v (descending lists and, by enumeration, ranges) into out.
 static void flatten_into(value v, rc_array_value *out, rc_arena *arena)
 {
@@ -947,6 +1031,7 @@ static void flatten_into(value v, rc_array_value *out, rc_arena *arena)
         rc_array_value_push(out, v, arena);
     }
 }
+
 
 // The shared reduction body: f(L) folds every leaf to a scalar; f(L, axis) collapses one
 // axis. op + identity pick the specific reduction (sum / product / min / max).
@@ -982,6 +1067,7 @@ static value reduce(rc_view_value args, value (*op)(value, value, rc_arena *), v
     return reduce_axis(v, axis, op, identity, arena);
 }
 
+
 static value fn_sum(rc_view_value args, rc_arena *arena)     { return reduce(args, op_add, value_make_numeric(0), arena); }
 static value fn_product(rc_view_value args, rc_arena *arena) { return reduce(args, op_mul, value_make_numeric(1), arena); }
 static value fn_min(rc_view_value args, rc_arena *arena)     { return reduce(args, op_min, value_make_none(), arena); }
@@ -1015,6 +1101,7 @@ static value fn_len(rc_view_value args, rc_arena *arena)
     return value_make_error(error_type_type_mismatch);   // a scalar has no length
 }
 
+
 // rank: the number of axes (0 for a scalar). A range is one axis whether or not its ends are
 // bounded - rank needs no length, so even 2.. answers 1.
 static value fn_rank(rc_view_value args, rc_arena *arena)
@@ -1029,10 +1116,12 @@ static value fn_rank(rc_view_value args, rc_arena *arena)
     if (value_is_error(v)) {
         return v;
     }
+
     return value_make_numeric(value_is_range(v) ? 1.0 : (double) rank_of(v));
 }
 
-// full(count, value): a list of `count` copies of value (NumPy's full(shape, fill_value)). value may be
+
+// full(count, value): a list of count copies of value (NumPy's full(shape, fill_value)). value may be
 // anything - full(3, {1,2}) is three copies of the pair. Handy on its own (EQUB full(16, &FF) fills a run),
 // and the way to make N uniform draws: RND(full(N, 256)).
 static value fn_full(rc_view_value args, rc_arena *arena)
@@ -1046,9 +1135,11 @@ static value fn_full(rc_view_value args, rc_arena *arena)
     if (value_is_error(count)) {
         return count;
     }
+
     if (value_is_error(fill)) {
         return fill;                                     // propagate a forward reference / eval error
     }
+
     if (!value_is_number(count)) {
         return value_make_error(error_type_type_mismatch);
     }
@@ -1057,6 +1148,7 @@ static value fn_full(rc_view_value args, rc_arena *arena)
     if (n < 0) {
         return value_make_error(error_type_domain);
     }
+
     if (n > VALUE_LIST_MAX_LENGTH) {
         return value_make_error(error_type_list_too_big);   // the same cap ranges use
     }
@@ -1065,8 +1157,10 @@ static value fn_full(rc_view_value args, rc_arena *arena)
     for (int64_t i = 0; i < n; i++) {
         rc_array_value_push(&out, fill, arena);   // the same value handle n times; deep-copied on promote / emit
     }
+
     return value_make_list(out.view);
 }
+
 
 // flatten: every leaf, in order, as a single rank-1 list.
 static value fn_flatten(rc_view_value args, rc_arena *arena)
@@ -1084,6 +1178,7 @@ static value fn_flatten(rc_view_value args, rc_arena *arena)
     flatten_into(v, &out, arena);
     return value_make_list(out.view);
 }
+
 
 // concat: join the arguments along axis 0 - each list (or range) contributes its elements,
 // each scalar joins as a single element.
@@ -1117,6 +1212,7 @@ static value fn_concat(rc_view_value args, rc_arena *arena)
 
     return value_make_list(out.view);
 }
+
 
 // zip: turn N equal-length lists into one list of N-tuples (the transpose of the stacked
 // arguments), so zip({1,2,3},{4,5,6}) == {{1,4},{2,5},{3,6}}. Ranges coerce to lists; the
@@ -1176,6 +1272,7 @@ static value fn_zip(rc_view_value args, rc_arena *arena)
     return value_make_list(out.view);
 }
 
+
 // reverse: the outermost axis reversed (a list's elements, or a string's characters).
 static value fn_reverse(rc_view_value args, rc_arena *arena)
 {
@@ -1210,6 +1307,7 @@ static value fn_reverse(rc_view_value args, rc_arena *arena)
 
     return value_make_error(error_type_type_mismatch);
 }
+
 
 // sort: order a list's elements ascending by a numeric key. The key is the element itself,
 // or - given extra arguments - the result of subscripting each element by them, so
@@ -1273,14 +1371,17 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
             arena
         );
     }
+
     sort_pairs(pairs.span);
 
     rc_array_value out = {0};
     for (uint32_t i = 0; i < n; i++) {
         rc_array_value_push(&out, rc_array_sort_pair_get(&pairs, i).v, arena);
     }
+
     return value_make_list(out.view);
 }
+
 
 // defined: false only for an unresolved symbol; true for any other value (including other
 // errors). Unlike the rest, it inspects its argument's error rather than propagating it -
@@ -1297,6 +1398,7 @@ static value fn_defined(rc_view_value args, rc_arena *arena)
     bool unresolved = value_is_error(v) && v.error.code == error_type_unknown_symbol;
     return value_make_bool(!unresolved);
 }
+
 
 // chr: the inverse of codes - every numeric leaf of the argument (flattened, ranges enumerated)
 // becomes one character of a single string, so chr(72) is "H", chr({72, 73}) is "HI", and
@@ -1332,8 +1434,10 @@ static value fn_chr(rc_view_value args, rc_arena *arena)
         }
         rc_mstr_append_char(&m, (char) (uint8_t) code, arena);
     }
+
     return value_make_string(m.view);
 }
+
 
 // Append v the way PRINT shows it: a string raw (no quotes - the text IS the message),
 // everything else in value_format's diagnostic shape. Shared by error() and find()'s payload.
@@ -1347,6 +1451,7 @@ static void append_value_raw(rc_mstr *out, value v, rc_arena *arena)
     }
 }
 
+
 // A whole haystack scanned and the needle nowhere in it: a not_found error naming the culprit,
 // so "Not found: 'Q'" points straight at the character missing from the charset.
 static value not_found(value needle, rc_arena *arena)
@@ -1355,6 +1460,7 @@ static value not_found(value needle, rc_arena *arena)
     append_value_raw(&m, needle, arena);
     return value_make_error_detail(error_type_not_found, m.view);
 }
+
 
 // One find: the zero-based index of needle's first occurrence in hay (already coerced to a
 // list or a string). A compound needle broadcasts - find(from, codes(s)) is a same-shape list
@@ -1373,6 +1479,7 @@ static value find_one(value hay, value needle, rc_arena *arena)
             return needle;
         }
     }
+
     if (value_is_list(needle)) {
         rc_array_value out = rc_array_value_make(needle.list.num, arena);
         for (uint32_t i = 0; i < needle.list.num; i++) {
@@ -1406,8 +1513,10 @@ static value find_one(value hay, value needle, rc_arena *arena)
             return value_make_numeric((double) i);
         }
     }
+
     return not_found(needle, arena);
 }
+
 
 // find(haystack, needle): the index of needle's first occurrence in the haystack (a list, a
 // range, or a string - a string haystack searches for a substring). The needle broadcasts;
@@ -1430,12 +1539,14 @@ static value fn_find(rc_view_value args, rc_arena *arena)
             return hay;
         }
     }
+
     if (!value_is_list(hay) && !value_is_string(hay)) {
         return value_make_error(error_type_type_mismatch);   // a scalar has nothing to search
     }
 
     return find_one(hay, rc_view_value_get(args, 1), arena);
 }
+
 
 // Whole-value type predicates: TRUE or FALSE for the value as a whole, deliberately NOT
 // element-wise (a list is neither a string nor a number - list-ness is already spelled
@@ -1453,8 +1564,10 @@ static value fn_is_string(rc_view_value args, rc_arena *arena)
     if (value_is_error(v)) {
         return v;
     }
+
     return value_make_bool(value_is_string(v));
 }
+
 
 static value fn_is_number(rc_view_value args, rc_arena *arena)
 {
@@ -1468,11 +1581,13 @@ static value fn_is_number(rc_view_value args, rc_arena *arena)
     if (value_is_error(v)) {
         return v;
     }
+
     // A ZA_AUTO address counts: it denotes the number it becomes at allocation, and answering
     // by its transient type would flip the answer between the settling and output passes.
     // A boolean counts too: it coerces to a number wherever one is wanted.
     return value_make_bool(value_is_number(v) || value_is_za_auto(v));
 }
+
 
 // error(...): the ERROR statement as a value. The arguments format PRINT-style (strings raw,
 // everything else in value_format's shape, concatenated) into a user_error the diagnostics
@@ -1492,6 +1607,7 @@ static value fn_error(rc_view_value args, rc_arena *arena)
     for (uint32_t i = 0; i < args.num; i++) {
         append_value_raw(&m, rc_view_value_get(args, i), arena);
     }
+
     return value_make_error_detail(error_type_user_error, m.view);
 }
 
@@ -1639,6 +1755,7 @@ static token_table operand_table(const parser *p) {
     return p->env->operand_tokens.num ? p->env->operand_tokens : even_tokens;
 }
 
+
 // The FUNCTION-body statement keywords - the minimum a body needs. Its own tiny table, so a body can lex only
 // these (plus intrinsic identifiers/terminators): an opcode or EQUB name is just an identifier here, an
 // assignment target, never code. The '=' return marker reuses lexeme_type_assign (statement-start position).
@@ -1661,8 +1778,10 @@ static expr_result expect_close_paren(const parser *p, value v, uint32_t pos)
     if (rp.token.type != lexeme_type_close_paren) {
         return fail(expr_error_expected_close_paren, pos);
     }
+
     return ok(v, rp.next);
 }
+
 
 // parse_operand and parse_precedence are mutually recursive, so one of the pair must
 // be declared ahead; everything else below is defined in call order (callees first).
@@ -1670,7 +1789,7 @@ static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_p
 
 // Accept a newline if one is here (a list literal treats newlines as whitespace),
 // returning the pos past it, else the pos unchanged. The lexer coalesces a run
-// of newlines into one terminator, so there is only ever one to skip. We lex with `tt`
+// of newlines into one terminator, so there is only ever one to skip. We lex with tt
 // so the caller can re-lex the same spot for whatever it expects there; a ':' or EOF
 // lexes as a hard terminator and is left in place, so an unclosed list is reported.
 static uint32_t accept_newline(const parser *p, uint32_t pos, token_table tt)
@@ -1679,8 +1798,10 @@ static uint32_t accept_newline(const parser *p, uint32_t pos, token_table tt)
     if (lr.token.type == lexeme_type_terminator && lr.token.terminator.newline) {
         return lr.next;
     }
+
     return pos;
 }
+
 
 // Parse a list literal from just after the '{': comma-separated element expressions
 // (nested lists allowed, empty allowed), with newlines ignored inside the braces. We
@@ -1724,6 +1845,7 @@ static expr_result parse_list(const parser *p, uint32_t pos)
     }
 }
 
+
 // Collect a call's arguments from just after the '(' (which was part of the token): comma-separated
 // expressions up to the ')', pushed into *args (the parser's scratch arena). On success returns .next just
 // past the ')' (its .value is unused); a soft expected_expression (e.g. "f(1,)") or a missing ')' is a real
@@ -1761,6 +1883,7 @@ static expr_result collect_args(const parser *p, uint32_t pos, rc_array_value *a
     }
 }
 
+
 // A builtin (variadic / structural) function call: collect args, then hand the raw list to its handler,
 // which validates count/types and decides how to treat error operands (most propagate, defined() inspects).
 static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t pos)
@@ -1770,8 +1893,10 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
     if (r.error != expr_error_none) {
         return r;
     }
+
     return ok(fn.apply(args.view, p->arena), r.next);
 }
+
 
 // ---- user-defined FUNCTION calls: interpreted here, in the evaluator, with no callback into the assembler ----
 
@@ -1807,6 +1932,7 @@ static body_result body_fail(error_type code, uint32_t at)
     };
 }
 
+
 // A single-token '=' table, to read the assignment operator after a body statement's target name.
 static const token assign_only_entries[] = { {RC_STR_INIT("="), {.type = lexeme_type_assign}} };
 static const token_table assign_only_tokens = RC_VIEW(assign_only_entries);
@@ -1822,7 +1948,8 @@ static parser body_sub(const parser *p, bool active)
     return sp;
 }
 
-// A body assignment `name = expr`, from just after `name` (whose start is `name_at`). A single immutable
+
+// A body assignment name = expr, from just after name (whose start is name_at). A single immutable
 // binding into the current (child) scope when active; when inactive, clear only the binding this statement
 // owns (the dead-branch rule). Returns the cursor after the RHS.
 static body_result interpret_assignment(const parser *p, rc_str name, uint32_t pos, bool active, uint32_t name_at)
@@ -1856,8 +1983,9 @@ static body_result interpret_assignment(const parser *p, rc_str name, uint32_t p
     return (body_result) {.next = rhs.next, .saw_statement = true};
 }
 
-// An IF ... [ELIF ...] [ELSE ...] ENDIF, from just after the `if`/`elif` keyword. Runs the selected branch
-// live and scans the rest; nested IFs recurse. Returns the cursor past ENDIF. Return (`=`) is top-level only,
+
+// An IF ... [ELIF ...] [ELSE ...] ENDIF, from just after the if/elif keyword. Runs the selected branch
+// live and scans the rest; nested IFs recurse. Returns the cursor past ENDIF. Return (=) is top-level only,
 // so a return met inside a branch is an error.
 static body_result interpret_if(const parser *p, uint32_t pos, bool active)
 {
@@ -1878,9 +2006,11 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
     if (br.error != error_type_none) {
         return br;
     }
+
     if (br.stop == body_stop_return) {
         return body_fail(error_type_unclosed_function, br.next);   // a return inside a branch: top-level only
     }
+
     if (br.stop == body_stop_eof) {
         return body_fail(error_type_unclosed_function, br.next);   // IF with no ENDIF
     }
@@ -1890,6 +2020,7 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
     if (br.stop == body_stop_elif) {
         return interpret_if(p, closer.next, else_active);   // the ELIF is a fresh IF over the else path
     }
+
     if (br.stop == body_stop_else) {
         body_result eb = interpret_statements(p, closer.next, else_active);
         if (eb.error != error_type_none) {
@@ -1901,12 +2032,14 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
         lexer_result end = lexer_next(p->text, eb.next, function_body_tokens);
         return (body_result) {.next = end.next, .saw_statement = true};
     }
+
     // body_stop_endif
     return (body_result) {.next = closer.next, .saw_statement = true};
 }
 
+
 // Run body statements (assignments, IFs) until the top-level '=' return, a branch closer (elif/else/endif),
-// or EOF. `active` gates whether assignments bind and IF branches execute (an inactive run just walks the
+// or EOF. active gates whether assignments bind and IF branches execute (an inactive run just walks the
 // structure, for the definition scan and dead branches).
 static body_result interpret_statements(const parser *p, uint32_t pos, bool active)
 {
@@ -1979,8 +2112,9 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
     }
 }
 
-// A user-defined FUNCTION call in operand position. `call_pos` is the token's start in the CALLER source
-// (for the child-scope key), `pos` is just past the '('. Collects arguments in the caller scope, matches an
+
+// A user-defined FUNCTION call in operand position. call_pos is the token's start in the CALLER source
+// (for the child-scope key), pos is just past the '('. Collects arguments in the caller scope, matches an
 // overload by arity, then interprets the body in a fresh child scope parented on the definition scope.
 static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call_pos, uint32_t pos, bool active)
 {
@@ -1989,12 +2123,14 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     if (r.error != expr_error_none) {
         return r;
     }
+
     uint32_t after = r.next;   // past ')'
 
     const function_signature *sig = functions_match(p->env->functions, index, args.view.num);
     if (sig == NULL) {
         return ok(value_make_error(error_type_no_matching_arity), after);
     }
+
     if (!sig->defined) {
         return ok(value_make_error(error_type_function_not_defined), after);   // only forward-declared
     }
@@ -2027,7 +2163,7 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
 
     cursor call_at = {p->env->source, call_pos};
     for (uint32_t i = 0; i < sig->params.num; i++) {
-        scopes_set_symbol(p->env->scopes, child, rc_view_rc_str_get(sig->params, i),
+        scopes_set_symbol(p->env->scopes, child, rc_view_str_get(sig->params, i),
                           rc_view_value_get(args.view, i), call_at);
     }
 
@@ -2046,11 +2182,14 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     if (br.error != error_type_none) {
         return ok(value_make_error_detail(br.error, br.error_detail), after);   // a malformed body -> a value
     }
+
     if (br.stop != body_stop_return) {
         return ok(value_make_error(error_type_unclosed_function), after);
     }
+
     return ok(br.value, after);
 }
+
 
 function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena)
 {
@@ -2069,6 +2208,7 @@ function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, cons
             .error_at = br.error_at,
         };
     }
+
     if (br.stop != body_stop_return) {
         return (function_body_scan) {
             .next     = br.next,
@@ -2085,9 +2225,11 @@ function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, cons
             .error_at = br.next,
         };
     }
+
     // A forward declaration is an empty body AND an empty return; anything with a real return is defined.
     return (function_body_scan) {.next = br.next, .defined = !empty_return};
 }
+
 
 // Parse one operand: a literal, a symbol, a parenthesised group, a prefixed unary
 // expression, a function call, or a list literal. A lexeme that cannot begin an
@@ -2115,6 +2257,7 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
 
         case lexeme_type_identifier: {
             value v = scopes_get_symbol(p->env->scopes, p->env->scope_index, lex.identifier.name);
+
             // Not found is not a parse error: it becomes an error value that propagates, so a forward
             // reference can resolve on a later pass. This is the one place that still KNOWS the name, so
             // it rides along as the error's detail - "Undefined symbol: 'x'" gets its x from here.
@@ -2168,8 +2311,8 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
             return parse_call_args(p, lex.function, lr.next);
 
         case lexeme_type_user_function:
-            // A user-defined FUNCTION: `pos` is the token start (the call site), `lr.next` is past its '('.
-            // `p->live` is false only inside a definition scan, where a call must not actually execute.
+            // A user-defined FUNCTION: pos is the token start (the call site), lr.next is past its '('.
+            // p->live is false only inside a definition scan, where a call must not actually execute.
             return interpret_call(p, lex.user_function.index, pos, lr.next, p->live);
 
         case lexeme_type_range: {
@@ -2193,6 +2336,7 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
             return fail(expr_error_expected_expression, pos);
     }
 }
+
 
 // Parse a subscript from just after the '[': comma-separated selector expressions up to
 // the ']', then index target by them. Selectors are full expressions (so i, a..b, {..}
@@ -2229,6 +2373,7 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t pos)
         return fail(expr_error_expected_close_bracket, pos);
     }
 }
+
 
 // Parse an expression whose operators bind at least as tightly as min_prec, folding
 // left-to-right. Stops (greedily) at the first lexeme that is not a usable binary
@@ -2319,6 +2464,7 @@ static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_p
         }
     }
 }
+
 
 expr_result expression_parse(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena)
 {

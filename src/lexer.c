@@ -85,6 +85,7 @@ static uint32_t skip_comment(rc_str text, uint32_t pos)
     while (!is_eof(text, pos) && !is_newline(at(text, pos))) {
         pos++;
     }
+
     return pos;
 }
 
@@ -104,7 +105,7 @@ uint32_t lexer_skip_whitespace(rc_str text, uint32_t pos)
 
 // Coalesce a run of ':' / newline (and the whitespace/comments between them) into a
 // single terminator lexeme. We enter at the first terminator character. The lexeme's
-// `newline` flag is true only when the whole run was newlines; a ':' makes it the
+// newline flag is true only when the whole run was newlines; a ':' makes it the
 // hard kind that a list will not skip over (as does EOF, handled separately).
 static lexer_result lex_terminator(rc_str text, uint32_t pos)
 {
@@ -117,6 +118,7 @@ static lexer_result lex_terminator(rc_str text, uint32_t pos)
         }
         pos = lexer_skip_whitespace(text, pos + 1);
     }
+
     while (!is_eof(text, pos) && is_terminator(at(text, pos)));
 
     return make_result(
@@ -144,6 +146,7 @@ static lexer_result lex_decimal(rc_str text, uint32_t pos)
         result = result * 10.0 + (at(text, pos) - '0');
         pos++;
     }
+
     while (!is_eof(text, pos) && is_digit(at(text, pos)));
 
     // Fractional part, only if there is a digit after the '.'
@@ -187,6 +190,7 @@ static lexer_result lex_hex(rc_str text, uint32_t pos)
         result = (result << 4) | hex_value(at(text, pos));
         pos++;
     }
+
     while (!is_eof(text, pos) && is_hex_digit(at(text, pos)));
 
     return make_numeric((double)result, pos);
@@ -209,6 +213,7 @@ static lexer_result lex_binary(rc_str text, uint32_t pos)
         result = (result << 1) | (uint32_t)(at(text, pos) - '0');
         pos++;
     }
+
     while (!is_eof(text, pos) && is_bin_digit(at(text, pos)));
 
     return make_numeric((double)result, pos);
@@ -220,6 +225,7 @@ static lexer_result lex_char(rc_str text, uint32_t pos)
     if (is_eof(text, pos) || is_newline(at(text, pos)) || at(text, pos) == '\'' || is_eof(text, pos + 1) || at(text, pos + 1) != '\'') {
         return make_error(lexer_error_bad_char_literal, pos);
     }
+
     return make_numeric((double)(uint8_t)at(text, pos), pos + 2);
 }
 
@@ -228,7 +234,7 @@ static lexer_result lex_char(rc_str text, uint32_t pos)
 
 static lexer_result lex_string(rc_str text, uint32_t pos)
 {
-    // pos is past the operning quote. A doubled quote ("") is an escaped quote and
+    // pos is past the opening quote. A doubled quote ("") is an escaped quote and
     // keeps the string going; we record that the raw text needs unescaping later.
     bool contains_quotes = false;
 
@@ -271,13 +277,14 @@ static uint32_t scan_segment(rc_str text, uint32_t pos)
     do {
         pos++;
     }
+
     while (!is_eof(text, pos) && is_ident_char(at(text, pos)));
 
     return pos;
 }
 
 // Scan ident('.' ident)*, consuming a '.' only when an identifier-start follows
-// (so `a.b` is one identifier, but `a..b` stops at `a`).
+// (so a.b is one identifier, but a..b stops at a).
 static uint32_t scan_dotted_identifier(rc_str text, uint32_t pos)
 {
     pos = scan_segment(text, pos);
@@ -285,6 +292,7 @@ static uint32_t scan_dotted_identifier(rc_str text, uint32_t pos)
            && !is_eof(text, pos + 1) && is_ident_start(at(text, pos + 1))) {
         pos = scan_segment(text, pos + 1);
     }
+
     return pos;
 }
 
@@ -387,6 +395,7 @@ uint32_t lexer_line_end(rc_str text, uint32_t pos)
     while (!is_eof(text, pos) && !is_newline(at(text, pos))) {
         pos++;
     }
+
     return pos;
 }
 
@@ -476,12 +485,12 @@ RC_TEST(lexer, identifiers_and_dots)
     r = lexer_next(s, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_binary_op);  p = r.next;
     r = lexer_next(s, p, lexer_tt); RC_CHECK_TRUE(r.token.type == lexeme_type_identifier); RC_CHECK(r.token.identifier.name, ==, RC_STR("b"));
 
-    // Greedy: ANDY is an identifier even though `and` is a token.
+    // Greedy: ANDY is an identifier even though and is a token.
     r = lexer_next(RC_STR("ANDY"), 0, lexer_tt);
     RC_CHECK_TRUE(r.token.type == lexeme_type_identifier);
     RC_CHECK(r.token.identifier.name, ==, RC_STR("ANDY"));
 
-    // `and` on its own is the token.
+    // and on its own is the token.
     r = lexer_next(RC_STR("and "), 0, lexer_tt);
     RC_CHECK_TRUE(r.token.type == lexeme_type_binary_op);
 }

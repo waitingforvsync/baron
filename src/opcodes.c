@@ -1,22 +1,23 @@
 #include "opcodes.h"
 
-#include "assemble_internal.h"   // parse_result, int_argument, require_separator, syntax_error, semantic_error
-#include "baron.h"               // scopes / sections / source_files reached through b
+#include "assemble_internal.h"
+#include "baron.h"
 #include "lexer.h"
 #include "expression.h"
 #include "richc/macros.h"
 
 
-// (mnemonic, addr_mode) -> cell. Bytes are the predecessor's verbatim. A cell ORs in `cmos`
-// only when the encoding is CMOS-only (a plain cell means both CPUs), and, for the zero-page
-// allocator, the call-analysis class. op_zpread / op_zpwrite describe how the ZERO-PAGE OPERAND
-// is touched, populated exactly per addressing mode: a direct zero-page access (zp / zpx / zpy)
-// reads / writes / rmw's the byte as the instruction dictates; an INDIRECT mode (indx / indy /
-// ind) READS the zero-page pointer to form the address, whatever it then does to the pointed-to
-// data, so it carries op_zpread ONLY (a `STA (zp),Y` reads its pointer, it does not write it);
-// and ABSOLUTE addressing (abs / absx / absy) touches no zero-page byte, so it carries neither.
-// op_branch / op_jump / op_call / op_return sit on the control-flow cells. Immediate, accumulator,
-// implied and the JMP vector modes carry no access flag.
+// (mnemonic, addr_mode) -> cell. Bytes are the predecessor's verbatim. A cell ORs in cmos only when
+// the encoding is CMOS-only (a plain cell means both CPUs), and, for the zero-page allocator, the
+// call-analysis class: op_branch / op_jump / op_call / op_return on the control-flow cells.
+//
+// op_zpread / op_zpwrite describe how the ZERO-PAGE OPERAND is touched, populated exactly per
+// addressing mode: a direct zero-page access (zp / zpx / zpy) reads / writes / rmw's the byte as
+// the instruction dictates; an INDIRECT mode (indx / indy / ind) READS the zero-page pointer to
+// form the address, whatever it then does to the pointed-to data, so it carries op_zpread ONLY
+// (a STA (zp),Y reads its pointer, it does not write it); and ABSOLUTE addressing (abs / absx /
+// absy) touches no zero-page byte, so it carries neither. Immediate, accumulator, implied and the
+// JMP vector modes carry no access flag.
 static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     [mnemonic_adc] = {
         [addr_mode_imm]  = 0x69,
@@ -335,7 +336,7 @@ static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
 };
 
 
-// Callers test presence of an encoding as `cell != 0`. That is safe only because no present
+// Callers test presence of an encoding as cell != 0. That is safe only because no present
 // cell is wholly zero: the one opcode byte that is 0x00 (BRK) carries op_return, which keeps its
 // cell nonzero. So presence detection leans on every 0x00-byte instruction also carrying a flag
 // - true today by coincidence of the table, not by construction.
@@ -350,25 +351,26 @@ uint16_t opcode_def(mnemonic m, addr_mode mode)
 
 // The DEFAULT opcode-operand token table: the structural punctuation only - '#' (immediate) and the parens
 // (indirect). No registers: in the BASE of an operand a bare A / X / Y is an ordinary symbol, never a
-// register, so `STA temp` still resolves to `temp` even when temp is literally named `x`. Registers are
+// register, so STA temp still resolves to temp even when temp is literally named x. Registers are
 // recognised only where the grammar expects one (see operand_reg_tokens); everywhere else an identifier
 // wins, and a longer identifier always beats a keyword anyway (a symbol "xyz" is not the X register).
 static const token operand_token_entries[] = {
     {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
     {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
     {RC_STR_INIT(")"), {.type = lexeme_type_close_paren}},
+
     // '}' closes a scope and so ends a statement: an implied/accumulator opcode may sit right before it
-    // (`.routine { RTS }`). We must recognise it here rather than let it fall through as an unexpected char
-    // that the no-operand peek would try to evaluate as an operand. It stays a `closer` in the statement
+    // (.routine { RTS }). We must recognise it here rather than let it fall through as an unexpected char
+    // that the no-operand peek would try to evaluate as an operand. It stays a closer in the statement
     // table (parse_block's brace handling relies on that); this operand-table row only lets the peek see it.
     {RC_STR_INIT("}"), {.type = lexeme_type_close_brace}},
 };
 static const token_table operand_tokens = RC_VIEW(operand_token_entries);
 
 // The register-aware table: the same punctuation PLUS the registers A / X / Y. Used ONLY at the two operand
-// positions where a register is grammatical - the accumulator (`ASL A`), and an index following a comma
-// (`foo,X` / `(foo,X)` / `(foo),Y`). Kept separate from the default so a bare A/X/Y elsewhere stays a symbol;
-// `ASL A` still resolves as accumulator mode first because we consult this table at the accumulator slot.
+// positions where a register is grammatical - the accumulator (ASL A), and an index following a comma
+// (foo,X / (foo,X) / (foo),Y). Kept separate from the default so a bare A/X/Y elsewhere stays a symbol;
+// ASL A still resolves as accumulator mode first because we consult this table at the accumulator slot.
 static const token operand_reg_token_entries[] = {
     {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
     {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
@@ -385,6 +387,7 @@ static bool is_register(lexeme lx, reg_name which)
     return lx.type == lexeme_type_register && lx.reg.which == which;
 }
 
+
 static uint32_t mode_operand_bytes(addr_mode mode)
 {
     switch (mode) {
@@ -400,8 +403,10 @@ static uint32_t mode_operand_bytes(addr_mode mode)
         case addr_mode_max:
             break;
     }
+
     RC_UNREACHABLE();
 }
+
 
 typedef enum index_reg {
     index_none,
@@ -428,13 +433,14 @@ static addr_mode resolve_direct(mnemonic m, index_reg idx, bool known, int64_t a
     return (addr >= 0 && addr < 0x100) ? zp : ab;
 }
 
+
 // The outcome of looking for a trailing ",X" / ",Y" after a plain operand: which index (if
 // any), the cursor past it, and any error.
 typedef struct index_result {
-    uint8_t  reg;     // index_reg
-    uint32_t       next;        // the separator position when there is no index
-    uint16_t error;   // error_type
-    uint32_t       error_at;
+    uint8_t  reg;        // index_reg
+    uint32_t next;       // the separator position when there is no index
+    uint16_t error;      // error_type
+    uint32_t error_at;
 } index_result;
 
 static index_result consume_index(rc_str source, uint32_t cursor)
@@ -461,16 +467,18 @@ static index_result consume_index(rc_str source, uint32_t cursor)
     };
 }
 
-// Is `mode` within the auto-variable direct-addressing envelope? The allocator gives a variable a byte on the
-// assumption it is reached ONLY directly - the variable IS the operand (`var` / `var+k` -> zp), or the whole
-// pair is dereferenced as a pointer (`(var),Y` -> indy, `(var)` -> ind). Every other form that names the
-// variable base reaches `var + index`: `var,X` (zpx/zpy, or absx/absy when no zp form exists) and `(var,X)`
+
+// Is mode within the auto-variable direct-addressing envelope? The allocator gives a variable a byte on the
+// assumption it is reached ONLY directly - the variable IS the operand (var / var+k -> zp), or the whole
+// pair is dereferenced as a pointer ((var),Y -> indy, (var) -> ind). Every other form that names the
+// variable base reaches var + index: var,X (zpx/zpy, or absx/absy when no zp form exists) and (var,X)
 // (indx) index INTO or THROUGH the reserved bytes, landing on a byte the allocator may have given to another
 // variable - which it cannot see. Those are outside the envelope and must be refused, not silently packed.
 static bool mode_in_var_envelope(addr_mode mode)
 {
     return mode == addr_mode_zp || mode == addr_mode_indy || mode == addr_mode_ind;
 }
+
 
 // The instruction's control-flow class, from its cell's control flags (exclusive: at most one is set).
 static zp_flow flow_from_cell(uint16_t cell)
@@ -482,6 +490,7 @@ static zp_flow flow_from_cell(uint16_t cell)
     return zp_flow_normal;
 }
 
+
 // The attribution of one operand to a ZA_AUTO variable: the referenced binding's identity (def cursor + the
 // scope it was declared in) and how this instruction touches it. All-none / vref_none when the operand names
 // no bound symbol.
@@ -491,6 +500,7 @@ typedef struct operand_ref {
     uint8_t  rw;
     bool     outside_envelope;   // the variable is reached by an indexed / indexed-indirect mode (unsound)
     bool     indirect;           // the variable is dereferenced as a zero-page POINTER ((var),Y / (var)) - it
+
                                  // needs 2 bytes, so a 1-byte ZA_AUTO1 here is refused (see zeropage_finalize)
 } operand_ref;
 
@@ -498,7 +508,7 @@ typedef struct operand_ref {
 // class; otherwise an all-none ref. The identity is mapped to a concrete vreg LATER (zeropage_resolve_vregs),
 // once the whole ZA_AUTO registry is populated, so a use before the declaration still attributes. The rw class
 // is read straight off the cell's op_zpread / op_zpwrite flags, which already encode the zero-page-operand
-// semantics per addressing mode (see the opcode table header). `operand_pos` is where the operand expression
+// semantics per addressing mode (see the opcode table header). operand_pos is where the operand expression
 // begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable).
 static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
                                      uint32_t operand_pos)
@@ -510,15 +520,18 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
     if (operand_pos == RC_INDEX_NONE) {
         return none;
     }
+
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lx = lexer_next(src, operand_pos, operand_tokens);
     if (lx.token.type != lexeme_type_identifier) {
         return none;   // a literal address or a register
     }
+
     symbol_ref ref = scopes_resolve_symbol_def(&b->scopes, scope, lx.token.identifier.name);
     if (cursor_is_none(ref.def)) {
         return none;   // resolves to nothing (undefined / not a bare symbol)
     }
+
     // op_zpread / op_zpwrite already encode how the zero-page operand is touched per mode (a direct access
     // reads/writes the byte; an indirect mode reads the pointer only; absolute carries neither), so the rw
     // class is a straight read of the cell - no per-mode special-casing here.
@@ -532,6 +545,7 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
     };
 }
 
+
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
 // liveness passes: its address + size, control-flow class + resolved target (branch/jump/call to a plain
 // abs/rel address; an indirect/computed target stays RC_INDEX_NONE), and its variable touch (if any).
@@ -541,6 +555,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     if (!flags.final || !flags.active || !zeropage_is_enabled(&b->zeropage)) {
         return;
     }
+
     zp_flow  flow   = flow_from_cell(cell);
     uint32_t target = RC_INDEX_NONE;
     if ((flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call)
@@ -565,10 +580,11 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     // touches no data variable - but an indirect jump THROUGH a ZA_AUTO variable plays both at once: the
     // variable is the dispatch target (the CFG's business) AND the jump READS its bytes at run time, so
     // it must also count as a touch or liveness would let another variable take the vector's bytes
-    // between its last store and the jump. WHERE the identity comes from differs too: a ZA_AUTO reference
-    // carries its own identity in its VALUE (so `x = var : LDA x` attributes through the alias), while a
-    // label target still resolves through attribute_operand's lex of the operand text (labels are plain
-    // numbers, with nothing to carry).
+    // between its last store and the jump.
+    //
+    // WHERE the identity comes from differs too: a ZA_AUTO reference carries its own identity in its
+    // VALUE (so x = var : LDA x attributes through the alias), while a label target still resolves
+    // through attribute_operand's lex of the operand text (labels are plain numbers, nothing to carry).
     bool is_control  = (flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call);
     bool vector_var  = arg.za_auto && (via == zp_target_via_vector || via == zp_target_via_table);
     bool is_var      = !is_control || vector_var;
@@ -579,6 +595,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .pc             = pc,
         .size           = (uint16_t) (1 + mode_operand_bytes(mode)),
         .flow           = (uint8_t) flow,
+
         // A dispatch through a ZA_AUTO vector reads the pointer (both bytes; a table read is indexed).
         .rw             = !is_control ? op.rw : (vector_var ? (uint8_t) vref_read : (uint8_t) vref_none),
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
@@ -586,7 +603,8 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .var_def        = is_var ? id_def : cursor_none(),
         .var_indexed    = is_control ? (vector_var && via == zp_target_via_table) : op.outside_envelope,
         .var_indirect   = is_control ? (vector_var && via == zp_target_via_vector) : op.indirect,
-        // A ZA_AUTO operand's known value IS the offset into the variable (0 for `var`, k for `var+k`) -
+
+        // A ZA_AUTO operand's known value IS the offset into the variable (0 for var, k for var+k) -
         // the base does not exist yet. Kept so the finalize pass can bounds-check it against the width.
         .var_offset     = (arg.za_auto && is_var) ? (uint32_t) arg.value : RC_INDEX_NONE,
         .target         = target,
@@ -597,6 +615,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .at             = at,
     });
 }
+
 
 struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
                                  uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
@@ -656,6 +675,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
             if (cp.token.type != lexeme_type_close_paren) {
                 return syntax_error(b, error_type_expected_close_paren, cursor_at(at, reg.next));
             }
+
             // "(expr,X)" is indexed-indirect for the ALU ops, but the indexed DISPATCH for JMP -
             // the same availability choice "(expr)" makes between ind16 and the CMOS zp indirect.
             mode = (opcode_def(m, addr_mode_ind16x) != 0) ? addr_mode_ind16x : addr_mode_indx;
@@ -682,8 +702,8 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     }
     else {
         // Plain operand. First, a bare accumulator 'A' on a shift / rmw mnemonic - consulted with the
-        // register-aware table, so `ASL A` reads as accumulator mode even when a symbol `a` exists, yet a
-        // real symbol operand (`ASL data`) falls straight through to the expression parser below. It counts
+        // register-aware table, so ASL A reads as accumulator mode even when a symbol a exists, yet a
+        // real symbol operand (ASL data) falls straight through to the expression parser below. It counts
         // as the accumulator only when nothing but a statement terminator (or a scope-closing '}') follows.
         bool handled = false;
         if (opcode_def(m, addr_mode_acc) != 0) {
@@ -788,6 +808,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
         if (arg.type == int_argument_type_known && (arg.value < 0 || arg.value > 0xFFFF)) {
             semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, start));
         }
+
         // NMOS hardware bug: an indirect JMP through a vector whose low byte is at $xxFF fetches the high
         // byte from $xx00, not the next page. Legal but almost always a mistake, so warn (not an error).
         if (mode == addr_mode_ind16 && arg.type == int_argument_type_known && (arg.value & 0xFF) == 0xFF) {

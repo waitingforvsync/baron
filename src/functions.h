@@ -1,8 +1,8 @@
 #ifndef BARON_FUNCTIONS_H_
 #define BARON_FUNCTIONS_H_
 
-#include "token.h"    // rc_array_token (the dynamic operand table), lexeme_type_user_function
-#include "cursor.h"   // cursor (a body's location within its definition source)
+#include "token.h"
+#include "cursor.h"
 
 
 // The user-defined-FUNCTION store. A function is a name bound to one or more OVERLOADS (signatures), each a
@@ -10,20 +10,18 @@
 // source every pass (functions_reset), exactly like the macro / section / include state, so an entry is a
 // transient projection of the source, not durable state.
 //
-// A function is NAMELESS here: its `name(` spelling lives in the dynamic OPERAND (even) token table, and a
-// lexeme_type_user_function carries the index into `list` that reaches it. Addressed by index, never a stored
+// A function is NAMELESS here: its name( spelling lives in the dynamic OPERAND (even) token table, and a
+// lexeme_type_user_function carries the index into list that reaches it. Addressed by index, never a stored
 // pointer (the list may relocate on growth).
 
-// Parameter names of one signature. arity = params.num. (A single-token element type, so no RC_ARRAY_NAME.)
-#define RC_ARRAY_TYPE rc_str
-#include "richc/template/array.h"
+#include "richc/array/str.h"
 
 // One overload: its parameter names, the body it evaluates, the scope it was defined in (the lexical parent
 // of each call's child scope), and whether the body has actually been supplied. An empty body + empty return
-// (`FUNCTION name(params)=`) is a forward declaration (defined == false); a later same-arity definition fills
-// it in. `params` is a view into the manager arena (the builder is promoted to a view on registration).
+// (FUNCTION name(params)=) is a forward declaration (defined == false); a later same-arity definition fills
+// it in. params is a view into the manager arena (the builder is promoted to a view on registration).
 typedef struct function_signature {
-    rc_view_rc_str params;
+    rc_view_str    params;      // parameter names; arity = params.num
     cursor         body;        // just past ')'; the body runs to the top-level '=' return
     uint32_t       def_scope;   // the scope the FUNCTION was defined in (the lexical parent at each call)
     bool           defined;     // false = forward declaration (empty body + empty return); filled in later
@@ -55,8 +53,8 @@ typedef struct functions {
 
 void functions_init(functions *f, rc_arena *per_pass);
 
-// Rebuild the store for a fresh pass and reseed operand_tokens from `base` (the static operand table) with
-// room for `reserve_extra` function-name tokens. The caller resets the shared per_pass arena once BEFORE
+// Rebuild the store for a fresh pass and reseed operand_tokens from base (the static operand table) with
+// room for reserve_extra function-name tokens. The caller resets the shared per_pass arena once BEFORE
 // this (reclaiming the previous pass's list, sub-arrays and tokens); this only re-makes the containers.
 void functions_reset(functions *f, token_table base, uint32_t reserve_extra);
 
@@ -64,12 +62,12 @@ void functions_reset(functions *f, token_table base, uint32_t reserve_extra);
 token_table functions_operand_tokens(const functions *f);
 
 // Map a function name to its list index, registering it on first sight: a new name appends a fresh (empty)
-// function AND a lexeme_type_user_function token spelling `name(` (interned into the arena, so whitespace in
+// function AND a lexeme_type_user_function token spelling name( (interned into the arena, so whitespace in
 // the definition does not matter); an existing name - an overload, a self-call, or a forward declaration being
-// filled - reuses its index. `name` is the bare name (no paren).
+// filled - reuses its index. name is the bare name (no paren).
 uint32_t functions_index_for_name(functions *f, rc_str name);
 
-// A pointer to the function at `index`. Valid only until the list next grows - copy out what you need.
+// A pointer to the function at index. Valid only until the list next grows - copy out what you need.
 function *functions_at(functions *f, uint32_t index);
 
 // The outcome of registering a signature on a name (mirrors the macro reconcile).
@@ -80,12 +78,12 @@ typedef enum function_add_status {
     function_add_duplicate,   // a second real body for an arity already defined
 } function_add_status;
 
-// Register `{params, body, def_scope, defined}` on function `index`, reconciling against its overloads by
-// arity (parameter names do not distinguish overloads). `params` and `body` must outlive the pass.
-function_add_status functions_add_signature(functions *f, uint32_t index, rc_view_rc_str params,
+// Register {params, body, def_scope, defined} on function index, reconciling against its overloads by
+// arity (parameter names do not distinguish overloads). params and body must outlive the pass.
+function_add_status functions_add_signature(functions *f, uint32_t index, rc_view_str params,
                                             cursor body, uint32_t def_scope, bool defined);
 
-// The signature of function `index` whose arity == `argc`, or NULL if none. Read-only (the caller reads its
+// The signature of function index whose arity == argc, or NULL if none. Read-only (the caller reads its
 // body / def_scope / defined without mutating).
 const function_signature *functions_match(const functions *f, uint32_t index, uint32_t argc);
 

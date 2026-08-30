@@ -14,17 +14,22 @@ enum {
 void macros_init(macros *m, rc_arena *per_pass)
 {
     RC_ASSERT(m != NULL && per_pass != NULL);
-    m->arena            = per_pass;             // borrowed; baron owns it
-    m->list             = (rc_array_macro) {0};   // macros_reset builds the store each pass
-    m->statement_tokens = (rc_array_token) {0};   // macros_reset seeds it from the base each pass
+
+    // The store stays empty here: macros_reset builds it and seeds the token table each pass.
+    m->arena            = per_pass;
+    m->list             = (rc_array_macro) {0};
+    m->statement_tokens = (rc_array_token) {0};
 }
+
 
 void macros_reset(macros *m, token_table base, uint32_t reserve_extra)
 {
     RC_ASSERT(m != NULL);
+
     m->list             = rc_array_macro_make(macros_list_reserve, m->arena);
     m->statement_tokens = rc_array_token_make_copy(base, base.num + reserve_extra, m->arena);
 }
+
 
 token_table macros_statement_tokens(const macros *m)
 {
@@ -32,9 +37,11 @@ token_table macros_statement_tokens(const macros *m)
     return m->statement_tokens.view;
 }
 
+
 uint32_t macros_index_for_name(macros *m, rc_str name)
 {
     RC_ASSERT(m != NULL);
+
     uint32_t t = token_table_find(m->statement_tokens.view, name);
     if (t != RC_INDEX_NONE) {
         token tok = rc_view_token_get(m->statement_tokens.view, t);
@@ -42,6 +49,7 @@ uint32_t macros_index_for_name(macros *m, rc_str name)
             return tok.lexeme.macro.index;
         }
     }
+
     uint32_t index = macros_add(m);
     rc_array_token_push(
         &m->statement_tokens,
@@ -50,9 +58,11 @@ uint32_t macros_index_for_name(macros *m, rc_str name)
     return index;
 }
 
+
 uint32_t macros_add(macros *m)
 {
     RC_ASSERT(m != NULL);
+
     macro entry = {
         .literal_table = rc_array_token_make(macro_literals_reserve, m->arena),
         .signatures    = rc_array_macro_signature_make(macro_signatures_reserve, m->arena),
@@ -60,20 +70,24 @@ uint32_t macros_add(macros *m)
     return rc_array_macro_push(&m->list, entry, m->arena);
 }
 
+
 macro *macros_at(macros *m, uint32_t index)
 {
     RC_ASSERT(m != NULL);
     return rc_array_macro_at(&m->list, index);
 }
 
+
 uint32_t macros_intern_literal(macros *m, uint32_t index, rc_str text)
 {
     macro *e = macros_at(m, index);
+
     for (uint32_t i = 0; i < e->literal_table.num; i++) {
         if (rc_str_is_equal_insensitive(rc_view_token_get(e->literal_table.view, i).name, text)) {
             return i;
         }
     }
+
     uint32_t id = e->literal_table.num;
     rc_array_token_push(
         &e->literal_table,
@@ -81,6 +95,7 @@ uint32_t macros_intern_literal(macros *m, uint32_t index, rc_str text)
         m->arena);
     return id;
 }
+
 
 // Two signatures share a pattern when they have the same slots in the same order - same kinds, and for
 // literals the same id (parameter NAMES are irrelevant: you cannot overload a macro by renaming its
@@ -90,6 +105,7 @@ static bool macro_pattern_equal(rc_view_macro_slot a, rc_view_macro_slot b)
     if (a.num != b.num) {
         return false;
     }
+
     for (uint32_t i = 0; i < a.num; i++) {
         macro_slot sa = rc_view_macro_slot_get(a, i);
         macro_slot sb = rc_view_macro_slot_get(b, i);
@@ -100,8 +116,10 @@ static bool macro_pattern_equal(rc_view_macro_slot a, rc_view_macro_slot b)
             return false;
         }
     }
+
     return true;
 }
+
 
 // The overload order: "match tokens before expressions". At the first slot two signatures differ, the one
 // with a LITERAL there sorts first (it is the more specific at that position); if one is a strict prefix of
@@ -121,11 +139,14 @@ static bool macro_signature_before(rc_view_macro_slot a, rc_view_macro_slot b)
             return false;
         }
     }
+
     if (a.num != b.num) {
         return a.num > b.num;   // one is a prefix of the other: the longer, more constrained one first
     }
+
     return false;   // identical pattern: leave definition order to the stable insert
 }
+
 
 macro_add_status macros_add_signature(macros *m, uint32_t index, rc_view_macro_slot slots, cursor body, bool defined)
 {
@@ -159,6 +180,7 @@ macro_add_status macros_add_signature(macros *m, uint32_t index, rc_view_macro_s
            && !macro_signature_before(ns.slots, rc_array_macro_signature_get(&e->signatures, pos).slots)) {
         pos++;
     }
+
     rc_array_macro_signature_insert(&e->signatures, pos, ns, m->arena);
     return macro_add_inserted;
 }

@@ -17,14 +17,16 @@
 #define BARON_VERSION "0.2.0"
 
 
-static void display_version(void) {
+static void display_version(void)
+{
     puts("baron " BARON_VERSION);
     puts("Developed and maintained by Rich Talbot-Watkins");
     puts("https://github.com/waitingforvsync/baron");
 }
 
 
-static void display_help(void) {
+static void display_help(void)
+{
     puts("Usage: baron [OPTION]... [SOURCE FILES]...");
     puts("A 6502 assembler targetting the BBC Micro.");
     puts("");
@@ -50,7 +52,7 @@ static void display_help(void) {
 }
 
 
-// A decimal option value in [0, max], or -1 with a complaint printed. `what` names the switch.
+// A decimal option value in [0, max], or -1 with a complaint printed. what names the switch.
 // Bailing out the moment we pass max keeps the running total below max * 10 + 9, so it cannot overflow.
 static int32_t parse_option_value(const char *what, const char *s, uint32_t max)
 {
@@ -66,6 +68,7 @@ static int32_t parse_option_value(const char *what, const char *s, uint32_t max)
     return (int32_t) v;
 }
 
+
 // A channel-redirect switch -log0 .. -log9, or -1. Its channel digit is the switch's own last character.
 static int log_channel(const char *arg)
 {
@@ -74,6 +77,7 @@ static int log_channel(const char *arg)
     }
     return -1;
 }
+
 
 // True for a switch that consumes the following argument as its value - shared by the option pass and the
 // assemble pass, which must SKIP those values or it would try to assemble them.
@@ -84,10 +88,11 @@ static bool option_takes_value(const char *arg)
         || log_channel(arg) >= 0;
 }
 
+
 // baron [options] <list of source files>. Each file is assembled in a fresh environment - symbols never
 // leak between files (the job BeebAsm's CLEAR used to do) - and its diagnostics are reported as soon as it
 // finishes. Success is silent; any error anywhere makes the exit code 1 (but every file is still assembled
-// first, so one run reports everything). The sections of each successful file are deep-copied into `saved`:
+// first, so one run reports everything). The sections of each successful file are deep-copied into saved:
 // they are what the output stage below writes from, kept alive here precisely because the next
 // assemble_file supersedes the previous result's sections.
 //
@@ -178,6 +183,7 @@ int main(int argc, char **argv)
             files++;
         }
     }
+
     if (boot < 0 || cycle < 0) {
         return 1;   // parse_option_value already complained
     }
@@ -210,7 +216,7 @@ int main(int argc, char **argv)
 
     // One baron_desc - arenas plus options - REUSED across all files. Reuse is safe because nothing
     // outlives its turn: each report is printed before the next assemble supersedes the result it came
-    // from, and the sections worth keeping are copied (into `cli`, made above the option loop).
+    // from, and the sections worth keeping are copied (into cli, made above the option loop).
     baron_desc desc = {
         .permanent = rc_arena_make_default(),
         .per_pass  = rc_arena_make_default(),

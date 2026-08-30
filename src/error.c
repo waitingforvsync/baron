@@ -1,6 +1,6 @@
 #include "error.h"
 
-#include "richc/macros.h"   // RC_UNREACHABLE
+#include "richc/macros.h"
 #include "richc/mstr.h"
 
 
@@ -110,8 +110,10 @@ rc_str error_type_name(error_type e)
         case error_type_source_load:             return RC_STR("Could not read the source file");
         case error_type_jmp_indirect_page_cross: return RC_STR("Indirect JMP vector straddles a page boundary (6502 bug)");
     }
+
     RC_UNREACHABLE();
 }
+
 
 void error_append_message(rc_mstr *out, error_type e, rc_str payload, rc_arena *arena)
 {

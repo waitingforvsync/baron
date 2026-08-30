@@ -1,8 +1,8 @@
 #ifndef BARON_ERROR_H_
 #define BARON_ERROR_H_
 
-#include "richc/mstr.h"   // rc_mstr (error_append_message's output)
-#include "richc/str.h"    // rc_str
+#include "richc/mstr.h"
+#include "richc/str.h"
 
 
 // The single diagnostic vocabulary, shared by every layer. The expression evaluator emits the
@@ -66,7 +66,7 @@ typedef enum error_type {
     error_type_bad_alignment,         // ALIGN n with n < 1
     error_type_bad_basic_line_number, // a BASIC line number past 32767 (the ROM's enterable maximum)
     error_type_basic_line_too_long,   // a tokenised BASIC line record past 255 bytes (its length is one byte)
-    error_type_guard_exceeded,        // a section's emission ran past its `guard` address
+    error_type_guard_exceeded,        // a section's emission ran past its guard address
     error_type_reserve_not_zeropage,  // a ZA_POOL address falls outside the zero page ($00-$FF)
     error_type_var_without_reserve,   // a ZA_AUTO1/ZA_AUTO2 declared with no ZA_POOL enabling the feature first
     error_type_zeropage_full,         // no free reserved byte to place a ZA_AUTO variable (a spill)
@@ -79,16 +79,13 @@ typedef enum error_type {
     error_type_za_auto_narrow_pointer, // a 1-byte ZA_AUTO1 dereferenced as a pointer ((var),Y / (var)) - needs ZA_AUTO2
     error_type_za_auto_out_of_bounds, // a var+n access reaches past the ZA_AUTO variable's declared width
     error_type_za_auto_bad_width,     // ZA_AUTO <count> with a count outside 1..256
-    error_type_za_auto_address,       // a ZA_AUTO address used where a number is needed NOW (a count, a
-                                      // condition, a layout address) - addresses exist only after allocation
+    error_type_za_auto_address,       // a ZA_AUTO address used where a number is needed NOW - addresses exist only after allocation
     error_type_za_discard_needs_var,  // a ZA_DISCARD operand that is not a whole ZA_AUTO variable
     error_type_za_entry_no_code,      // a ZA_ENTRY/ZA_INTERRUPT marker whose pc begins no assembled instruction
-    error_type_za_entry_input,        // warning: a ZA_ENTRY routine reads a ZA_AUTO before writing it - an
-                                      // external caller cannot know an allocator-chosen input address
+    error_type_za_entry_input,        // warning: a ZA_ENTRY routine reads a ZA_AUTO before writing it - callers cannot know its address
     error_type_za_auto_unreachable,   // warning: ZA_AUTO-touching code unreachable from every declared/default root
     error_type_za_returnto_no_code,   // warning: a ZA_RETURNTO target that begins no assembled instruction
-    error_type_skip_spans_instruction, // a BITZP/BITABS resume address landing inside a recorded instruction -
-                                      // the two streams interleave mid-instruction, which the CFG cannot model
+    error_type_skip_spans_instruction, // a BITZP/BITABS resume address landing inside a recorded instruction
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding
@@ -137,7 +134,7 @@ typedef enum error_type {
 // symbol name, a branch distance, an ERROR statement's text) belongs.
 rc_str error_type_name(error_type e);
 
-// Append the code's message to `out` with `payload` substituted for the template's first '%' (an empty
+// Append the code's message to out with the payload substituted for the template's first '%' (an empty
 // payload substitutes nothing). Only the template is scanned, so a payload containing '%' is inert; a
 // payload with no '%' to land in is dropped. The one message renderer, shared by the diagnostic report
 // and value_format.

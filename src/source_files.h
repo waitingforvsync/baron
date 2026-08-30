@@ -1,8 +1,8 @@
 #ifndef BARON_SOURCE_FILES_H_
 #define BARON_SOURCE_FILES_H_
 
-#include "richc/str.h"     // rc_str
-#include "richc/arena.h"   // rc_arena
+#include "richc/str.h"
+#include "richc/arena.h"
 #include <stdint.h>
 
 
@@ -20,7 +20,7 @@ typedef struct source_file {
 
 
 // The source-file cache: a manager of cached sources addressed by index, in the same spirit as
-// `scopes` and `sections`. It owns the cached names and contents (in its own arenas), so a source
+// scopes and sections. It owns the cached names and contents (in its own arenas), so a source
 // added from a transient string or path stays valid for the manager's lifetime.
 typedef struct source_files {
     rc_arena            *arena;   // BORROWED: baron's permanent arena, backs the nodes AND the cached names/text

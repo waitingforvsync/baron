@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "richc/macros.h"   // RC_INDEX_NONE
+#include "richc/macros.h"
 
 
 // A position in a source: the source file index plus a byte offset into it. It is the parser's
@@ -31,7 +31,7 @@ static inline bool cursor_is_none(cursor c)
     return c.pos == RC_INDEX_NONE;
 }
 
-// The same source cursor with its offset moved to `pos` - the common "same source, a little further
+// The same source cursor with its offset moved to pos - the common "same source, a little further
 // along" step, and the way a handler builds an error location from its own cursor plus an offset.
 static inline cursor cursor_at(cursor at, uint32_t pos)
 {

@@ -1,8 +1,8 @@
 #ifndef BARON_EXPRESSION_H_
 #define BARON_EXPRESSION_H_
 
-#include "value.h"   // value, rc_arena, rc_str
-#include "token.h"   // token_table (the dynamic operand table carried in the env)
+#include "value.h"
+#include "token.h"
 
 typedef struct scopes       scopes;         // forward: expression_parse needs only the pointers
 typedef struct functions    functions;      // the user-FUNCTION registry (a call resolves its body through it)
@@ -33,29 +33,28 @@ typedef enum expr_error {
 
 
 typedef struct expr_result {
-    value      value;       // the evaluated value (may itself be an eval-error value)
-    uint32_t   next;        // cursor just past the consumed text
-    uint8_t error;          // expr_error: a parse error, or expr_error_none
-    uint32_t   error_at;    // cursor where a parse error was spotted (when error set)
+    value    value;      // the evaluated value (may itself be an eval-error value)
+    uint32_t next;       // cursor just past the consumed text
+    uint8_t  error;      // expr_error: a parse error, or expr_error_none
+    uint32_t error_at;   // cursor where a parse error was spotted (when error set)
 } expr_result;
 
 
 // The environment one expression evaluates in: symbol resolution plus the live assembler state an impure
-// value needs. Passed by const pointer; the evaluator never sees `baron`. It grows fields over time without
+// value needs. Passed by const pointer; the evaluator never sees baron. It grows fields over time without
 // ever gaining a baron dependency.
 //
-// `scopes` is now MUTABLE, because a user-FUNCTION call interprets its body inside the evaluator: it makes a
+// scopes is now MUTABLE, because a user-FUNCTION call interprets its body inside the evaluator: it makes a
 // per-call child scope and binds function-locals directly (symbols are immutable, so this stays purely
 // functional). The registry + source cache + operand table + recursion counter are what that interpretation
-// needs; all still read-only projections of `baron`.
+// needs; all still read-only projections of baron.
 typedef struct expr_env {
     scopes             *scopes;         // MUTABLE: a FUNCTION body binds locals / makes its child scope
     uint32_t            scope_index;
     uint32_t            pc;             // current program counter, for * / P%
     uint32_t            source;         // the reference's source, and...
     uint32_t            offset;         // ...its position, together the use site - for the local labels @- / @+
-    token_table         operand_tokens; // dynamic operand (even) table: static base + a token per FUNCTION name;
-                                        //   {0} means "use the static base" (expression.c's own unit tests)
+    token_table         operand_tokens; // dynamic operand (even) table: static base + a token per FUNCTION; {0} = the static base
     const functions    *functions;      // a lexeme_type_user_function index -> its signatures (params + body)
     const source_files *sources;        // to fetch a function body's source text (it may be a different file)
     uint32_t           *call_depth;     // FUNCTION recursion guard (points at baron.function_depth); may be NULL
@@ -67,14 +66,14 @@ typedef struct expr_env {
 // reject a name that collides with a builtin operand call (abs(, lo(, ...).
 token_table expression_operand_base(void);
 
-// Parse a FUNCTION body inactively from `pos` (just past the header ')') to locate its top-level '=' return.
+// Parse a FUNCTION body inactively from pos (just past the header ')') to locate its top-level '=' return.
 // Used by handle_function at definition time: it needs the body's end and whether the definition is a real
 // body or a forward declaration (an empty body AND an empty return expression).
 typedef struct function_body_scan {
-    uint32_t   next;         // just past the return expression (or the '=' for an empty return)
-    bool       defined;      // false = forward declaration (empty body + empty return)
-    uint16_t error;          // error_type: error_type_none, or a structural problem in the body
-    uint32_t   error_at;     // where the structural problem was seen
+    uint32_t next;       // just past the return expression (or the '=' for an empty return)
+    bool     defined;    // false = forward declaration (empty body + empty return)
+    uint16_t error;      // error_type: error_type_none, or a structural problem in the body
+    uint32_t error_at;   // where the structural problem was seen
 } function_body_scan;
 
 function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena);

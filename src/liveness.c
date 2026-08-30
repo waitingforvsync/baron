@@ -7,7 +7,7 @@
 // dataflow sets are byte-wide (nbytes bits), the public results variable-wide (num_vars bits); sets only
 // ever meet others of their own width, so the equal-width preconditions hold throughout.
 
-// A fixed count of zeroed bitsets, each `width` bits wide, as a span (empty when n == 0): the arena
+// A fixed count of zeroed bitsets, each width bits wide, as a span (empty when n == 0): the arena
 // owns the storage, the span says "these rows may be written but the row count never changes".
 static rc_span_bitset make_rows(uint32_t n, uint32_t width, rc_arena *arena)
 {
@@ -15,8 +15,10 @@ static rc_span_bitset make_rows(uint32_t n, uint32_t width, rc_arena *arena)
     for (uint32_t i = 0; i < n; i++) {
         rc_bitset_resize(rc_span_bitset_at(rows, i), width, arena);
     }
+
     return rows;
 }
+
 
 // Rows of u32 lists: ret_from (below) keeps, per returning block, the call sites that reach it.
 #define RC_ARRAY_TYPE rc_array_u32
@@ -39,6 +41,7 @@ static byte_ids byte_ids_make(rc_view_zp_var vars, rc_arena *arena)
         rc_span_u32_set(base, v, nbytes);
         nbytes += rc_view_zp_var_get(vars, v).width;
     }
+
     rc_span_u32 owner = rc_span_u32_make(nbytes ? rc_arena_alloc_type(arena, uint32_t, nbytes) : NULL,
                                          nbytes);
     for (uint32_t v = 0; v < vars.num; v++) {
@@ -46,8 +49,10 @@ static byte_ids byte_ids_make(rc_view_zp_var vars, rc_arena *arena)
             rc_span_u32_set(owner, rc_span_u32_get(base, v) + k, v);
         }
     }
+
     return (byte_ids) {.base = base, .owner = owner};
 }
+
 
 // Predecessor lists, in the same first/count/pool shape the cfg's successors use: block b's
 // predecessors are preds[first[b] .. first[b] + count[b]).
@@ -70,15 +75,18 @@ static pred_lists pred_lists_make(cfg g, rc_arena *arena)
         }
         npreds += blk.succ_count;
     }
+
     // Two separate loops, deliberately: the prefix sum reads count[b - 1], so zeroing the counts (they
     // are reused as the fill cursors) must wait until the whole sum is done - fused into one loop, each
     // first[] after the head came out zero and every block's preds landed on top of each other.
     for (uint32_t b = 0; b < nb; b++) {
         rc_span_u32_set(first, b, b == 0 ? 0 : rc_span_u32_get(first, b - 1) + rc_span_u32_get(count, b - 1));
     }
+
     for (uint32_t b = 0; b < nb; b++) {
         rc_span_u32_set(count, b, 0);   // reused as the fill cursor
     }
+
     rc_span_u32 preds = rc_span_u32_make(npreds ? rc_arena_alloc_type(arena, uint32_t, npreds) : NULL,
                                          npreds);
     for (uint32_t b = 0; b < nb; b++) {
@@ -89,8 +97,10 @@ static pred_lists pred_lists_make(cfg g, rc_arena *arena)
             *rc_span_u32_at(count, t) += 1;
         }
     }
+
     return (pred_lists) {.first = first, .count = count, .preds = preds};
 }
+
 
 // Each call site's callee entry blocks, resolved once (ZA_CANCALL overrides included); non-call rows
 // stay zeroed - a valid empty call_targets.
@@ -105,8 +115,10 @@ static rc_span_call_targets calls_make(cfg g, rc_view_zp_cflow cflows, rc_view_z
             rc_span_call_targets_set(calls, i, cfg_call_targets(g, cflows, n, arena));
         }
     }
+
     return calls;
 }
+
 
 // The set of call-target entry blocks: the routines whose summaries the interprocedural fixpoints keep.
 static rc_bitset entry_blocks(rc_span_call_targets calls, uint32_t nb, rc_arena *arena)
@@ -119,11 +131,13 @@ static rc_bitset entry_blocks(rc_span_call_targets calls, uint32_t nb, rc_arena 
             rc_bitset_set(&is_entry, rc_view_u32_get(ct.blocks, c));
         }
     }
+
     return is_entry;
 }
 
-// Walk the extent of the routine entered at `e` - the blocks reachable through intraprocedural edges -
-// into `in_ext` (reset first; `stack` is the reusable worklist). Returns whether any block in the
+
+// Walk the extent of the routine entered at e - the blocks reachable through intraprocedural edges -
+// into in_ext (reset first; stack is the reusable worklist). Returns whether any block in the
 // extent has an unknown successor: the taint that forfeits an interprocedural claim.
 static bool extent_walk(cfg g, uint32_t e, rc_bitset *in_ext, rc_array_u32 *stack, rc_arena *arena)
 {
@@ -143,14 +157,16 @@ static bool extent_walk(cfg g, uint32_t e, rc_bitset *in_ext, rc_array_u32 *stac
             }
         }
     }
+
     return tainted;
 }
+
 
 // ---- the byte id space ----
 // Liveness is tracked per BYTE, not per variable: vreg v's bytes occupy [base[v], base[v] + width[v]) in a
 // dense byte id space, and the dataflow sets below are byte sets. This is what makes partial writes come
-// out right for multi-byte variables: a store redefines exactly the byte it hits, so `STA ptr` alone
-// leaves the MSB's old value live straight through it, while a `STA ptr : STA ptr+1` pair accumulates into
+// out right for multi-byte variables: a store redefines exactly the byte it hits, so STA ptr alone
+// leaves the MSB's old value live straight through it, while a STA ptr : STA ptr+1 pair accumulates into
 // a full kill through the fixpoint (across blocks too - each byte's kill propagates independently). The
 // PUBLIC results stay at variable level: the interference rows and live-in/out sets are projected back,
 // a variable being live iff any of its bytes is - the allocator places whole variables, so that is the
@@ -173,6 +189,7 @@ static touch_window insn_window(zp_insn n, uint16_t width)
         // read, and the caller must not treat this as a store (no pin).
         return (touch_window) {.write_first = 0, .write_count = width};
     }
+
     bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
     bool narrow = direct && n.var_offset + (n.var_indirect ? 2u : 1u) <= width;
     return (touch_window) {
@@ -182,11 +199,13 @@ static touch_window insn_window(zp_insn n, uint16_t width)
         .read_count  = !(n.rw & vref_read) ? 0
                      : narrow              ? (n.var_indirect ? 2u : 1u)
                                            : width,
+
         // Writes: only a direct store proves anything, and a 6502 store writes one byte.
         .write_first = (n.rw & vref_write) && direct ? n.var_offset : 0,
         .write_count = (n.rw & vref_write) && direct ? 1u : 0u,
     };
 }
+
 
 static void add_edge(rc_span_bitset interfere, uint32_t a, uint32_t b)
 {
@@ -195,6 +214,7 @@ static void add_edge(rc_span_bitset interfere, uint32_t a, uint32_t b)
         rc_bitset_set(rc_span_bitset_at(interfere, b), a);
     }
 }
+
 
 // Does this block hand control back to the caller of the routine containing it? True for an RTS/RTI - and
 // for a transfer OUT of the program, because the external routine's own RTS returns to OUR caller (the
@@ -210,10 +230,12 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     if (blk.num_insns == 0) {
         return false;
     }
+
     zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
     if (last.flow != zp_flow_jump && last.flow != zp_flow_branch && last.flow != zp_flow_return) {
         return false;   // normal/call/skip flow: not an exit of any kind (a skip always resumes in-stream)
     }
+
     bool annotated = false;
     for (uint32_t j = 0; j < cflows.num; j++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
@@ -230,21 +252,26 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             }
         }
     }
+
     if (annotated) {
         return false;   // every declared arm resolved in-program: control continues at them
     }
+
     if (last.flow == zp_flow_return) {
         return true;   // a bare RTS/RTI returns
     }
+
     if (cfg_target_block(g, last) != RC_INDEX_NONE) {
         return false;   // a plain resolved jump/branch: an ordinary edge, not an exit
     }
+
     return cfg_target_is_external(g, last);   // an unannotated external jump/branch out
 }
 
+
 // The bytes a call definitely writes whichever arm it takes: the intersection of its callees' current
 // must-write sets (mwb, indexed by entry block). Empty when any arm is external (it returns having written
-// nothing of ours) or untrackable. A fresh set in `arena` each call - the sets are tiny and short-lived.
+// nothing of ours) or untrackable. A fresh set in arena each call - the sets are tiny and short-lived.
 static rc_bitset call_kill_bytes(call_targets ct, rc_view_bitset mwb, uint32_t nbytes, rc_arena *arena)
 {
     rc_bitset out = {0};
@@ -255,14 +282,17 @@ static rc_bitset call_kill_bytes(call_targets ct, rc_view_bitset mwb, uint32_t n
             rc_bitset_intersection(&out, rc_view_bitset_at(mwb, rc_view_u32_get(ct.blocks, a)));
         }
     }
+
     return out;
 }
+
 
 liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_var vars,
                           uint32_t entry_block, rc_arena *arena, rc_arena scratch)
 {
     uint32_t num_vars = vars.num;
     uint32_t nb = g.blocks.num;
+
     // The results are built through these local spans; the struct hands out views of the same rows for
     // everything consumers only read, and the span itself for the graph they keep injecting edges into.
     rc_span_bitset live_in    = make_rows(nb, num_vars, arena);
@@ -278,10 +308,12 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         .must_write = must_write.view,
         .classes    = classes.view,
     };
+
     // The containers carry the counts now, so pin the shape once: one row per block, one interference
     // row and one class per vreg. Every accessor's bound then has exactly one authority.
     RC_ASSERT(lv.live_in.num == nb && lv.live_out.num == nb && lv.must_write.num == nb);
     RC_ASSERT(lv.interfere.num == num_vars && lv.classes.num == num_vars);
+
     if (nb == 0 || num_vars == 0) {
         return lv;
     }
@@ -329,6 +361,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             rc_bitset_copy(rc_span_bitset_at(mwb, e), &full);
         }
     }
+
     rc_span_bitset mwin   = make_rows(nb, nbytes, &scratch);   // per-entry working rows, re-seeded each visit
     rc_span_bitset mwout  = make_rows(nb, nbytes, &scratch);
     rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
@@ -411,6 +444,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                     if (!rc_bitset_is_set(&in_ext, b) || !block_returns(g, insns, cflows, blk)) {
                         continue;
                     }
+
                     // A returning exit carries whatever the routine wrote before handing back.
                     if (!any_return) {
                         rc_bitset_copy(&acc, rc_span_bitset_at(mwout, b));
@@ -461,12 +495,14 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             }
         }
     }
+
     rc_span_bitset after = make_rows(insns.num, 0, &scratch);
     for (uint32_t i = 0; i < insns.num; i++) {
         if (rc_view_zp_insn_get(insns, i).flow == zp_flow_call) {
             rc_bitset_resize(rc_span_bitset_at(after, i), nbytes, &scratch);
         }
     }
+
     for (uint32_t e = 0; e < nb; e++) {
         if (!rc_bitset_is_set(&is_entry, e)) {
             continue;
@@ -569,7 +605,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // Interference, per instruction. Sweep each block backward from its byte live-out: at any WRITE the
     // variable is pinned to its bytes, so it interferes with the owner of every other live byte (indexed
     // and unknown-offset stores pin too, even though they kill nothing); then advance the live set to
-    // before the instruction - remove the provably-rewritten bytes, add the read ones. A lone `STA ptr`
+    // before the instruction - remove the provably-rewritten bytes, add the read ones. A lone STA ptr
     // removes only the LSB's byte, so the MSB keeps the pointer live and overlap with it still registers;
     // once the MSB's store joins it the whole variable goes dead and the range genuinely ends. All the "in
     // reuses in's byte", "keep hits the whole callee footprint" legality falls out of these overlaps.
@@ -620,6 +656,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             }
         }
     }
+
     // The routine's inputs are all simultaneously live at entry (the spec's synthetic ENTRY def = In(R)), so
     // they pairwise interfere - an edge no real-instruction def would create for a read-only input.
     if (entry_block < nb) {
@@ -644,6 +681,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         if (n.rw & vref_read)  { rc_bitset_set(&seen_read,  n.vreg); }
         if (n.rw & vref_write) { rc_bitset_set(&seen_write, n.vreg); }
     }
+
     for (uint32_t v = 0; v < num_vars; v++) {
         bool read     = rc_bitset_is_set(&seen_read, v);
         bool written  = rc_bitset_is_set(&seen_write, v);
@@ -662,13 +700,16 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     return lv;
 }
 
+
 bool liveness_interferes(const liveness *lv, uint32_t a, uint32_t b)
 {
     RC_ASSERT(lv != NULL);
+
     // The graph is square (one num_vars-bit row per vreg), so one count bounds both sides.
     return a != b && a < lv->interfere.num && b < lv->interfere.num
         && rc_bitset_is_set(rc_view_bitset_at(lv->interfere.view, a), b);
 }
+
 
 vreg_class liveness_class_of(const liveness *lv, uint32_t vreg)
 {
@@ -676,15 +717,18 @@ vreg_class liveness_class_of(const liveness *lv, uint32_t vreg)
     return vreg < lv->classes.num ? (vreg_class) rc_view_u8_get(lv->classes, vreg) : vreg_class_unused;
 }
 
+
 bool liveness_is_live_in(const liveness *lv, uint32_t block, uint32_t vreg)
 {
     RC_ASSERT(lv != NULL);
     if (block >= lv->live_in.num) {
         return false;
     }
+
     const rc_bitset *row = rc_view_bitset_at(lv->live_in, block);
     return vreg < row->num && rc_bitset_is_set(row, vreg);   // the row's own width IS the vreg count
 }
+
 
 bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
 {
@@ -692,9 +736,11 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
     if (block >= lv->live_out.num) {
         return false;
     }
+
     const rc_bitset *row = rc_view_bitset_at(lv->live_out, block);
     return vreg < row->num && rc_bitset_is_set(row, vreg);
 }
+
 
 // The bytes an instruction MAY write - the gate for the entry-input harvest below. The allocator's
 // insn_window counts only PROVABLE redefinitions (an indexed store proves nothing, so it kills nothing);
@@ -707,12 +753,14 @@ static touch_window may_write_window(zp_insn n, uint16_t width)
     if (n.var_kill || !(n.rw & vref_write)) {
         return (touch_window) {0};
     }
+
     bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
     return (touch_window) {
         .write_first = direct ? n.var_offset : 0,
         .write_count = direct ? 1u : width,
     };
 }
+
 
 // The shared plumbing of the entry-input walk's two phases: the graph and stream, the may-write
 // summaries the flow consumes, and the working rows it fills (the footprint walk's context pattern).
@@ -747,6 +795,7 @@ static bool may_write_flow(rbw_ctx *c, uint32_t e)
             rc_bitset_reset(rc_span_bitset_at(c->mayout, b));
         }
     }
+
     bool pass = true;
     while (pass) {
         pass = false;
@@ -790,23 +839,20 @@ static bool may_write_flow(rbw_ctx *c, uint32_t e)
             }
         }
     }
+
     return tainted;
 }
 
-// The entry-input walk: which variables can a routine read while NOTHING in the program could yet have
-// written them - values that can only have come from outside, which is fatal at an allocator-chosen
-// address. Deliberately gated on MAY-write, not the sibling engine's must-write: a write on ANY route
-// to the read silences it. A definite-assignment gate flagged correct programs whose guarding
-// correlations no analysis of this IR can see - the flag-guarded init (writes skipped exactly when a
-// "nothing to do" flag is set, reads guarded by the same flag) and the value-correlated dispatch
-// (written under X==0, read only in the handler dispatched when X==0) - and drowned the real signal.
-// The price, paid knowingly: purely loop-carried state (read at a loop's top, written only later inside
-// it) is silenced by its own back edge. Calls apply summaries, not edges: a callee's may-writes extend
-// the caller's set, and its own input set counts only where the caller's set does not already cover it
-// - which keeps one call site's context out of another. Two phases, because an interleave would not
-// converge cleanly: the may-write summaries grow to their fixpoint first, then - coverage frozen - the
-// input summaries grow to theirs (interleaved, an early under-covered harvest could flag a read the
-// final coverage silences, and a grow-only summary would never take it back).
+
+// The entry-input walk: which variables can a routine read while NOTHING in the program could yet
+// have written them - values that can only have come from outside, which is fatal at an
+// allocator-chosen address. Deliberately gated on MAY-write, not the sibling engine's must-write: a
+// write on ANY route to the read silences it. A definite-assignment gate flagged correct programs
+// whose guarding correlations no analysis of this IR can see (the flag-guarded init, the
+// value-correlated dispatch) and drowned the real signal; the price, paid knowingly, is that purely
+// loop-carried state is silenced by its own back edge. Calls apply summaries, not edges - a callee's
+// may-writes extend the caller's set, its input set counts only where the caller's does not already
+// cover it - which keeps one call site's context out of another.
 rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                                      rc_view_zp_var vars, uint32_t root, rc_arena *arena, rc_arena scratch)
 {
@@ -899,10 +945,12 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
         }
     }
 
-    // Phase 2: the input harvest, to its own fixpoint with the coverage frozen. Replay each block from
-    // its stable may-in and collect the reads that land outside the running set - checking each
-    // instruction's reads BEFORE applying its writes, so a read-modify-write consumes the old value. A
-    // callee contributes its own input set, filtered by what this caller may already have covered, then
+    // Phase 2: the input harvest, to its own fixpoint with the coverage frozen - the freeze is why the
+    // phases cannot interleave: an early under-covered harvest could flag a read the final coverage
+    // silences, and a grow-only summary would never take it back. Replay each block from its stable
+    // may-in and collect the reads that land outside the running set - checking each instruction's
+    // reads BEFORE applying its writes, so a read-modify-write consumes the old value. A callee
+    // contributes its own input set, filtered by what this caller may already have covered, then
     // extends the running set with its may-writes. Reads come from insn_window (its read side is the
     // consumption question, unchanged); only the coverage side uses the may window.
     changed = true;
@@ -970,6 +1018,7 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
          bit = rc_bitset_get_next_set(rc_span_bitset_at(rbwb, root), bit + 1)) {
         rc_bitset_set(&result, rc_span_u32_get(ids.owner, bit));
     }
+
     return result;
 }
 
@@ -990,7 +1039,7 @@ static uint32_t touch(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, zp_fl
     return pc + size;
 }
 
-// A registry of `n` one-byte variables (vreg i = vars[i]) - the common case; a test that needs a wider
+// A registry of n one-byte variables (vreg i = vars[i]) - the common case; a test that needs a wider
 // variable builds its own registry.
 static rc_view_zp_var width1_vars(uint32_t n, rc_arena *arena)
 {
@@ -1002,7 +1051,7 @@ static rc_view_zp_var width1_vars(uint32_t n, rc_arena *arena)
     return vars.view;
 }
 
-// The spec's `mul` routine: vreg 0 = in1 (read-only), 1 = tmp (write then read), 2 = out1 (write-only).
+// The spec's mul routine: vreg 0 = in1 (read-only), 1 = tmp (write then read), 2 = out1 (write-only).
 //   LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS
 static rc_array_zp_insn build_mul(rc_arena *arena)
 {
@@ -1108,7 +1157,7 @@ RC_TEST(liveness, loop_carries_value_across_back_edge)
     rc_arena_deinit(&arena);
 }
 
-// touch() with an explicit byte window: `offset` into the variable, `indirect` for a 2-byte pointer deref.
+// touch() with an explicit byte window: offset into the variable, indirect for a 2-byte pointer deref.
 static uint32_t touch_at(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, uint32_t vreg, uint8_t rw,
                          uint32_t offset, bool indirect, rc_arena *arena)
 {
@@ -1194,7 +1243,7 @@ RC_TEST(liveness, full_byte_rewrite_kills_a_pointer)
     rc_arena_deinit(&arena);
 }
 
-// Push a ZA_DISCARD marker for `vreg`: size 0, no rw - the tests pre-resolve vregs, so identity fields stay 0.
+// Push a ZA_DISCARD marker for vreg: size 0, no rw - the tests pre-resolve vregs, so identity fields stay 0.
 static uint32_t kill_marker(rc_array_zp_insn *insns, uint32_t pc, uint32_t vreg, rc_arena *arena)
 {
     rc_array_zp_insn_push(insns,

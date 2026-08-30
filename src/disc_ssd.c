@@ -26,8 +26,9 @@ static rc_str msg(const char *before, rc_str name, const char *after, rc_arena *
     return s.view;
 }
 
+
 // A filename split into DFS terms: a single directory character (default '$') and a 1-7 character name.
-// `ok` false means it cannot go on a DFS disc at all.
+// ok false means it cannot go on a DFS disc at all.
 typedef struct dfs_name {
     char   dir;
     rc_str name;
@@ -40,6 +41,7 @@ static bool dfs_char_ok(char c)
     return c > ' ' && c <= '~' && c != '.' && c != ':' && c != '"' && c != '#' && c != '*';
 }
 
+
 static dfs_name dfs_name_parse(rc_str filename)
 {
     bool   spec = filename.len >= 2 && filename.data[1] == '.';   // "X.File": a directory specifier
@@ -48,24 +50,29 @@ static dfs_name dfs_name_parse(rc_str filename)
     if (!dfs_char_ok(dir) || name.len == 0 || name.len > 7) {
         return (dfs_name) {0};
     }
+
     for (uint32_t i = 0; i < name.len; i++) {
         if (!dfs_char_ok(name.data[i])) {
             return (dfs_name) {0};
         }
     }
+
     return (dfs_name) {.dir = dir, .name = name, .ok = true};
 }
+
 
 static char lower(char c)
 {
     return c >= 'A' && c <= 'Z' ? (char) (c + 32) : c;
 }
 
+
 // DFS matches names without regard to case, so two names differing only in case still collide.
 static bool dfs_name_is_equal(dfs_name a, dfs_name b)
 {
     return lower(a.dir) == lower(b.dir) && rc_str_is_equal_insensitive(a.name, b.name);
 }
+
 
 // One placed file: its parsed catalogue name and its start sector. Fixed count (one per entry), so the
 // records travel as a span over arena storage.
@@ -81,15 +88,19 @@ typedef struct dfs_file {
 disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena)
 {
     RC_ASSERT(spec != NULL && arena != NULL);
+
     if (spec->title.len > ssd_max_title) {
         return (disc_ssd_result) {.error = msg("disc title '", spec->title, "' is too long (12 characters maximum)", arena)};
     }
+
     if (spec->boot > ssd_max_boot) {
         return (disc_ssd_result) {.error = rc_str_from_cstr("boot option must be 0-3")};
     }
+
     if (spec->cycle > ssd_max_cycle) {
         return (disc_ssd_result) {.error = rc_str_from_cstr("cycle count must be 0-99")};
     }
+
     uint32_t n = spec->entries.num;
     if (n > ssd_max_files) {
         return (disc_ssd_result) {.error = rc_str_from_cstr("too many files for a DFS disc (31 maximum)")};
@@ -99,6 +110,7 @@ disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena)
     // entry order. Each record remembers where its file landed for the catalogue below.
     rc_span_dfs_file files = rc_span_dfs_file_make(n != 0 ? rc_arena_alloc_type(arena, dfs_file, n) : NULL, n);
     uint32_t next = ssd_first_sector;
+
     for (uint32_t i = 0; i < n; i++) {
         output_entry e = rc_view_output_entry_get(spec->entries, i);
         dfs_name name = dfs_name_parse(e.filename);
@@ -132,6 +144,7 @@ disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena)
     for (uint32_t i = 0; i < spec->title.len; i++) {
         rc_array_bytes_set(&img, i < 8 ? i : ssd_sector_size + (i - 8), (uint8_t) spec->title.data[i]);
     }
+
     rc_array_bytes_set(&img, ssd_sector_size + 4, (uint8_t) (((spec->cycle / 10) << 4) | (spec->cycle % 10)));
     rc_array_bytes_set(&img, ssd_sector_size + 5, (uint8_t) (n * 8));
     rc_array_bytes_set(&img, ssd_sector_size + 6, (uint8_t) (((ssd_total_sectors >> 8) & 3) | (spec->boot << 4)));
@@ -171,6 +184,7 @@ disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena)
 
     return (disc_ssd_result) {.image = img.view};
 }
+
 
 #ifdef BARON_TESTS
 

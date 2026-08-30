@@ -12,6 +12,7 @@ uint32_t token_table_find(token_table tt, rc_str text)
             }
         }
     }
+
     return best;
 }
 

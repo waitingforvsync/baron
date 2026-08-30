@@ -14,10 +14,10 @@
 
 typedef struct basic_line_result {
     rc_view_bytes bytes;   // the whole record: 0D, line hi, line lo, length, tokenised text; empty on error
-    uint16_t      error;    // error_type
+    uint16_t      error;   // error_type
 } basic_line_result;
 
-// Tokenise one whole source line. `line` starts at the first digit of the line number (the caller
+// Tokenise one whole source line. line starts at the first digit of the line number (the caller
 // peeked it - we assert) and ends before the newline. The decimal line number becomes the record's
 // big-endian header (the ROM's enterable range, 0 to 32767); spaces after it are kept exactly as
 // written (LISTO 0, the power-on default) while trailing spaces - and a stray '\r' from a CRLF

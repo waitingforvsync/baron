@@ -1,7 +1,7 @@
 #ifndef BARON_DISC_SSD_H_
 #define BARON_DISC_SSD_H_
 
-#include "output.h"   // output_spec: what a disc image is built from
+#include "output.h"
 
 
 // The .ssd writer: an output_spec rendered as a single-sided Acorn DFS disc image. Pure byte work into a

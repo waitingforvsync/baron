@@ -1,23 +1,23 @@
 #ifndef BARON_ASSEMBLE_INTERNAL_H_
 #define BARON_ASSEMBLE_INTERNAL_H_
 
-#include "assemble.h"     // error_type, diagnostic, rc_str, rc_arena
-#include "value.h"        // value (int_argument_make's input)
-#include "cursor.h"       // cursor (an error's location, and require_separator's position)
-#include "expression.h"   // expr_result / expr_env (eval's return + the context it builds)
+#include "assemble.h"
+#include "value.h"
+#include "cursor.h"
+#include "expression.h"
 
 
 // The assembler's internal parsing vocabulary, shared between assemble.c (the statement loop and
 // the directives) and opcodes.c (instruction parsing). Not part of the public assemble.h surface.
 
-// `baron` is the internal machine (defined in baron.h); the public assemble.h no longer names it, so the
+// baron is the internal machine (defined in baron.h); the public assemble.h no longer names it, so the
 // shared parse vocabulary forward-declares it here for the handler signatures below.
 typedef struct baron baron;
 
-// Per-statement parse context, threaded by value alongside the cursor. `final` arms the deferred
-// checks (range, undefined-on-final) on the settling pass. `active` says whether a statement's
+// Per-statement parse context, threaded by value alongside the cursor. final arms the deferred
+// checks (range, undefined-on-final) on the settling pass. active says whether a statement's
 // effects apply: inside a false IF branch it is cleared, so the statement is parsed for structure
-// (to find the matching ENDIF) but emits nothing, binds nothing and raises nothing. `listing` marks
+// (to find the matching ENDIF) but emits nothing, binds nothing and raises nothing. listing marks
 // the one extra pass run after zero-page allocation: everything is settled and the ZA_AUTO symbols
 // hold their real addresses, so re-emission produces the true output bytes and the verbose listing
 // is built as we go (diagnostics stay quiet - their gate is final, which a listing pass is not).
@@ -25,15 +25,14 @@ typedef struct baron baron;
 typedef struct parse_flags {
     bool final;     // the single armed pass after convergence: diagnostics record, the zp IR fills
     bool active;    // false inside a dead IF/FOR branch: parse for extent, effect nothing
-    bool output;    // the post-allocation re-emission pass: ZA_AUTO symbols hold their real addresses,
-                    // and the sections it builds ARE the output (there is no operand patching)
+    bool output;    // the post-allocation re-emission pass: ZA_AUTO symbols hold their real addresses
     bool listing;   // build the -v listing text (rides on the output pass; implies output)
 } parse_flags;
 
 // The outputs of a parse, returned by value for the caller to fold into its own running state.
-// `next` is the cursor past what was consumed; `fatal` that a syntax error broke the token stream
-// and the whole assemble must unwind; `unresolved` that some operand referenced a not-yet-defined
-// symbol; `changed` that some existing symbol moved value. The error's code and location do NOT ride
+// next is the cursor past what was consumed; fatal that a syntax error broke the token stream
+// and the whole assemble must unwind; unresolved that some operand referenced a not-yet-defined
+// symbol; changed that some existing symbol moved value. The error's code and location do NOT ride
 // here - they are recorded straight into b->diagnostics at the failure site (see syntax_error /
 // semantic_error), so a recoverable error leaves no trace in the result and the statement simply
 // carries on. unresolved and changed are independent (a pass can do both), so they stay two flags -
@@ -59,52 +58,52 @@ parse_result syntax_error_payload(baron *b, error_type code, cursor at, rc_str p
 void semantic_error(baron *b, parse_flags flags, error_type code, cursor at);
 void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor at, rc_str payload);
 
-// Record a warning into b->diagnostics at a positive `severity` level, gated exactly like semantic_error
+// Record a warning into b->diagnostics at a positive severity level, gated exactly like semantic_error
 // (settling pass, live branch). Unlike an error it does not fail the assemble - it just rides along for
 // the caller to see (and to filter by warning level).
 void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity);
 
 // An integer argument reduced for emission: one of three mutually-exclusive outcomes, so a single
-// tag rather than a clutch of bools. `value` is the integer (valid only when known); `error` /
-// `error_at` say why an argument can never be an address. The 8-byte value leads so the struct packs.
+// tag rather than a clutch of bools. value is the integer (valid only when known); error / error_at
+// say why an argument can never be an address. The 8-byte value leads so the struct packs.
+//
+// za_auto marks a ZA_AUTO address: value then holds the OFFSET within the variable (the real base
+// exists only after allocation) and zp_scope/zp_def/zp_name carry its identity. Callers that need a
+// real number NOW must refuse (error_type_za_auto_address); the operand and data-emission paths
+// accept, and the output pass re-evaluates against the allocated address.
 typedef enum int_argument_type {
     int_argument_type_error,        // 0/default: a value that can never be an address (fail-safe)
-    int_argument_type_known,        // `value` is a resolved integer
+    int_argument_type_known,        // value is a resolved integer
     int_argument_type_unresolved,   // a forward reference - defer to a later pass
 } int_argument_type;
 
 typedef struct int_argument {
-    int64_t           value;        // valid when type == int_argument_type_known
+    int64_t  value;          // valid when type == int_argument_type_known
     uint8_t  type;           // int_argument_type
-    uint16_t error;          // error_type        // set when type == int_argument_type_error
-    uint32_t          error_at;
-    rc_str            error_detail; // the error's payload (e.g. the undefined symbol's name), or {0}
-    bool              za_auto;      // the value was a ZA_AUTO address: `value` holds the OFFSET within
-                                    // the variable (the real base exists only after allocation), and
-                                    // zp_scope/zp_def/zp_name carry its identity. Callers that need a
-                                    // real number NOW must refuse (error_type_za_auto_address); the
-                                    // operand and data-emission paths accept, and the output pass
-                                    // re-evaluates against the allocated address.
-    uint32_t          zp_scope;
-    cursor            zp_def;
-    rc_str            zp_name;
+    uint16_t error;          // error_type, set when type == int_argument_type_error
+    uint32_t error_at;
+    rc_str   error_detail;   // the error's payload (e.g. the undefined symbol's name), or {0}
+    bool     za_auto;        // a ZA_AUTO address: value is the offset, zp_* its identity (see above)
+    uint32_t zp_scope;
+    cursor   zp_def;
+    rc_str   zp_name;
 } int_argument;
 
 // Reduce an evaluated expression value to an integer argument (pure: inputs in, result out). A plain
 // numeric comes back known; a ZA_AUTO address comes back known-with-the-za_auto-flag (see above); a
 // forward reference (unknown symbol) comes back unresolved, to settle on a later pass; a value that
-// can never be an address - or an unknown symbol on the final pass - comes back as an error. `at` is
+// can never be an address - or an unknown symbol on the final pass - comes back as an error. at is
 // the offset to blame.
 int_argument int_argument_make(value v, bool final_pass, uint32_t at);
 
-// The separator (':' / newline / EOF) that must follow a non-label statement, starting at `at`. A
+// The separator (':' / newline / EOF) that must follow a non-label statement, starting at at. A
 // following '}' counts as an implicit one (left for the scope to close). Returns the cursor past it
-// in `.next`; a missing separator is a fatal (syntax) error, recorded into b and flagged in `.fatal`.
+// in .next; a missing separator is a fatal (syntax) error, recorded into b and flagged in .fatal.
 // Defined in assemble.c (it reads the statement table); shared with opcodes.c.
 parse_result require_separator(baron *b, cursor at);
 
-// Evaluate one expression in the assembler's current context: symbols from `scope`, plus the live PC of the
-// current section. The single place that projects `baron` into an expr_env, so no call site rebuilds it.
+// Evaluate one expression in the assembler's current context: symbols from scope, plus the live PC of the
+// current section. The single place that projects baron into an expr_env, so no call site rebuilds it.
 // Defined in assemble.c (it reaches into b's sections); shared with opcodes.c.
 expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch);
 
@@ -121,7 +120,7 @@ typedef enum verbose_text_kind {
 // text is sliced [stmt.pos, end_pos) and echoed verbatim (first line only - a multi-line list literal
 // gets an ellipsis). verbose_code_line is an emitting statement: address + hex dump (truncated after
 // four bytes) + source, with the bytes read back from the section between code_begin and its current
-// end. verbose_text_line covers the rest, laid out by `kind` (above); `pc` is read only for
+// end. verbose_text_line covers the rest, laid out by kind (above); pc is read only for
 // verbose_text_address.
 // Defined in assemble.c (they append to b's buffer); shared with opcodes.c.
 void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,

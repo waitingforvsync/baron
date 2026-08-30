@@ -1,7 +1,7 @@
 #include "sections.h"
 
 #include "richc/macros.h"
-#include "richc/mstr.h"   // rc_mstr_from_str: durable copies of a section's name / attribute keys
+#include "richc/mstr.h"
 
 
 enum {
@@ -10,28 +10,42 @@ enum {
     section_attrs_reserve  = 4,         // a handful of attributes per section is typical
 };
 
+
+// ---- lifecycle ----
+
 void sections_init(sections *sec, rc_arena *per_pass, rc_arena *permanent)
 {
     RC_ASSERT(sec != NULL && per_pass != NULL && permanent != NULL);
-    sec->arena     = per_pass;          // borrowed; baron owns it
-    sec->permanent = permanent;         // borrowed; backs the cross-pass size + emission maps only
-    sec->nodes     = (rc_array_section) {0};   // sections_reset builds the list each pass
+
+    // The node list stays empty here: sections_reset builds it at the top of each pass. sizes and
+    // emissions are lazily made and deliberately survive the per-pass resets.
+    sec->arena     = per_pass;
+    sec->permanent = permanent;
+    sec->nodes     = (rc_array_section) {0};
     sec->splices   = (rc_array_splice) {0};
-    sec->sizes     = (rc_array_section_size) {0};   // lazily made; deliberately NOT reset per pass
-    sec->emissions = (rc_view_section_emission) {0};   // ditto: last settling pass's fingerprints
+    sec->sizes     = (rc_array_section_size) {0};
+    sec->emissions = (rc_view_section_emission) {0};
 }
+
 
 void sections_reset(sections *sec)
 {
     RC_ASSERT(sec != NULL);
+
+    // The default section is index 0
     sec->nodes = rc_array_section_make(sections_nodes_reserve, sec->arena);
-    rc_array_section_push(                                   // the default section is index 0
+    rc_array_section_push(
         &sec->nodes,
         (section) { .guard = RC_INDEX_NONE,
                     .code = rc_array_bytes_make(section_code_reserve, sec->arena) },
         sec->arena);
-    sec->splices = (rc_array_splice) {0};   // this pass's records; the arena behind them was just reset
+
+    // This pass's splice records start empty; the arena behind the old ones was just reset
+    sec->splices = (rc_array_splice) {0};
 }
+
+
+// ---- queries ----
 
 uint32_t sections_pc(const sections *sec, uint32_t id)
 {
@@ -39,11 +53,13 @@ uint32_t sections_pc(const sections *sec, uint32_t id)
     return rc_array_section_get(&sec->nodes, id).pc;
 }
 
+
 rc_view_bytes sections_code(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
     return rc_array_section_get(&sec->nodes, id).code.view;
 }
+
 
 rc_view_section sections_all(const sections *sec)
 {
@@ -51,34 +67,56 @@ rc_view_section sections_all(const sections *sec)
     return sec->nodes.view;
 }
 
+
 rc_view_attribute sections_attributes(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
     return rc_array_section_get(&sec->nodes, id).attributes.view;
 }
 
+
 uint32_t sections_find(const sections *sec, rc_str name)
 {
     RC_ASSERT(sec != NULL);
-    // Sections are few (one per named region), so a linear scan by name is ample. Skip nameless entries -
-    // the default at index 0 has a zero-initialised {0} name (NULL data, which rc_str_is_equal rejects)
-    // and is never a target of a name lookup anyway.
+
+    // Sections are few, so a linear scan is ample. Skip nameless entries: the default's {0} name has
+    // NULL data (which rc_str_is_equal rejects) and is never a lookup target anyway.
     for (uint32_t i = 0; i < sec->nodes.num; i++) {
         rc_str n = rc_array_section_get(&sec->nodes, i).name;
         if (n.len != 0 && rc_str_is_equal(n, name)) {
             return i;
         }
     }
+
     return RC_INDEX_NONE;
 }
+
+
+bool sections_cmos(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+    return rc_array_section_get(&sec->nodes, id).cmos;
+}
+
+
+uint32_t sections_guard(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+    return rc_array_section_get(&sec->nodes, id).guard;
+}
+
+
+// ---- mutation ----
 
 uint32_t sections_make(sections *sec, rc_str name)
 {
     RC_ASSERT(sec != NULL);
-    // A repeated name is a duplicate: hand back RC_INDEX_NONE and let the caller diagnose it.
+
+    // A repeated name is a duplicate: hand back RC_INDEX_NONE and let the caller diagnose it
     if (sections_find(sec, name) != RC_INDEX_NONE) {
-        return RC_INDEX_NONE;   // already defined this pass
+        return RC_INDEX_NONE;
     }
+
     return rc_array_section_push(
         &sec->nodes,
         (section) { .name = name, .guard = RC_INDEX_NONE,
@@ -86,14 +124,15 @@ uint32_t sections_make(sections *sec, rc_str name)
         sec->arena);
 }
 
+
 void sections_add_attribute(sections *sec, uint32_t id, rc_str key, value v, cursor at)
 {
     RC_ASSERT(sec != NULL);
+
     section *s = rc_array_section_at(&sec->nodes, id);
     value copy = value_make_copy(v, sec->arena);   // durable backing in the (per-pass) manager arena
 
-    // Upsert: a key already present (inherited from a parent, most often) is replaced in place; otherwise
-    // append. The bag is made lazily so a section with no attributes carries none.
+    // Upsert: a key already present (inherited from a parent, most often) is replaced in place
     for (uint32_t i = 0; i < s->attributes.num; i++) {
         if (rc_str_is_equal(rc_array_attribute_get(&s->attributes, i).key, key)) {
             *rc_array_attribute_at(&s->attributes, i) = (attribute) {
@@ -104,9 +143,12 @@ void sections_add_attribute(sections *sec, uint32_t id, rc_str key, value v, cur
             return;
         }
     }
+
+    // Otherwise append; the bag is made lazily so a section with no attributes carries none
     if (s->attributes.data == NULL) {
         s->attributes = rc_array_attribute_make(section_attrs_reserve, sec->arena);
     }
+
     rc_array_attribute_push(&s->attributes, (attribute) {
                 .key = key,
                 .v   = copy,
@@ -114,11 +156,15 @@ void sections_add_attribute(sections *sec, uint32_t id, rc_str key, value v, cur
             }, sec->arena);
 }
 
+
 void sections_org(sections *sec, uint32_t id, uint32_t addr)
 {
     RC_ASSERT(sec != NULL);
-    rc_array_section_at(&sec->nodes, id)->pc = addr;   // only the effective address moves; code still appends at code.num
+
+    // Only the effective address moves; code still appends at code.num
+    rc_array_section_at(&sec->nodes, id)->pc = addr;
 }
+
 
 void sections_set_cmos(sections *sec, uint32_t id, bool cmos)
 {
@@ -126,11 +172,6 @@ void sections_set_cmos(sections *sec, uint32_t id, bool cmos)
     rc_array_section_at(&sec->nodes, id)->cmos = cmos;
 }
 
-bool sections_cmos(const sections *sec, uint32_t id)
-{
-    RC_ASSERT(sec != NULL);
-    return rc_array_section_get(&sec->nodes, id).cmos;
-}
 
 void sections_set_guard(sections *sec, uint32_t id, uint32_t addr)
 {
@@ -138,19 +179,16 @@ void sections_set_guard(sections *sec, uint32_t id, uint32_t addr)
     rc_array_section_at(&sec->nodes, id)->guard = addr;
 }
 
-uint32_t sections_guard(const sections *sec, uint32_t id)
-{
-    RC_ASSERT(sec != NULL);
-    return rc_array_section_get(&sec->nodes, id).guard;
-}
 
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
 {
     RC_ASSERT(sec != NULL);
+
     section *s = rc_array_section_at(&sec->nodes, id);
     rc_array_bytes_push(&s->code, b, sec->arena);
     s->pc += 1;
 }
+
 
 void sections_emit_u16(sections *sec, uint32_t id, uint16_t w)
 {
@@ -158,51 +196,21 @@ void sections_emit_u16(sections *sec, uint32_t id, uint16_t w)
     sections_emit_u8(sec, id, (uint8_t)(w >> 8));
 }
 
+
 void sections_skip(sections *sec, uint32_t id, uint32_t count)
 {
     RC_ASSERT(sec != NULL);
+
     section *s = rc_array_section_at(&sec->nodes, id);
     for (uint32_t i = 0; i < count; i++) {
         rc_array_bytes_push(&s->code, 0, sec->arena);
     }
+
     s->pc += count;
 }
 
-// CRC-32 (the standard reflected polynomial), bitwise - no table. The inputs are one program's object
-// code once per settling pass, so simplicity beats speed.
-static uint32_t crc32_bytes(rc_view_bytes bytes)
-{
-    uint32_t crc = 0xFFFFFFFFu;
-    for (uint32_t i = 0; i < bytes.num; i++) {
-        crc ^= rc_view_bytes_get(bytes, i);
-        for (uint32_t k = 0; k < 8; k++) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-        }
-    }
-    return ~crc;
-}
 
-bool sections_emission_changed(sections *sec)
-{
-    RC_ASSERT(sec != NULL);
-    bool first   = sec->emissions.num == 0;   // nothing noted yet: the first pass has no comparison
-    bool changed = !first && sec->emissions.num != sec->nodes.num;
-
-    rc_array_section_emission next = rc_array_section_emission_make(sec->nodes.num, sec->permanent);
-    for (uint32_t i = 0; i < sec->nodes.num; i++) {
-        section_emission e = {
-            .size = rc_array_section_get(&sec->nodes, i).code.num,
-            .crc  = crc32_bytes(rc_array_section_get(&sec->nodes, i).code.view),
-        };
-        if (!first && i < sec->emissions.num) {
-            section_emission prev = rc_view_section_emission_get(sec->emissions, i);
-            changed = changed || prev.size != e.size || prev.crc != e.crc;
-        }
-        rc_array_section_emission_push(&next, e, sec->permanent);
-    }
-    sec->emissions = next.view;
-    return changed;
-}
+// ---- splices (INCSECTION) ----
 
 // The size the named section ended the LAST pass with, or 0 when it has never been seen - the best a
 // splice can reserve for a source not built yet this pass.
@@ -214,40 +222,28 @@ static uint32_t prior_size(const sections *sec, rc_str name)
             return e.size;
         }
     }
+
     return 0;
 }
 
-// Record (or refresh) the named section's cross-pass size. The name is a view into permanent source text,
-// so storing it outlives every pass; the entries themselves live in the permanent arena for the same reason.
-static void size_upsert(sections *sec, rc_str name, uint32_t size)
-{
-    for (uint32_t i = 0; i < sec->sizes.num; i++) {
-        if (rc_str_is_equal(rc_array_section_size_get(&sec->sizes, i).name, name)) {
-            rc_array_section_size_at(&sec->sizes, i)->size = size;
-            return;
-        }
-    }
-    if (sec->sizes.data == NULL) {
-        sec->sizes = rc_array_section_size_make(8, sec->permanent);
-    }
-    rc_array_section_size_push(&sec->sizes, (section_size) {.name = name, .size = size}, sec->permanent);
-}
 
 void sections_splice(sections *sec, uint32_t dst, rc_str src_name, cursor at)
 {
     RC_ASSERT(sec != NULL);
-    // Reserve the source's best-known size as zeroes (the fixup copy overwrites them after everything -
-    // the final pass, the zero-page patches - has finished): its live size when it is already built this
-    // pass, else the size it ended the last pass with. A first sighting reserves 0; the settle check then
-    // demands another pass once the real size is known. A source that is still OPEN (this splice sits
-    // inside it) reserves its partial size - harmless, since that shape is a cycle and fails the pass.
+
+    // Reserve the source's best-known size as zeroes: its live size if built this pass, else last
+    // pass's size, else 0 on a first sighting (the settle check demands another pass once known). A
+    // still-open source reserves its partial size - harmless, that shape is a cycle and fails the pass.
     uint32_t src    = sections_find(sec, src_name);
     uint32_t count  = (src != RC_INDEX_NONE) ? sections_code(sec, src).num : prior_size(sec, src_name);
     uint32_t offset = sections_code(sec, dst).num;
+
     sections_skip(sec, dst, count);
+
     if (sec->splices.data == NULL) {
         sec->splices = rc_array_splice_make(8, sec->arena);
     }
+
     rc_array_splice_push(
         &sec->splices,
         (splice) {
@@ -260,15 +256,18 @@ void sections_splice(sections *sec, uint32_t dst, rc_str src_name, cursor at)
         sec->arena);
 }
 
+
 rc_view_splice sections_splices(const sections *sec)
 {
     RC_ASSERT(sec != NULL);
     return sec->splices.view;
 }
 
+
 bool sections_splices_changed(const sections *sec)
 {
     RC_ASSERT(sec != NULL);
+
     for (uint32_t i = 0; i < sec->splices.num; i++) {
         splice sp  = rc_array_splice_get(&sec->splices, i);
         uint32_t src = sections_find(sec, sp.src_name);
@@ -277,20 +276,59 @@ bool sections_splices_changed(const sections *sec)
             return true;   // the reservation missed: the layout will differ next pass
         }
     }
+
     return false;
 }
+
+
+void sections_copy_in(sections *sec, uint32_t dst, uint32_t offset, uint32_t src)
+{
+    RC_ASSERT(sec != NULL && dst != src);
+
+    section *d = rc_array_section_at(&sec->nodes, dst);
+    rc_view_bytes s = sections_code(sec, src);
+    RC_ASSERT((uint64_t) offset + s.num <= d->code.num);   // the span was reserved at exactly this size
+
+    for (uint32_t i = 0; i < s.num; i++) {
+        rc_array_bytes_set(&d->code, offset + i, rc_view_bytes_get(s, i));
+    }
+}
+
+
+// ---- cross-pass bookkeeping ----
+
+// Record (or refresh) the named section's cross-pass size. The name is a view into permanent source text,
+// so storing it outlives every pass; the entries themselves live in the permanent arena for the same reason.
+static void size_upsert(sections *sec, rc_str name, uint32_t size)
+{
+    for (uint32_t i = 0; i < sec->sizes.num; i++) {
+        if (rc_str_is_equal(rc_array_section_size_get(&sec->sizes, i).name, name)) {
+            rc_array_section_size_at(&sec->sizes, i)->size = size;
+            return;
+        }
+    }
+
+    if (sec->sizes.data == NULL) {
+        sec->sizes = rc_array_section_size_make(8, sec->permanent);
+    }
+
+    rc_array_section_size_push(&sec->sizes, (section_size) {.name = name, .size = size}, sec->permanent);
+}
+
 
 void sections_note_sizes(sections *sec)
 {
     RC_ASSERT(sec != NULL);
+
     for (uint32_t i = 0; i < sec->nodes.num; i++) {
         section s = rc_array_section_get(&sec->nodes, i);
         if (s.name.len != 0) {
             size_upsert(sec, s.name, s.code.num);
         }
     }
+
     // A splice source that never appeared this pass is pinned at 0, so a section that VANISHED across
-    // passes (an IF arm flipping) cannot leave a stale size re-reserving itself forever.
+    // passes (an IF arm flipping) cannot leave a stale size re-reserving itself forever
     for (uint32_t i = 0; i < sec->splices.num; i++) {
         rc_str name = rc_array_splice_get(&sec->splices, i).src_name;
         if (sections_find(sec, name) == RC_INDEX_NONE) {
@@ -299,16 +337,50 @@ void sections_note_sizes(sections *sec)
     }
 }
 
-void sections_copy_in(sections *sec, uint32_t dst, uint32_t offset, uint32_t src)
+
+// CRC-32 (the standard reflected polynomial), bitwise - no table. The inputs are one program's object
+// code once per settling pass, so simplicity beats speed.
+static uint32_t crc32_bytes(rc_view_bytes bytes)
 {
-    RC_ASSERT(sec != NULL && dst != src);
-    section *d = rc_array_section_at(&sec->nodes, dst);
-    rc_view_bytes s = sections_code(sec, src);
-    RC_ASSERT((uint64_t) offset + s.num <= d->code.num);   // the span was reserved at exactly this size
-    for (uint32_t i = 0; i < s.num; i++) {
-        rc_array_bytes_set(&d->code, offset + i, rc_view_bytes_get(s, i));
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < bytes.num; i++) {
+        crc ^= rc_view_bytes_get(bytes, i);
+        for (uint32_t k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
     }
+
+    return ~crc;
 }
+
+
+bool sections_emission_changed(sections *sec)
+{
+    RC_ASSERT(sec != NULL);
+
+    bool first   = sec->emissions.num == 0;   // nothing noted yet: the first pass has no comparison
+    bool changed = !first && sec->emissions.num != sec->nodes.num;
+
+    // Compare each section's fingerprint against last time's while rebuilding the noted set for next time
+    rc_array_section_emission next = rc_array_section_emission_make(sec->nodes.num, sec->permanent);
+    for (uint32_t i = 0; i < sec->nodes.num; i++) {
+        section_emission e = {
+            .size = rc_array_section_get(&sec->nodes, i).code.num,
+            .crc  = crc32_bytes(rc_array_section_get(&sec->nodes, i).code.view),
+        };
+        if (!first && i < sec->emissions.num) {
+            section_emission prev = rc_view_section_emission_get(sec->emissions, i);
+            changed = changed || prev.size != e.size || prev.crc != e.crc;
+        }
+        rc_array_section_emission_push(&next, e, sec->permanent);
+    }
+
+    sec->emissions = next.view;
+    return changed;
+}
+
+
+// ---- copying ----
 
 // Copy an rc_str into the arena. The nameless default's {0} name stays {0} - there is nothing to own.
 static rc_str str_make_copy(rc_str s, rc_arena *arena)
@@ -316,14 +388,17 @@ static rc_str str_make_copy(rc_str s, rc_arena *arena)
     if (s.len == 0) {
         return (rc_str) {0};
     }
+
     return rc_mstr_from_str(s, 0, arena).view;
 }
+
 
 section section_make_copy(section s, rc_arena *arena)
 {
     RC_ASSERT(arena != NULL);
+
     // Everything the section references is copied, not just the code: the name and attribute keys are views
-    // into source text held by a DIFFERENT arena, and a copy that borrowed them would quietly die with it.
+    // into source text held by a DIFFERENT arena, and a copy that borrowed them would quietly die with it
     rc_array_attribute attributes = {0};
     if (s.attributes.num != 0) {
         attributes = rc_array_attribute_make(s.attributes.num, arena);
@@ -339,16 +414,17 @@ section section_make_copy(section s, rc_arena *arena)
                 arena);
         }
     }
+
     return (section) {
         .name       = str_make_copy(s.name, arena),
         .pc         = s.pc,
         .cmos       = s.cmos,
-        .guard      = s.guard,   // the piecemeal copy used to drop this (harmless - nothing reads a
-                                 // saved section's guard - but a copy should be a copy)
+        .guard      = s.guard,
         .code       = rc_array_bytes_make_copy(s.code.view, 0, arena),
         .attributes = attributes,
     };
 }
+
 
 #ifdef BARON_TESTS
 

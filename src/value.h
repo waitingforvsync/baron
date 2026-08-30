@@ -4,20 +4,18 @@
 #include "richc/arena.h"
 #include "richc/mstr.h"
 #include "richc/str.h"
-#include "cursor.h"  // cursor, half of a ZA_AUTO variable's identity
-#include "error.h"   // error_type, the shared diagnostic vocabulary
+#include "cursor.h"
+#include "error.h"
 
 
-// The single value type flowing through Baron's expression machinery. It is a
-// tagged union: none (uninitialised), a number, a boolean, a string, a list of
-// values, a numeric range, an error, or a ZA_AUTO address. Evaluation errors (unknown
-// symbol, divide by zero, ...) are carried as a value rather than aborting, so
-// they can propagate to the end of an expression and let assembly continue
-// across an as-yet-unresolvable reference.
+// The single value type flowing through Baron's expression machinery: a tagged union of none, number,
+// boolean, string, list, range, error, or ZA_AUTO address. Evaluation errors (unknown symbol, divide
+// by zero, ...) are carried as a value rather than aborting, so they can propagate to the end of an
+// expression and let assembly continue across an as-yet-unresolvable reference.
 
-// value is recursive (a list holds values), so its view/span/array types are
-// declared here while value is only forward-declared, and the matching functions
-// are emitted once value is complete (see the second include below).
+// value is recursive (a list holds values), so its view/span/array types are declared here while
+// value is only forward-declared; the matching functions are emitted once value is complete (see
+// the second include below).
 typedef struct value value;
 
 #define RC_ARRAY_TYPE value
@@ -33,24 +31,22 @@ typedef rc_view_value value_list;
 #define VALUE_LIST_MAX_LENGTH 65536u
 
 
-
-
 typedef enum value_type {
-    value_type_none,                    // zero/default: uninitialised
+    value_type_none,      // zero/default: uninitialised
     value_type_numeric,
-    value_type_boolean,                 // TRUE / FALSE; coerces to 1 / 0 in any numeric context
+    value_type_boolean,   // TRUE / FALSE; coerces to 1 / 0 in any numeric context
     value_type_string,
     value_type_list,
     value_type_range,
     value_type_error,
-    value_type_za_auto,                  // the address of a ZA_AUTO variable, unknown until allocation
+    value_type_za_auto,   // the address of a ZA_AUTO variable, unknown until allocation
 } value_type;
 
 
 // An inclusive numeric range. start/end are optional so boundless ranges (3..,
 // ..9, ..) can be represented; step defaults to 1. There is no exclusivity flag:
 // an exclusive end (0..<10) is normalised to an inclusive end at construction, so
-// iteration is uniformly `v <= end`.
+// iteration is uniformly v <= end.
 typedef struct value_range {
     int64_t start;
     int64_t end;
@@ -69,12 +65,11 @@ typedef struct value_error {
 } value_error;
 
 
-// The address of a ZA_AUTO variable before allocation has chosen it. Real addresses exist only after
-// the whole program has converged, so during assembly a variable's symbol carries THIS instead of a
-// number: the variable's identity - the (declaring scope, ZA_AUTO def cursor) pair the zero-page IR
-// keys on - plus a byte offset within it (`ptr+1` is the same identity at offset 1). Contexts that
-// genuinely need a number (a count, a condition, a layout address) refuse it with a clear error;
-// instruction operands and data emissions accept it and receive the real address on the output pass.
+// The address of a ZA_AUTO variable before allocation has chosen it: the variable's identity plus a
+// byte offset within it (ptr+1 is the same identity at offset 1). Real addresses exist only after the
+// whole program has converged, so contexts that genuinely need a number (a count, a condition, a
+// layout address) refuse it with a clear error; instruction operands and data emissions accept it
+// and receive the real address on the output pass.
 typedef struct value_za_auto {
     uint32_t scope;     // the variable's declaring scope index...
     cursor   def;       // ...and its ZA_AUTO statement's def cursor: together, its identity
@@ -116,17 +111,15 @@ value value_make_range(value_range r);
 value value_make_list(rc_view_value items);    // wraps the view; does not copy
 value value_make_za_auto(uint32_t scope, cursor def, int32_t offset, rc_str name);
 
-// Deep-copy v into arena so it can outlive the (scratch) arena it was built in. A value
-// is a non-owning handle, so a plain copy still points at the old backing; this is the
-// deliberate promotion across the scratch-to-permanent boundary. Scalars (none, numeric,
-// range, error) have no backing and copy as-is; a string copies its bytes; a list copies
-// its element storage and recurses into each element.
+// Deep-copy v into arena so it can outlive the (scratch) arena it was built in - the deliberate
+// promotion across the scratch-to-permanent boundary (a value is a non-owning handle, so a plain
+// copy still points at the old backing). Scalars copy as-is; a string copies its bytes; a list
+// copies its element storage and recurses into each element.
 value value_make_copy(value v, rc_arena *arena);
 
-// Range builders. They take the (already evaluated) endpoint values and own all the
-// range semantics: step inference, the second-element/stepped form (rhs is a range),
-// exclusivity, and validation. Each returns a range value, or a propagating error
-// value (a bad endpoint, a non-integer, an empty or inconsistent range).
+// Range builders. They take the (already evaluated) endpoint values and own all the range semantics:
+// step inference, the stepped form (rhs is a range), exclusivity and validation. Each returns a
+// range value, or a propagating error value (a bad endpoint, an empty or inconsistent range).
 value value_make_range_pair(value lhs, value rhs, bool exclusive);   // lhs..rhs / lhs..<rhs
 value value_make_range_open_end(value lhs, bool exclusive);          // lhs..
 value value_make_range_open_start(value rhs, bool exclusive);        // ..rhs / ..<rhs

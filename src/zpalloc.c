@@ -14,25 +14,30 @@ static bool conflicts(const liveness *lv, uint32_t a, uint32_t b)
     return liveness_interferes(lv, a, b);
 }
 
-// Are all `width` bytes starting at `base` reserved (and inside the page)?
+
+// Are all width bytes starting at base reserved (and inside the page)?
 static bool span_reserved(const rc_bitset *reserved, uint32_t base, uint32_t width)
 {
     if (base + width > zp_bytes) {
         return false;
     }
+
     for (uint32_t i = 0; i < width; i++) {
         if (!rc_bitset_is_set(reserved, base + i)) {
             return false;
         }
     }
+
     return true;
 }
+
 
 // Do byte spans [a, a+aw) and [b, b+bw) overlap?
 static bool spans_overlap(uint32_t a, uint32_t aw, uint32_t b, uint32_t bw)
 {
     return a < b + bw && b < a + aw;
 }
+
 
 zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *reserved,
                      rc_arena *arena, rc_arena scratch)
@@ -43,6 +48,7 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
     for (uint32_t v = 0; v < n; v++) {
         rc_span_u32_set(base, v, RC_INDEX_NONE);
     }
+
     bool any_spilled = false;
 
     // First-fit-decreasing over widths (widest first): place the more constrained wide variables before the
@@ -56,6 +62,7 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
             max_w = w;
         }
     }
+
     for (uint32_t pass_w = max_w; pass_w >= 1; pass_w--) {
         for (uint32_t v = 0; v < n; v++) {
             uint32_t w = rc_view_zp_var_get(vars, v).width;
@@ -90,6 +97,7 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
             }
         }
     }
+
     return (zp_coloring) {.base = base.view, .any_spilled = any_spilled};
 }
 
