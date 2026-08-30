@@ -4,7 +4,15 @@
 #include "cfg.h"
 #include "zeropage.h"   // rc_view_zp_insn, vref_rw
 #include "richc/arena.h"
+#include "richc/array/u8.h"   // rc_view_u8: the classes row (u8 storage for vreg_class values)
 #include "richc/bitset.h"
+
+// Bitset rows - the shape every dataflow result takes (one row per block, or per vreg). The arena owns
+// the storage; a fixed-count allocation travels as a SPAN (mutable rows, no growth), and a result only
+// ever read travels as a VIEW.
+#define RC_ARRAY_TYPE rc_bitset
+#define RC_ARRAY_NAME bitset
+#include "richc/template/array.h"
 
 
 // How a variable relates to its routine's boundary, inferred from liveness. This is a Stage C heuristic
@@ -24,16 +32,18 @@ typedef enum vreg_class {
 // sets from the backward fixpoint, the interference graph (one adjacency bitset row per vreg - two vregs
 // interfere iff their live ranges overlap at some program point), and each vreg's boundary classification.
 typedef struct liveness {
-    uint32_t    num_vars;
-    uint32_t    num_blocks;
-    rc_bitset  *live_in;      // [num_blocks]
-    rc_bitset  *live_out;     // [num_blocks]
-    rc_bitset  *interfere;    // [num_vars]: interfere[a] has bit b set iff vregs a and b overlap (symmetric)
-    rc_bitset  *must_write;   // [num_blocks] var-level: for a call-target entry block, the variables the
-                              // routine entered there definitely rewrites IN FULL on every returning path
-                              // (empty for non-entry blocks). A call to it KILLS these - the caller's
-                              // pre-call values are dead, so a result's range starts at its call
-    vreg_class *classes;      // [num_vars]
+    // No separate counts: every container carries its own - rows per block (live_in.num etc.), vregs per
+    // row (each row's bit count, == interfere.num == classes.num). liveness_analyze asserts they agree.
+    rc_view_bitset live_in;      // [num_blocks]; a view - the analysis result is read-only
+    rc_view_bitset live_out;     // [num_blocks]
+    rc_span_bitset interfere;    // [num_vars]: row a has bit b set iff vregs a and b overlap (symmetric).
+                                 // A SPAN, not a view: the finalize guards keep injecting edges (pinning,
+                                 // call-input edges) into the graph after the analysis hands it over
+    rc_view_bitset must_write;   // [num_blocks] var-level: for a call-target entry block, the variables the
+                                 // routine entered there definitely rewrites IN FULL on every returning path
+                                 // (empty for non-entry blocks). A call to it KILLS these - the caller's
+                                 // pre-call values are dead, so a result's range starts at its call
+    rc_view_u8     classes;      // [num_vars] vreg_class values (u8 storage; members never take enum types)
 } liveness;
 
 // Run the backward liveness fixpoint over `g`, build the per-instruction interference graph, and classify

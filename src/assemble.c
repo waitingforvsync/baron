@@ -3004,11 +3004,11 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 // written nothing, and an untrackable one could do anything, so both forfeit the kill.
 static bool call_rewrites(const liveness *lv, call_targets ct, uint32_t v)
 {
-    if (ct.unknown || ct.external || ct.blocks.view.num == 0) {
+    if (ct.unknown || ct.external || ct.blocks.num == 0) {
         return false;
     }
-    for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
-        if (!rc_bitset_is_set(&lv->must_write[rc_array_u32_get(&ct.blocks, c)], v)) {
+    for (uint32_t c = 0; c < ct.blocks.num; c++) {
+        if (!rc_bitset_is_set(rc_view_bitset_at(lv->must_write, rc_view_u32_get(ct.blocks, c)), v)) {
             return false;
         }
     }
@@ -3040,8 +3040,8 @@ static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, ui
                 continue;
             }
             call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
-            for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
-                uint32_t t = rc_array_u32_get(&ct.blocks, c);
+            for (uint32_t c = 0; c < ct.blocks.num; c++) {
+                uint32_t t = rc_view_u32_get(ct.blocks, c);
                 if (!rc_bitset_is_set(reach, t) && (within == NULL || rc_bitset_is_set(within, t))) {
                     rc_bitset_set(reach, t);
                     stack[sp++] = t;
@@ -3064,8 +3064,8 @@ static void pin_var(liveness *lv, uint32_t v, uint32_t nv)
 {
     for (uint32_t w = 0; w < nv; w++) {
         if (w != v) {
-            rc_bitset_set(&lv->interfere[v], w);
-            rc_bitset_set(&lv->interfere[w], v);
+            rc_bitset_set(rc_span_bitset_at(lv->interfere, v), w);
+            rc_bitset_set(rc_span_bitset_at(lv->interfere, w), v);
         }
     }
 }
@@ -3331,8 +3331,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         continue;
                     }
                     call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
-                    for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
-                        uint32_t t = rc_array_u32_get(&ct.blocks, c);
+                    for (uint32_t c = 0; c < ct.blocks.num; c++) {
+                        uint32_t t = rc_view_u32_get(ct.blocks, c);
                         if (!rc_bitset_is_set(&reach, t)) { upred[t] = true; }
                     }
                 }
@@ -3430,8 +3430,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                             for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
                                  t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
                                 if (c != t) {
-                                    rc_bitset_set(&lv.interfere[c], t);
-                                    rc_bitset_set(&lv.interfere[t], c);
+                                    rc_bitset_set(rc_span_bitset_at(lv.interfere, c), t);
+                                    rc_bitset_set(rc_span_bitset_at(lv.interfere, t), c);
                                 }
                             }
                         }
@@ -3446,8 +3446,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         rc_bitset_clear(&live, v);
                     }
                 }
-                for (uint32_t c = 0; c < ct.blocks.view.num; c++) {
-                    uint32_t e = rc_array_u32_get(&ct.blocks, c);
+                for (uint32_t c = 0; c < ct.blocks.num; c++) {
+                    uint32_t e = rc_view_u32_get(ct.blocks, c);
                     for (uint32_t v = 0; v < nv; v++) {
                         if (liveness_is_live_in(&lv, e, v)) {
                             rc_bitset_set(&live, v);
@@ -3500,8 +3500,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
              t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
             for (uint32_t v = 0; v < nv; v++) {
                 if (v != t && !rc_bitset_is_set(&fp.touched, v)) {
-                    rc_bitset_set(&lv.interfere[t], v);
-                    rc_bitset_set(&lv.interfere[v], t);
+                    rc_bitset_set(rc_span_bitset_at(lv.interfere, t), v);
+                    rc_bitset_set(rc_span_bitset_at(lv.interfere, v), t);
                 }
             }
         }

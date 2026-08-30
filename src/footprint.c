@@ -29,8 +29,8 @@ static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
     if (t.unknown) {
         *c->unknown = true;
     }
-    for (uint32_t i = 0; i < t.blocks.view.num; i++) {
-        fp_visit(c, rc_array_u32_get(&t.blocks, i), scratch);
+    for (uint32_t i = 0; i < t.blocks.num; i++) {
+        fp_visit(c, rc_view_u32_get(t.blocks, i), scratch);
     }
 }
 

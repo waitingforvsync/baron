@@ -122,6 +122,26 @@ static void add_var(rc_array_zp_var *vars, uint8_t width, rc_arena *arena)
         arena);
 }
 
+// A hand-buildable interference graph: n zeroed n-bit rows, ready for rc_bitset_set through _at.
+static rc_span_bitset make_interfere(uint32_t n, rc_arena *arena)
+{
+    rc_span_bitset rows = rc_span_bitset_make(rc_arena_alloc_zero_type(arena, rc_bitset, n), n);
+    for (uint32_t i = 0; i < n; i++) {
+        rc_bitset_resize(rc_span_bitset_at(rows, i), n, arena);
+    }
+    return rows;
+}
+
+// A hand-set classes row: the values are vreg_class enumerators, stored as the u8 the struct carries.
+static rc_view_u8 make_classes(const uint8_t *values, uint32_t n, rc_arena *arena)
+{
+    uint8_t *data = rc_arena_alloc_type(arena, uint8_t, n);
+    for (uint32_t i = 0; i < n; i++) {
+        data[i] = values[i];
+    }
+    return rc_view_u8_make(data, n);
+}
+
 RC_TEST(zpalloc, disjoint_share_interfering_split)
 {
     rc_arena arena = rc_arena_make_default();
@@ -133,13 +153,12 @@ RC_TEST(zpalloc, disjoint_share_interfering_split)
     rc_array_zp_var vars = rc_array_zp_var_make(4, &arena);
     add_var(&vars, 1, &arena); add_var(&vars, 1, &arena); add_var(&vars, 1, &arena);
 
-    // Hand-built liveness: 3 vars, interfere[0]<->[1]; classes all input (used). num_blocks 0 is fine here.
-    liveness lv = {.num_vars = 3, .num_blocks = 0};
-    lv.interfere = rc_arena_alloc_type(&arena, rc_bitset, 3);
-    for (uint32_t i = 0; i < 3; i++) { lv.interfere[i] = (rc_bitset) {0}; rc_bitset_resize(&lv.interfere[i], 3, &arena); }
-    rc_bitset_set(&lv.interfere[0], 1); rc_bitset_set(&lv.interfere[1], 0);
-    lv.classes = rc_arena_alloc_type(&arena, vreg_class, 3);
-    lv.classes[0] = lv.classes[1] = lv.classes[2] = vreg_class_input;
+    // Hand-built liveness: 3 vars, interfere[0]<->[1]; classes all input (used). The containers carry the
+    // counts, so a zero-init struct plus the two rows we fill is a complete liveness (no live_in needed).
+    liveness lv = {0};
+    lv.interfere = make_interfere(3, &arena);
+    rc_bitset_set(rc_span_bitset_at(lv.interfere, 0), 1); rc_bitset_set(rc_span_bitset_at(lv.interfere, 1), 0);
+    lv.classes = make_classes((uint8_t[]) {vreg_class_input, vreg_class_input, vreg_class_input}, 3, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x7F, &arena);
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
@@ -164,12 +183,10 @@ RC_TEST(zpalloc, width_two_takes_consecutive_bytes)
     add_var(&vars, 2, &arena);   // v0 pointer
     add_var(&vars, 1, &arena);   // v1 temp
 
-    liveness lv = {.num_vars = 2, .num_blocks = 0};
-    lv.interfere = rc_arena_alloc_type(&arena, rc_bitset, 2);
-    for (uint32_t i = 0; i < 2; i++) { lv.interfere[i] = (rc_bitset) {0}; rc_bitset_resize(&lv.interfere[i], 2, &arena); }
-    rc_bitset_set(&lv.interfere[0], 1); rc_bitset_set(&lv.interfere[1], 0);
-    lv.classes = rc_arena_alloc_type(&arena, vreg_class, 2);
-    lv.classes[0] = vreg_class_temp; lv.classes[1] = vreg_class_temp;
+    liveness lv = {0};
+    lv.interfere = make_interfere(2, &arena);
+    rc_bitset_set(rc_span_bitset_at(lv.interfere, 0), 1); rc_bitset_set(rc_span_bitset_at(lv.interfere, 1), 0);
+    lv.classes = make_classes((uint8_t[]) {vreg_class_temp, vreg_class_temp}, 2, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x7F, &arena);
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
@@ -193,12 +210,10 @@ RC_TEST(zpalloc, unused_variable_is_skipped)
     rc_array_zp_var vars = rc_array_zp_var_make(4, &arena);
     add_var(&vars, 1, &arena); add_var(&vars, 1, &arena); add_var(&vars, 1, &arena);
 
-    liveness lv = {.num_vars = 3, .num_blocks = 0};
-    lv.interfere = rc_arena_alloc_type(&arena, rc_bitset, 3);
-    for (uint32_t i = 0; i < 3; i++) { lv.interfere[i] = (rc_bitset) {0}; rc_bitset_resize(&lv.interfere[i], 3, &arena); }
-    rc_bitset_set(&lv.interfere[0], 2); rc_bitset_set(&lv.interfere[2], 0);
-    lv.classes = rc_arena_alloc_type(&arena, vreg_class, 3);
-    lv.classes[0] = vreg_class_temp; lv.classes[1] = vreg_class_unused; lv.classes[2] = vreg_class_temp;
+    liveness lv = {0};
+    lv.interfere = make_interfere(3, &arena);
+    rc_bitset_set(rc_span_bitset_at(lv.interfere, 0), 2); rc_bitset_set(rc_span_bitset_at(lv.interfere, 2), 0);
+    lv.classes = make_classes((uint8_t[]) {vreg_class_temp, vreg_class_unused, vreg_class_temp}, 3, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x7F, &arena);
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
@@ -221,12 +236,10 @@ RC_TEST(zpalloc, spill_when_out_of_bytes)
     rc_array_zp_var vars = rc_array_zp_var_make(4, &arena);
     add_var(&vars, 1, &arena); add_var(&vars, 1, &arena);
 
-    liveness lv = {.num_vars = 2, .num_blocks = 0};
-    lv.interfere = rc_arena_alloc_type(&arena, rc_bitset, 2);
-    for (uint32_t i = 0; i < 2; i++) { lv.interfere[i] = (rc_bitset) {0}; rc_bitset_resize(&lv.interfere[i], 2, &arena); }
-    rc_bitset_set(&lv.interfere[0], 1); rc_bitset_set(&lv.interfere[1], 0);
-    lv.classes = rc_arena_alloc_type(&arena, vreg_class, 2);
-    lv.classes[0] = vreg_class_temp; lv.classes[1] = vreg_class_temp;
+    liveness lv = {0};
+    lv.interfere = make_interfere(2, &arena);
+    rc_bitset_set(rc_span_bitset_at(lv.interfere, 0), 1); rc_bitset_set(rc_span_bitset_at(lv.interfere, 1), 0);
+    lv.classes = make_classes((uint8_t[]) {vreg_class_temp, vreg_class_temp}, 2, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x70, &arena);   // exactly one byte
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);

@@ -93,7 +93,8 @@ uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 // enumerate: a computed, unannotated call. This is the single call-target policy, shared by the footprint
 // walk and the callee-input liveness injection.
 typedef struct call_targets {
-    rc_array_u32 blocks;    // in-program callee entry block indices
+    rc_view_u32  blocks;    // in-program callee entry block indices; built in full by cfg_call_targets,
+                            // so the result carries a read-only view (zero-init = no arms)
     bool         unknown;   // an untrackable (computed, unannotated) arm
     bool         external;  // an arm that leaves the program (JSR &FFEE, or an external ZA_CANCALL target):
                             // it returns having touched nothing, so a must-write intersection over the
