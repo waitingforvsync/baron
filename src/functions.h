@@ -5,14 +5,10 @@
 #include "cursor.h"
 
 
-// The user-defined-FUNCTION store. A function is a name bound to one or more OVERLOADS (signatures), each a
-// parameter list plus the cursor of the value-expression body it evaluates. The whole thing is rebuilt from
-// source every pass (functions_reset), exactly like the macro / section / include state, so an entry is a
-// transient projection of the source, not durable state.
-//
-// A function is NAMELESS here: its name( spelling lives in the dynamic OPERAND (even) token table, and a
-// lexeme_type_user_function carries the index into list that reaches it. Addressed by index, never a stored
-// pointer (the list may relocate on growth).
+// The user-defined-FUNCTION store. A function is a name bound to one or more OVERLOADS (signatures),
+// each a parameter list plus the cursor of the value-expression body it evaluates - rebuilt from
+// source every pass (functions_reset), a transient projection rather than durable state. A function
+// is NAMELESS here: its name( spelling lives in the dynamic operand table, carrying its index.
 
 #include "richc/array/str.h"
 

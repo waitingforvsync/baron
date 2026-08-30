@@ -5,16 +5,11 @@
 #include "richc/str.h"
 
 
-// The single diagnostic vocabulary, shared by every layer. The expression evaluator emits the
-// value-evaluation codes (divide_by_zero, domain, ...) straight into a value; the assembler emits the
-// rest - lexical/structural, semantic, driver and warnings - into its diagnostics. One enum, so a
-// value's error surfaces as an assembler diagnostic with no translation step. (The expression PARSE
-// errors - a missing close paren and the like - keep their own expr_error enum: they are structural to
-// the expression grammar, not values that flow, and are wrapped as error_type_expression.)
-//
-// error_type_none is the zero default (no error). error_type_unknown_symbol is the transient "not
-// bound yet" that a lookup yields - it may still resolve on a later pass; once the assembler judges it
-// final it records the definitive error_type_undefined_symbol instead.
+// The single diagnostic vocabulary, shared by every layer: the expression evaluator emits the
+// value-evaluation codes straight into a value, the assembler the rest, so a value's error surfaces
+// as a diagnostic with no translation step. (Expression PARSE errors keep their own expr_error enum,
+// wrapped as error_type_expression.) error_type_unknown_symbol is the transient "not bound yet" that
+// may still resolve on a later pass; judged final, it becomes error_type_undefined_symbol instead.
 typedef enum error_type {
     error_type_none,
 

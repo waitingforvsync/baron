@@ -11,13 +11,9 @@
 
 // The zero-page auto-allocation subsystem: the ZA_POOL byte set the allocator may draw from, plus
 // the IR the analyses walk - declared variables, recorded instructions, control-flow annotations,
-// label and entry markers. A ZA_POOL directive in the source enables the feature; with no ZA_POOL
-// the whole subsystem stays dormant and costs nothing.
-//
-// The pool set is GLOBAL - there is one physical zero page shared by all resident code, so one map
-// for the whole program. Everything lives in the borrowed permanent arena. ZA_POOL re-executes every
-// pass, so the state is cleared at the top of each pass (zeropage_reset) and refilled as the source
-// runs; after the final pass it holds the settled program.
+// label and entry markers. A ZA_POOL directive enables the feature; without one the subsystem stays
+// dormant and costs nothing. The pool is GLOBAL (one physical zero page for all resident code), and
+// the state clears at the top of each pass (zeropage_reset), refilled as the source runs.
 
 // One declared zero-page variable - a "vreg" for the allocator: the name (a view into permanent
 // source text), the owning scope, the byte width, and the defining cursor, which is the variable's
@@ -70,15 +66,11 @@ typedef enum zp_target_via {
 } zp_target_via;
 
 // One recorded instruction - the IR the CFG + liveness passes walk. EVERY instruction on the final
-// pass is recorded (so pc ordering and branch targets are complete), each carrying its address +
-// size, control-flow class + target, and - if it touches a ZA_AUTO variable - which vreg and how.
-//
-// Identities resolve LATE: vreg comes from the (var_scope, var_def) pair once the whole registry is
-// populated (zeropage_resolve_vregs), so a use before its declaration still attributes; a target's
-// (target_scope, target_def) likewise names the exact label - and so the exact block - even where
-// paged banks share an address. For an INDIRECT jump the operand names the VECTOR, never the
-// destination, so the CFG must not wire an edge to the vector cell's own address. A raw target
-// address resolves within its own section only; crossing a section takes a named label.
+// pass is recorded, so pc ordering and branch targets are complete. Identities resolve LATE: vreg
+// comes from the (var_scope, var_def) pair once the registry is populated (zeropage_resolve_vregs),
+// so a use before its declaration still attributes; (target_scope, target_def) likewise names the
+// exact label even where paged banks share an address. For an INDIRECT jump the operand names the
+// VECTOR, never the destination - the CFG must not wire an edge to the vector cell's own address.
 typedef struct zp_insn {
     uint32_t pc;               // this instruction's address
     uint16_t size;             // its length in bytes (1 + operand bytes)

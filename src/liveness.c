@@ -163,14 +163,11 @@ static bool extent_walk(cfg g, uint32_t e, rc_bitset *in_ext, rc_array_u32 *stac
 
 
 // ---- the byte id space ----
-// Liveness is tracked per BYTE, not per variable: vreg v's bytes occupy [base[v], base[v] + width[v]) in a
-// dense byte id space, and the dataflow sets below are byte sets. This is what makes partial writes come
-// out right for multi-byte variables: a store redefines exactly the byte it hits, so STA ptr alone
-// leaves the MSB's old value live straight through it, while a STA ptr : STA ptr+1 pair accumulates into
-// a full kill through the fixpoint (across blocks too - each byte's kill propagates independently). The
-// PUBLIC results stay at variable level: the interference rows and live-in/out sets are projected back,
-// a variable being live iff any of its bytes is - the allocator places whole variables, so that is the
-// granularity it consumes.
+// Liveness is tracked per BYTE: vreg v's bytes occupy [base[v], base[v] + width[v]) in a dense id
+// space, and the dataflow sets are byte sets. That is what makes partial writes come out right: STA
+// ptr alone leaves the MSB's old value live straight through it, while the STA ptr : STA ptr+1 pair
+// accumulates into a full kill through the fixpoint. The PUBLIC results project back to variable
+// level (live iff any byte is) - the allocator places whole variables.
 
 // Which of its variable's bytes an instruction touches, as offset windows within the variable.
 //   read  - bytes whose OLD value the instruction consumes: the addressed byte (two for an indirect
@@ -216,15 +213,12 @@ static void add_edge(rc_span_bitset interfere, uint32_t a, uint32_t b)
 }
 
 
-// Does this block hand control back to the caller of the routine containing it? True for an RTS/RTI - and
-// for a transfer OUT of the program, because the external routine's own RTS returns to OUR caller (the
-// tail-call idiom); that includes an external ZA_CANJUMP arm of a dispatch, which the CFG wires no edge for.
-// A ZA_RETURN annotation is the declared form of exactly that: the jump/branch hands straight back to our
-// caller (the inline-data trick's computed exit), no external routine in between. An RTS wearing a
-// ZA_CANJUMP is the dispatch trick - control continues at the declared targets, not the caller - so it does
-// NOT return here (its targets' own exits do), unless one of its arms is external; likewise a jump/branch
-// whose declared arms all resolved in-program. The annotations are consulted BEFORE a resolved literal
-// target, because a declared set replaces a self-modified operand's placeholder edge in the CFG too.
+// Does this block hand control back to the caller of the routine containing it? True for an RTS/RTI
+// and for a transfer OUT of the program - the external routine's own RTS returns to OUR caller (the
+// tail-call idiom); ZA_RETURN is the declared form of the same thing. An RTS wearing a ZA_CANJUMP is
+// the dispatch trick - control continues at the declared targets, so it does NOT return here unless
+// one of its arms is external. The annotations are consulted BEFORE a resolved literal target,
+// because a declared set replaces a self-modified operand's placeholder edge in the CFG too.
 static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, basic_block blk)
 {
     if (blk.num_insns == 0) {
@@ -323,14 +317,12 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     byte_ids ids    = byte_ids_make(vars, &scratch);
     uint32_t nbytes = ids.owner.num;
 
-    // Each call site's callee entry blocks, resolved once (ZA_CANCALL overrides included). A call is treated
-    // as a USE of its callee's live-in set - the callee's inputs - which is what gives an argument stored
-    // by the caller a live range reaching the JSR, so nothing can be coloured over it in between; and as a
-    // KILL of the bytes its callees definitely write (the must-write sets below) - the caller's read after
-    // the call receives the callee's value, so the pre-call byte is dead and a delivered result's range
-    // starts at its call, not at the top of the caller. The arms that resolve to no blocks inject and kill
-    // nothing: an external callee touches none of our bytes, and a computed unannotated call is the user's
-    // responsibility (ZA_CANCALL declares the targets whose inputs and writes then count).
+    // Each call site's callee entry blocks, resolved once. A call is treated as a USE of its callees'
+    // live-in - which gives an argument stored by the caller a live range reaching the JSR - and as a
+    // KILL of the bytes its callees definitely write (the must-write sets below), so a delivered
+    // result's range starts at its call, not at the top of the caller. Arms resolving to no blocks
+    // inject and kill nothing: an external callee touches none of our bytes, and a computed
+    // unannotated call is the user's responsibility (ZA_CANCALL).
     rc_span_call_targets calls = calls_make(g, cflows, insns, &scratch);
 
     // A full set for the unknown_succ taint: a block whose control may leave to an address we cannot model
@@ -342,13 +334,11 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     }
 
     // ---- must-write (definite assignment) ----
-    // For every routine entered by a call, the bytes written on EVERY path from its entry to a return: a
-    // forward "must" analysis (meet = intersection, non-entry blocks start at FULL and only shrink), run
-    // per entry over the blocks reachable from it, inside an outer fixpoint so a call inside a routine
-    // contributes its own callees' (still-shrinking) sets - recursion converges downward from FULL. A
-    // routine with no returning path vacuously must-writes everything (its caller's post-call code never
-    // runs); an unknown-succ block anywhere in the extent forfeits the lot (Guard 1 refuses such programs
-    // anyway). Sound in one direction only: an under-approximation just kills less.
+    // For every routine entered by a call, the bytes written on EVERY path from its entry to a
+    // return: a forward "must" analysis (meet = intersection, seeded FULL so recursion converges
+    // downward), run per entry inside an outer fixpoint so a nested call contributes its callees'
+    // still-shrinking sets. No returning path vacuously must-writes everything; an unknown-succ block
+    // in the extent forfeits the lot. Sound in one direction only: under-approximating just kills less.
     rc_bitset is_entry = entry_blocks(calls, nb, &scratch);
 
     // Predecessor lists, once, for the forward meets.
@@ -476,13 +466,11 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     }
 
     // ---- return edges ----
-    // The dual of the call-input injection: a routine's RETURNING exits see everything live AFTER each of
-    // its call sites, so a value written for the caller - an escaping result - stays live from its store
-    // to the RTS, and the routine's own later writes (or a sibling local) cannot land on its byte. Without
-    // this, the must-write kill would leave an escaping value dead the moment its producer stores it (its
-    // only reads are in the caller, which intraprocedural liveness cannot see). ret_from[b] lists the call
-    // sites whose callees' extents contain returning block b; after[i] snapshots the live set just after
-    // call i, maintained inside the fixpoint below.
+    // The dual of the call-input injection: a routine's RETURNING exits see everything live AFTER
+    // each of its call sites, so an escaping result stays live from its store to the RTS and the
+    // routine's later writes cannot land on its byte (its only reads are in the caller, invisible to
+    // intraprocedural liveness). ret_from[b] lists the call sites whose callees' extents contain
+    // returning block b; after[i] snapshots the live set just after call i, kept inside the fixpoint.
     rc_span_u32_list ret_from = rc_span_u32_list_make(rc_arena_alloc_zero_type(&scratch, rc_array_u32, nb), nb);
     for (uint32_t i = 0; i < insns.num; i++) {
         call_targets ct = rc_span_call_targets_get(calls, i);
@@ -602,13 +590,12 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
     }
 
-    // Interference, per instruction. Sweep each block backward from its byte live-out: at any WRITE the
-    // variable is pinned to its bytes, so it interferes with the owner of every other live byte (indexed
-    // and unknown-offset stores pin too, even though they kill nothing); then advance the live set to
-    // before the instruction - remove the provably-rewritten bytes, add the read ones. A lone STA ptr
-    // removes only the LSB's byte, so the MSB keeps the pointer live and overlap with it still registers;
-    // once the MSB's store joins it the whole variable goes dead and the range genuinely ends. All the "in
-    // reuses in's byte", "keep hits the whole callee footprint" legality falls out of these overlaps.
+    // Interference, per instruction. Sweep each block backward from its byte live-out: at any WRITE
+    // the variable is pinned to its bytes, interfering with the owner of every other live byte
+    // (indexed and unknown-offset stores pin too, even though they kill nothing); then advance the
+    // live set - remove the provably-rewritten bytes, add the read ones. A lone STA ptr removes only
+    // the LSB's byte, so the MSB keeps the pointer live; once the MSB's store joins it the whole
+    // variable goes dead and the range genuinely ends.
     rc_bitset live = {0}; rc_bitset_resize(&live, nbytes, &scratch);
     for (uint32_t b = 0; b < nb; b++) {
         basic_block block = rc_view_basic_block_get(g.blocks, b);

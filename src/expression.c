@@ -12,9 +12,6 @@
 
 
 // ---- precedence ladder (higher binds tighter) ----
-// The range operator '..' is the loosest, so its endpoints are whole expressions;
-// comparisons and the logical ops sit below arithmetic; shifts share the multiply
-// level; unary +/- sit below pow so -2^2 is -(2^2).
 typedef enum prec {
     prec_lohi  = 1,    // unary < > (low/high byte); swallow the whole following expression
     prec_range = 5,    // ..  ..<  (right-associative; handled specially, not a binary_op)
@@ -30,17 +27,13 @@ typedef enum prec {
 
 
 // ---- operator and function handlers ----
-// The apply_* wrappers below screen operands for error values first, so a handler
-// only ever sees real values. Every operator here wants numbers; NEEDS_NUM bails
-// out with a type-mismatch otherwise. The arena is unused by the numeric operators
-// but stays in the signature for the string/list operators still to come.
+// The apply_* wrappers below screen operands for error values first, so a handler only ever sees
+// real values.
 
 #define NEEDS_NUM(cond) do { if (!(cond)) return value_make_error(error_type_type_mismatch); } while (0)
 
-// Coerce a number to 32 bits, truncating toward zero. The int64 hop makes the
-// truncation well-defined before the 32-bit wrap. Bitwise ops read the value as
-// unsigned (so >> is logical and NOT yields a positive pattern); div/mod read it
-// signed.
+// Coerce a number to 32 bits, truncating toward zero; the int64 hop makes the truncation
+// well-defined before the 32-bit wrap.
 static int32_t  as_i32(value v) { return (int32_t)(int64_t)v.numeric; }
 static uint32_t as_u32(value v) { return (uint32_t)(int64_t)v.numeric; }
 
@@ -199,10 +192,9 @@ static value op_shr(value a, value b, rc_arena *arena)
 }
 
 
-// AND, OR and EOR are overloaded on their operand types: two booleans get the logical
-// operation (yielding a boolean), two numbers the bitwise one on the 32-bit pattern.
-// A mixed pair is refused rather than coerced - there is no honest reading of
-// TRUE AND 4, so we make the caller say which they meant.
+// AND, OR and EOR are overloaded on their operand types: two booleans get the logical operation,
+// two numbers the bitwise one on the 32-bit pattern. A mixed pair is refused rather than coerced -
+// there is no honest reading of TRUE AND 4, so we make the caller say which they meant.
 static value op_and(value a, value b, rc_arena *arena)
 {
     (void)arena;
@@ -345,9 +337,9 @@ static value op_pos(value v, rc_arena *arena)
 
 
 // ---- RND: the one impure builtin ----
-// A module-static stream, reseeded to a fixed point at the start of every pass (expression_reset_random,
-// called by the assembler's pass driver). That is what keeps RND reproducible pass-to-pass, so an assembly
-// that uses it can still reach a fixpoint - a draw's value depends only on its position in the pass's parse.
+// A module-static stream, reseeded to a fixed point at the start of every pass (expression_reset_random),
+// which keeps RND reproducible pass-to-pass so an assembly using it can still reach a fixpoint - a
+// draw's value depends only on its position in the pass's parse.
 #define EXPR_RANDOM_SEED 0u
 static rc_random expr_prng;
 
@@ -423,10 +415,9 @@ static value fn_hex(value v, rc_arena *arena)
 }
 
 
-// A string's character codes as a rank-1 list of numbers: codes("AB") is {65, 66}, codes("") the
-// empty list. This is the bridge from text to arithmetic - subscript for one character's code
-// (codes("A")[0]), broadcasting for whole-string remaps (codes(s) - codes(" ")), and a gather
-// subscript for the full character-mapping idiom (table[codes(s)]).
+// A string's character codes as a rank-1 list of numbers: codes("AB") is {65, 66}. The bridge from
+// text to arithmetic - broadcasting remaps (codes(s) - codes(" ")) and the character-mapping gather
+// (table[codes(s)]) both build on it.
 static value fn_codes(value v, rc_arena *arena)
 {
     if (!value_is_string(v)) {
@@ -528,11 +519,9 @@ static value fn_exp(value v, rc_arena *arena)  { (void)arena; return math1(exp, 
 
 #undef NEEDS_NUM
 
-// The range operator handlers. Unlike the operators above they live nowhere in the
-// tables (range is lexeme_type_range, not a binary_op): parse_precedence has its own '..'
-// case that calls one of these directly, at prec_range and right-associative. A range
-// builds from its raw operands - no broadcast, no coercion - and value_make_range_pair
-// owns the semantics (and the error propagation).
+// The range operator handlers. They live nowhere in the tables (range is lexeme_type_range, not a
+// binary_op): parse_precedence has its own '..' case that calls one directly. A range builds from
+// its raw operands - no broadcast, no coercion - and value_make_range_pair owns the semantics.
 static value op_range(value a, value b, rc_arena *arena)
 {
     (void)arena;
@@ -564,18 +553,11 @@ static uint32_t range_count(value_range r)
 }
 
 
-// The uniform-length-prefix shape of v written into dims[], returning its rank: descend
-// while every node at a level is a list of the same length, stopping at the first axis
-// that is not uniform (so a ragged list reports the axes that ARE uniform). A scalar is
-// rank 0; a leading length-1 axis is kept, not squashed. A bounded range shapes as the
-// rank-1 list it stands for ({count}); an unbounded one has no honest length to report,
-// so it degrades to rank 0 here (fn_shape errors on it at top level).
-//
-// The whole thing rests on one recursive idea: a list's shape is its own length, followed
-// by the shape that ALL of its elements agree on. So {{1,2},{3,4}} is 2-of-(things that
-// are each {2}) -> {2,2}; but {{1,2},{3,4,5}} is 2-of-(a {2} and a {3}, which agree on
-// nothing) -> just {2}. "What they all agree on" is the common leading prefix of the
-// elements' shapes, and each element can only ever trim that prefix shorter.
+// The uniform-length-prefix shape of v, one recursive idea: a list's shape is its own length,
+// followed by the shape ALL its elements agree on - the common leading prefix of their shapes, which
+// each element can only trim shorter. So {{1,2},{3,4}} is {2,2}; the ragged {{1,2},{3,4,5}} is just
+// {2}. A scalar is rank 0; a bounded range shapes as the rank-1 list it stands for; an unbounded one
+// has no honest length, so it degrades to rank 0 (fn_shape errors on it at top level).
 typedef struct shape {
     uint32_t rank;
     uint32_t dims[MAX_RANK];
@@ -663,17 +645,7 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
 }
 
 
-// ---- the parser ----
-// The invariants for one parse, bundled so the recursive helpers stay readable. live is false during
-// a FUNCTION-body definition scan or inside a dead body branch: a user-FUNCTION call then
-// short-circuits rather than executing (the branch is still PARSED, to find where it ends, so its
-// calls must not run).
-typedef struct parser {
-    rc_str          text;
-    const expr_env *env;
-    rc_arena       *arena;
-    bool            live;   // a call executes its body only when live
-} parser;
+// ---- broadcasting ----
 
 // Expand a bounded range into its rank-1 list of numeric values; an unbounded range has
 // no end to count to, so it cannot be enumerated and yields a domain error instead.
@@ -697,13 +669,9 @@ value range_to_list(value_range r, rc_arena *arena)
 }
 
 
-// Apply a binary operator, broadcasting component-wise over lists (NumPy-style) by
-// recursing into itself - so a ragged tail just broadcasts on its own. Two simple
-// operands fall through to the handler (5 + 3 stays 8); errors propagate. A range is just
-// a rank-1 list written compactly, so we expand it and broadcast over the elements. The
-// shallower operand is a prepended length-1 axis: it is held whole while the deeper one is
-// descended. At equal rank a length-1 axis repeats; mismatched lengths are a shape error.
-// The result is freshly built; the inputs are only re-read, never copied.
+// Apply a binary operator, broadcasting component-wise over lists (NumPy-style) by recursing into
+// itself - so a ragged tail just broadcasts on its own. Two simple operands fall straight through to
+// the handler; errors propagate; the per-axis rules sit at the branches below.
 static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena)
 {
     if (value_is_error(a)) return a;
@@ -880,10 +848,9 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
 }
 
 
-// Index a value by indices: the first selector applies to this axis, the rest (a right-
-// slice) descend per selected element, so each selector hits one axis and the selectors
-// cross-product. An empty selector list returns the value whole (trailing axes untouched);
-// a non-subscriptable value errors.
+// Index a value by indices: the first selector applies to this axis, the rest descend per selected
+// element, so each selector hits one axis and the selectors cross-product. An empty selector list
+// returns the value whole; a non-subscriptable value errors.
 static value subscript(value v, rc_view_value indices, rc_arena *arena)
 {
     if (value_is_error(v)) {
@@ -1309,10 +1276,9 @@ static value fn_reverse(rc_view_value args, rc_arena *arena)
 }
 
 
-// sort: order a list's elements ascending by a numeric key. The key is the element itself,
-// or - given extra arguments - the result of subscripting each element by them, so
-// sort(L, 0) sorts on each element's first item. The key must resolve to a number. We pair
-// each element with its key once, then sort the pairs (richc introsort) on the stored key.
+// sort: order a list's elements ascending by a numeric key - the element itself, or, given extra
+// arguments, the result of subscripting each element by them (sort(L, 0) sorts on first items). We
+// pair each element with its key once, then sort the pairs (richc introsort) on the stored key.
 typedef struct sort_pair {
     double key;
     value  v;
@@ -1401,10 +1367,8 @@ static value fn_defined(rc_view_value args, rc_arena *arena)
 
 
 // chr: the inverse of codes - every numeric leaf of the argument (flattened, ranges enumerated)
-// becomes one character of a single string, so chr(72) is "H", chr({72, 73}) is "HI", and
-// chr(codes(s)) is s again. Doubling as the "join a list of codes into a string" the language
-// otherwise lacks is the point of collapsing the shape. Fractions truncate toward zero like
-// every other byte-sized context; a code outside 0..255 has no character to become.
+// becomes one character of a single string, so chr(codes(s)) is s again. Collapsing the shape is the
+// point: it doubles as the join-codes-into-a-string the language otherwise lacks.
 static value fn_chr(rc_view_value args, rc_arena *arena)
 {
     if (args.num != 1) {
@@ -1462,11 +1426,9 @@ static value not_found(value needle, rc_arena *arena)
 }
 
 
-// One find: the zero-based index of needle's first occurrence in hay (already coerced to a
-// list or a string). A compound needle broadcasts - find(from, codes(s)) is a same-shape list
-// of indices, which is what makes table[find(from, codes(s))] the whole character map. A miss
-// anywhere fails the whole call rather than embedding an error element: a gathered subscript
-// would only garble it into "subscript out of range", a long way from the real complaint.
+// One find: the zero-based index of needle's first occurrence in hay. A compound needle broadcasts
+// to a same-shape list of indices (the character-map idiom). A miss anywhere fails the WHOLE call:
+// an embedded error element would only garble into "subscript out of range" downstream.
 static value find_one(value hay, value needle, rc_arena *arena)
 {
     if (value_is_error(needle)) {
@@ -1518,10 +1480,9 @@ static value find_one(value hay, value needle, rc_arena *arena)
 }
 
 
-// find(haystack, needle): the index of needle's first occurrence in the haystack (a list, a
-// range, or a string - a string haystack searches for a substring). The needle broadcasts;
-// the haystack does not (it is the thing being searched, however deep its elements). Note the
-// broadcast means a needle can never itself be a list-valued element of the haystack.
+// find(haystack, needle): a list, range or string haystack (a string searches for a substring). The
+// needle broadcasts; the haystack does not - which means a needle can never itself be a list-valued
+// element of the haystack.
 static value fn_find(rc_view_value args, rc_arena *arena)
 {
     if (args.num != 2) {
@@ -1548,10 +1509,9 @@ static value fn_find(rc_view_value args, rc_arena *arena)
 }
 
 
-// Whole-value type predicates: TRUE or FALSE for the value as a whole, deliberately NOT
-// element-wise (a list is neither a string nor a number - list-ness is already spelled
-// shape(x) != {}). Errors propagate as usual (only defined() inspects), so a forward
-// reference still defers.
+// Whole-value type predicates, deliberately NOT element-wise (list-ness is already spelled
+// shape(x) != {}). Errors propagate as usual (only defined() inspects), so a forward reference
+// still defers.
 static value fn_is_string(rc_view_value args, rc_arena *arena)
 {
     (void)arena;
@@ -1589,11 +1549,9 @@ static value fn_is_number(rc_view_value args, rc_arena *arena)
 }
 
 
-// error(...): the ERROR statement as a value. The arguments format PRINT-style (strings raw,
-// everything else in value_format's shape, concatenated) into a user_error the diagnostics
-// render verbatim, so a FUNCTION body can refuse bad input from behind an IF:
-// r = error("bad width: ", w). An error argument propagates first, so a forward reference
-// defers rather than firing prematurely.
+// error(...): the ERROR statement as a value. The arguments format PRINT-style into a user_error the
+// diagnostics render verbatim, so a FUNCTION body can refuse bad input from behind an IF. An error
+// argument propagates first, so a forward reference defers rather than firing prematurely.
 static value fn_error(rc_view_value args, rc_arena *arena)
 {
     for (uint32_t i = 0; i < args.num; i++) {
@@ -1628,9 +1586,8 @@ static value const_next_local(const expr_env *env) { return scopes_find_local_la
 
 
 // ---- the two context tables ----
-// EVEN: lexed where an operand is expected (the start, after a binary op, after an
-// open paren). Numbers/strings/identifiers come from the lexer itself, so the table
-// only carries the leading operators, the functions, the constants, and the open paren.
+// EVEN: lexed where an operand is expected. Numbers/strings/identifiers come from the lexer itself,
+// so the table only carries the leading operators, the functions, the constants and the brackets.
 static const token even_entries[] = {
     {RC_STR_INIT("("),     {.type = lexeme_type_open_paren}},
     {RC_STR_INIT("{"),     {.type = lexeme_type_open_brace}},            // begins a list literal
@@ -1749,6 +1706,20 @@ static const token_table odd_tokens  = RC_VIEW(odd_entries);
 
 token_table expression_operand_base(void) { return even_tokens; }
 
+
+// ---- the parser ----
+
+// The invariants for one parse, bundled so the recursive helpers stay readable. live is false during
+// a FUNCTION-body definition scan or inside a dead body branch: a user-FUNCTION call then
+// short-circuits rather than executing (the branch is still PARSED, to find where it ends, so its
+// calls must not run).
+typedef struct parser {
+    rc_str          text;
+    const expr_env *env;
+    rc_arena       *arena;
+    bool            live;   // a call executes its body only when live
+} parser;
+
 // The operand table to lex from: the dynamic one the env carries (base + user-FUNCTION names) when present,
 // else the static base. A bare env (expression.c's own tests) leaves operand_tokens {0} and gets the base.
 static token_table operand_table(const parser *p) {
@@ -1787,11 +1758,9 @@ static expr_result expect_close_paren(const parser *p, value v, uint32_t pos)
 // be declared ahead; everything else below is defined in call order (callees first).
 static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_prec);
 
-// Accept a newline if one is here (a list literal treats newlines as whitespace),
-// returning the pos past it, else the pos unchanged. The lexer coalesces a run
-// of newlines into one terminator, so there is only ever one to skip. We lex with tt
-// so the caller can re-lex the same spot for whatever it expects there; a ':' or EOF
-// lexes as a hard terminator and is left in place, so an unclosed list is reported.
+// Accept a newline if one is here (a list literal treats newlines as whitespace), returning the pos
+// past it, else unchanged. A ':' or EOF lexes as a hard terminator and is left in place, so an
+// unclosed list is reported; lexing with tt lets the caller re-lex the same spot afterwards.
 static uint32_t accept_newline(const parser *p, uint32_t pos, token_table tt)
 {
     lexer_result lr = lexer_next(p->text, pos, tt);
@@ -1803,10 +1772,9 @@ static uint32_t accept_newline(const parser *p, uint32_t pos, token_table tt)
 }
 
 
-// Parse a list literal from just after the '{': comma-separated element expressions
-// (nested lists allowed, empty allowed), with newlines ignored inside the braces. We
-// gather the elements in the parser's scratch arena and wrap that view - no copy,
-// since a value is a non-owning handle.
+// Parse a list literal from just after the '{': comma-separated element expressions (nested and
+// empty allowed), newlines ignored inside the braces. The elements gather in the parser's scratch
+// arena and the view is wrapped - no copy, since a value is a non-owning handle.
 static expr_result parse_list(const parser *p, uint32_t pos)
 {
     rc_array_value elems = {0};
@@ -1846,10 +1814,9 @@ static expr_result parse_list(const parser *p, uint32_t pos)
 }
 
 
-// Collect a call's arguments from just after the '(' (which was part of the token): comma-separated
-// expressions up to the ')', pushed into *args (the parser's scratch arena). On success returns .next just
-// past the ')' (its .value is unused); a soft expected_expression (e.g. "f(1,)") or a missing ')' is a real
-// error. Shared by builtin functions and user-defined FUNCTION calls.
+// Collect a call's arguments from just after the '(' (part of the token): comma-separated expressions
+// up to the ')', pushed into *args. Returns .next just past the ')'; "f(1,)" or a missing ')' is a
+// real error. Shared by builtin functions and user-defined FUNCTION calls.
 static expr_result collect_args(const parser *p, uint32_t pos, rc_array_value *args)
 {
     RC_ASSERT(pos > 0 && p->text.data[pos - 1] == '(');   // the '(' is part of the call token
@@ -1937,9 +1904,8 @@ static body_result body_fail(error_type code, uint32_t at)
 static const token assign_only_entries[] = { {RC_STR_INIT("="), {.type = lexeme_type_assign}} };
 static const token_table assign_only_tokens = RC_VIEW(assign_only_entries);
 
-// A sub-parser for a body expression (a condition, an assignment RHS, the return). It inherits everything
-// but forces user-FUNCTION calls dead in an inactive branch: a dead branch is still PARSED (to find where
-// it ends), so any call it contains must short-circuit rather than run - otherwise a dead branch's recursion
+// A sub-parser for a body expression (a condition, an assignment RHS, the return): inherits everything
+// but forces user-FUNCTION calls dead in an inactive branch - otherwise a dead branch's recursion
 // would fire on every step, running to the depth cap and exhausting the scratch arena.
 static parser body_sub(const parser *p, bool active)
 {
@@ -2145,14 +2111,10 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
         return ok(value_make_error(error_type_function_too_deep), after);
     }
 
-    // A per-call child scope, parented on the DEFINITION scope so lookup is LEXICAL: a body sees its own
-    // params and whatever was in scope where it was defined (the globals at root, normally), never the
-    // caller's locals. But the frame is KEYED on its caller's scope index (plus the call site): that is what
-    // keeps two independent call chains from aliasing one shared frame. Keying on the call site AND depth
-    // alone - under one flat def-scope parent - collided distinct chains that reached the same site+depth,
-    // and corrupted deep or repeated recursion. The caller's scope index is unique per frame in the tree, so
-    // it names the chain; call_pos separates several call sites that share one caller frame (qsort calls lt,
-    // ge and qsort from one body). It is stable pass-to-pass (scopes are created in a deterministic order).
+    // A per-call child scope, parented on the DEFINITION scope so lookup is LEXICAL (a body sees its
+    // params and the def scope's globals, never the caller's locals), but KEYED on the caller's scope
+    // index + call site: the caller's frame is unique per call chain, so two chains never alias one
+    // frame (keying on site + depth alone did, and corrupted deep recursion). Stable pass-to-pass.
     char storage[80];
     rc_mstr key = {.data = storage, .len = 0, .cap = sizeof storage};
     rc_mstr_append_char(&key, '@', NULL);
@@ -2259,10 +2221,9 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
             value v = scopes_get_symbol(p->env->scopes, p->env->scope_index, lex.identifier.name);
 
             // Not found is not a parse error: it becomes an error value that propagates, so a forward
-            // reference can resolve on a later pass. This is the one place that still KNOWS the name, so
-            // it rides along as the error's detail - "Undefined symbol: 'x'" gets its x from here.
-            // (scopes_get_symbol itself yields a detail-less unknown for a dotted path that goes astray;
-            // stamp the name on that too.)
+            // reference can resolve on a later pass. This is the one place that still KNOWS the name,
+            // so it rides as the detail ("Undefined symbol: 'x'") - stamped too on the detail-less
+            // unknown scopes hands back for a dotted path gone astray.
             if (value_is_none(v) || (value_is_error(v) && v.error.code == error_type_unknown_symbol)) {
                 v = value_make_error_detail(error_type_unknown_symbol, lex.identifier.name);
             }
@@ -2338,11 +2299,9 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
 }
 
 
-// Parse a subscript from just after the '[': comma-separated selector expressions up to
-// the ']', then index target by them. Selectors are full expressions (so i, a..b, {..}
-// and a bare .. all work, each stopping cleanly at the ',' or ']'). Newlines are not
-// skipped - a subscript is an inline postfix. An empty '[]', a trailing comma, or a
-// missing ']' is a committed error; index/type problems become propagating error values.
+// Parse a subscript from just after the '[': comma-separated selector expressions up to the ']',
+// then index target by them. Newlines are not skipped - a subscript is an inline postfix. An empty
+// '[]', a trailing comma or a missing ']' is a committed error; index/type problems propagate.
 static expr_result parse_subscript(const parser *p, value target, uint32_t pos)
 {
     rc_array_value indices = {0};
@@ -2415,10 +2374,9 @@ static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_p
                 break;
             }
 
-            // The range operator '..' / '..<'. It is the loosest operator and right-
-            // associative, so a..b..c folds as a..(b..c) and a range on the right is the
-            // stepped form. It builds from its raw operands (no broadcast, no coercion),
-            // and a missing right side is not an error but an unbounded end ("a..").
+            // The range operator '..' / '..<': the loosest, right-associative (a..b..c folds as
+            // a..(b..c), the stepped form), built from raw operands. A missing right side is not
+            // an error but an unbounded end ("a..").
             case lexeme_type_range: {
                 if (prec_range < min_prec) {
                     return lhs;

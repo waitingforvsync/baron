@@ -11,16 +11,11 @@
 #include "richc/mstr.h"
 
 
-// Baron's global state, threaded through the parser as a single baron * first argument: the scope
-// tree (root at scope index 0), the section manager, the source-file cache, the macro / function
-// stores and the accumulated diagnostics. The current scope and section indices are NOT stored
-// here - they thread through the parser as parameters, since scopes and sections strictly nest.
-//
-// baron is an INTERNAL detail: built on the stack inside assemble_string / assemble_file, BORROWING
-// the caller's three arenas (a baron_desc), run, and discarded - the caller sees only the harvested
-// baron_result. permanent takes the diagnostics; per_pass is reset at the top of each pass; scratch
-// threads by value straight into the pass loop, so it is not stored here. The subsystems below
-// borrow permanent (scopes / source_files) or per_pass (sections / macros / functions) in turn.
+// Baron's global state, threaded through the parser as a single baron * first argument. The current
+// scope and section indices are NOT stored here - they thread as parameters, since both strictly
+// nest. baron is an INTERNAL detail: built on the stack inside assemble_string / assemble_file,
+// BORROWING the caller's three arenas (a baron_desc), run, and discarded - the caller sees only the
+// harvested baron_result. scratch threads by value straight into the pass loop, so it is not stored.
 typedef struct baron {
     rc_arena           *permanent;       // BORROWED from baron_desc: scopes/symbols, source text, diagnostics
     rc_arena           *per_pass;        // BORROWED from baron_desc: sections, macros, functions (reset each pass)
@@ -39,23 +34,16 @@ typedef struct baron {
     uint32_t            function_depth;  // how many FUNCTION calls deep the evaluator is, to catch runaway recursion
 } baron;
 
-// Build a fresh baron on a's three arenas (borrowing them - they stay the caller's to free) and return it
-// by value. Seeds the scope root and the default section, so it is ready to assemble into. There is no
-// baron_deinit: the arenas own everything, and the caller frees them (rc_arena_deinit on each).
-//
-// Returning by value is safe because every member is position-independent: a trie is now a plain { root }
-// value (it holds no pointer into its pool - the pool is passed to each op), the managers hold only borrowed
-// arena pointers (into a, never into the baron) plus arena-backed arrays, and all inter-container links are
-// indices. So the copy a return b; may make - C not guaranteeing copy elision - dangles nothing.
+// Build a fresh baron on a's three arenas (borrowed - they stay the caller's to free), seeding the
+// scope root and the default section. Returned by value: safe, since every member is
+// position-independent (tries are index values, managers hold only borrowed arena pointers, all
+// inter-container links are indices). There is no baron_deinit - the arenas own everything.
 baron baron_make(baron_desc *a);
 
-// Append a diagnostic to b's list. baron_error records a failing error (severity 0); baron_warning
-// records a harmless warning at a positive severity level. baron_has_errors reports whether any
-// error-severity diagnostic is present - the pass driver fails the assemble exactly when it is, so
-// warnings alone leave it succeeding (and stay in the list for the caller to read / filter by level).
-// The _payload variants attach a string the renderer substitutes for '%' in the message (a symbol name,
-// a branch distance, an ERROR statement's text); it is COPIED into the permanent arena, so any backing
-// will do. The plain forms record no payload.
+// Append a diagnostic to b's list: baron_error a failing error (severity 0), baron_warning a
+// harmless warning at a positive level - warnings alone leave the assemble succeeding. The _payload
+// variants attach the string the renderer substitutes for '%' in the message; it is COPIED into the
+// permanent arena, so any backing will do.
 void baron_error(baron *b, error_type code, cursor at);
 void baron_warning(baron *b, error_type code, cursor at, uint8_t severity);
 void baron_error_payload(baron *b, error_type code, cursor at, rc_str payload);

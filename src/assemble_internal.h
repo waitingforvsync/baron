@@ -14,14 +14,10 @@
 // shared parse vocabulary forward-declares it here for the handler signatures below.
 typedef struct baron baron;
 
-// Per-statement parse context, threaded by value alongside the cursor. final arms the deferred
-// checks (range, undefined-on-final) on the settling pass. active says whether a statement's
-// effects apply: inside a false IF branch it is cleared, so the statement is parsed for structure
-// (to find the matching ENDIF) but emits nothing, binds nothing and raises nothing. listing marks
-// the one extra pass run after zero-page allocation: everything is settled and the ZA_AUTO symbols
-// hold their real addresses, so re-emission produces the true output bytes and the verbose listing
-// is built as we go (diagnostics stay quiet - their gate is final, which a listing pass is not).
-// The flags are independent, hence a struct not a bool.
+// Per-statement parse context, threaded by value alongside the cursor. The flags are independent,
+// hence a struct not a bool: a dead IF branch is still parsed for structure (to find its ENDIF) but
+// must effect nothing, and the output pass re-emits after allocation with diagnostics staying quiet
+// (their gate is final, which it is not).
 typedef struct parse_flags {
     bool final;     // the single armed pass after convergence: diagnostics record, the zp IR fills
     bool active;    // false inside a dead IF/FOR branch: parse for extent, effect nothing
@@ -29,19 +25,15 @@ typedef struct parse_flags {
     bool listing;   // build the -v listing text (rides on the output pass; implies output)
 } parse_flags;
 
-// The outputs of a parse, returned by value for the caller to fold into its own running state.
-// next is the cursor past what was consumed; fatal that a syntax error broke the token stream
-// and the whole assemble must unwind; unresolved that some operand referenced a not-yet-defined
-// symbol; changed that some existing symbol moved value. The error's code and location do NOT ride
-// here - they are recorded straight into b->diagnostics at the failure site (see syntax_error /
-// semantic_error), so a recoverable error leaves no trace in the result and the statement simply
-// carries on. unresolved and changed are independent (a pass can do both), so they stay two flags -
-// not a tag - and the driver loops while either holds. The bools sit last to pack.
+// The outputs of a parse, returned by value for the caller to fold into its own running state. An
+// error's code and location do NOT ride here - they are recorded straight into b->diagnostics at the
+// failure site (syntax_error / semantic_error). unresolved and changed are independent (a pass can
+// do both), so they stay two flags - not a tag - and the driver loops while either holds.
 typedef struct parse_result {
-    uint32_t next;
-    bool     fatal;
-    bool     unresolved;
-    bool     changed;
+    uint32_t next;         // cursor past what was consumed
+    bool     fatal;        // a syntax error broke the token stream: the whole assemble unwinds
+    bool     unresolved;   // some operand referenced a not-yet-defined symbol
+    bool     changed;      // some existing symbol moved value
 } parse_result;
 
 // Record a fatal (syntax) error into b->diagnostics and yield the unwinding result: the token stream
@@ -64,13 +56,10 @@ void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor
 void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity);
 
 // An integer argument reduced for emission: one of three mutually-exclusive outcomes, so a single
-// tag rather than a clutch of bools. value is the integer (valid only when known); error / error_at
-// say why an argument can never be an address. The 8-byte value leads so the struct packs.
-//
-// za_auto marks a ZA_AUTO address: value then holds the OFFSET within the variable (the real base
-// exists only after allocation) and zp_scope/zp_def/zp_name carry its identity. Callers that need a
-// real number NOW must refuse (error_type_za_auto_address); the operand and data-emission paths
-// accept, and the output pass re-evaluates against the allocated address.
+// tag rather than a clutch of bools. za_auto marks a ZA_AUTO address: value then holds the OFFSET
+// within the variable (the real base exists only after allocation) and zp_* carry its identity -
+// callers needing a real number NOW must refuse (error_type_za_auto_address); the operand and
+// data-emission paths accept, and the output pass re-evaluates against the allocated address.
 typedef enum int_argument_type {
     int_argument_type_error,        // 0/default: a value that can never be an address (fail-safe)
     int_argument_type_known,        // value is a resolved integer
@@ -89,11 +78,9 @@ typedef struct int_argument {
     rc_str   zp_name;
 } int_argument;
 
-// Reduce an evaluated expression value to an integer argument (pure: inputs in, result out). A plain
-// numeric comes back known; a ZA_AUTO address comes back known-with-the-za_auto-flag (see above); a
-// forward reference (unknown symbol) comes back unresolved, to settle on a later pass; a value that
-// can never be an address - or an unknown symbol on the final pass - comes back as an error. at is
-// the offset to blame.
+// Reduce an evaluated expression value to an integer argument (pure). Numeric -> known; a ZA_AUTO
+// address -> known with the za_auto flag; a forward reference -> unresolved, settling later - or, on
+// the final pass, an error, like any value that can never be an address. at is the offset to blame.
 int_argument int_argument_make(value v, bool final_pass, uint32_t at);
 
 // The separator (':' / newline / EOF) that must follow a non-label statement, starting at at. A
@@ -115,14 +102,11 @@ typedef enum verbose_text_kind {
     verbose_text_address,
 } verbose_text_kind;
 
-// Append one line to the verbose listing - but ONLY on the listing pass of a live branch
-// (flags.listing && flags.active), the verbose twin of semantic_error's gate. The statement's source
-// text is sliced [stmt.pos, end_pos) and echoed verbatim (first line only - a multi-line list literal
-// gets an ellipsis). verbose_code_line is an emitting statement: address + hex dump (truncated after
-// four bytes) + source, with the bytes read back from the section between code_begin and its current
-// end. verbose_text_line covers the rest, laid out by kind (above); pc is read only for
-// verbose_text_address.
-// Defined in assemble.c (they append to b's buffer); shared with opcodes.c.
+// Append one line to the verbose listing - ONLY on the listing pass of a live branch (flags.listing
+// && flags.active, the verbose twin of semantic_error's gate), the source sliced [stmt.pos, end_pos)
+// and echoed verbatim, first line only. verbose_code_line is an emitting statement: address + hex
+// dump (truncated after four bytes) + source, the bytes read back from the section from code_begin;
+// verbose_text_line covers the rest, laid out by kind. Defined in assemble.c; shared with opcodes.c.
 void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
                        uint32_t section, uint32_t pc, uint32_t code_begin);
 void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,

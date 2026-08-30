@@ -574,13 +574,11 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
 
     operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
 
-    // The operand's identity plays one of two roles by control-flow class: for a branch/jump/call it names
-    // the TARGET (a label, or a ZA_AUTO cell dispatched through); for everything else it may name a ZA_AUTO
-    // VARIABLE the instruction touches. Usually the two are exclusive - a control-transfer instruction
-    // touches no data variable - but an indirect jump THROUGH a ZA_AUTO variable plays both at once: the
-    // variable is the dispatch target (the CFG's business) AND the jump READS its bytes at run time, so
-    // it must also count as a touch or liveness would let another variable take the vector's bytes
-    // between its last store and the jump.
+    // The operand's identity plays one of two roles by control-flow class: for a branch/jump/call it
+    // names the TARGET; for everything else it may name a ZA_AUTO VARIABLE the instruction touches.
+    // An indirect jump THROUGH a ZA_AUTO plays both at once: the variable is the dispatch target AND
+    // the jump READS its bytes at run time, so it must also count as a touch - or liveness would let
+    // another variable take the vector's bytes between its last store and the jump.
     //
     // WHERE the identity comes from differs too: a ZA_AUTO reference carries its own identity in its
     // VALUE (so x = var : LDA x attributes through the alias), while a label target still resolves

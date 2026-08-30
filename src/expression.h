@@ -9,19 +9,12 @@ typedef struct functions    functions;      // the user-FUNCTION registry (a cal
 typedef struct source_files source_files;   // a function body may live in a different source than the call
 
 
-// The expression parser: a Pratt (precedence-climbing) parser that lexes an
-// expression from source, resolves symbols against a scope as it goes, evaluates,
-// and returns a value. Symbols that do not resolve, and arithmetic mishaps like
-// divide-by-zero, become error values that propagate to the end rather than
-// aborting the parse - so a forward reference can be retried on a later pass.
-//
-// The parser is greedy: it consumes as much as makes sense and then stops, handing
-// back the cursor so the caller can carry on. It stops at the first lexeme it
-// cannot use (a stray close paren, a trailing binary op with no operand) without
-// complaint. But once it has committed to a bracketed construct - an open paren or
-// a function call - a missing close paren or a function argument that never opens
-// is a real error it reports with a position, because those are awkward to diagnose
-// from the outside.
+// The expression parser: a Pratt (precedence-climbing) parser that lexes an expression from source,
+// resolves symbols as it goes, evaluates, and returns a value. Unresolved symbols and arithmetic
+// mishaps become error values that propagate rather than aborting, so a forward reference can retry
+// on a later pass. The parser is GREEDY: it stops without complaint at the first lexeme it cannot
+// use, handing back the cursor - but once committed to a bracketed construct, a missing closer is a
+// real error reported with a position.
 
 typedef enum expr_error {
     expr_error_none,                    // success, or a clean greedy stop
@@ -40,14 +33,10 @@ typedef struct expr_result {
 } expr_result;
 
 
-// The environment one expression evaluates in: symbol resolution plus the live assembler state an impure
-// value needs. Passed by const pointer; the evaluator never sees baron. It grows fields over time without
-// ever gaining a baron dependency.
-//
-// scopes is now MUTABLE, because a user-FUNCTION call interprets its body inside the evaluator: it makes a
-// per-call child scope and binds function-locals directly (symbols are immutable, so this stays purely
-// functional). The registry + source cache + operand table + recursion counter are what that interpretation
-// needs; all still read-only projections of baron.
+// The environment one expression evaluates in: symbol resolution plus the live assembler state an
+// impure value needs - the evaluator never sees baron. scopes is MUTABLE because a user-FUNCTION call
+// interprets its body right here, making a per-call child scope and binding locals (symbols are
+// immutable, so this stays purely functional); everything else is a read-only projection.
 typedef struct expr_env {
     scopes             *scopes;         // MUTABLE: a FUNCTION body binds locals / makes its child scope
     uint32_t            scope_index;

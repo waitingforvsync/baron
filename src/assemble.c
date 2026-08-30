@@ -649,14 +649,11 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// SECTION name, key = expr, ... / ENDSECTION - a lexically scoped region of object code, and its own
-// address space (laying two sections at one address is fine: they never fall through into each other,
-// and only a control transfer that names a label crosses between them). The name is UNIQUE (a repeat
-// is error_type_duplicate_section: a name identifies one output blob, and there is no concatenation).
-// The attributes are key = expr pairs resolved here: the assembler acts on org, cmos and guard, and
-// stores every attribute on the section for the output utility to read out of the result. A SECTION
-// does NOT open a naming scope - labels inside bind in the enclosing scope, exactly as an IF body
-// does. A dead branch parses the whole block for its extent but creates nothing and emits nothing.
+// SECTION name, key = expr, ... / ENDSECTION - a lexically scoped region of object code with its own
+// address space (two sections at one address is fine: only a control transfer that names a label
+// crosses between them). The name is UNIQUE - one output blob, no concatenation. The assembler acts
+// on the org, cmos and guard attributes and stores the whole bag for the output utility. A SECTION
+// does NOT open a naming scope; a dead branch parses the block for its extent but creates nothing.
 static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -816,14 +813,12 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 }
 
 
-// BASIC ... ENDBASIC - an inline BBC BASIC program. Each numbered line is tokenised byte-for-byte as
-// the BASIC 4 ROM would store it (basic.h has the algorithm) and emitted into the current section;
-// ENDBASIC finishes the program with its 0D FF terminator. A line inside the block either starts
-// with a decimal line number - the WHOLE line then belongs to the tokeniser, bypassing the lexer, so
-// ':' and ';' are BASIC text there rather than Baron's separator and comment - or it is blank / a
-// comment line / ENDBASIC; any other statement is refused (interspersing assembly among the lines is
-// a possible later extension). The emitted bytes are pure text, identical every pass, so the block
-// never disturbs convergence; a dead branch walks the lines to find its ENDBASIC and emits nothing.
+// BASIC ... ENDBASIC - an inline BBC BASIC program, each numbered line tokenised byte-for-byte as
+// the BASIC 4 ROM would store it (basic.h) and emitted into the current section; ENDBASIC finishes
+// with the 0D FF terminator. A numbered line belongs WHOLE to the tokeniser, bypassing the lexer, so
+// ':' and ';' are BASIC text there; blanks, comment lines and ENDBASIC are the only other statements
+// allowed. The bytes are pure text, identical every pass, so the block never disturbs convergence;
+// a dead branch walks the lines to find its ENDBASIC and emits nothing.
 static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scope;
@@ -974,14 +969,11 @@ static parse_result handle_za_pool(baron *b, cursor stmt, cursor at, uint32_t sc
 }
 
 
-// The ZA_AUTO name-binding worker, shared by ZA_AUTO1 / ZA_AUTO2 / ZA_AUTO <n>: declare width-byte zero-page
-// variables, auto-allocated from the ZA_POOL set. Each name binds an ordinary scoped symbol (so LDA foo
-// sizes as zero page and routine.foo resolves from outside, all for free) to a fixed PLACEHOLDER address;
-// the real byte is assigned later, at the allocation phase. The variable's width + identity are recorded in
-// the zeropage var registry, but only on the single final pass (the settling passes need just the placeholder
-// binding for layout to converge). ZA_AUTO is meaningless without a ZA_POOL first: we flag that, but still
-// bind the names so references do not cascade into undefined-symbol errors. A dead branch removes only the
-// binding it owns, like a dead label.
+// The ZA_AUTO name-binding worker, shared by ZA_AUTO1 / ZA_AUTO2 / ZA_AUTO <n>. Each name binds an
+// ordinary scoped symbol (so LDA foo sizes as zero page and routine.foo resolves from outside) to a
+// PLACEHOLDER address; the real byte arrives at allocation, and the width + identity enter the var
+// registry on the final pass only. ZA_AUTO without a ZA_POOL is flagged but still binds, so
+// references do not cascade into undefined-symbol errors; a dead branch removes only its own binding.
 static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
 {
     (void) stmt;      // the listing line is built from the allocated symbol, not the source echo
@@ -1120,13 +1112,10 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
 }
 
 
-// ZA_UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch or a never-returning
-// JSR, that control cannot fall through to this point. The allocator's CFG would otherwise wire the
-// fall-through edge (a branch's not-taken arm, or a call's continuation) and treat whatever is live down
-// that dead path as live across the site, pinning bytes needlessly. Recording this pc lets
-// zeropage_finalize prune that one edge. It is TRUSTED - a wrong ZA_UNREACHABLE (a fall-through that
-// really can happen) is one of the few ways to defeat the certainty contract, but it is the programmer's
-// explicit promise. Only meaningful on the final pass, and only with the feature enabled.
+// ZA_UNREACHABLE - a zero-byte assertion that control cannot fall through to this point (an
+// always-taken branch's dead arm, a never-returning JSR's continuation), letting the CFG prune that
+// one edge instead of pinning bytes on a dead path. TRUSTED: a wrong one defeats the certainty
+// contract, but it is the programmer's explicit promise. Final pass + feature enabled only.
 static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -1145,14 +1134,11 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
 }
 
 
-// The instruction a trailing annotation binds to: the last recorded one, skipping ZA_DISCARD markers (a
-// marker between the instruction and its annotation is bookkeeping, not the site) - IF its flow fits the
-// annotation's kind, else RC_INDEX_NONE and the annotation binds to nothing rather than mis-annotating.
-// ZA_CANCALL and ZA_RETURNTO qualify a call; ZA_CANJUMP a jump, a branch (a self-modified operand) or a
-// return (the RTS-dispatch trick - push a target address, RTS into it); ZA_RETURN a jump or a branch only
-// (an RTS already returns, and a call resumes in-stream). A BITZP/BITABS skip fits nothing, deliberately:
-// it is a real emitted byte, so an annotation separated from its transfer by one detaches - the pc it
-// would name is wrong anyway. Meaningful on the final pass only - that is when instructions are recorded.
+// The instruction a trailing annotation binds to: the last recorded one, skipping ZA_DISCARD markers -
+// IF its flow fits the annotation's kind, else RC_INDEX_NONE (binding to nothing beats mis-annotating).
+// ZA_CANCALL and ZA_RETURNTO qualify a call; ZA_CANJUMP a jump, branch or return (the RTS-dispatch
+// trick); ZA_RETURN a jump or branch only. A BITZP/BITABS skip fits nothing, deliberately: it is a
+// real emitted byte, so an annotation separated from its transfer by one detaches.
 static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 {
     uint32_t ni = zeropage_insn_count(&b->zeropage);
@@ -1226,13 +1212,10 @@ static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cf
 }
 
 
-// The shared body of ZA_CANCALL / ZA_CANJUMP / ZA_RETURNTO: parse a comma-separated list of target values
-// (each a number, or a range/list that flattens to numbers) and record one cflow of kind per target,
-// sited on the last recorded instruction (the JSR / JMP / branch / RTS this annotation qualifies) - but
-// only when that instruction's flow fits the kind (see annotation_site), so a stray ZA_CANCALL after a JMP
-// (or vice versa) binds to nothing rather than mis-annotating. Only the final pass records instructions, so
-// only then is there a site; the settling passes still parse the list so the statement stays well-formed.
-// A forward target defers.
+// The shared body of ZA_CANCALL / ZA_CANJUMP / ZA_RETURNTO: parse a comma-separated list of targets
+// (numbers, or ranges/lists that flatten to numbers) and record one cflow of kind per target, sited
+// via annotation_site. Only the final pass records instructions, so only then is there a site; the
+// settling passes still parse the list so the statement stays well-formed. A forward target defers.
 static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
                                        zp_cflow_kind kind, rc_arena scratch)
 {
@@ -1290,13 +1273,10 @@ static parse_result handle_za_canjump(baron *b, cursor stmt, cursor at, uint32_t
 }
 
 
-// ZA_RETURN - a bare marker declaring that the jump or branch immediately preceding it hands control back to
-// this routine's CALLER: the callee side of the inline-data idiom (pop the return address, consume the data,
-// then JMP (ptr) - or a self-modified direct JMP - straight past it). The CFG wires no edge for it (a
-// declared literal placeholder is overridden too) and liveness treats the block as a returning exit, so the
-// caller's live-after set flows through exactly as for an RTS. On a branch it declares a CONDITIONAL return
-// (the not-taken edge stays). TRUSTED, like ZA_UNREACHABLE. Binds to nothing after anything but a
-// jump/branch - an RTS already returns.
+// ZA_RETURN - a bare marker declaring that the jump or branch immediately preceding it hands control
+// back to this routine's CALLER (the callee side of the inline-data idiom). The CFG wires no edge for
+// it and liveness treats the block as a returning exit, exactly as for an RTS; on a branch it is a
+// CONDITIONAL return (the not-taken edge stays). TRUSTED, like ZA_UNREACHABLE.
 static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -1331,13 +1311,11 @@ static parse_result handle_za_returnto(baron *b, cursor stmt, cursor at, uint32_
 }
 
 
-// ZA_DISCARD <var>[, <var>...] - the programmer's promise that the value each named ZA_AUTO variable holds AT
-// THIS POINT is never read again: everything read later comes from writes after here. Recorded as a size-0
-// marker in the zp instruction stream; liveness treats it as a full-width kill that stores nothing, which is
-// what lets an array rebuilt through indexed stores (STA arr,X - no provable byte written) have a live
-// range that starts at its rebuild instead of leaking back to the routine entry and around the caller's
-// loop. TRUSTED, like ZA_UNREACHABLE: a wrong ZA_DISCARD hands the variable's byte to someone else while the old
-// value is still wanted. Whole variables only - the promise is hard enough to audit without byte windows.
+// ZA_DISCARD <var>[, <var>...] - the programmer's promise that the value each named ZA_AUTO variable
+// holds AT THIS POINT is never read again. Recorded as a size-0 marker; liveness treats it as a
+// full-width kill that stores nothing, which lets an array rebuilt through indexed stores (no
+// provable byte written) start its live range at the rebuild instead of leaking to the routine entry.
+// TRUSTED, like ZA_UNREACHABLE. Whole variables only - the promise is hard enough to audit already.
 static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -1555,13 +1533,11 @@ static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope
 }
 
 
-// BITZP / BITABS - the classic overlapping-streams trick: emit a lone BIT opcode (&24 zero page / &2C
-// absolute) whose operand fetch swallows the next 1 / 2 bytes. On the fall-through path the BIT executes
-// (a harmless read of a junk address; the flags it trashes are the programmer's business) and control
-// resumes past the swallowed bytes; a branch straight past us executes the swallowed instruction instead.
-// The byte is emitted on every pass (the pc must not wobble) and recorded into the zero-page IR on the
-// final pass, so the CFG knows fall-through resumes at pc + 1 + swallow and that the record at pc + 1 is
-// reached only by an explicit branch - a swallowed store must not read as a write on the path that hops it.
+// BITZP / BITABS - the classic overlapping-streams trick: emit a lone BIT opcode (&24 / &2C) whose
+// operand fetch swallows the next 1 / 2 bytes; a branch straight past us executes the swallowed
+// instruction instead. The byte is emitted on every pass (the pc must not wobble) and recorded on the
+// final pass, so the CFG knows fall-through resumes at pc + 1 + swallow and the record at pc + 1 is
+// reached only by an explicit branch - a swallowed store must not read as a write on the hopping path.
 static parse_result handle_bit_skip(baron *b, cursor stmt, cursor at, uint32_t section, parse_flags flags, uint8_t swallow)
 {
     if (flags.active) {
@@ -1716,14 +1692,12 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// ERROR [value[, value...]] - the user's own diagnostic: the values are formatted exactly as PRINT would
-// show them (strings raw, everything else in value_format's shape, concatenated with no separator) and
-// recorded as a RECOVERABLE error at the statement. Recoverable because the statement is syntactically
-// fine: parsing carries on, so further errors still accumulate, and the recorded severity_error fails
-// the assemble at the end like any other. The message renders whole through error_type_user_error's bare
-// "%" template, so a '%' inside it is inert. A forward reference in a value defers (unresolved) and
-// settles like PRINT's; still unknown on the final pass it is the usual undefined symbol and the ERROR
-// itself stays silent (its message could not be formed). A dead branch records nothing.
+// ERROR [value[, value...]] - the user's own diagnostic: the values format exactly as PRINT would
+// show them and record as a RECOVERABLE error at the statement (the syntax is fine, so parsing
+// carries on and further errors still accumulate). The message renders whole through the bare "%"
+// template, so a '%' inside it is inert. A forward reference defers like PRINT's; still unknown on
+// the final pass it is the usual undefined symbol and the ERROR stays silent. A dead branch records
+// nothing.
 static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -1943,14 +1917,11 @@ static parse_result handle_open_brace(baron *b, cursor stmt, cursor at, uint32_t
 }
 
 
-// IF cond ... ELIF cond ... ELSE ... ENDIF, evaluated each pass. IF does not open a scope: labels in
-// the live branch leak to the enclosing scope, and the construct must close (ENDIF) inside the same
-// scope it opened in. ELIF is just an IF in the else position (IF a x ELIF b y ELSE z == IF a x ELSE
-// {IF b y ELSE z}), so this reads that way: one condition picks between a true body, active iff
-// flags.active && the condition holds, and an else body, active iff flags.active && the condition is
-// known FALSE. At most one is live - and neither when the condition cannot yet be evaluated, which
-// owes another pass (a hard error on the final pass). Entered just past the IF - or, via the
-// recursion, the ELIF - at the condition.
+// IF cond ... ELIF cond ... ELSE ... ENDIF, evaluated each pass. IF opens no scope: labels in the
+// live branch leak to the enclosing one. ELIF is just an IF in the else position, so this reads that
+// way: one condition picks between a true body and an else body, at most one live - and neither when
+// the condition cannot yet be evaluated, which owes another pass (a hard error on the final pass).
+// Entered just past the IF - or, via the recursion, the ELIF - at the condition.
 static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -2333,13 +2304,11 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
 }
 
 
-// INCBIN "file" - splice a binary file's bytes into the current section. Its size never changes across passes,
-// so on the settling passes we do NOT read the file at all: rc_file_size tells us how many bytes it will be and
-// we just advance pc by that much (sections_skip pads with zeroes). Only on the FINAL pass do we actually load
-// it and emit the real bytes (via emit_data, reusing EQUB's per-byte path over a string of the contents). The
-// filename is a string operand resolved relative to the includer, exactly like INCLUDE; a forward-referenced
-// name defers like a forward address. A missing / unreadable file is FATAL (there is no sensible recovery - the
-// output would be the wrong size), so it unwinds the whole assemble rather than accumulating.
+// INCBIN "file" - splice a binary file's bytes into the current section. Its size never changes
+// across passes, so the settling passes never read it: rc_file_size reserves the span (zero-padded)
+// and only the FINAL pass loads and emits the real bytes. The filename resolves like INCLUDE's; a
+// forward-referenced name defers. A missing / unreadable file is FATAL - the output would be the
+// wrong size, so there is no sensible recovery.
 static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     expr_result e = eval(b, at, scope, section, scratch);
@@ -2397,16 +2366,12 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
 }
 
 
-// INCSECTION <name> - splice the assembled bytes of the named section here: INCBIN, but sourced from a
-// section's code buffer. Only SPACE is reserved during the passes (the source's best-known size, so the
-// layout settles whatever order the sections appear in); the bytes themselves land in one final,
-// dependency-ordered fixup step AFTER the zero-page allocator has patched them (splices_resolve).
-//
-// Consequences: the section may be defined LATER in the source; a missing one is judged only on the
-// final settled state; a circular arrangement is refused the first pass it is seen; and the -v listing
-// shows an address-only line (the bytes belong to the fixup, not to this statement). The copy is
-// literal - no relocation - which is the point: the bytes are meant to run at the SOURCE section's
-// addresses once the program has moved them there.
+// INCSECTION <name> - splice the assembled bytes of the named section here. Only SPACE is reserved
+// during the passes (the source's best-known size, so the layout settles whatever the definition
+// order); the bytes land in one final, dependency-ordered fixup AFTER the allocator has done its
+// work (splices_resolve). So: the source may be defined later; a missing one is judged only on the
+// final settled state; a cycle is refused; the -v listing shows an address-only line. The copy is
+// literal - the bytes are meant to run at the SOURCE section's addresses once the program moves them.
 static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scope;
@@ -2920,14 +2885,11 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t sec
 
 // ---- the multi-pass driver ----
 
-// The INCSECTION dependency walk, shared by the per-pass cycle check and the final fixup. Splices release
-// in "everything spliced INTO my source has landed first" order - which is exactly the order the copies
-// must run in, so a chain (A inserts B inserts C) carries C's bytes through B into A - and a splice that
-// never releases sits on (or behind) a dependency cycle. With apply set this is the real fixup: an
-// unknown source is an error (every IF arm has settled by now, so absence is final) and each released
-// splice copies its source's bytes over the span it reserved. Without it, the walk only proves
-// acyclicity: an unknown source may yet appear on a later pass, so it blocks nothing and errors nothing.
-// Returns false with diagnostics recorded when anything refused.
+// The INCSECTION dependency walk, shared by the per-pass cycle check and the final fixup. Splices
+// release in "everything spliced INTO my source has landed first" order - exactly the copy order, so
+// a chain carries C's bytes through B into A - and one that never releases sits on a cycle. With
+// apply set this is the real fixup (an unknown source is an error: absence is final by now); without
+// it, the walk only proves acyclicity. Returns false with diagnostics recorded when anything refused.
 static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
 {
     rc_view_splice all = sections_splices(&b->sections);
@@ -2994,14 +2956,11 @@ static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
 
 // ---- command-line predefines ----
 
-// Apply one -D "name=expression" definition into the root scope. The string is registered as a tiny
-// synthetic source named after the switch itself, so a diagnostic points somewhere readable
-// ("-D DEBUG=TRU:1:9: ..."); registration is keyed by name, so every pass lands on the same source
-// index and the binding's identity holds - re-evaluation is an update, never a duplicate. The name
-// lexes through the base statement table, giving it the same collision rules the source has (a
-// mnemonic, keyword or built-in constant is refused), and the expression evaluates exactly like an
-// assignment's, so it may forward-reference symbols the source defines later. Anything left over
-// after the expression is a mistake: there is no next statement to hand it to.
+// Apply one -D "name=expression" definition into the root scope. The string registers as a tiny
+// synthetic source named after the switch (so diagnostics point somewhere readable; keyed by name,
+// so every pass lands on the same source index and the binding's identity holds). The name lexes
+// through the base statement table (the source's collision rules), and the expression evaluates like
+// an assignment's, so it may forward-reference. Anything left after the expression is a mistake.
 static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_arena scratch)
 {
     rc_mstr name = rc_mstr_make(define.len + 4, &scratch);
@@ -3177,12 +3136,6 @@ static bool call_rewrites(const liveness *lv, call_targets ct, uint32_t v)
 }
 
 
-// Mark into reach every block reachable from seed, following the same edges control can take: the CFG's
-// successor slices (fall-throughs, branches, wired ZA_CANJUMP arms) plus each call's resolved callee entries.
-// An unknown or external call arm contributes nothing - external code is off the map, and an unannotated
-// computed call cannot extend reachability (its true callees may then warn, which is exactly the "add
-// ZA_CANCALL" nudge). within, when non-NULL, restricts the walk to blocks inside that set - how the region
-// closures below stay within the unreachable half of the graph.
 // One declared interrupt handler: its entry block and the marker's cursor (for Guard 3's diagnostics).
 // Collected by pushing - fewer resolve than there are markers, duplicates collapsing on the way.
 typedef struct zp_handler {
@@ -3194,6 +3147,10 @@ typedef struct zp_handler {
 #define RC_ARRAY_NAME zp_handler
 #include "richc/template/array.h"
 
+// Mark into reach every block reachable from seed, following the same edges control can take: the
+// CFG's successor slices plus each call's resolved callee entries (unknown / external arms contribute
+// nothing, so an unannotated computed call cannot extend reachability). within, when non-NULL,
+// restricts the walk to blocks inside that set.
 static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t seed,
                        const rc_bitset *within, rc_bitset *reach, rc_arena scratch)
 {
@@ -3281,24 +3238,16 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // at open and its cursor only advances (emission, or a forward SKIP/SKIPTO/ALIGN), so its pc is strictly
     // monotonic. cfg_build asserts that invariant in debug builds; there is nothing to refuse here.
 
-    // Guard 0 (indexed access is the user's responsibility): a variable reached by an indexed / indexed-
-    // indirect mode (var,X, var,Y, (var,X)) touches var+index at run time - the intended way to walk a ZA_AUTO
-    // table. The allocator reserves the WHOLE variable [base, base+width) and liveness marks it all live on any
-    // access, so an index that stays inside the width only ever reads the variable's own bytes: sound. What
-    // Baron cannot see is the run-time index - an index at or past the width walks into a neighbour, and no
-    // static check can catch that. So this is not a refusal but an OPT-IN warning (severity_optional, silent
-    // until the warning level is raised), the same trust we place in ZA_CANCALL / ZA_UNREACHABLE. The CONSTANT base
-    // of the access is still bounds-checked below (Guard 0b): LDA var+4,X on a 4-wide table is refused because
-    // the base is already off the end before any index is added. (Checked per recorded insn once vregs are
-    // resolved: a var_indexed insn that really names a ZA_AUTO now has a vreg.)
+    // Guard 0 (indexed access is the user's responsibility): an indexed / indexed-indirect mode
+    // touches var+index at run time - the intended way to walk a ZA_AUTO table. The WHOLE variable is
+    // reserved and liveness marks it all live, so an in-width index is sound; the run-time index
+    // itself is unprovable, so an overrun into a neighbour is on the user - hence an OPT-IN warning
+    // (severity_optional), the same trust we place in ZA_CANCALL.
     //
-    // Guard 0b (bounds): a var+offset access must lie WITHIN the variable's declared width. The access spans
-    // access bytes at var_offset: 1 for a direct byte, 2 for an indirect pointer deref ((var),Y / (var),
-    // which reads the pointer's low+high bytes). If [offset, offset+access) runs off the end, the stray byte is
-    // one the allocator never reserved for this variable - so refuse. A 1-byte ZA_AUTO1 used as a pointer is the
-    // special case that gets the pointed "declare it ZA_AUTO2" message; every other overrun (a var+n past a
-    // table's end, a pointer straddling the top of a wider var) gets the general out-of-bounds message. (Both
-    // need the resolved vreg for the width, hence here rather than at record time; an unknown offset is skipped.)
+    // Guard 0b (bounds): a var+offset access (1 byte direct, 2 for a pointer deref) must lie WITHIN
+    // the declared width - a stray byte is one the allocator never reserved for this variable. A
+    // 1-byte ZA_AUTO1 used as a pointer gets the pointed "declare it ZA_AUTO2" message, any other
+    // overrun the general one. (Needs the resolved vreg for the width; an unknown offset is skipped.)
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.vreg == RC_INDEX_NONE) {
@@ -3399,13 +3348,11 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // The root set: where control can enter the program from outside. Declared ZA_ENTRY / ZA_INTERRUPT
-    // markers resolve to their blocks (the cfg marked each a leader, so "no block" reliably means the
-    // marker sits on no instruction - data, or a section's end - a static mistake we refuse). Any ZA_ENTRY
-    // replaces the default sync roots; without one, each section's first recorded block roots itself - the
-    // generalisation of the old "block 0 is the entry" presumption, kind to the relocation workflow where
-    // a spliced section's code is entered at its own org. ZA_INTERRUPT alone leaves the defaults in place
-    // (a handler is extra, not a statement about where the mainline starts).
+    // The root set: where control can enter the program from outside. Declared markers resolve to
+    // their blocks (each was leader-marked, so "no block" reliably means the marker sits on data - a
+    // static mistake we refuse). Any ZA_ENTRY replaces the default sync roots; without one, each
+    // section's first recorded block roots itself (kind to the relocation workflow, where a spliced
+    // section is entered at its own org). ZA_INTERRUPT alone leaves the defaults in place.
     rc_view_zp_entry entries = zeropage_entries(&b->zeropage);
     uint32_t  nb           = g.blocks.num;
     rc_bitset roots        = {0};
@@ -3651,14 +3598,11 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     }
 
     // Guard 3 / interrupt pinning: a ZA_INTERRUPT handler preempts at ARBITRARY instructions, so no
-    // transaction discipline can be assumed around it. Two rules make its variables sound: (i) its
-    // communication vars - live-in at the handler's entry, written by the mainline for the handler to read -
-    // are pinned against everything, the handler's own temps included (the mainline may rewrite one at any
-    // moment relative to the handler's execution, so no instant of "dead" exists to reuse); (ii) every var
-    // in the handler's transitive footprint interferes with every var outside it - a handler temp can never
-    // share a byte with mainline state it might fire on top of. Among the handler's own temps, ordinary
-    // liveness still governs, so intra-handler reuse survives. A footprint the walk cannot bound (an
-    // unannotated computed call in the extent) is refused, with the same remedy as ever: ZA_CANCALL.
+    // instant of "dead" can be assumed around it. Two rules: (i) its communication vars - live-in at
+    // the handler's entry - are pinned against everything, its own temps included; (ii) every var in
+    // its transitive footprint interferes with every var outside it. Among the handler's own temps
+    // ordinary liveness still governs, so intra-handler reuse survives. An unboundable footprint is
+    // refused, with the same remedy as ever: ZA_CANCALL.
     for (uint32_t h = 0; h < handlers.num; h++) {
         zp_handler hd = rc_array_zp_handler_get(&handlers, h);
         footprint fp = footprint_compute(g, insns, cflows, hd.block, nv, &work, scratch);
@@ -3683,16 +3627,12 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // The ZA_ENTRY input warning: an externally-called routine that reads a variable before writing it
-    // expects its caller to have poked the value - but an outside caller cannot know an allocator-chosen
-    // address, so a ZA_AUTO input on a declared external interface is almost certainly a mistake (an
-    // external interface wants fixed bytes: ZA_POOL them, or use plain addresses). The test is the
-    // read-before-write walk, not live-in: the backward fixpoint's shared return edges smear one call
-    // site's live-after through a common helper into another call site (a helper called both before the
-    // entry's init and from the main loop makes every loop-carried variable look live-in at the entry),
-    // while the walk follows calls with per-callee summaries, so only genuine uninitialised reads count.
-    // Handler blocks are excluded - a stacked ZA_ENTRY+ZA_INTERRUPT takes the stricter interrupt treatment,
-    // and Guard 3's pinned comm vars ARE the supported live-in pattern there.
+    // The ZA_ENTRY input warning: an externally-called routine that reads a ZA_AUTO before writing it
+    // expects its caller to have poked a value - but an outside caller cannot know an allocator-chosen
+    // address (an external interface wants fixed bytes: ZA_POOL them). The test is the read-before-
+    // write walk, not live-in, whose shared return edges smear one call site's live-after into
+    // another. Handler blocks are excluded: a stacked ZA_ENTRY+ZA_INTERRUPT takes the stricter
+    // treatment, and Guard 3's pinned comm vars ARE the supported live-in pattern there.
     rc_bitset sync_seen = {0};
     rc_bitset_resize(&sync_seen, nb ? nb : 1, &scratch);
     for (uint32_t i = 0; nv > 0 && i < entries.num; i++) {
@@ -3796,14 +3736,11 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             }
 
             // The OUTPUT pass: one re-emission with the ZA_AUTO symbols holding their allocated
-            // addresses, whose sections ARE the result (there is no operand patching - a settling
-            // pass's operands hold intra-variable offsets, meaningless as output). It must run
-            // whenever the zp feature is on; -v rides the same pass to build the listing text, with
-            // the true bytes in every line. Re-emission cannot move anything: a ZA_AUTO address is a
-            // typed value that every layout-affecting context refuses, and the contexts that accept
-            // one (instruction operands, data elements) are width-stable, so the converged layout is
-            // reproduced exactly. It runs final=false, so nothing gated on the settling pass
-            // (diagnostics, the zeropage IR) records twice.
+            // addresses, whose sections ARE the result (no operand patching - a settling pass's
+            // operands hold meaningless intra-variable offsets). It runs whenever the zp feature is
+            // on; -v rides it to build the listing with the true bytes. Re-emission cannot move
+            // anything: a ZA_AUTO address is typed, every layout-affecting context refuses it, and
+            // the accepting contexts are width-stable. final=false, so nothing records twice.
             if (b->want_verbose || zeropage_is_enabled(&b->zeropage)) {
                 parse_result out = run_pass(b, source,
                     (parse_flags) {

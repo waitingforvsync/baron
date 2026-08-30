@@ -101,23 +101,16 @@ uint32_t scopes_make_root(scopes *s);
 // empty name ({0}) gives an anonymous scope that only its index can reach.
 uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name);
 
-// Get the child of parent_index named name, making it if it does not exist yet.
-// Idempotent, so re-walking the same source on a later pass lands on the same scope
-// (and so keeps its symbol bindings) rather than spawning a duplicate. name is
-// non-empty; on a first sighting its bytes are copied into the scopes' own arena, so
-// the caller may pass a scratch view (an anonymous scope is given a synthetic key the
-// caller builds, e.g. "@source:pos", which no user identifier can spell).
+// Get the child of parent_index named name, making it if needed. Idempotent, so re-walking the same
+// source on a later pass lands on the same scope (keeping its bindings). On a first sighting the
+// name's bytes are copied into the scopes' own arena, so the caller may pass a scratch view.
 uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name);
 
-// Bind leaf name to v in scope_index, with def recording the source position
-// that defines it - name is a plain symbol name, never a dotted path. The value is
-// deep-cloned into the scopes' permanent arena (only on a genuine change), so a value
-// built in a caller's scratch arena may be passed safely. The outcome:
-//   - duplicate: a binding already exists under a DIFFERENT def - a second definition
-//     of the same name in the same scope. Nothing is mutated; the caller errors.
-//   - changed:   the same definition (matching def) re-evaluated to a different value.
-//     This is what a later pass watches to decide whether things have settled.
-//   - unchanged: a brand new symbol, or the same definition landing the same value again.
+// Bind leaf name (never a dotted path) to v in scope_index, def recording the defining position. The
+// value is deep-cloned into the permanent arena (only on a genuine change), so a scratch-built value
+// is safe. Outcomes: duplicate - a binding exists under a DIFFERENT def, nothing mutated, the caller
+// errors; changed - the same def re-evaluated to a different value (the convergence signal);
+// unchanged - a brand new symbol, or the same value again.
 symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v, cursor def);
 
 // Remove leaf name (a plain symbol name, not a path) from scope_index. Returns
@@ -129,10 +122,9 @@ bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name);
 // here. Used to point a duplicate-symbol error back at the binding it collides with.
 cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 
-// A resolved binding's IDENTITY: its def cursor plus the scope it was declared in. The def cursor ALONE is
-// not unique - a macro / FOR body shares one def across every instantiation - so the declaring scope, which
-// the per-instantiation child scope makes distinct, is what tells two instances apart. def is cursor_none()
-// and scope is RC_INDEX_NONE when the name is unbound.
+// A resolved binding's IDENTITY: its def cursor plus the declaring scope. The def cursor ALONE is
+// not unique - a macro / FOR body shares one def across its instantiations - so the per-instantiation
+// scope is what tells two instances apart. cursor_none / RC_INDEX_NONE when the name is unbound.
 typedef struct symbol_ref {
     cursor   def;
     uint32_t scope;
@@ -144,40 +136,29 @@ typedef struct symbol_ref {
 // operand to the exact variable instance it references, wherever it was declared.
 symbol_ref scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 
-// Look a symbol up, starting from scope_index. A bare name walks up the parent
-// chain and takes the nearest enclosing definition. A dotted path (a.b.sym) finds
-// its head the same way, then descends the rest strictly through the child maps
-// and looks for the final name in the leaf scope alone. Hands back
-// value_make_none() if nothing matches.
+// Look a symbol up from scope_index: a bare name walks up the parent chain (nearest wins); a dotted
+// path (a.b.sym) finds its head the same way, then descends strictly through the child maps, reading
+// the final name in the leaf scope alone. Hands back value_make_none() if nothing matches.
 value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path);
 
-// Resolve a LOCAL label reference (@- / @+) made at (source, use_pos) inside scope_index. Local labels are
-// ordinary symbols bound under an unspellable "@source:pos" key; we scan this scope's symbols ALONE (no parent
-// walk - locals do not leak across scopes), keep the '@'-prefixed keys defined in the same source, and pick
-// the nearest by DEFINITION position: the largest def.pos < use_pos for a backward '@-' (forward == false), or
-// the smallest def.pos > use_pos for a forward '@+' (forward == true). Ordering is by source position, never
-// by value, so an ORG between two local labels cannot reorder them. Hands back the winner's value, or an
-// unknown-symbol error value when none qualifies (so an unresolved @- / @+ defers like any forward reference).
+// Resolve a local label reference (@- / @+) at (source, use_pos), scanning scope_index ALONE (no
+// parent walk - locals do not leak across scopes): the nearest same-source '@' key by DEFINITION
+// position, before the use for '@-', after it for '@+' - never by value, so an ORG between two
+// labels cannot reorder them. No candidate yields an unknown-symbol error value, which defers.
 value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t source, uint32_t use_pos, bool forward);
 
 // Project a finished scopes into a read-only view (see scopes_view above). Cheap - it copies the nodes
 // view and the two pool handles; the arena-backed backing is shared, not duplicated.
 scopes_view scopes_view_make(const scopes *s);
 
-// Look a full dotted path up in the view, from the top level (root). A bare name ("top") is found in the
-// root scope; a dotted path ("routine.core") descends the child maps and reads the leaf scope's symbol map.
-// Hands back value_make_none() if nothing matches. (This is the result-facing lookup; the internal
-// scopes_get_symbol adds a starting scope + parent walk for use during assembly.)
+// Look a full dotted path up in the view, from the top level (root); value_make_none() on a miss.
+// The result-facing lookup - scopes_get_symbol adds a starting scope + parent walk for assembly time.
 value scopes_view_get_symbol(scopes_view v, rc_str full_path);
 
-// Flatten every spellable resolved binding into a fresh array (backed by arena) and hand back its view,
-// each entry keyed by its full dotted path from the top level ("routine.core"). Unspellable internals are
-// skipped: any scope or symbol whose name begins with '@' - anonymous { } blocks (a synthetic "@source:pos"
-// key), FOR-iteration and macro/function call frames, and local labels - none of which a source path can
-// spell or scopes_view_get_symbol can reach. A top-level symbol's path reuses its owned key rc_str directly (no
-// copy); a nested symbol's path is built in arena. scratch backs the per-scope prefix while it is
-// assembled. The result is a read-only, position-independent snapshot (paths and values all live in arena),
-// so it outlives the view.
+// Flatten every spellable binding into a fresh array in arena, keyed by full dotted path. Unspellable
+// internals - any scope or symbol whose name begins '@' (anonymous blocks, call frames, local labels)
+// - are skipped. A top-level path reuses its owned key with no copy; scratch backs the per-scope
+// prefix. The snapshot is position-independent, so it outlives the view.
 rc_view_symbol_entry scopes_view_flatten(scopes_view v, rc_arena *arena, rc_arena scratch);
 
 

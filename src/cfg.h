@@ -6,23 +6,16 @@
 #include "richc/array/u32.h"
 
 
-// A basic block: a maximal straight-line run of instructions with a single entry (its first
-// instruction) and a single exit (its last). It indexes into the instruction list rather than owning
-// insns. Successors are a contiguous slice of the CFG's shared succs pool - a variable count, so a
-// ZA_CANJUMP jump table with many targets is representable, not just the one/two of a jump/branch.
+// A basic block: a maximal straight-line run of instructions with a single entry and a single exit,
+// indexing into the instruction list rather than owning insns. (section, pc) is its identity - paged
+// banks may share a pc, and only a control transfer that names a label crosses sections.
 //
-// (section, pc) is the block's identity: two sections (paged banks) may share a pc, so pc alone does
-// not name a block. Fall-through and in-section branches stay within one section; only a control
-// transfer that named a label crosses into another.
-//
-// unknown_succ means control may ALSO leave to an address we cannot model: an indirect JMP through a
-// vector WE assembled (no ZA_CANJUMP), an indexed dispatch, or an unresolved target. The succ slice
-// then lists only the successors we CAN place, and liveness must treat live-out conservatively. A
-// CONSTANT destination off the recorded stream is NOT this - that is a clean transfer out of the
-// program (cfg_target_is_external) - and nor is a plain RTS/RTI, which has no successor and is fully
-// known. An RTS-dispatch or a self-modified transfer cannot be seen here at all: the ZA_CANJUMP /
-// ZA_CANCALL / ZA_RETURN annotations supply the targets we cannot recover, and unannotated they
-// remain trusted preconditions.
+// unknown_succ: control may ALSO leave to an address we cannot model (an unannotated indirect jump
+// through a vector WE assembled, an indexed dispatch, an unresolved target), so the succ slice is
+// incomplete and liveness must go conservative. A constant destination off the stream is NOT this -
+// that is a clean external exit (cfg_target_is_external) - nor is a plain RTS/RTI (no successor,
+// fully known). A self-modified transfer is invisible here altogether: the ZA_ annotations supply
+// what we cannot recover, and unannotated it remains a trusted precondition.
 typedef struct basic_block {
     uint32_t section;        // with pc, the block's identity
     uint32_t pc;             // leader address (this block's entry), within its section
@@ -48,19 +41,12 @@ typedef struct cfg {
     rc_view_zp_label     labels;   // retained so a labelled target resolves to its block on demand (cfg_target_block)
 } cfg;
 
-// Build the CFG for insns (recorded in program / pc order, sections interleaving). labels maps each
-// label's identity to its (section, pc) so a control transfer that named a label resolves across
-// sections; entries lists the declared ZA_ENTRY / ZA_INTERRUPT markers, whose addresses are marked
-// as leaders so a mid-run entry starts its own block.
-//
-// cflows supplies the annotations: ZA_UNREACHABLE prunes a dead fall-through; ZA_CANJUMP wires a
-// computed JMP's / self-modified branch's declared targets in place of the literal; ZA_RETURN makes
-// a jump/branch a return to the routine's own caller; ZA_RETURNTO reroutes a call's continuation to
-// its declared resumption points (the inline-data idiom's caller side).
-//
-// Blocks + successors live in arena; scratch (by value) backs the transient leader set. An empty
-// instruction list gives an empty CFG. Assumes pc is monotonic WITHIN a section run (the block cut
-// at every section change keeps it so, even as sections interleave in the stream).
+// Build the CFG for insns (recorded in program order, sections interleaving). labels resolve a
+// labelled target across sections; entries' addresses are leader-marked so a mid-run ZA_ENTRY starts
+// its own block; cflows applies the annotations (ZA_UNREACHABLE prunes a dead fall-through,
+// ZA_CANJUMP replaces a computed transfer's targets, ZA_RETURN makes one a return to our caller,
+// ZA_RETURNTO reroutes a call's continuation). Blocks + successors live in arena; scratch backs the
+// transient leader set. Assumes pc is monotonic within a section run (the section-change cut keeps it so).
 cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label labels,
               rc_view_zp_entry entries, rc_arena *arena, rc_arena scratch);
 
@@ -85,12 +71,10 @@ bool cfg_target_is_external(cfg g, zp_insn n);
 // The i-th successor block index of b (i < b.succ_count). Reads the shared successor pool.
 uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 
-// The callee entry blocks a call site can reach. A ZA_CANCALL annotation at the site overrides the
-// literal target with the declared set (a declared address with no block is an external arm,
-// contributing nothing); otherwise the literal target resolves through cfg_target_block. This is the
-// single call-target policy, shared by the footprint walk and the callee-input liveness injection.
-// An external arm returns having touched nothing, so a must-write intersection over the call's arms
-// is empty - the call kills nothing when external is set.
+// The callee entry blocks a call site can reach - the single call-target policy, shared by the
+// footprint walk and the callee-input liveness injection. A ZA_CANCALL at the site overrides the
+// literal target with the declared set; a declared address with no block is an external arm, which
+// returns having touched nothing (so a must-write intersection over the arms is empty).
 typedef struct call_targets {
     rc_view_u32  blocks;    // in-program callee entry block indices (zero-init = no arms)
     bool         unknown;   // an untrackable (computed, unannotated) arm

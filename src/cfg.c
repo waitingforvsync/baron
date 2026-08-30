@@ -110,13 +110,10 @@ uint32_t cfg_block_at(cfg g, uint32_t section, uint32_t pc)
 
 
 // Does n's control transfer leave the assembled program for EXTERNAL code (an OS or ROM entry)? Only
-// meaningful once the caller has failed to place the target as a block. The policy: a destination we can pin
-// to a constant address, yet which matches nothing we assembled, is a transfer OUT of the program - and
-// external code cannot touch a ZA_AUTO variable, because ZA_POOL names precisely the bytes nothing outside
-// the program uses. So a JSR &FFEE is a benign call with an empty footprint and a JMP (&FFFC) a clean exit,
-// no annotation required. What stays conservative is flow whose destination we genuinely cannot pin down:
-// a jump through a vector WE assembled (its contents may point back into our own code), an indexed dispatch
-// table, or an unresolved target.
+// meaningful once the caller has failed to place the target as a block. The policy: a CONSTANT
+// destination matching nothing we assembled is a transfer OUT of the program, and external code
+// cannot touch a ZA_AUTO (ZA_POOL names precisely the bytes nothing outside the program uses) - so
+// no annotation is required. Only flow whose destination we cannot pin down stays conservative.
 static bool target_is_external(rc_view_zp_label labels, zp_insn n)
 {
     switch (n.target_via) {
@@ -305,15 +302,12 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 break;
         }
 
-        // A declared annotation target is a code entry just as a literal target is: mark it a leader, so an
-        // in-program declared target always gets its own block (even mid-run). That is what lets a declared
-        // target with NO block reliably mean "off the assembled stream" - an external arm - in the edge
-        // wiring and the footprint walk, rather than an address we merely failed to split at. A call takes
-        // ZA_CANCALL (its callee arms) and ZA_RETURNTO (its resumption points); a jump, branch or return
-        // takes ZA_CANJUMP - the return being the RTS-dispatch trick (jump to a pushed address), the branch
-        // a self-modified operand. ZA_RETURN and ZA_UNREACHABLE carry no target; the RC_INDEX_NONE guard
-        // skips them. A skip takes no annotation at all (annotation_site never sites one there), so we
-        // leave it out rather than let it scan for ZA_CANJUMPs it can never own.
+        // A declared annotation target is a code entry just as a literal target is: mark it a leader,
+        // so an in-program declared target always gets its own block - which is what lets "no block"
+        // reliably mean an EXTERNAL arm in the edge wiring and the footprint walk. A call takes
+        // ZA_CANCALL and ZA_RETURNTO; a jump, branch or return takes ZA_CANJUMP. ZA_RETURN and
+        // ZA_UNREACHABLE carry no target (the RC_INDEX_NONE guard skips them); a skip takes no
+        // annotation at all.
         if (insn.flow != zp_flow_normal && insn.flow != zp_flow_skip) {
             for (uint32_t j = 0; j < cflows.num; j++) {
                 zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
@@ -338,13 +332,11 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         }
     }
 
-    // Pass 2: cut the instruction stream into blocks. A new block starts at the first instruction, at every
-    // SECTION change (which keeps each block single-section and its pc monotonic even as sections interleave),
-    // at any instruction that is a leader in its section, and after any block TERMINATOR - a branch, jump or
-    // return, or a call whose continuation an annotation reroutes (ZA_RETURNTO) or severs (ZA_UNREACHABLE
-    // sited just past it). The terminator cut matters where inline data displaces the next instruction: the
-    // after-address leader from pass 1 then marks a pc no instruction sits on, and without the cut the
-    // terminator would sit mid-block, losing its edges. The block runs until the next such start.
+    // Pass 2: cut the instruction stream into blocks. A new block starts at the first instruction, at
+    // every SECTION change, at any leader, and after any TERMINATOR - a branch/jump/return, or a call
+    // whose continuation an annotation reroutes or severs. The terminator cut matters where inline
+    // data displaces the next instruction: the after-address leader then marks a pc nothing sits on,
+    // and without the cut the terminator would sit mid-block, losing its edges.
     uint32_t current  = RC_INDEX_NONE;
     uint32_t prev_sec = 0;
     uint32_t prev_pc  = 0;
@@ -353,12 +345,10 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         zp_insn insn = rc_view_zp_insn_get(insns, i);
 
         // Within one section pc must never step backward - the property that keeps (section, pc) an
-        // unambiguous block identity. It holds by construction (a section's org is fixed at open and its
-        // cursor only advances), so this asserts the invariant rather than handling a violation. Equal pcs
-        // DO occur: a size-0 ZA_DISCARD marker shares its address with the instruction after it, which is also
-        // why a leader (or a terminator cut) starts a new block only when the address CHANGES - both same-pc
-        // records belong to one block, marker first. A real terminator always advances the pc, so its cut is
-        // never lost to that guard.
+        // unambiguous block identity; it holds by construction, so this asserts rather than handles.
+        // Equal pcs DO occur (a size-0 ZA_DISCARD shares its neighbour's address), which is why a cut
+        // starts a new block only when the address CHANGES - same-pc records share a block, marker
+        // first. A real terminator always advances the pc, so its cut is never lost to that guard.
         RC_ASSERT(i == 0 || insn.section != prev_sec || insn.pc >= prev_pc);
         bool new_addr = i == 0 || insn.section != prev_sec || insn.pc != prev_pc;
         if (i == 0 || insn.section != prev_sec
@@ -415,13 +405,11 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     }
                 }
 
-                // The taken edge. Declared ZA_CANJUMP targets replace the literal outright (resolved in the
-                // transfer's own section) - the pass-1 leader marking guarantees every in-program declared
-                // target has its own block, so "no block" reliably means off the assembled stream: an
-                // EXTERNAL arm, contributing no edge and no taint (same policy as an unannotated JSR to a
-                // constant). ZA_RETURN also contributes no edge: control hands back to whoever called us,
-                // which block_returns turns into the routine's exit. Only an unannotated transfer falls
-                // back to the literal, and taints when the destination is computed and possibly ours.
+                // The taken edge. Declared ZA_CANJUMP targets replace the literal outright; pass 1's
+                // leader marking guarantees every in-program declared target has a block, so "no
+                // block" reliably means an EXTERNAL arm - no edge, no taint. ZA_RETURN contributes no
+                // edge either (block_returns makes it the routine's exit). Only an unannotated
+                // transfer falls back to the literal, tainting when computed and possibly ours.
                 bool returns   = cflow_at(cflows, zp_cflow_za_return, last.pc);
                 bool annotated = false;
                 for (uint32_t i = 0; i < cflows.num; i++) {
@@ -466,15 +454,12 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 }
                 break;
             case zp_flow_skip: {
-                // The BIT-skip trick: exactly one successor, the resume address past the swallowed bytes.
-                // NEVER an edge to pc+1 - the swallowed instruction runs only when branched to directly,
-                // which is the entire point of modelling this (a swallowed store must not look like a
-                // definite write on the fall-through path). ZA_UNREACHABLE sited at the resume severs,
-                // as it does for a call/normal fall-through. If nothing was recorded at the resume (the
-                // skip hops inline data), control carries on at the next recorded same-section
-                // instruction - but the plain gap-skip loop would land on the swallowed block itself
-                // (it sits at pc+1, BEFORE the resume), so we insist on pc >= resume. Nothing found is
-                // the end of the program - a clean end, not an unknown.
+                // The BIT-skip trick: exactly one successor, the resume past the swallowed bytes -
+                // NEVER an edge to pc+1, where the swallowed instruction runs only when branched to
+                // (a swallowed store must not look like a definite write on the fall-through path).
+                // ZA_UNREACHABLE at the resume severs. A resume with no record (the skip hops inline
+                // data) falls through to the next recorded same-section instruction, insisting on
+                // pc >= resume - the plain gap-skip would land on the swallowed block itself.
                 uint32_t resume = after + last.skip_bytes;
                 if (!cflow_at(cflows, zp_cflow_za_unreachable, resume)) {
                     uint32_t ft = block_at(blocks.view, last.section, resume);
@@ -522,12 +507,10 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     }
                     else {
                         // The fall-through pc has no block: inline data displaced the next instruction
-                        // (JSR printstring : EQUS "text", 0 : ... - the callee consumes the data and
-                        // resumes past it). Control carries on at the next recorded same-section
-                        // instruction - the adjacency the in-block walkers already assume, expressed as an
-                        // edge. Blocks tile the instruction list in order, so the first later block in our
-                        // section starts at exactly that instruction; nothing found is the end of the
-                        // program (or a routine falling off its end) - a clean end, not an unknown.
+                        // (JSR printstring : EQUS "text", 0 : ...). Control carries on at the next
+                        // recorded same-section instruction - blocks tile the list in order, so that is
+                        // the first later block in our section. Nothing found is a clean end, not an
+                        // unknown.
                         for (uint32_t j = bi + 1; j < blocks.num; j++) {
                             if (rc_array_basic_block_get(&blocks, j).section == last.section) {
                                 add_succ(&succs, block, j, arena);

@@ -9,47 +9,34 @@
 #include "richc/bitset.h"
 
 
-// How a variable relates to its routine's boundary, inferred from liveness. This is a Stage C heuristic
-// derived from a single routine in isolation; the interprocedural pass (C3) refines OUTPUT precisely from the
-// real caller liveness across each call site. The three kinds are the spec's In / Out / Local:
-//   input  - live-in at the routine entry (read before it is written), so the caller must supply its value.
-//   output - written inside but never read inside: the value's only consumer is outside -> it escapes.
-//   temp   - written and read inside: born and consumed within the routine, invisible to callers.
+// How a variable relates to its routine's boundary, inferred from a single routine in isolation
+// (the interprocedural passes refine across calls).
 typedef enum vreg_class {
     vreg_class_unused = 0,   // touched by no recorded instruction
-    vreg_class_input,
-    vreg_class_output,
-    vreg_class_temp,
+    vreg_class_input,        // live-in at entry (read before written): the caller supplies its value
+    vreg_class_output,       // written but never read inside: the value escapes to the caller
+    vreg_class_temp,         // written and read inside: invisible to callers
 } vreg_class;
 
-// The result of a liveness analysis over the global vreg id space: the per-block live-in/out sets
-// from the backward fixpoint, the interference graph (one adjacency bitset row per vreg - two vregs
-// interfere iff their live ranges overlap at some program point), and each vreg's boundary class.
-// No separate counts: every container carries its own - rows per block, vregs per row - and
-// liveness_analyze asserts they agree.
-//
-// interfere is a SPAN, not a view: the finalize guards keep injecting edges (pinning, call-input
-// edges) into the graph after the analysis hands it over. must_write is var-level: for a call-target
-// entry block, the variables the routine entered there definitely rewrites IN FULL on every
-// returning path (empty for non-entry blocks) - a call to it KILLS these, so a result's live range
-// starts at its call.
+// The result of a liveness analysis over the global vreg id space. No separate counts: every
+// container carries its own (rows per block, vregs per row), and liveness_analyze asserts they
+// agree. interfere is a SPAN, not a view - the finalize guards keep injecting edges (pinning,
+// call-input) into the graph after the analysis hands it over.
 typedef struct liveness {
     rc_view_bitset live_in;      // [num_blocks]
     rc_view_bitset live_out;     // [num_blocks]
-    rc_span_bitset interfere;    // [num_vars]: row a has bit b set iff vregs a and b overlap (symmetric)
-    rc_view_bitset must_write;   // [num_blocks] var-level: what a call entering this block definitely rewrites
+    rc_span_bitset interfere;    // [num_vars]: row a has bit b set iff a and b's live ranges overlap (symmetric)
+    rc_view_bitset must_write;   // [num_blocks] var-level: a call entering this block definitely rewrites these
+                                 //   in full on every returning path, so it KILLS them (empty off entry blocks)
     rc_view_u8     classes;      // [num_vars] vreg_class values (u8 storage; members never take enum types)
 } liveness;
 
-// Run the backward liveness fixpoint over g, build the interference graph, and classify each vreg.
-// cflows supplies the ZA_CANCALL overrides for call-target resolution - a call is treated as a USE
-// of its callees' live-in (their inputs), so an argument stored by the caller stays live up to the
-// JSR. vars is the variable registry: vreg ids index into it, its length bounds the id space, and
-// the WIDTHS drive the partial-def rule (a write kills a live range only when it covers the whole
-// variable; see zp_insn_write_kills). entry_block is the routine's entry (block 0 for a whole-stream
-// analysis). A block flagged unknown_succ contributes ALL vars to its live-out - the conservative
-// taint that keeps a computed exit from silently shrinking a live range. Results live in arena;
-// scratch (by value) backs the transient state.
+// Run the backward liveness fixpoint over g, build the interference graph, and classify each vreg
+// (entry_block seeds the classification; RC_INDEX_NONE for none). A call is treated as a USE of its
+// callees' live-in (cflows supplies the ZA_CANCALL overrides), so an argument stored by the caller
+// stays live up to the JSR; vars' WIDTHS drive the partial-def rule (see zp_insn_write_kills). A
+// block flagged unknown_succ contributes ALL vars to its live-out - the conservative taint that
+// keeps a computed exit from shrinking a live range. Results in arena; scratch backs the transients.
 liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_var vars,
                           uint32_t entry_block, rc_arena *arena, rc_arena scratch);
 
@@ -63,15 +50,10 @@ bool liveness_is_live_in(const liveness *lv, uint32_t block, uint32_t vreg);
 bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg);
 
 // May-read-before-write from root: the variables some real control path starting at root READS
-// before any write covers the byte read - the routine's true inputs.
-//
-// This is the precise form of "live-in at the root": the backward liveness above answers the same
-// question only up to its context-INsensitive return edges, which smear one call site's live-after
-// through a shared callee into another call site. This walk follows calls with per-callee summaries
-// instead - a callee's reads count only where the caller has not already definitely written the
-// bytes, and its must-writes extend the caller's written set. Unknown/external call arms contribute
-// nothing (no false alarms; Guard 1 refuses computed flow anyway). Returns a var-level bitset
-// (vars.num bits) allocated in arena.
+// before any write covers the byte read - the routine's true inputs. The precise form of "live-in at
+// the root": the backward liveness above smears one call site's live-after through a shared callee
+// into another (context-insensitive return edges); this walk follows calls with per-callee summaries
+// instead. Unknown/external arms contribute nothing. Returns a var-level bitset in arena.
 rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                                      rc_view_zp_var vars, uint32_t root, rc_arena *arena, rc_arena scratch);
 

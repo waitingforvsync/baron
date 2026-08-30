@@ -19,18 +19,13 @@ typedef struct line_col {
 
 line_col line_col_from_offset(rc_str text, uint32_t pos);
 
-// Render every diagnostic at or below the severity threshold (severity_warning shows errors plus default
-// warnings; severity_error just the errors), GCC-style, one per line:
+// Render every diagnostic at or below the severity threshold, GCC-style, one per line:
 //
-//   <name>:<line>:<col>: error: <message>
-//   <name>:<line>:<col>: warning: <message>
-//   <name>:<line>:<col>: note: <message>      (the companion frames: original definition / included from /
-//                                              expanded from - context for the error above them)
+//   <name>:<line>:<col>: error|warning: <message>
+//   <name>:<line>:<col>: note: <message>      (companion frames: context for the error above them)
 //
-// A cursor whose source index is not in r->sources - the unreadable-root-file case, where there was never a
-// source to register - renders location-free as "<origin>: error: <message>"; origin is whatever name the
-// caller knows the input by (the command-line path). An empty return means nothing to report at this
-// threshold.
+// A cursor whose source index is not in r->sources (the unreadable-root case) renders location-free
+// as "<origin>: error: <message>". An empty return means nothing to report at this threshold.
 rc_str report_render(const baron_result *r, rc_str origin, uint8_t severity_threshold, rc_arena *arena);
 
 

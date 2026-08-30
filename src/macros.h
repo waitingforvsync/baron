@@ -5,14 +5,10 @@
 #include "cursor.h"
 
 
-// The macro store. A macro is a name bound to one or more OVERLOADS (signatures); each signature is a
-// sequence of slots interleaving parameters and literal tokens, plus the cursor of the body it stamps
-// out. The whole thing is rebuilt from source every pass (macros_reset), exactly like the section and
-// include state, so an entry is a transient projection of the source, not durable state.
-//
-// A macro is NAMELESS here: its name lives in the dynamic statement-token table (on baron), and a
-// lexeme_type_macro carries the index into list that reaches it. This is an internal element of its
-// manager, addressed by index, never by a stored pointer (the list may relocate on growth).
+// The macro store. A macro is a name bound to one or more OVERLOADS (signatures), each a sequence of
+// slots (parameters / literal tokens) plus the cursor of the body it stamps out - rebuilt from source
+// every pass (macros_reset), a transient projection rather than durable state. A macro is NAMELESS
+// here: its name lives in the dynamic statement-token table, a lexeme_type_macro carrying its index.
 
 // A signature slot: a parameter to bind, or a literal token to match verbatim. A tagged union - the two
 // never coexist - discriminated by type.
@@ -59,13 +55,9 @@ typedef struct macro {
 #define RC_ARRAY_NAME macro
 #include "richc/template/array.h"
 
-// The manager: one arena backs everything (the list, each macro's sub-arrays, the promoted slot views,
-// AND the dynamic statement-token table), all reset together each pass. Capacities are reserved generously
-// up front so per-definition appends rarely reallocate within the shared arena.
-//
-// statement_tokens lives here, next to its arena: it is the static base table plus one lexeme_type_macro
-// entry per macro name, rebuilt from source order every pass. The lexer reads it to recognise a name as a
-// call; a name defined earlier this pass is in it, one defined later is not (definition order matters).
+// The manager: one arena backs everything - the list, each macro's sub-arrays, AND the dynamic
+// statement-token table (the static base plus one lexeme_type_macro entry per name, rebuilt in
+// source order every pass, so a name defined later is not yet a token: definition order matters).
 typedef struct macros {
     rc_arena      *arena;              // BORROWED: baron's per_pass arena (list, sub-arrays, tokens all live here)
     rc_array_macro list;               // one per distinct name; a lexeme_type_macro's index addresses it
