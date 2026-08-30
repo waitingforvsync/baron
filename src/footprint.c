@@ -9,7 +9,7 @@
 typedef struct fp_ctx {
     cfg              g;
     rc_view_zp_insn  insns;
-    rc_view_zp_cflow cflows;   // CANCALL overrides: a JSR's declared target set
+    rc_view_zp_cflow cflows;   // ZA_CANCALL overrides: a JSR's declared target set
     rc_bitset       *touched;   // accumulate vregs here (in the caller's arena)
     rc_bitset       *killed;    // vregs given a write-only def here (a fresh value, per the footprint doc)
     rc_bitset       *on_stack;  // routine-entry blocks currently being computed - a revisit is recursion
@@ -20,7 +20,7 @@ typedef struct fp_ctx {
 // fp_visit and fp_visit_call are mutually recursive (a call reaches a routine, whose blocks make more calls).
 static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch);
 
-// Descend into what call site `n` reaches. cfg_call_targets applies the whole target policy - a CANCALL
+// Descend into what call site `n` reaches. cfg_call_targets applies the whole target policy - a ZA_CANCALL
 // override, label resolution (so a JSR into another section finds the right block), external arms
 // contributing nothing - and flags the one shape we cannot follow, a computed unannotated call.
 static void fp_visit_call(fp_ctx *c, zp_insn n, rc_arena scratch)
@@ -62,7 +62,7 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
         for (uint32_t k = 0; k < blk.num_insns; k++) {
             zp_insn n = rc_view_zp_insn_get(c->insns, blk.first_insn + k);
             if (n.vreg != RC_INDEX_NONE && !n.var_kill) {
-                // A DISCARD marker is not a touch: it stores nothing, so a caller's variable sharing the
+                // A ZA_DISCARD marker is not a touch: it stores nothing, so a caller's variable sharing the
                 // byte is safe across a callee that merely discards - and it must not feed `killed`, whose
                 // job is spotting FRESH per-level values across recursion.
                 rc_bitset_set(c->touched, n.vreg);

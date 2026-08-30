@@ -26,12 +26,12 @@ groundo  = &AA                  ;                     odd scanlines  {3,0,3,0}
 
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "CAMERA", guard = &6000
 
-ZPRESERVE &00..&FC
-ZPAUTO1 framectr                ; incremented by the vsync interrupt
-ZPAUTO1 irqchange
-ZPAUTO2 scr                     ; the one indirect pointer (tables, then screen)
-ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
-ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
+ZA_POOL &00..&FC
+ZA_AUTO1 framectr               ; incremented by the vsync interrupt
+ZA_AUTO1 irqchange
+ZA_AUTO2 scr                    ; the one indirect pointer (tables, then screen)
+ZA_AUTO1 camidx                 ; this frame's camera index (framectr copy)
+ZA_AUTO1 drawpage               ; page of the hidden screen: &60 or &70
 
 
 \ ******************************************************************
@@ -133,8 +133,8 @@ tabstride = nslots * ncam DIV 256   ; pages per table (nslots is kept even)
 
 .drawsprites
 {
-    ZPAUTO1 slots                   ; slots left this frame (stop there or at height 0)
-    ZPAUTO1 tabhi                   ; slot table page (ncam = 256: one page per slot)
+    ZA_AUTO1 slots                  ; slots left this frame (stop there or at height 0)
+    ZA_AUTO1 tabhi                  ; slot table page (ncam = 256: one page per slot)
 
     LDA #HI(tab_xl):STA tabhi
     LDA #nslots:STA slots
@@ -178,20 +178,20 @@ tabstride = nslots * ncam DIV 256   ; pages per table (nslots is kept even)
 .drawsprite
 {
     \\ Inputs
-    ZPAUTO1 sxl                     ; sprite: left column (inclusive)
-    ZPAUTO1 sxr                     ;         right column (exclusive)
-    ZPAUTO1 syrow                   ;         bottom pixel row
-    ZPAUTO1 sht                     ;         height in rows
-    ZPAUTO1 solid                   ;         solid 4-pixel colour byte
+    ZA_AUTO1 sxl                    ; sprite: left column (inclusive)
+    ZA_AUTO1 sxr                    ;         right column (exclusive)
+    ZA_AUTO1 syrow                  ;         bottom pixel row
+    ZA_AUTO1 sht                    ;         height in rows
+    ZA_AUTO1 solid                  ;         solid 4-pixel colour byte
 
-    ZPAUTO1 lom                     ; xl AND 3: left partial-byte pixel offset
-    ZPAUTO1 rom                     ; xr AND 3: right partial-byte pixel count
-    ZPAUTO1 firstb                  ; first and last byte columns of the sprite
-    ZPAUTO1 lastb
-    ZPAUTO1 curb                    ; byte column being drawn
-    ZPAUTO1 ys                      ; bottom row's scanline within its char row
-    ZPAUTO1 msk                     ; current strip's pixel mask
-    ZPAUTO1 whibase                 ; page of the bottom char row on the hidden screen
+    ZA_AUTO1 lom                    ; xl AND 3: left partial-byte pixel offset
+    ZA_AUTO1 rom                    ; xr AND 3: right partial-byte pixel count
+    ZA_AUTO1 firstb                 ; first and last byte columns of the sprite
+    ZA_AUTO1 lastb
+    ZA_AUTO1 curb                   ; byte column being drawn
+    ZA_AUTO1 ys                     ; bottom row's scanline within its char row
+    ZA_AUTO1 msk                    ; current strip's pixel mask
+    ZA_AUTO1 whibase                ; page of the bottom char row on the hidden screen
 
     LDA sxl:AND #3:STA lom
     LDA sxr:AND #3:STA rom
@@ -281,7 +281,7 @@ tabstride = nslots * ncam DIV 256   ; pages per table (nslots is kept even)
 \ ******************************************************************
 
 .irq
-    ZPINTERRUPT
+    ZA_INTERRUPT
     LDA #&02:STA &FE4D              ; clear the CA1 (vsync) interrupt flag
     LDA irqchange:EOR #1:STA irqchange
     BEQ @+
@@ -311,7 +311,7 @@ tabstride = nslots * ncam DIV 256   ; pages per table (nslots is kept even)
 
 .entry
 {
-    ZPENTRY
+    ZA_ENTRY
     SEI
     LDX #&FF:TXS                ; reset stack
     LDA #&7F:STA &FE4E          ; disable all system VIA interrupts

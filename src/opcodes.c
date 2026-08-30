@@ -482,7 +482,7 @@ static zp_flow flow_from_cell(uint16_t cell)
     return zp_flow_normal;
 }
 
-// The attribution of one operand to a ZPAUTO variable: the referenced binding's identity (def cursor + the
+// The attribution of one operand to a ZA_AUTO variable: the referenced binding's identity (def cursor + the
 // scope it was declared in) and how this instruction touches it. All-none / vref_none when the operand names
 // no bound symbol.
 typedef struct operand_ref {
@@ -491,12 +491,12 @@ typedef struct operand_ref {
     uint8_t  rw;
     bool     outside_envelope;   // the variable is reached by an indexed / indexed-indirect mode (unsound)
     bool     indirect;           // the variable is dereferenced as a zero-page POINTER ((var),Y / (var)) - it
-                                 // needs 2 bytes, so a 1-byte ZPAUTO1 here is refused (see zeropage_finalize)
+                                 // needs 2 bytes, so a 1-byte ZA_AUTO1 here is refused (see zeropage_finalize)
 } operand_ref;
 
 // If the operand's leading identifier resolves (with shadowing) to a bound symbol, return its identity and rw
 // class; otherwise an all-none ref. The identity is mapped to a concrete vreg LATER (zeropage_resolve_vregs),
-// once the whole ZPAUTO registry is populated, so a use before the declaration still attributes. The rw class
+// once the whole ZA_AUTO registry is populated, so a use before the declaration still attributes. The rw class
 // is read straight off the cell's op_zpread / op_zpwrite flags, which already encode the zero-page-operand
 // semantics per addressing mode (see the opcode table header). `operand_pos` is where the operand expression
 // begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable).
@@ -547,7 +547,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     uint32_t target = RC_INDEX_NONE;
     if ((flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call)
         && arg.type == int_argument_type_known
-        && !arg.zpauto   // a ZPAUTO destination has no address yet: its offset must not read as one
+        && !arg.za_auto   // a ZA_AUTO destination has no address yet: its offset must not read as one
         && (mode == addr_mode_rel || mode == addr_mode_abs)) {
         target = (uint32_t) (arg.value & 0xFFFF);
     }
@@ -562,35 +562,35 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
 
     // The operand's identity plays one of two roles by control-flow class: for a branch/jump/call it names
-    // the TARGET (a label, or a ZPAUTO cell dispatched through); for everything else it may name a ZPAUTO
+    // the TARGET (a label, or a ZA_AUTO cell dispatched through); for everything else it may name a ZA_AUTO
     // VARIABLE the instruction touches. Usually the two are exclusive - a control-transfer instruction
-    // touches no data variable - but an indirect jump THROUGH a ZPAUTO variable plays both at once: the
+    // touches no data variable - but an indirect jump THROUGH a ZA_AUTO variable plays both at once: the
     // variable is the dispatch target (the CFG's business) AND the jump READS its bytes at run time, so
     // it must also count as a touch or liveness would let another variable take the vector's bytes
-    // between its last store and the jump. WHERE the identity comes from differs too: a ZPAUTO reference
+    // between its last store and the jump. WHERE the identity comes from differs too: a ZA_AUTO reference
     // carries its own identity in its VALUE (so `x = var : LDA x` attributes through the alias), while a
     // label target still resolves through attribute_operand's lex of the operand text (labels are plain
     // numbers, with nothing to carry).
     bool is_control  = (flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call);
-    bool vector_var  = arg.zpauto && (via == zp_target_via_vector || via == zp_target_via_table);
+    bool vector_var  = arg.za_auto && (via == zp_target_via_vector || via == zp_target_via_table);
     bool is_var      = !is_control || vector_var;
-    uint32_t id_scope = arg.zpauto ? arg.zp_scope : op.scope;
-    cursor   id_def   = arg.zpauto ? arg.zp_def : op.def;
+    uint32_t id_scope = arg.za_auto ? arg.zp_scope : op.scope;
+    cursor   id_def   = arg.za_auto ? arg.zp_def : op.def;
 
     zeropage_add_insn(&b->zeropage, (zp_insn) {
         .pc             = pc,
         .size           = (uint16_t) (1 + mode_operand_bytes(mode)),
         .flow           = (uint8_t) flow,
-        // A dispatch through a ZPAUTO vector reads the pointer (both bytes; a table read is indexed).
+        // A dispatch through a ZA_AUTO vector reads the pointer (both bytes; a table read is indexed).
         .rw             = !is_control ? op.rw : (vector_var ? (uint8_t) vref_read : (uint8_t) vref_none),
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
         .var_scope      = is_var ? id_scope : RC_INDEX_NONE,
         .var_def        = is_var ? id_def : cursor_none(),
         .var_indexed    = is_control ? (vector_var && via == zp_target_via_table) : op.outside_envelope,
         .var_indirect   = is_control ? (vector_var && via == zp_target_via_vector) : op.indirect,
-        // A ZPAUTO operand's known value IS the offset into the variable (0 for `var`, k for `var+k`) -
+        // A ZA_AUTO operand's known value IS the offset into the variable (0 for `var`, k for `var+k`) -
         // the base does not exist yet. Kept so the finalize pass can bounds-check it against the width.
-        .var_offset     = (arg.zpauto && is_var) ? (uint32_t) arg.value : RC_INDEX_NONE,
+        .var_offset     = (arg.za_auto && is_var) ? (uint32_t) arg.value : RC_INDEX_NONE,
         .target         = target,
         .target_scope   = is_control ? id_scope : RC_INDEX_NONE,
         .target_def     = is_control ? id_def : cursor_none(),

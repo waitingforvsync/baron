@@ -59,10 +59,10 @@ value value_make_list(rc_view_value items)
     return (value) {.type = value_type_list, .list = items};
 }
 
-value value_make_zpauto(uint32_t scope, cursor def, int32_t offset, rc_str name)
+value value_make_za_auto(uint32_t scope, cursor def, int32_t offset, rc_str name)
 {
-    return (value) {.type = value_type_zpauto,
-                    .zpauto = {.scope = scope, .def = def, .offset = offset, .name = name}};
+    return (value) {.type = value_type_za_auto,
+                    .za_auto = {.scope = scope, .def = def, .offset = offset, .name = name}};
 }
 
 
@@ -73,7 +73,7 @@ value value_make_copy(value v, rc_arena *arena)
         case value_type_numeric:
         case value_type_boolean:
         case value_type_range:
-        case value_type_zpauto:   // the name view is into permanent source text, so no copy needed
+        case value_type_za_auto:   // the name view is into permanent source text, so no copy needed
             return v;   // wholly inline: nothing to deep-copy
 
         case value_type_error:
@@ -235,14 +235,14 @@ bool value_is_string(value v)      { return v.type == value_type_string; }
 bool value_is_list(value v)        { return v.type == value_type_list; }
 bool value_is_range(value v)       { return v.type == value_type_range; }
 bool value_is_error(value v)       { return v.type == value_type_error; }
-bool value_is_zpauto(value v)      { return v.type == value_type_zpauto; }
+bool value_is_za_auto(value v)      { return v.type == value_type_za_auto; }
 
-// Simple values stand alone (a number, a boolean, a string, an error, a zpauto address); compound
+// Simple values stand alone (a number, a boolean, a string, an error, a za_auto address); compound
 // values gather others (a list of values, a range that enumerates to one). none belongs to neither.
-// zpauto and boolean being simple is load-bearing: it routes them through the broadcast machinery
+// za_auto and boolean being simple is load-bearing: it routes them through the broadcast machinery
 // as scalars, reaching the operator handlers (whose type checks accept or refuse them) instead of
 // the list paths.
-bool value_is_simple(value v)      { return value_is_number(v) || value_is_string(v) || value_is_error(v) || value_is_zpauto(v); }
+bool value_is_simple(value v)      { return value_is_number(v) || value_is_string(v) || value_is_error(v) || value_is_za_auto(v); }
 bool value_is_compound(value v)    { return value_is_list(v) || value_is_range(v); }
 
 
@@ -278,12 +278,12 @@ bool value_is_equal(value a, value b)
                 }
             }
             return true;
-        case value_type_zpauto:
+        case value_type_za_auto:
             // Identity plus offset - the name is descriptive. This equality is what lets a derived
             // binding (x = var + 1) report `unchanged` pass after pass, so the assemble converges.
-            return a.zpauto.scope == b.zpauto.scope
-                && cursor_is_equal(a.zpauto.def, b.zpauto.def)
-                && a.zpauto.offset == b.zpauto.offset;
+            return a.za_auto.scope == b.za_auto.scope
+                && cursor_is_equal(a.za_auto.def, b.za_auto.def)
+                && a.za_auto.offset == b.za_auto.offset;
     }
 
     RC_UNREACHABLE();
@@ -337,15 +337,15 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
             }
             rc_mstr_append_char(out, '}', arena);
             return;
-        case value_type_zpauto:
+        case value_type_za_auto:
             // Normally invisible - PRINT speaks on the output pass, where the symbol is a real number -
             // but an edge path (ERROR, say) may still render one before allocation.
-            rc_mstr_append(out, RC_STR("<zpauto '"), arena);
-            rc_mstr_append(out, v.zpauto.name, arena);
+            rc_mstr_append(out, RC_STR("<za_auto '"), arena);
+            rc_mstr_append(out, v.za_auto.name, arena);
             rc_mstr_append_char(out, '\'', arena);
-            if (v.zpauto.offset != 0) {
+            if (v.za_auto.offset != 0) {
                 rc_mstr_append_char(out, '+', arena);
-                rc_mstr_append_i64(out, v.zpauto.offset, arena);
+                rc_mstr_append_i64(out, v.za_auto.offset, arena);
             }
             rc_mstr_append_char(out, '>', arena);
             return;

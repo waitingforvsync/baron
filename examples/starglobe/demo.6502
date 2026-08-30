@@ -89,12 +89,12 @@ screenbase      = &4000
 
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "DEMO"
 
-ZPRESERVE &00..&FC
-ZPAUTO1 vsync                   ; incremented by the vsync interrupt
-ZPAUTO2 multabptr
-ZPAUTO2 mulnegtabptr
-ZPAUTO2 angle
-ZPAUTO2 speed
+ZA_POOL &00..&FC
+ZA_AUTO1 vsync                  ; incremented by the vsync interrupt
+ZA_AUTO2 multabptr
+ZA_AUTO2 mulnegtabptr
+ZA_AUTO2 angle
+ZA_AUTO2 speed
 
 
 \ ******************************************************************
@@ -103,10 +103,10 @@ ZPAUTO2 speed
 
 .start
 {
-    ZPAUTO1 xpos
-    ZPAUTO1 colour
-    ZPAUTO2 write
-    ZPAUTO1 behindflag
+    ZA_AUTO1 xpos
+    ZA_AUTO1 colour
+    ZA_AUTO2 write
+    ZA_AUTO1 behindflag
 
     \\ This is the main loop!
 
@@ -229,7 +229,7 @@ ZPAUTO2 speed
 \ ******************************************************************
 
 .irq
-    ZPINTERRUPT
+    ZA_INTERRUPT
     LDA #&40:STA &FE4D:INC vsync
     LDA &FC
     RTI
@@ -323,9 +323,9 @@ ALIGN &100
 
 .entry
 {
-    ZPENTRY
-    ZPAUTO2 sqr
-    ZPAUTO1 delta
+    ZA_ENTRY
+    ZA_AUTO2 sqr
+    ZA_AUTO1 delta
 
     \\ Set up hardware state and interrupts
 

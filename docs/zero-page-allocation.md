@@ -8,15 +8,15 @@ space is exactly the sort of fiddly bookkeeping we would rather a tool did for u
 So Baron does it. You hand over a pool of zero-page bytes, declare named variables, and Baron works out
 where each one lives - packing several onto the same byte when their lifetimes never overlap, and
 refusing outright rather than ever emitting code it cannot prove safe. It is entirely opt-in: no
-`ZPRESERVE` in your source, no allocator, no cost.
+`ZA_POOL` in your source, no allocator, no cost.
 
 This is the usage guide. If you want to know *how* Baron pulls it off, the machinery lives in
 [the internals document](zero-page-allocation-internals.md).
 
 ## Contents ##
 - [A first taste](#a-first-taste)
-- [ZPRESERVE: the pool](#zpreserve-the-pool)
-- [ZPAUTO: the variables](#zpauto-the-variables)
+- [ZA_POOL: the pool](#za_pool-the-pool)
+- [ZA_AUTO: the variables](#za_auto-the-variables)
 - [The address of a variable](#the-address-of-a-variable)
 - [What you can rely on](#what-you-can-rely-on)
 - [Subroutine inputs and outputs](#subroutine-inputs-and-outputs)
@@ -28,11 +28,11 @@ This is the usage guide. If you want to know *how* Baron pulls it off, the machi
 ## A first taste ##
 
 ```
-ZPRESERVE &70..&8F      ; hand Baron these 32 bytes to play with
+ZA_POOL &70..&8F        ; hand Baron these 32 bytes to play with
 
 .multiply
 {
-    ZPAUTO1 m1, m2, result
+    ZA_AUTO1 m1, m2, result
 
     STA m1
     STX m2
@@ -48,37 +48,37 @@ yourself. The difference is that you didn't: Baron picked the addresses for you,
 reserved. Better still, if two variables are never needed at the same moment, Baron happily gives them
 the *same* byte. The `-v` listing shows you each choice as the assignment it became: `m1 = &70 [auto]`.
 
-## ZPRESERVE: the pool ##
+## ZA_POOL: the pool ##
 
-`ZPRESERVE` tells Baron which bytes it's allowed to use - a comma-separated list of addresses and
+`ZA_POOL` tells Baron which bytes it's allowed to use - a comma-separated list of addresses and
 ranges:
 
 ```
-ZPRESERVE &70..&8F                 ; a run of 32 bytes
-ZPRESERVE &70..&8F, &A8..&AF       ; two runs, wherever the OS leaves you gaps
-ZPRESERVE &70, &71, &72            ; individual bytes, if you must
+ZA_POOL &70..&8F                   ; a run of 32 bytes
+ZA_POOL &70..&8F, &A8..&AF         ; two runs, wherever the OS leaves you gaps
+ZA_POOL &70, &71, &72              ; individual bytes, if you must
 ```
 
 There is one zero page, so there is one pool for the whole program, and it must appear before any
 variable that wants to use it. Only reserve bytes that are genuinely yours - Baron takes your word for
 it - but within that, reserve generously: an unused byte costs nothing.
 
-## ZPAUTO: the variables ##
+## ZA_AUTO: the variables ##
 
 ```
-ZPAUTO1 counter, temp, flags     ; one-byte variables
-ZPAUTO2 src, dst                 ; two-byte pairs - pointers
-ZPAUTO 16, sines                 ; a 16-byte table
-ZPAUTO WIDTH*2, buf              ; the count is any constant expression, 1 to 256
+ZA_AUTO1 counter, temp, flags    ; one-byte variables
+ZA_AUTO2 src, dst                ; two-byte pairs - pointers
+ZA_AUTO 16, sines                ; a 16-byte table
+ZA_AUTO WIDTH*2, buf             ; the count is any constant expression, 1 to 256
 ```
 
 A variable is a normal scoped symbol: declare it inside a named block and it can be reached from
 outside as `block.var`, exactly like a label - which is how a routine publishes its inputs and outputs
-(see [Subroutine inputs and outputs](#subroutine-inputs-and-outputs)). A `ZPAUTO2`'s low byte is `name`
+(see [Subroutine inputs and outputs](#subroutine-inputs-and-outputs)). A `ZA_AUTO2`'s low byte is `name`
 and its high byte `name+1`, so things like this just work:
 
 ```
-ZPAUTO2 ptr
+ZA_AUTO2 ptr
     LDA #LO(data) : STA ptr
     LDA #HI(data) : STA ptr+1
     LDY #0
@@ -108,9 +108,9 @@ vhi = v + 1                 ; aliases carry the identity: LDA vhi is a use of v
 ```
 
 What you can't do is make the *shape* of the program depend on an address: a condition (`IF v <> w`), a
-count (`SKIP v`, `ZPAUTO v, q`), a loop bound (`FOR n = v..8`), a section's `org`. Those all need a real
+count (`SKIP v`, `ZA_AUTO v, q`), a loop bound (`FOR n = v..8`), a section's `org`. Those all need a real
 number while Baron is still assembling - before any addresses exist - so Baron refuses them at the
-line: `Cannot use a ZPAUTO address here: 'v'`. The only arithmetic a placeholder address supports is
+line: `Cannot use a ZA_AUTO address here: 'v'`. The only arithmetic a placeholder address supports is
 adding or subtracting a whole number (that is how `ptr+1` works); the only other operator that will
 touch one is `~`, which formats it for `PRINT`. Anything else - multiply, compare, a range - is a type
 error.
@@ -151,20 +151,20 @@ You can declare a routine's inputs and outputs as variables in *its own* scope, 
 them by their fully scoped (dot separated) path:
 
 ```
-ZPRESERVE &70..&8F          ; In reality only uses ONE byte for the lot
+ZA_POOL &70..&8F            ; In reality only uses ONE byte for the lot
 
 .scale                      ; scale.input * 2 -> scale.result
 {
-    ZPAUTO1 input
-    ZPAUTO1 result
+    ZA_AUTO1 input
+    ZA_AUTO1 result
     LDA input : ASL A : STA result
     RTS
 }
 
 .offset                     ; offset.input + 7 -> offset.result
 {
-    ZPAUTO1 input
-    ZPAUTO1 result
+    ZA_AUTO1 input
+    ZA_AUTO1 result
     LDA input : CLC : ADC #7 : STA result
     RTS
 }
@@ -201,8 +201,8 @@ We can show the final point by contriving a contrary scenario. Let's change `off
 ```
 .offset                     ; offset.input + 7 -> offset.result, left alone when the sum is zero
 {
-    ZPAUTO1 input
-    ZPAUTO1 result
+    ZA_AUTO1 input
+    ZA_AUTO1 result
     LDA input : CLC : ADC #7 : BEQ @+
     STA result : .@
     RTS
@@ -228,7 +228,7 @@ byte:
 ```
 
 The store is wasted - harmless, but six cycles of nothing. You might be tempted to guard the relay with
-`IF scale.res <> offset.xin` - but **an `IF` on a ZPAUTO variable is an error, and the assembly fails**:
+`IF scale.res <> offset.xin` - but **an `IF` on a ZA_AUTO variable is an error, and the assembly fails**:
 
 ```
 relay.6502:8:7: error: Incompatible types
@@ -237,17 +237,17 @@ relay.6502:8:7: error: Incompatible types
 A conditional can't depend on an allocated address, because the addresses are only chosen once the
 whole assembly is finished - at `IF` time there is nothing to compare. Baron refuses rather than
 guessing, and the same applies to every construct that would let the program's *shape* depend on an
-address: `IF var` alone (`Cannot use a ZPAUTO address here: 'v'`), `SKIP var`, `FOR n = var..8`,
+address: `IF var` alone (`Cannot use a ZA_AUTO address here: 'v'`), `SKIP var`, `FOR n = var..8`,
 `org = var` and friends - see [The address of a variable](#the-address-of-a-variable).
 
 If you want the copy gone, say so by *naming*: when two stages should hand a value over in place, give
 that value one name they share -
 
 ```
-ZPAUTO1 pipe                ; scale's result IS offset's input
+ZA_AUTO1 pipe               ; scale's result IS offset's input
 
-.scale  { ZPAUTO1 xin : LDA xin : ASL A : STA pipe : RTS }
-.offset { ZPAUTO1 res : LDA pipe : CLC : ADC #7 : STA res : RTS }
+.scale  { ZA_AUTO1 xin : LDA xin : ASL A : STA pipe : RTS }
+.offset { ZA_AUTO1 res : LDA pipe : CLC : ADC #7 : STA res : RTS }
 
     JSR scale
     JSR offset              ; no relay - the value is already where offset looks
@@ -261,42 +261,42 @@ paths buy decoupling; the shared variable buys fusion. Choose your weapon!
 Some facts Baron cannot see from the instruction stream, and rather than guess it stops and asks. An
 annotation is your promise to the allocator.
 
-**`UNREACHABLE`** - after a branch you know is always taken, telling Baron not to bother with the code
+**`ZA_UNREACHABLE`** - after a branch you know is always taken, telling Baron not to bother with the code
 path that never happens:
 
 ```
     ADC #10
     BCC in_range        ; carry is always clear here, honest
-    UNREACHABLE         ; This is actually some pretty neat documentation, zp allocator or not
+    ZA_UNREACHABLE      ; This is actually some pretty neat documentation, zp allocator or not
 ```
 
 It emits nothing and changes nothing; it just lets Baron pack tighter.
 
-**`CANCALL`** - after a `JSR` whose real target is computed (self-modified, or dispatched through a
+**`ZA_CANCALL`** - after a `JSR` whose real target is computed (self-modified, or dispatched through a
 table), naming every routine it can reach:
 
 ```
     JSR dispatch                ; address patched at runtime
-    CANCALL handler_a, handler_b, handler_c
+    ZA_CANCALL handler_a, handler_b, handler_c
 ```
 
 Do annotate a self-modified call even when its placeholder operand looks like an innocent constant -
 the constant reads as a harmless OS call, which is not what the patched `JSR` does at runtime. A
-destination may be external (`CANCALL handler_a, &FFEE`): that arm contributes nothing.
+destination may be external (`ZA_CANCALL handler_a, &FFEE`): that arm contributes nothing.
 
-**`CANJUMP`** - after a computed or indirect `JMP` through a vector or table *you* assembled, naming
+**`ZA_CANJUMP`** - after a computed or indirect `JMP` through a vector or table *you* assembled, naming
 every landing site:
 
 ```
     JMP (vector)                ; one of the mode handlers - Baron cannot see which
-    CANJUMP mode_draw, mode_erase, mode_flip
+    ZA_CANJUMP mode_draw, mode_erase, mode_flip
 ```
 
-External arms work here too: `JMP (myvec) : CANJUMP &FFEE` says the vector may hold an OS address, and
+External arms work here too: `JMP (myvec) : ZA_CANJUMP &FFEE` says the vector may hold an OS address, and
 that arm is as clean an exit as an `RTS`. (A jump through a *constant* OS vector needs no annotation at
 all.)
 
-`CANJUMP` also marks the **RTS-dispatch trick** - pushing a target address onto the stack and jumping
+`ZA_CANJUMP` also marks the **RTS-dispatch trick** - pushing a target address onto the stack and jumping
 to it with an `RTS`. An unmarked `RTS` looks exactly like a real return, and Baron trusts it as one;
 the annotation tells it this one is really a jump, and the analysis follows control to the declared
 targets like any other dispatch:
@@ -305,7 +305,7 @@ targets like any other dispatch:
     LDA #HI(handler-1) : PHA
     LDA #LO(handler-1) : PHA
     RTS                         ; not a return: it "returns" into handler
-    CANJUMP handler
+    ZA_CANJUMP handler
 ```
 
 The `PHP : RTI` flavour (address pushed unadjusted) is annotated the same way.
@@ -313,7 +313,7 @@ The `PHP : RTI` flavour (address pushed unadjusted) is annotated the same way.
 For all of these, list *every* destination - if you omit something by mistake, you may see your zp
 getting clobbered unexpectedly.
 
-**`DISCARD`** - tells Baron a variable's current value is finished with: everything read later comes
+**`ZA_DISCARD`** - tells Baron a variable's current value is finished with: everything read later comes
 from writes after this point. You need it when a variable is rebuilt through indexed stores, because
 `STA arr,X` never proves *which* byte it wrote:
 
@@ -330,55 +330,55 @@ back through the routine's entry and around whatever loop reaches it, and walls 
 everything. One line fixes it - place it where the old value stops mattering, before the rebuild:
 
 ```
-    DISCARD arr                 ; the old value is dead; the fill loop makes a new one
+    ZA_DISCARD arr              ; the old value is dead; the fill loop makes a new one
 ```
 
-It emits nothing, takes a comma list, and wants whole variables (`DISCARD arr+1` is refused). TRUSTED
-like the others: if something *does* read the old value past a `DISCARD`, that byte may already belong
+It emits nothing, takes a comma list, and wants whole variables (`ZA_DISCARD arr+1` is refused). TRUSTED
+like the others: if something *does* read the old value past a `ZA_DISCARD`, that byte may already belong
 to someone else. Inside a subroutine it also tells callers their copy dies at the `JSR`, just as a real
 full rewrite would. One quirk: at a loop's top it re-asserts every time around - Baron cannot tell "on
-entry" from "each iteration" at the same address. (In the spritescale demo, two `DISCARD` lines freed
+entry" from "each iteration" at the same address. (In the spritescale demo, two `ZA_DISCARD` lines freed
 17 bytes of zero page at zero runtime cost - the two plotters' slot arrays fold onto each other.)
 
-**`ZPENTRY`** - put this at the top of any routine that the *outside world* calls. A routine that only
+**`ZA_ENTRY`** - put this at the top of any routine that the *outside world* calls. A routine that only
 BASIC ever `CALL`s is referenced by nothing in the program, so to Baron it looks like dead code:
 
 ```
 .blit
-    ZPENTRY                     ; nothing here calls this - BASIC does
+    ZA_ENTRY                    ; nothing here calls this - BASIC does
     LDA xpos
     ...
     RTS
 ```
 
 The marker takes no operand; it just remembers the address where it stands, so either side of the
-label works. Normally Baron assumes execution enters at the top of each section. Write one `ZPENTRY`
+label works. Normally Baron assumes execution enters at the top of each section. Write one `ZA_ENTRY`
 and it stops guessing: your markers are now the complete list of ways in, so mark every routine the
-outside calls - the main one included. Anything touching a `ZPAUTO` variable that none of them can
+outside calls - the main one included. Anything touching a `ZA_AUTO` variable that none of them can
 reach gets a warning: dead code, or a routine you forgot to mark.
 
-One thing `ZPENTRY` does *not* do: keep BASIC's pokes and peeks safe. If BASIC does
+One thing `ZA_ENTRY` does *not* do: keep BASIC's pokes and peeks safe. If BASIC does
 `?&70=X% : CALL blit`, then `&70` had better not be auto-allocated - the allocator would cheerfully
 move it next build. Variables you share with the outside get a fixed home:
 
 ```
-xpos = &70                      ; BASIC pokes here, so it must stay put - not a ZPAUTO
+xpos = &70                      ; BASIC pokes here, so it must stay put - not a ZA_AUTO
 ```
 
-Baron watches for the mistake: a `ZPENTRY` routine that reads a `ZPAUTO` variable before writing it
+Baron watches for the mistake: a `ZA_ENTRY` routine that reads a `ZA_AUTO` variable before writing it
 is expecting *someone* to have set the value - and the only someone is the outside caller, who cannot
 know an auto-allocated address. That draws a warning naming the variable
-(`ZPAUTO input to a ZPENTRY routine`). The fix is one of two: give the variable a fixed home as
+(`ZA_AUTO input to a ZA_ENTRY routine`). The fix is one of two: give the variable a fixed home as
 above, or initialise it in the routine before the first read.
 
-**`ZPINTERRUPT`** - the same marker, for interrupt handlers. These need more than a "way in", because
+**`ZA_INTERRUPT`** - the same marker, for interrupt handlers. These need more than a "way in", because
 an interrupt fires between any two instructions. Say the handler counts frames:
 
 ```
-ZPAUTO1 vsync
+ZA_AUTO1 vsync
 
 .irq
-    ZPINTERRUPT
+    ZA_INTERRUPT
     LDA #&40 : STA &FE4D
     INC vsync
     LDA &FC
@@ -394,19 +394,19 @@ kept apart from each other too (an NMI can land mid-IRQ).
 
 Two honest limits: a *multi-byte* variable shared with a handler can still be caught half-updated
 (keep shared state to single bytes, or bring your own interlock), and an RTS-dispatch inside a handler
-is as invisible here as anywhere - `CANJUMP` it.
+is as invisible here as anywhere - `ZA_CANJUMP` it.
 
 ## The rules ##
 
 What the allocator will not accept, and what it trusts you with:
 
 - **No unannotated computed flow.** An indirect `JMP` through your own vector, or a jump table, is
-  refused while any variable still matters there - annotate it (`CANJUMP` / `CANCALL`) or keep clear.
+  refused while any variable still matters there - annotate it (`ZA_CANJUMP` / `ZA_CANCALL`) or keep clear.
   An RTS-dispatch is the one computed transfer Baron *cannot* refuse: it looks identical to a real
-  return, so an unmarked one is silently trusted - annotating it with `CANJUMP` is on you.
-- **A pointer dereference needs a `ZPAUTO2`.** `(var),Y` reads two bytes; dereferencing a one-byte
-  variable that way is refused - declare it `ZPAUTO2` or wider.
-- **`var+n` must stay inside the variable.** `var+1` on a `ZPAUTO1`, or `table+16` on a `ZPAUTO 16`,
+  return, so an unmarked one is silently trusted - annotating it with `ZA_CANJUMP` is on you.
+- **A pointer dereference needs a `ZA_AUTO2`.** `(var),Y` reads two bytes; dereferencing a one-byte
+  variable that way is refused - declare it `ZA_AUTO2` or wider.
+- **`var+n` must stay inside the variable.** `var+1` on a `ZA_AUTO1`, or `table+16` on a `ZA_AUTO 16`,
   is refused - that byte belongs to someone else. The constant base of an indexed access is checked the
   same way (`table+16,X` is off the end before X gets a say).
 - **The run-time index is yours.** `table,X` is fine while X stays inside the declared width; Baron
@@ -429,11 +429,11 @@ What the allocator will not accept, and what it trusts you with:
 
 - **Cross-section transfers go through labels**, so Baron knows which bank you mean.
 - **`STA arr,X` proves nothing.** An indexed store cannot say which byte it wrote, so an array rebuilt
-  only that way looks permanently live. `DISCARD` it where the old value dies.
-- **Mark your ways in.** One `ZPENTRY` anywhere and Baron stops assuming sections are entered at the
-  top - your markers become the complete list. Interrupt handlers always need their `ZPINTERRUPT`.
-  The unreachable warning follows calls, branches and declared `CANJUMP`/`CANCALL` targets, so a
-  routine reached only through a computed call may need the `CANCALL` before it goes quiet.
+  only that way looks permanently live. `ZA_DISCARD` it where the old value dies.
+- **Mark your ways in.** One `ZA_ENTRY` anywhere and Baron stops assuming sections are entered at the
+  top - your markers become the complete list. Interrupt handlers always need their `ZA_INTERRUPT`.
+  The unreachable warning follows calls, branches and declared `ZA_CANJUMP`/`ZA_CANCALL` targets, so a
+  routine reached only through a computed call may need the `ZA_CANCALL` before it goes quiet.
 - **Variables shared with the outside get fixed addresses.** `?&70=X% : CALL blit` needs `&70` to stay
   put, and an auto-allocated address moves whenever the code changes.
 - **A write nobody reads is thrown away.** If nothing in the program consumes a value, its byte is up
@@ -453,11 +453,11 @@ things as early as possible:
   two or three bytes.
 - Fully re-initialise a pointer when you are done with the old value; rewriting both bytes is what
   releases the pair.
-- Reach for `UNREACHABLE` on always-taken branches; the pruned path frees whatever was only needed
+- Reach for `ZA_UNREACHABLE` on always-taken branches; the pruned path frees whatever was only needed
   there.
 
 If you run out of bytes, Baron names the variable it could not place - usually the fix is a bigger
-`ZPRESERVE`, or noticing that something is being kept around longer than it really needs to be.
+`ZA_POOL`, or noticing that something is being kept around longer than it really needs to be.
 
 ## Errors and warnings ##
 
@@ -466,25 +466,25 @@ fall back to a hand-placed address.
 
 | Message | What happened |
 |---------|---------------|
-| `ZPRESERVE address outside the zero page` | The pool can only contain bytes &00-&FF. |
-| `ZPAUTO needs a prior ZPRESERVE` | A variable with no pool reserved. Add a `ZPRESERVE` first. |
-| `ZPAUTO count must be 1 to 256` | A generic `ZPAUTO n` with a count outside 1-256. |
-| `Cannot use a ZPAUTO address here: '...'` | A variable's address used somewhere that needs a real number during assembly - a condition, a count, an `org`, an annotation target. See [The address of a variable](#the-address-of-a-variable). |
-| `ZPAUTO variable cannot be named 'A'` | The accumulator clash. Rename it. |
-| `No free zero-page byte for ZPAUTO variable: '...'` | More variables needed at once than the pool has bytes. Reserve more, or shorten a lifetime. |
-| `ZPAUTO variable live across an unanalysable JSR (annotate with CANCALL)` | A variable held across a call whose destination Baron cannot follow. |
-| `Computed jump reaches unknown code (annotate with CANJUMP)` | A jump table or indirect `JMP` the analysis cannot follow. |
-| `ZPAUTO variable freshly written and held live across recursion` | A per-level value in a call cycle - one byte cannot hold a value per level. |
-| `ZPAUTO1 dereferenced as a pointer (declare it ZPAUTO2)` | `(var),Y` on a one-byte variable. |
-| `Access past the end of ZPAUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
-| `DISCARD needs a whole ZPAUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZPAUTO` variable, whole. |
-| `ZPENTRY/ZPINTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |
+| `ZA_POOL address outside the zero page` | The pool can only contain bytes &00-&FF. |
+| `ZA_AUTO needs a prior ZA_POOL` | A variable with no pool reserved. Add a `ZA_POOL` first. |
+| `ZA_AUTO count must be 1 to 256` | A generic `ZA_AUTO n` with a count outside 1-256. |
+| `Cannot use a ZA_AUTO address here: '...'` | A variable's address used somewhere that needs a real number during assembly - a condition, a count, an `org`, an annotation target. See [The address of a variable](#the-address-of-a-variable). |
+| `ZA_AUTO variable cannot be named 'A'` | The accumulator clash. Rename it. |
+| `No free zero-page byte for ZA_AUTO variable: '...'` | More variables needed at once than the pool has bytes. Reserve more, or shorten a lifetime. |
+| `ZA_AUTO variable live across an unanalysable JSR (annotate with ZA_CANCALL)` | A variable held across a call whose destination Baron cannot follow. |
+| `Computed jump reaches unknown code (annotate with ZA_CANJUMP)` | A jump table or indirect `JMP` the analysis cannot follow. |
+| `ZA_AUTO variable freshly written and held live across recursion` | A per-level value in a call cycle - one byte cannot hold a value per level. |
+| `ZA_AUTO1 dereferenced as a pointer (declare it ZA_AUTO2)` | `(var),Y` on a one-byte variable. |
+| `Access past the end of ZA_AUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
+| `ZA_DISCARD needs a whole ZA_AUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZA_AUTO` variable, whole. |
+| `ZA_ENTRY/ZA_INTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |
 
 And four warnings:
 
 | Message | Level | What happened |
 |---------|-------|---------------|
-| `Unused ZPAUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition** - referencing it is an error, exactly as if the declaration were not there. Use it or remove it. |
-| `Unchecked indexed access into ZPAUTO variable: '...'` | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. |
-| `ZPAUTO used in code unreachable from any entry (missing ZPENTRY/ZPINTERRUPT, or dead code)` | default | Nothing can reach this code from any entry. Usually a handler or a BASIC-called routine missing its marker; sometimes dead code; occasionally a routine behind a computed call that wants a `CANCALL`. |
-| `ZPAUTO input to a ZPENTRY routine: '...' (external callers cannot know its address)` | default | A `ZPENTRY` routine reads the variable before writing it on some path, so it expects its caller to have set the value - and an outside caller cannot know an auto-allocated address. Give the interface a fixed home (see `ZPENTRY` above), or initialise the variable before the first read. |
+| `Unused ZA_AUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition** - referencing it is an error, exactly as if the declaration were not there. Use it or remove it. |
+| `Unchecked indexed access into ZA_AUTO variable: '...'` | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. |
+| `ZA_AUTO used in code unreachable from any entry (missing ZA_ENTRY/ZA_INTERRUPT, or dead code)` | default | Nothing can reach this code from any entry. Usually a handler or a BASIC-called routine missing its marker; sometimes dead code; occasionally a routine behind a computed call that wants a `ZA_CANCALL`. |
+| `ZA_AUTO input to a ZA_ENTRY routine: '...' (external callers cannot know its address)` | default | A `ZA_ENTRY` routine reads the variable before writing it on some path, so it expects its caller to have set the value - and an outside caller cannot know an auto-allocated address. Give the interface a fixed home (see `ZA_ENTRY` above), or initialise the variable before the first read. |

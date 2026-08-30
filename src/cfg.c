@@ -92,7 +92,7 @@ uint32_t cfg_block_at(cfg g, uint32_t section, uint32_t pc)
 // Does `n`'s control transfer leave the assembled program for EXTERNAL code (an OS or ROM entry)? Only
 // meaningful once the caller has failed to place the target as a block. The policy: a destination we can pin
 // to a constant address, yet which matches nothing we assembled, is a transfer OUT of the program - and
-// external code cannot touch a ZPAUTO variable, because ZPRESERVE names precisely the bytes nothing outside
+// external code cannot touch a ZA_AUTO variable, because ZA_POOL names precisely the bytes nothing outside
 // the program uses. So a JSR &FFEE is a benign call with an empty footprint and a JMP (&FFFC) a clean exit,
 // no annotation required. What stays conservative is flow whose destination we genuinely cannot pin down:
 // a jump through a vector WE assembled (its contents may point back into our own code), an indexed dispatch
@@ -107,9 +107,9 @@ static bool target_is_external(rc_view_zp_label labels, zp_insn n)
         case zp_target_via_vector:
             // A literal vector address (JMP (&FFFC)) - or a named constant standing for one (wrchv = &20E) -
             // is a cell outside the program: whatever it dispatches to is by policy external. A vector that
-            // IS one of our labels - or a ZPAUTO variable the allocator owns - is a cell we assembled, whose
+            // IS one of our labels - or a ZA_AUTO variable the allocator owns - is a cell we assembled, whose
             // run-time contents may point anywhere, including back at us - that stays computed (annotate
-            // with CANJUMP).
+            // with ZA_CANJUMP).
             if (n.target_is_zpvar) {
                 return false;
             }
@@ -153,9 +153,9 @@ call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_aren
     bool annotated = false;
     for (uint32_t j = 0; j < cflows.num; j++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
-        if (cf.kind == zp_cflow_cancall && cf.site == n.pc) {
+        if (cf.kind == zp_cflow_za_cancall && cf.site == n.pc) {
             annotated = true;
-            // CANCALL names a same-section address. Every declared target is a block leader, so an
+            // ZA_CANCALL names a same-section address. Every declared target is a block leader, so an
             // in-program address always has a block; one without is an external arm and contributes nothing.
             uint32_t tb = cfg_block_at(g, n.section, cf.target);
             if (tb != RC_INDEX_NONE) {
@@ -255,13 +255,13 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
             default:
                 break;
         }
-        // A declared CANJUMP / CANCALL target is a code entry just as a literal target is: mark it a leader,
+        // A declared ZA_CANJUMP / ZA_CANCALL target is a code entry just as a literal target is: mark it a leader,
         // so an in-program declared target always gets its own block (even mid-run). That is what lets a
         // declared target with NO block reliably mean "off the assembled stream" - an external arm - in the
         // edge wiring and the footprint walk, rather than an address we merely failed to split at. A RETURN
-        // takes CANJUMP too: the RTS-dispatch trick jumps to a pushed address, and the annotation names it.
+        // takes ZA_CANJUMP too: the RTS-dispatch trick jumps to a pushed address, and the annotation names it.
         if (insn.flow == zp_flow_jump || insn.flow == zp_flow_call || insn.flow == zp_flow_return) {
-            zp_cflow_kind want = (insn.flow == zp_flow_call) ? zp_cflow_cancall : zp_cflow_canjump;
+            zp_cflow_kind want = (insn.flow == zp_flow_call) ? zp_cflow_za_cancall : zp_cflow_za_canjump;
             for (uint32_t j = 0; j < cflows.num; j++) {
                 zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
                 if (cf.kind == (uint8_t) want && cf.site == insn.pc) {
@@ -270,7 +270,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
             }
         }
     }
-    // A ZPENTRY / ZPINTERRUPT marker is a code entry too: mark it a leader so a mid-run entry address starts
+    // A ZA_ENTRY / ZA_INTERRUPT marker is a code entry too: mark it a leader so a mid-run entry address starts
     // its own block - and so "no block at (section, pc)" reliably means the marker sits on no instruction
     // (data, or the end of a section), which finalize reports. A marker in a section with no recorded insns
     // has no leader space at all; skip it here and let the same finalize check catch it.
@@ -292,7 +292,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         // Within one section pc must never step backward - the property that keeps (section, pc) an
         // unambiguous block identity. It holds by construction (a section's org is fixed at open and its
         // cursor only advances), so this asserts the invariant rather than handling a violation. Equal pcs
-        // DO occur: a size-0 DISCARD marker shares its address with the instruction after it, which is also
+        // DO occur: a size-0 ZA_DISCARD marker shares its address with the instruction after it, which is also
         // why a leader starts a new block only when the address CHANGES - both same-pc records belong to
         // one block, marker first.
         RC_ASSERT(i == 0 || insn.section != prev_sec || insn.pc >= prev_pc);
@@ -321,7 +321,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // pool. A branch has two (fall-through + target), a jump one (target), a return none, and a call / normal
     // terminator falls through to the next block. Fall-through stays in the block's own section; the target is
     // resolved by resolve_target_loc (a named label may cross sections). Annotations adjust this: an
-    // UNREACHABLE at a branch's fall-through prunes that edge; a CANJUMP at a computed JMP supplies its
+    // ZA_UNREACHABLE at a branch's fall-through prunes that edge; a ZA_CANJUMP at a computed JMP supplies its
     // (same-section) targets. A target that names no block and is not annotated yields the unknown_succ taint -
     // UNLESS it is external (a constant destination off the stream, or a constant OS vector), which is a clean
     // exit out of the program (see target_is_external).
@@ -333,9 +333,9 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         block->succ_first = result.succs.num;
         switch (last.flow) {
             case zp_flow_branch: {
-                // Not-taken (in-stream) fall-through, unless UNREACHABLE asserts control cannot reach it.
+                // Not-taken (in-stream) fall-through, unless ZA_UNREACHABLE asserts control cannot reach it.
                 uint32_t ft = block_at(result.blocks.view, last.section, after);
-                if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_unreachable, after)) {
+                if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
                     add_succ(&result, block, ft, arena);
                 }
                 uint32_t taken = tl.found ? block_at(result.blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
@@ -355,7 +355,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     add_succ(&result, block, t, arena);   // a plain, resolved JMP
                 }
                 else {
-                    // Computed / indirect JMP. If CANJUMP names its targets, wire each as a real edge (resolved
+                    // Computed / indirect JMP. If ZA_CANJUMP names its targets, wire each as a real edge (resolved
                     // in the jump's own section). A declared target with no block is an EXTERNAL arm of the
                     // dispatch - the pass-1 leader marking guarantees every in-program declared target has its
                     // own block, so "no block" reliably means off the assembled stream: a clean exit,
@@ -363,7 +363,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     bool annotated = false;
                     for (uint32_t i = 0; i < cflows.num; i++) {
                         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-                        if (cf.kind == zp_cflow_canjump && cf.site == last.pc) {
+                        if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
                             annotated = true;
                             uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
                             if (tb != RC_INDEX_NONE) {
@@ -380,14 +380,14 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 break;
             }
             case zp_flow_return:
-                // A genuine return: no successor, fully known. A CANJUMP at the RTS is the dispatch trick -
+                // A genuine return: no successor, fully known. A ZA_CANJUMP at the RTS is the dispatch trick -
                 // a jump in a return's clothing - and gets the declared edges exactly as a computed JMP
                 // does (an external arm contributes no edge: control leaves for the OS and returns to our
                 // caller through its RTS). An UNANNOTATED dispatch is indistinguishable from a real return,
                 // so it stays a trusted precondition, never a taint.
                 for (uint32_t i = 0; i < cflows.num; i++) {
                     zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-                    if (cf.kind == zp_cflow_canjump && cf.site == last.pc) {
+                    if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
                         uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
                         if (tb != RC_INDEX_NONE) {
                             add_succ(&result, block, tb, arena);
@@ -590,7 +590,7 @@ RC_TEST(cfg, call_is_in_block_not_an_edge)
     rc_arena_deinit(&arena);
 }
 
-RC_TEST(cfg, canjump_wires_declared_targets)
+RC_TEST(cfg, za_canjump_wires_declared_targets)
 {
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
@@ -609,14 +609,14 @@ RC_TEST(cfg, canjump_wires_declared_targets)
     pc = push_insn(&insns, pc, 3, zp_flow_jump,   RC_INDEX_NONE, &arena);   // JMP (ind) @2006
     (void) pc;
 
-    // CANJUMP @2006 -> {2000, 2003}: two real successor edges, and the taint cleared.
+    // ZA_CANJUMP @2006 -> {2000, 2003}: two real successor edges, and the taint cleared.
     rc_array_zp_cflow cflows = rc_array_zp_cflow_make(2, &arena);
-    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2000, .kind = zp_cflow_canjump}, &arena);
-    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2003, .kind = zp_cflow_canjump}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2000, .kind = zp_cflow_za_canjump}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2003, .kind = zp_cflow_za_canjump}, &arena);
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2006));
-    RC_CHECK_FALSE(b.unknown_succ);            // CANJUMP resolved it - no taint
+    RC_CHECK_FALSE(b.unknown_succ);            // ZA_CANJUMP resolved it - no taint
     RC_CHECK(b.succ_count, ==, 2u);
     RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2000));
     RC_CHECK(cfg_succ(g, b, 1), ==, cfg_block_at(g, 0, 0x2003));
@@ -631,14 +631,14 @@ RC_TEST(cfg, canjump_wires_declared_targets)
     rc_arena_deinit(&arena);
 }
 
-RC_TEST(cfg, canjump_external_arm_and_midblock_target)
+RC_TEST(cfg, za_canjump_external_arm_and_midblock_target)
 {
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
 
     //   2000  LDA #    (normal)
-    //   2002  LDA #    (normal)  <- a declared CANJUMP target that sits MID-RUN: the leader marking must
+    //   2002  LDA #    (normal)  <- a declared ZA_CANJUMP target that sits MID-RUN: the leader marking must
     //   2004  RTS                   split the block here so the edge can be wired
     //   2005  JMP (ind) (dispatcher, target unknown)
     uint32_t pc = 0x2000;
@@ -648,11 +648,11 @@ RC_TEST(cfg, canjump_external_arm_and_midblock_target)
     pc = push_insn(&insns, pc, 3, zp_flow_jump,   RC_INDEX_NONE, &arena);   // JMP (ind) @2005
     (void) pc;
 
-    // CANJUMP @2005 -> {2002, FFEE}: one in-program arm (mid-run, forcing a block split) and one EXTERNAL
+    // ZA_CANJUMP @2005 -> {2002, FFEE}: one in-program arm (mid-run, forcing a block split) and one EXTERNAL
     // arm (an OS entry - off the stream, so it contributes a clean exit, not an edge and not a taint).
     rc_array_zp_cflow cflows = rc_array_zp_cflow_make(2, &arena);
-    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0x2002, .kind = zp_cflow_canjump}, &arena);
-    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0xFFEE, .kind = zp_cflow_canjump}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0x2002, .kind = zp_cflow_za_canjump}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2005, .target = 0xFFEE, .kind = zp_cflow_za_canjump}, &arena);
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 3u);   // [2000], [2002,2004] (split by the declared target), [2005]
@@ -674,7 +674,7 @@ RC_TEST(cfg, external_constant_targets_are_clean_exits)
     //   2000  BNE FFEE (branch out of the program - the taken arm leaves for external code)
     //   2002  JMP FFEE (jump out of the program)
     // A constant destination that matches nothing we assembled is a transfer to EXTERNAL code (an OS entry),
-    // which by policy touches no ZPAUTO variable: the branch keeps only its fall-through edge and the jump is
+    // which by policy touches no ZA_AUTO variable: the branch keeps only its fall-through edge and the jump is
     // as clean an exit as an RTS - neither taints.
     uint32_t pc = 0x2000;
     pc = push_insn(&insns, pc, 2, zp_flow_branch, 0xFFEE, &arena);   // BNE &FFEE
@@ -716,7 +716,7 @@ RC_TEST(cfg, vector_jump_external_vs_own_label)
     RC_CHECK(ba.succ_count, ==, 0u);
 
     // (b) a NAMED cell that is one of OUR labels (a vector we assembled): its run-time contents may point
-    // back into our own code, so this is genuinely computed - the taint stands until a CANJUMP says otherwise.
+    // back into our own code, so this is genuinely computed - the taint stands until a ZA_CANJUMP says otherwise.
     zp_insn through_ours = jmp;
     through_ours.target_scope = 5;
     through_ours.target_def   = vec_def;
@@ -743,7 +743,7 @@ RC_TEST(cfg, vector_jump_external_vs_own_label)
 
 RC_TEST(cfg, size0_marker_shares_its_address)
 {
-    // A DISCARD marker is a size-0 record at the same pc as the instruction after it. The pair must land
+    // A ZA_DISCARD marker is a size-0 record at the same pc as the instruction after it. The pair must land
     // in ONE block - marker first - even when that address is a leader, so (section, pc) stays a unique
     // block identity and a branch to the address still resolves.
     rc_arena arena = rc_arena_make_default();
@@ -755,7 +755,7 @@ RC_TEST(cfg, size0_marker_shares_its_address)
         (zp_insn) {.pc = pc, .size = 0, .flow = zp_flow_normal, .vreg = 0, .var_kill = true,
                    .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE, .target_def = cursor_none(),
                    .at = (cursor) {0}},
-        &arena);                                                            // (DISCARD) @2002
+        &arena);                                                            // (ZA_DISCARD) @2002
     pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
     pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2002,        &arena);   // BNE 2002 @2004
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2006
@@ -782,7 +782,7 @@ RC_TEST(cfg, entry_marker_splits_midrun_block)
     rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
 
     //   2000  LDA #    (normal)
-    //   2002  LDA #    (normal)  <- a ZPENTRY marker mid-run: the leader marking must split the block here,
+    //   2002  LDA #    (normal)  <- a ZA_ENTRY marker mid-run: the leader marking must split the block here,
     //   2004  RTS                   so the entry address names a real block for the reachability roots
     uint32_t pc = 0x2000;
     pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000

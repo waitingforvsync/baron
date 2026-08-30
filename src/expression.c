@@ -44,7 +44,7 @@ typedef enum prec {
 static int32_t  as_i32(value v) { return (int32_t)(int64_t)v.numeric; }
 static uint32_t as_u32(value v) { return (uint32_t)(int64_t)v.numeric; }
 
-// Adjust a zpauto address by a numeric delta. The offset must stay an integral, non-negative byte
+// Adjust a za_auto address by a numeric delta. The offset must stay an integral, non-negative byte
 // index into the variable; whether it stays within the declared WIDTH is checked later, at the
 // operand bounds check, where the width is known.
 static value zp_offset_add(value zp, double delta)
@@ -52,11 +52,11 @@ static value zp_offset_add(value zp, double delta)
     if (floor(delta) != delta) {
         return value_make_error(error_type_domain);
     }
-    int64_t off = (int64_t) zp.zpauto.offset + (int64_t) delta;
+    int64_t off = (int64_t) zp.za_auto.offset + (int64_t) delta;
     if (off < 0 || off > INT32_MAX) {
         return value_make_error(error_type_domain);
     }
-    zp.zpauto.offset = (int32_t) off;
+    zp.za_auto.offset = (int32_t) off;
     return zp;
 }
 
@@ -68,13 +68,13 @@ static value op_add(value a, value b, rc_arena *arena)
         rc_mstr_append(&m, b.string, arena);
         return value_make_string(m.view);   // '+' concatenates two strings
     }
-    // A zpauto address plus an integer is the same address further in: ptr+1 is the pointer's high
+    // A za_auto address plus an integer is the same address further in: ptr+1 is the pointer's high
     // byte, whichever byte the allocator eventually picks. This and subtraction below are the ONLY
-    // arithmetic a zpauto value supports - every other operator's numeric check refuses it.
-    if (value_is_zpauto(a) && value_is_number(b)) {
+    // arithmetic a za_auto value supports - every other operator's numeric check refuses it.
+    if (value_is_za_auto(a) && value_is_number(b)) {
         return zp_offset_add(a, b.numeric);
     }
-    if (value_is_number(a) && value_is_zpauto(b)) {
+    if (value_is_number(a) && value_is_za_auto(b)) {
         return zp_offset_add(b, a.numeric);
     }
     NEEDS_NUM(value_is_number(a) && value_is_number(b));
@@ -84,14 +84,14 @@ static value op_add(value a, value b, rc_arena *arena)
 static value op_sub(value a, value b, rc_arena *arena)
 {
     (void)arena;
-    if (value_is_zpauto(a) && value_is_number(b)) {
+    if (value_is_za_auto(a) && value_is_number(b)) {
         return zp_offset_add(a, -b.numeric);
     }
-    if (value_is_zpauto(a) && value_is_zpauto(b)) {
+    if (value_is_za_auto(a) && value_is_za_auto(b)) {
         // The distance between two offsets into the SAME variable is a plain number; two different
         // variables have no knowable distance before allocation.
-        if (a.zpauto.scope == b.zpauto.scope && cursor_is_equal(a.zpauto.def, b.zpauto.def)) {
-            return value_make_numeric((double) a.zpauto.offset - (double) b.zpauto.offset);
+        if (a.za_auto.scope == b.za_auto.scope && cursor_is_equal(a.za_auto.def, b.za_auto.def)) {
+            return value_make_numeric((double) a.za_auto.offset - (double) b.za_auto.offset);
         }
         return value_make_error(error_type_domain);
     }
@@ -356,10 +356,10 @@ static value fn_hi(value v, rc_arena *arena)
 // caller's to write, and PRINT is the point of the thing.
 static value fn_hex(value v, rc_arena *arena)
 {
-    // A ZPAUTO address stands in with its offset until allocation, exactly as an instruction operand
+    // A ZA_AUTO address stands in with its offset until allocation, exactly as an instruction operand
     // does; the real byte arrives on the output pass, which is the pass PRINT speaks on.
-    NEEDS_NUM(value_is_number(v) || value_is_zpauto(v));
-    uint32_t u = value_is_zpauto(v) ? (uint32_t) v.zpauto.offset : as_u32(v);
+    NEEDS_NUM(value_is_number(v) || value_is_za_auto(v));
+    uint32_t u = value_is_za_auto(v) ? (uint32_t) v.za_auto.offset : as_u32(v);
 
     rc_mstr m = rc_mstr_make(8, arena);
     if (u <= 0xFFu) {
@@ -1466,10 +1466,10 @@ static value fn_is_number(rc_view_value args, rc_arena *arena)
     if (value_is_error(v)) {
         return v;
     }
-    // A ZPAUTO address counts: it denotes the number it becomes at allocation, and answering
+    // A ZA_AUTO address counts: it denotes the number it becomes at allocation, and answering
     // by its transient type would flip the answer between the settling and output passes.
     // A boolean counts too: it coerces to a number wherever one is wanted.
-    return value_make_bool(value_is_number(v) || value_is_zpauto(v));
+    return value_make_bool(value_is_number(v) || value_is_za_auto(v));
 }
 
 // error(...): the ERROR statement as a value. The arguments format PRINT-style (strings raw,

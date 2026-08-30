@@ -43,11 +43,11 @@ groundo  = patodd(darkgreen)
 
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "SCALE", guard = &6000
 
-ZPRESERVE &00..&FC
-ZPAUTO1 framectr                ; incremented by the vsync interrupt
-ZPAUTO1 irqchange
-ZPAUTO1 drawpage                ; page of the hidden screen: &60 or &70
-ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
+ZA_POOL &00..&FC
+ZA_AUTO1 framectr               ; incremented by the vsync interrupt
+ZA_AUTO1 irqchange
+ZA_AUTO1 drawpage               ; page of the hidden screen: &60 or &70
+ZA_AUTO1 camidx                 ; this frame's camera index (framectr copy)
 
 
 \ ******************************************************************
@@ -82,9 +82,9 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 
 .drawsprites
 {
-    ZPAUTO1 slots
-    ZPAUTO1 tabhi                   ; slot page in tab_x
-    ZPAUTO2 tptr
+    ZA_AUTO1 slots
+    ZA_AUTO1 tabhi                  ; slot page in tab_x
+    ZA_AUTO2 tptr
 
     LDA #LO(boulder):STA plot_setup.spr
     LDA #HI(boulder):STA plot_setup.spr+1
@@ -154,26 +154,26 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 .plot_setup
 {
     \\ Inputs
-    ZPAUTO2 spr                     ; sprite base
-    ZPAUTO2 scale                   ; 8.8: screen pixels per source column = pairs per row
-    ZPAUTO1 sprx                    ; left pixel column, SIGNED: negative = left-clipped
+    ZA_AUTO2 spr                    ; sprite base
+    ZA_AUTO2 scale                  ; 8.8: screen pixels per source column = pairs per row
+    ZA_AUTO1 sprx                   ; left pixel column, SIGNED: negative = left-clipped
     \\ Outputs
-    ZPAUTO1 wid                     ; source columns N
-    ZPAUTO1 hgt                     ; source rows H
-    ZPAUTO1 pw                      ; plotted width in pixels
-    ZPAUTO1 ph                      ; plotted height in pairs = PY[H]
-    ZPAUTO1 sx0                     ; the on-screen left edge (0 when left-clipped)
-    ZPAUTO1 strips                  ; strip budget: byte columns up to the right
+    ZA_AUTO1 wid                    ; source columns N
+    ZA_AUTO1 hgt                    ; source rows H
+    ZA_AUTO1 pw                     ; plotted width in pixels
+    ZA_AUTO1 ph                     ; plotted height in pairs = PY[H]
+    ZA_AUTO1 sx0                    ; the on-screen left edge (0 when left-clipped)
+    ZA_AUTO1 strips                 ; strip budget: byte columns up to the right
                                     ; edge (counted down by the plotters); 0 =
                                     ; nothing visible, don't call a plotter at all
-    ZPAUTO1 c0                      ; the plotters' starting column walk state:
-    ZPAUTO1 rem0                    ;   first visible column, its on-screen pixels,
-    ZPAUTO2 xacc0                   ;   and the edge accumulator to continue from
+    ZA_AUTO1 c0                     ; the plotters' starting column walk state:
+    ZA_AUTO1 rem0                   ;   first visible column, its on-screen pixels,
+    ZA_AUTO2 xacc0                  ;   and the edge accumulator to continue from
 
-    ZPAUTO1 lclip                   ; pixels hanging off the left (internal)
-    ZPAUTO1 tmp
+    ZA_AUTO1 lclip                  ; pixels hanging off the left (internal)
+    ZA_AUTO1 tmp
 
-    ZPAUTO2 acc
+    ZA_AUTO2 acc
 
     LDY #0:LDA (spr),Y:STA wid
     INY:LDA (spr),Y:STA hgt
@@ -214,7 +214,7 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
     EOR #&FF:CLC:ADC #1:STA lclip   ; -sprx pixels hang off the left
     LDA #0:STA sx0
     BEQ @+
-    UNREACHABLE
+    ZA_UNREACHABLE
 .onscreen
     STA sx0
     LDA #0:STA lclip
@@ -249,7 +249,7 @@ ZPAUTO1 camidx                  ; this frame's camera index (framectr copy)
 .nextcol
     INC c0
     BNE poscol
-    UNREACHABLE
+    ZA_UNREACHABLE
 .partial
     EOR #&FF:SEC:ADC rem0:STA rem0  ; the pixels of it that are on screen
     LDA #0:STA lclip
@@ -336,7 +336,7 @@ ENDMACRO
 \ code. With one column there is nothing to check or minimise - the
 \ only possible event is its own.
 MACRO changesbody n, swallow
-    ZPAUTO1 ysave
+    ZA_AUTO1 ysave
     STY ysave
     IF n = 1
         \ One column: nothing else's bits to preserve, so no merges.
@@ -393,32 +393,32 @@ ENDMACRO
 .plot_draw
 {
     \\ Inputs
-    ZPAUTO1 spry                    ; bottom pair
-    ZPAUTO2 pal                     ; palette: even,odd byte pairs for colours 0..7
+    ZA_AUTO1 spry                   ; bottom pair
+    ZA_AUTO2 pal                    ; palette: even,odd byte pairs for colours 0..7
 
-    ZPAUTO1 ystart                  ; bottom pair's odd scanline within its row
-    ZPAUTO1 pagestart               ; and that row's page
-    ZPAUTO2 scr                     ; screen pointer: low = column*8 (fixed per strip)
-    ZPAUTO2 sproff                  ; -> the sprite's column offset table
-    ZPAUTO1 c                       ; source column being assigned to slots
-    ZPAUTO1 rem                     ; its pixels not yet assigned
-    ZPAUTO2 xacc                    ; column edge accumulator (8.8)
-    ZPAUTO1 tmp                     ; findcol scratch
-    ZPAUTO1 skiptmp                 ; skiploop scratch (the allocator merges these
+    ZA_AUTO1 ystart                 ; bottom pair's odd scanline within its row
+    ZA_AUTO1 pagestart              ; and that row's page
+    ZA_AUTO2 scr                    ; screen pointer: low = column*8 (fixed per strip)
+    ZA_AUTO2 sproff                 ; -> the sprite's column offset table
+    ZA_AUTO1 c                      ; source column being assigned to slots
+    ZA_AUTO1 rem                    ; its pixels not yet assigned
+    ZA_AUTO2 xacc                   ; column edge accumulator (8.8)
+    ZA_AUTO1 tmp                    ; findcol scratch
+    ZA_AUTO1 skiptmp                ; skiploop scratch (the allocator merges these
                                     ; if their lives allow - never share by hand)
-    ZPAUTO1 slot                    ; slot being filled, 0..3 (pixel bit = slotbits[slot])
-    ZPAUTO 4, colmask
-    ZPAUTO 4, idx
-    ZPAUTO 4, cp
-    ZPAUTO2 chvec                   ; the strip's change handler (by tracked count)
-    ZPAUTO1 hoffs                   ; handler set: 0 zoom, 4 shrink (swallow)
-    ZPAUTO1 ucm                     ; the strip's uncovered slots (kept background)
-    ZPAUTO1 cnt                     ; position in the strip: set to the stretch end
+    ZA_AUTO1 slot                   ; slot being filled, 0..3 (pixel bit = slotbits[slot])
+    ZA_AUTO 4, colmask
+    ZA_AUTO 4, idx
+    ZA_AUTO 4, cp
+    ZA_AUTO2 chvec                  ; the strip's change handler (by tracked count)
+    ZA_AUTO1 hoffs                  ; handler set: 0 zoom, 4 shrink (swallow)
+    ZA_AUTO1 ucm                    ; the strip's uncovered slots (kept background)
+    ZA_AUTO1 cnt                    ; position in the strip: set to the stretch end
                                     ; by the change handler, so it is current once
                                     ; the stretch has been emitted
-    ZPAUTO1 mask
-    ZPAUTO1 data_even
-    ZPAUTO1 data_odd
+    ZA_AUTO1 mask
+    ZA_AUTO1 data_even
+    ZA_AUTO1 data_odd
 
     \\ where the bottom pair lives: scanline 127 - 2*spry
 
@@ -453,7 +453,7 @@ ENDMACRO
     \\ An allocation hint: the slot state is only ever written with
     \\ indexed stores, which never prove a whole variable overwritten,
     \\ so without this promise Baron would keep it alive across the call.
-    DISCARD colmask, idx, cp
+    ZA_DISCARD colmask, idx, cp
 
 .striploop
     \\ assign slots to columns; X = tracked index. Only entries 0..X
@@ -469,7 +469,7 @@ ENDMACRO
     LDY slot
     LDA slotbits,Y:STA colmask,X    ; the column's first slot
     BNE advance                     ; always: slot bits are non-zero
-    UNREACHABLE
+    ZA_UNREACHABLE
 .slotloop
     LDY slot
     LDA slotbits,Y:ORA colmask,X:STA colmask,X
@@ -482,7 +482,7 @@ ENDMACRO
     INC slot
     LDA slot:CMP #4:BNE newcol      ; not 4: more slots to fill
     BEQ filled
-    UNREACHABLE
+    ZA_UNREACHABLE
 .samecol
     INC slot
     LDA slot:CMP #4:BNE slotloop
@@ -502,7 +502,7 @@ ENDMACRO
     LDY ystart
     LDA pagestart:STA scr+1
     JMP (chvec)
-    CANJUMP changes1, changes2, changes3, changes4, schanges1, schanges2, schanges3, schanges4
+    ZA_CANJUMP changes1, changes2, changes3, changes4, schanges1, schanges2, schanges3, schanges4
 
 .stretch
     LDA mask
@@ -519,12 +519,12 @@ ENDMACRO
 .back
     DEX:BNE pairloop
     BEQ stretchdone
-    UNREACHABLE
+    ZA_UNREACHABLE
 
 .adjustrow
     DEC scr+1:LDY #7
     BNE back
-    UNREACHABLE
+    ZA_UNREACHABLE
 
 .skiploop
     \\ a fully transparent stretch is consumed in one go: with
@@ -540,7 +540,7 @@ ENDMACRO
     EOR #&FF:SEC:ADC scr+1          ; ...subtracted without a store
     STA scr+1
     BNE stretchdone                 ; always: screen pages are never zero
-    UNREACHABLE
+    ZA_UNREACHABLE
 
 .solidloop                          ; the most common stretch: falls into stretchdone
     LDA data_odd:STA (scr),Y
@@ -555,12 +555,12 @@ ENDMACRO
     LDA cnt
     CMP plot_setup.ph:BEQ nextstrip
     JMP (chvec)
-    CANJUMP changes1, changes2, changes3, changes4, schanges1, schanges2, schanges3, schanges4
+    ZA_CANJUMP changes1, changes2, changes3, changes4, schanges1, schanges2, schanges3, schanges4
 
 .solidadjust
     DEC scr+1:LDY #7
     BNE solidback
-    UNREACHABLE
+    ZA_UNREACHABLE
 
 .nextstrip
     LDA scr:ADC #7:STA scr          ; carry set by the CMP that got us here
@@ -617,7 +617,7 @@ ENDMACRO
 .nextc
     INC c
     BNE findcol
-    UNREACHABLE
+    ZA_UNREACHABLE
 .exhausted
     RTS
 }
@@ -643,8 +643,8 @@ ENDMACRO
 \ Fetch slot n's next run: end first (swallowing shrunk-away runs),
 \ then the pre-masked patterns from the palette's slot tables.
 MACRO afetch n
-    ZPAUTO1 acnt
-    ZPAUTO1 ysave
+    ZA_AUTO1 acnt
+    ZA_AUTO1 ysave
     STX acnt
     STY ysave
 .fetch
@@ -674,24 +674,24 @@ ENDMACRO
 
 .plot_draw_a
 {
-    ZPAUTO1 ystart                  ; bottom pair's odd scanline within its row
-    ZPAUTO1 pagestart               ; and that row's page
-    ZPAUTO2 scr                     ; screen pointer: low = column*8 (fixed per strip)
-    ZPAUTO2 sproff                  ; -> the sprite's column offset table
-    ZPAUTO1 c                       ; source column being assigned
-    ZPAUTO2 xacc                    ; column edge accumulator (8.8)
-    ZPAUTO1 rem
-    ZPAUTO1 tmp
-    ZPAUTO1 alead                   ; first-strip padding slots still owed
-    ZPAUTO1 aexh                    ; ran out of source columns: last strip
-    ZPAUTO1 mtmp
-    ZPAUTO1 otmp
-    ZPAUTO1 etmp
-    ZPAUTO 4, aidx                  ; per slot: next run byte in the sprite
-    ZPAUTO 4, aend                  ;   current run's end (&FF on a dummy)
-    ZPAUTO 4, ce                    ;   pre-masked even pattern
-    ZPAUTO 4, co                    ;   pre-masked odd pattern
-    ZPAUTO 4, cm                    ;   mask contribution (slot bits if transparent)
+    ZA_AUTO1 ystart                 ; bottom pair's odd scanline within its row
+    ZA_AUTO1 pagestart              ; and that row's page
+    ZA_AUTO2 scr                    ; screen pointer: low = column*8 (fixed per strip)
+    ZA_AUTO2 sproff                 ; -> the sprite's column offset table
+    ZA_AUTO1 c                      ; source column being assigned
+    ZA_AUTO2 xacc                   ; column edge accumulator (8.8)
+    ZA_AUTO1 rem
+    ZA_AUTO1 tmp
+    ZA_AUTO1 alead                  ; first-strip padding slots still owed
+    ZA_AUTO1 aexh                   ; ran out of source columns: last strip
+    ZA_AUTO1 mtmp
+    ZA_AUTO1 otmp
+    ZA_AUTO1 etmp
+    ZA_AUTO 4, aidx                 ; per slot: next run byte in the sprite
+    ZA_AUTO 4, aend                 ;   current run's end (&FF on a dummy)
+    ZA_AUTO 4, ce                   ;   pre-masked even pattern
+    ZA_AUTO 4, co                   ;   pre-masked odd pattern
+    ZA_AUTO 4, cm                   ;   mask contribution (slot bits if transparent)
 
     LDA plot_draw.spry:ASL A
     EOR #&FF:CLC:ADC #128
@@ -715,7 +715,7 @@ ENDMACRO
     \\ An allocation hint: the slot state is only ever written with
     \\ indexed stores, which never prove a whole variable overwritten,
     \\ so without this promise Baron would keep it alive across the call.
-    DISCARD aidx, aend, ce, co, cm
+    ZA_DISCARD aidx, aend, ce, co, cm
 
 .striploop
     \\ fill the four slots: lead padding and past-the-end are dummies
@@ -735,7 +735,7 @@ ENDMACRO
     BNE nextslot
     INC aexh                        ; none left: this is the last strip
     BNE nextslot
-    UNREACHABLE
+    ZA_UNREACHABLE
 .dummy
     LDA #&FF:STA aend,X             ; never fetches
     LDA #0:STA ce,X:STA co,X
@@ -781,7 +781,7 @@ ENDMACRO
 .adjust
     DEC scr+1:LDY #7
     BNE resume
-    UNREACHABLE
+    ZA_UNREACHABLE
 
 .solidpair
     LDA co+0:ORA co+1:ORA co+2:ORA co+3
@@ -824,7 +824,7 @@ ENDMACRO
 .nextc
     INC c
     BNE findcol
-    UNREACHABLE
+    ZA_UNREACHABLE
 .exhausted
     RTS
 }
@@ -912,7 +912,7 @@ ENDMACRO
 \ ******************************************************************
 
 .irq
-    ZPINTERRUPT
+    ZA_INTERRUPT
     LDA #&02:STA &FE4D
     LDA irqchange:EOR #1:STA irqchange
     BEQ @+
@@ -927,7 +927,7 @@ ENDMACRO
 
 .entry
 {
-    ZPENTRY
+    ZA_ENTRY
     SEI
     LDX #&FF:TXS
     LDA #&7F:STA &FE4E

@@ -43,7 +43,7 @@ Three ideas, each small.
 read it before anything overwrites it. It becomes live when written, and dies at its last read. The span
 in between is its *live range*.
 
-Here is a real program (it is test `zpauto_allocates_and_reuses` in `assemble.c`), with each variable's
+Here is a real program (it is test `za_auto_allocates_and_reuses` in `assemble.c`), with each variable's
 live range drawn beside the code:
 
 ```
@@ -92,8 +92,8 @@ which changes the game in a few ways:
   of a `{ }` block or into one, and one block can hold three routines. We must recover the real control
   flow from the branches themselves.
 - **Layout settles over many passes.** A forward reference can change an instruction's size, shifting
-  every later address - so we cannot allocate mid-assembly. The trick: `ZPAUTO` binds its name to a
-  **typed placeholder value** (`value_type_zpauto` in `src/value.h`) carrying the variable's identity
+  every later address - so we cannot allocate mid-assembly. The trick: `ZA_AUTO` binds its name to a
+  **typed placeholder value** (`value_type_za_auto` in `src/value.h`) carrying the variable's identity
   and a byte offset, never a number. Every context that would let the layout depend on an address - a
   condition, a count, a section `org` - *refuses* the type with an eager error; the contexts that accept
   it (instruction operands, immediates, data elements) are width-stable, `LDA var` being a two-byte
@@ -110,8 +110,8 @@ Everything runs inside `zeropage_finalize` (`src/assemble.c`), once, after the f
 ```
   during assembly (every pass)          zeropage_finalize (once, post-convergence)
   ----------------------------          ------------------------------------------
-  ZPRESERVE -> reserved-byte set        1. resolve vregs   (operand identity -> variable id)
-  ZPAUTO    -> typed placeholder        2. bounds + indexed-access checks
+  ZA_POOL -> reserved-byte set        1. resolve vregs   (operand identity -> variable id)
+  ZA_AUTO    -> typed placeholder        2. bounds + indexed-access checks
   final pass -> record the IR           3. build the CFG   (basic blocks + edges)
                                         4. liveness        (ranges -> interference graph)
                                         5. call analyses   (footprints + the guards)
@@ -129,25 +129,25 @@ Only the final pass records anything - earlier passes exist to let the layout se
 (`src/zeropage.c`, filled by `record_insn` in `src/opcodes.c`) is four flat arrays:
 
 - `zp_var` - one per declaration: name, owning scope, width (1-256), and its **def cursor** (the source
-  position of the `ZPAUTO` statement).
+  position of the `ZA_AUTO` statement).
 - `zp_insn` - one per *instruction*: pc, size, control-flow class (`zp_flow`), which variable it touches
   and how (`rw` read/write flags, constant offset, indexed/indirect flags), and its transfer target.
-- `zp_cflow` - the annotations: `UNREACHABLE`, `CANCALL`, `CANJUMP`.
+- `zp_cflow` - the annotations: `ZA_UNREACHABLE`, `ZA_CANCALL`, `ZA_CANJUMP`.
 - `zp_label` - each label's identity mapped to its physical `(section, pc)`.
 
 Two details worth knowing:
 
 - **A variable's identity is the pair (scope, def cursor)** - not the def cursor alone. A macro or `FOR`
-  body shares one `ZPAUTO` across every instantiation, but each instantiation runs in its own child
+  body shares one `ZA_AUTO` across every instantiation, but each instantiation runs in its own child
   scope, so the pair tells the copies apart (each iteration's `loc` is a genuinely distinct variable).
   Operands record the pair; `zeropage_resolve_vregs` maps pairs to dense ids once the registry is
   complete, which is also why a use may precede its declaration.
-- **Attribution comes from the VALUE.** A ZPAUTO reference evaluates to the typed placeholder, which
+- **Attribution comes from the VALUE.** A ZA_AUTO reference evaluates to the typed placeholder, which
   carries its own identity - so `record_insn` reads the touched variable straight off the evaluated
   operand. Dotted paths (`STA sub.wid`), locals, and even *aliases* (`x = var : LDA x` - the identity
   rides through the assignment) all attribute through one uniform channel. Only control-transfer
   TARGETS still resolve by lexing the operand text (labels are plain numbers, with nothing to carry).
-  One instruction plays both roles at once: a `JMP` through a ZPAUTO vector names the variable as its
+  One instruction plays both roles at once: a `JMP` through a ZA_AUTO vector names the variable as its
   target *and* reads its bytes, so it is recorded as a pointer read too - without that, liveness would
   let another variable take the vector's bytes between its last store and the jump.
 
@@ -159,10 +159,10 @@ Before any graph exists, some things are decidable from single instructions (the
 - **`var + n` must stay inside the variable.** During assembly the symbol is the placeholder 0, so an
   operand's evaluated value *is* its offset within the variable. A window past the declared width lands
   on a byte reserved for someone else: **refused**. `(var),Y` on a one-byte variable gets the pointed
-  `zpauto_narrow_pointer` ("declare it ZPAUTO2"); everything else gets `zpauto_out_of_bounds` - including
+  `za_auto_narrow_pointer` ("declare it ZA_AUTO2"); everything else gets `za_auto_out_of_bounds` - including
   the constant *base* of an indexed access (`table+4,X` on a 4-wide table is off the end before X has a
   say).
-- **Indexed access itself is a warning, not a refusal** (`zpauto_indexed_access`, opt-in severity). The
+- **Indexed access itself is a warning, not a refusal** (`za_auto_indexed_access`, opt-in severity). The
   whole variable is reserved and liveness treats an indexed touch as using all of it, so an in-width
   index is sound - and the run-time index is the one thing no static check can see. The same trust as an
   annotation.
@@ -178,7 +178,7 @@ blocks.
 
 1. **Find the leaders** - every instruction where a block must start: the first instruction, every
    branch/jump/call target, the instruction after any branch, jump or return, every section boundary,
-   and every `CANCALL`/`CANJUMP`-declared target.
+   and every `ZA_CANCALL`/`ZA_CANJUMP`-declared target.
 2. **Cut the stream** at the leaders.
 3. **Wire the edges** from each block's last instruction.
 
@@ -213,17 +213,17 @@ The details that make the CFG honest:
   (`zp_insn.target_via`), so the cell's address is never mistaken for an edge.
 - **A constant destination matching nothing we assembled is a transfer out of the program**
   (`cfg_target_is_external`): `JSR &FFEE`, a tail `JMP &FFEE`, `JMP (&FFFC)` through an OS vector.
-  External code cannot touch the pool - `ZPRESERVE` names precisely the bytes nothing else uses - so an
+  External code cannot touch the pool - `ZA_POOL` names precisely the bytes nothing else uses - so an
   external exit is as clean as an `RTS`, and needs no annotation.
 - **Flow we genuinely cannot place taints its block** (`unknown_succ`): an unannotated indirect `JMP`
-  through our own vector, an indexed dispatch `JMP (table,X)`. A vector that is a ZPAUTO *variable* is
-  ours too (`zp_insn.target_is_zpvar`, resolved alongside the vregs), so `JMP (vec)` on a `ZPAUTO2` is
-  computed flow wanting `CANJUMP`, never mistaken for a constant OS cell. The taint later forces
+  through our own vector, an indexed dispatch `JMP (table,X)`. A vector that is a ZA_AUTO *variable* is
+  ours too (`zp_insn.target_is_zpvar`, resolved alongside the vregs), so `JMP (vec)` on a `ZA_AUTO2` is
+  computed flow wanting `ZA_CANJUMP`, never mistaken for a constant OS cell. The taint later forces
   "everything live" out of that block - and Guard 1 refuses the program if any variables are in play at
   all.
-- **Annotations adjust the graph**: `UNREACHABLE` prunes a branch's fall-through edge; `CANJUMP` wires a
+- **Annotations adjust the graph**: `ZA_UNREACHABLE` prunes a branch's fall-through edge; `ZA_CANJUMP` wires a
   computed jump's declared targets as real successors (external arms contributing nothing). An `RTS`
-  carrying a `CANJUMP` is the dispatch trick - push a target address, "return" into it - and is wired
+  carrying a `ZA_CANJUMP` is the dispatch trick - push a target address, "return" into it - and is wired
   exactly like an annotated jump. An *unannotated* dispatch is indistinguishable from a real return, so
   it remains a trusted precondition, never a taint.
 
@@ -247,7 +247,7 @@ changes - a *fixpoint*. The sets only ever grow, so it terminates.
 
 Two refinements:
 
-- **The dataflow is per BYTE, not per variable.** A `ZPAUTO2` pointer occupies two byte-ids; `STA ptr`
+- **The dataflow is per BYTE, not per variable.** A `ZA_AUTO2` pointer occupies two byte-ids; `STA ptr`
   rewrites only the low one. So a pointer whose MSB was written once and whose LSB is refreshed before
   each use stays live - nothing gets allocated over the MSB - while a `STA ptr : STA ptr+1` pair
   accumulates into a genuine full kill. (Treating any store as a whole-variable kill was a real bug: it
@@ -266,7 +266,7 @@ parameter that the driver no longer supplies - there is no presumed program entr
 the analysis's own tests, and a value read at an entry before anything writes it simply has no defined
 value and no protection.
 
-One record in the stream is not an instruction at all: a `DISCARD` marker (`zp_insn.var_kill`, size 0,
+One record in the stream is not an instruction at all: a `ZA_DISCARD` marker (`zp_insn.var_kill`, size 0,
 sharing its pc with the instruction after it). Its window "writes" the variable's whole width while
 reading nothing, so the backward walk treats it as a full kill - which is the entire point: an array
 rebuilt only through indexed stores has no provable write anywhere, and without the marker its reads
@@ -300,18 +300,18 @@ Four rules close the gap - each one exists because a real program broke without 
 **1. A call clobbers its callee's footprint** (`src/footprint.c`). A routine's *footprint* is every
 variable it touches, transitively through everything it calls (`fp_visit`, a walk over the call graph).
 Any variable live *across* a call interferes with the whole footprint - that is Guard 2 in
-`zeropage_finalize`. In this real test (`zpauto_interprocedural_allocation`):
+`zeropage_finalize`. In this real test (`za_auto_interprocedural_allocation`):
 
 ```
     LDA #1 : STA keep
     JSR sub             ; keep is live across this call...
     LDA keep
     RTS
-.sub { ZPAUTO1 loc : STA loc : LDA loc : RTS }
+.sub { ZA_AUTO1 loc : STA loc : LDA loc : RTS }
 ```
 
 `keep` gets `&70` and `loc` is forced to `&71` - without the rule both took `&70` and the call corrupted
-`keep`. A variable already dead at the call is free to reuse the callee's bytes. `CANCALL` supplies the
+`keep`. A variable already dead at the call is free to reuse the callee's bytes. `ZA_CANCALL` supplies the
 targets of a call the analysis cannot follow; a call *out of the program* has an empty footprint.
 
 **2. A call consumes its inputs.** The callee's live-in set - what it reads before writing - is treated
@@ -337,54 +337,54 @@ This is what lets the usage guide's two-stage pipeline run four interface variab
 proof is genuine: make the store conditional -
 
 ```
-.offset { ZPAUTO1 xin, res : LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS }
+.offset { ZA_AUTO1 xin, res : LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS }
 ```
 
 - and `res` is no longer must-written, so it is preserved across the whole journey on its own byte
-(test `zpauto_conditional_result_is_preserved`). A "returning exit" (`block_returns`) is an RTS/RTI *or*
+(test `za_auto_conditional_result_is_preserved`). A "returning exit" (`block_returns`) is an RTS/RTI *or*
 a transfer out of the program - the OS routine's own RTS returns to our caller, the tail-call idiom -
-but *not* an RTS wearing a `CANJUMP`, whose control continues at its declared targets.
+but *not* an RTS wearing a `ZA_CANJUMP`, whose control continues at its declared targets.
 
 **4. Returns see the caller.** Rule 3 creates a hazard: an escaping result's only reads are in the
 caller, so inside its producer it would look dead the moment it is stored - and the producer's *later*
 code could take its byte:
 
 ```
-.sub { ZPAUTO1 res, t : LDA #1 : STA res : LDA #2 : STA t : LDA t : RTS }
+.sub { ZA_AUTO1 res, t : LDA #1 : STA res : LDA #2 : STA t : LDA t : RTS }
                                   ^ res "dead" here?     ^ then t may land on it!
 ```
 
 So every returning block's live-out also unions the live-*after* set of each call site that reaches its
 routine (the `ret_from` map and per-call `after` snapshots, maintained inside the fixpoint). `res` stays
 live from its store to the `RTS`, and `t` gets its own byte (test
-`zpauto_result_survives_producer_tail`).
+`za_auto_result_survives_producer_tail`).
 
 **Recursion** gets one extra check: a value the cycle writes *afresh* at each level and reads back after
 the recursive call would need a byte per level, which one static address cannot give - refused
-(`zpauto_recursion`, keyed on the footprint's write-only `killed` set against the live set *before* the
+(`za_auto_recursion`, keyed on the footprint's write-only `killed` set against the live set *before* the
 must-write reduction, so the kill cannot hide the pattern). A counter merely `DEC`ed through the
 recursion is a single running value and rides one byte happily.
 
 ## Roots, reachability and interrupts ##
 
 Everything so far analyses the stream as it lies; nothing asks *where control can enter it*. That
-question has two customers, both fed by the `ZPENTRY` / `ZPINTERRUPT` markers (`zp_entry` records: a
+question has two customers, both fed by the `ZA_ENTRY` / `ZA_INTERRUPT` markers (`zp_entry` records: a
 section, the marked pc, an interrupt flag - `cfg_build` marks each a block leader so a mid-run entry
 starts its own block, and a marker that resolves to no block is refused as marking no instruction).
 
-**Reachability.** The root set is every declared marker's block; with no `ZPENTRY` anywhere the
+**Reachability.** The root set is every declared marker's block; with no `ZA_ENTRY` anywhere the
 defaults apply instead - each section's first recorded block (blocks come in stream order with
-per-section pc monotonic, so first sighting of a section index is its earliest code; a `ZPINTERRUPT`
+per-section pc monotonic, so first sighting of a section index is its earliest code; a `ZA_INTERRUPT`
 alone keeps the defaults, since a handler says nothing about where the mainline starts). From the
 roots, `reach_from` walks successor edges plus each call's resolved arms - the same edge set control
-can actually take, `CANJUMP`/`CANCALL` arms included; unknown and external arms contribute nothing. A
-block that touches a `ZPAUTO` variable and is not reached warns (`zpauto_unreachable`,
+can actually take, `ZA_CANJUMP`/`ZA_CANCALL` arms included; unknown and external arms contribute nothing. A
+block that touches a `ZA_AUTO` variable and is not reached warns (`za_auto_unreachable`,
 default-visible): most likely an unmarked handler - the silently-unsound island shape the feature
 exists to catch - or dead code. One warning per region: heads are unreachable blocks with no
 unreachable predecessor, each head's closure is claimed once, and a headless cycle is mopped up
 separately. Warnings never refuse; unreachable code is still fully analysed and coloured.
 
-**Interrupt pinning (Guard 3).** A `ZPINTERRUPT` handler preempts between *any* two instructions, so
+**Interrupt pinning (Guard 3).** A `ZA_INTERRUPT` handler preempts between *any* two instructions, so
 no transaction discipline exists around it and two interference rules are injected (plain edge writes
 into `lv.interfere`, like Guard 2's): the handler's live-in - state the mainline feeds it - is pinned
 against *everything*, its own temps included (the mainline may rewrite a communication variable at any
@@ -393,17 +393,17 @@ handler's transitive footprint (`footprint_compute` at its entry) interferes wit
 outside it. Handler-internal reuse is untouched - ordinary liveness governs among its own temps - and
 two handlers separate each other for free (each is outside the other's footprint). A footprint the
 walk cannot bound (an unannotated computed call in the extent) is refused with the usual
-`zpauto_across_call`, at the marker. Edge injection is order-independent of Guard 2: `lv.interfere` is
+`za_auto_across_call`, at the marker. Edge injection is order-independent of Guard 2: `lv.interfere` is
 write-only until the colourer reads it.
 
-`ZPENTRY` deliberately carries no interface semantics. An external API's inputs and outputs belong at
+`ZA_ENTRY` deliberately carries no interface semantics. An external API's inputs and outputs belong at
 fixed addresses outside the pool (an auto-allocated address moves between builds); an auto-allocated
 entry is protected exactly as far as a strict poke-`CALL`-peek transaction requires, which ordinary
 liveness already provides - so a sync entry is *only* a root.
 
 **The input warning.** A sync root that *reads* a variable before writing it is expecting its caller
-to have set the value - impossible at an auto-allocated address - so each `ZPENTRY` block is checked
-and every such variable warned (`zpentry_input`, default-visible; handler blocks are exempt, their
+to have set the value - impossible at an auto-allocated address - so each `ZA_ENTRY` block is checked
+and every such variable warned (`za_entry_input`, default-visible; handler blocks are exempt, their
 live-in being Guard 3's supported comm-var pattern). The test is NOT `live_in` at the root:
 the backward fixpoint's return edges are context-insensitive, so a helper called both from the
 entry's pre-init stretch and from inside the main loop smears the loop call site's live-after
@@ -423,7 +423,7 @@ refuses computed flow anyway.
 With the interference graph built, `zp_color` (`src/zpalloc.c`) assigns addresses by
 **first-fit-decreasing**:
 
-- widths are processed widest first - a `ZPAUTO 8` table is far more constrained than a lone byte, so it
+- widths are processed widest first - a `ZA_AUTO 8` table is far more constrained than a lone byte, so it
   places while the pool is open;
 - each variable takes the lowest reserved base whose whole span `[base, base+width)` is free of every
   interfering neighbour's span (`span_reserved` / `spans_overlap` - width-generic, so a table packs
@@ -443,7 +443,7 @@ re-emission - the **output pass** (`parse_flags.output`) - whose sections ARE th
 operand patching: a settling pass's operand bytes hold only intra-variable offsets, meaningless as
 output, and simply get thrown away with the rest of that pass's sections.
 
-Why re-emission cannot move anything: a ZPAUTO address is a typed value, and every context is statically
+Why re-emission cannot move anything: a ZA_AUTO address is a typed value, and every context is statically
 one of two kinds. The layout-affecting kind (conditions, counts, `org`) *refused* it during assembly, so
 no branch flips and no size changes; the accepting kind (operands, immediates, `EQU*` elements) is
 width-stable - a base+offset cannot leave the zero page, and data widths are fixed per element. So the
@@ -460,25 +460,25 @@ The refusals (all fatal):
 
 | Code | Cause |
 |------|-------|
-| `zpauto_narrow_pointer` / `zpauto_out_of_bounds` | an access window past the declared width |
-| `zpauto_bad_width` | `ZPAUTO n` outside 1-256 (at parse) |
-| `zpauto_address` | a ZPAUTO address in a context needing a number now: a condition, a count, an `org`, an annotation operand (the typed placeholder refused at the use site) |
-| `zpauto_computed_flow` | an `unknown_succ` block with variables in play (Guard 1) |
-| `zpauto_across_call` | live across a call whose footprint cannot be bounded (Guard 2) |
-| `zpauto_recursion` | a fresh per-level value held across a recursive call (Guard 2) |
+| `za_auto_narrow_pointer` / `za_auto_out_of_bounds` | an access window past the declared width |
+| `za_auto_bad_width` | `ZA_AUTO n` outside 1-256 (at parse) |
+| `za_auto_address` | a ZA_AUTO address in a context needing a number now: a condition, a count, an `org`, an annotation operand (the typed placeholder refused at the use site) |
+| `za_auto_computed_flow` | an `unknown_succ` block with variables in play (Guard 1) |
+| `za_auto_across_call` | live across a call whose footprint cannot be bounded (Guard 2) |
+| `za_auto_recursion` | a fresh per-level value held across a recursive call (Guard 2) |
 | `zeropage_full` | a spill: more simultaneous liveness than reserved bytes |
 
-(`discard_needs_var` - an operand that is not a whole `ZPAUTO` variable - is a recoverable semantic
+(`za_discard_needs_var` - an operand that is not a whole `ZA_AUTO` variable - is a recoverable semantic
 error at the statement, like the other operand mistakes.)
 
-The warnings: `zpauto_unused` and `zpauto_unreachable` (default level) and `zpauto_indexed_access`
+The warnings: `za_auto_unused` and `za_auto_unreachable` (default level) and `za_auto_indexed_access`
 (opt-in).
 
 And the trust points - the deliberate holes in the proof, each an explicit contract with the user:
 
-- **Annotations are believed.** A wrong `UNREACHABLE`, `CANCALL` or `CANJUMP` defeats the analysis; a
+- **Annotations are believed.** A wrong `ZA_UNREACHABLE`, `ZA_CANCALL` or `ZA_CANJUMP` defeats the analysis; a
   *missing* one is caught wherever possible (Guards 1 and 2) - except an unmarked RTS-dispatch, which is
-  indistinguishable from a real return. A wrong `DISCARD` is the same class: it hands the variable's
+  indistinguishable from a real return. A wrong `ZA_DISCARD` is the same class: it hands the variable's
   bytes away while the old value is still wanted; a missing one merely wastes bytes, never correctness.
 - **A constant destination off the assembled stream is assumed external.** True for real OS calls, and
   the user's responsibility for a self-modified placeholder or a bare cross-bank number (name the label
@@ -491,23 +491,23 @@ And the trust points - the deliberate holes in the proof, each an explicit contr
 Deliberate limitations, all soundness-safe or documented trust points:
 
 - **Annotation operands resolve in their own section.** Ordinary cross-section transfers resolve by
-  label; a `CANCALL`/`CANJUMP` *operand* is still a bare number resolved in the annotating
-  instruction's section, so it cannot yet name a target in a different bank. (`ZPENTRY`/`ZPINTERRUPT`
+  label; a `ZA_CANCALL`/`ZA_CANJUMP` *operand* is still a bare number resolved in the annotating
+  instruction's section, so it cannot yet name a target in a different bank. (`ZA_ENTRY`/`ZA_INTERRUPT`
   take no operand, so they are intrinsically in the right section.)
 - **The reserved set is global.** One physical zero page, one pool.
 - **INCSECTION splices are byte copies.** A marker lives in its source section's coordinates; the
   spliced copy is never re-analysed, same as every annotation.
 - **Re-entrant interruption is outside the model.** A handler preempted by *itself* (or an unmarked
-  RTS-dispatch inside a handler, invisible as ever) is a trust point, like recursion and `CANCALL`.
+  RTS-dispatch inside a handler, invisible as ever) is a trust point, like recursion and `ZA_CANCALL`.
 
 ## Map of the code ##
 
 | Piece | Where | What |
 |-------|-------|------|
-| IR + registries | `src/zeropage.{h,c}` | reserved set, `zp_var`/`zp_insn` (incl. `var_kill` DISCARD markers)/`zp_cflow`/`zp_label`/`zp_entry`, vreg resolution |
+| IR + registries | `src/zeropage.{h,c}` | reserved set, `zp_var`/`zp_insn` (incl. `var_kill` ZA_DISCARD markers)/`zp_cflow`/`zp_label`/`zp_entry`, vreg resolution |
 | recording | `src/opcodes.c` | `record_insn`: each instruction's touch, flow and target |
 | basic blocks | `src/cfg.{h,c}` | `cfg_build`, target resolution, `cfg_call_targets`, the external rule |
-| liveness | `src/liveness.{h,c}` | backward byte-level fixpoint, must-write, return edges, interference, classes; forward read-before-write walk for the ZPENTRY input warning |
+| liveness | `src/liveness.{h,c}` | backward byte-level fixpoint, must-write, return edges, interference, classes; forward read-before-write walk for the ZA_ENTRY input warning |
 | footprints | `src/footprint.{h,c}` | transitive Touch(R) per call site, recursion / unknown-call detection |
 | colouring | `src/zpalloc.{h,c}` | first-fit-decreasing over the interference graph |
 | the driver | `src/assemble.c` | `zeropage_finalize`: checks, roots + reachability, guards, interrupt pinning, colour, symbol rewrite; `run_passes` runs the output pass |

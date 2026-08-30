@@ -525,7 +525,7 @@ RC_TEST_STEP(scopes, resolve_def_follows_dotted_paths, fix)
 {
     // The identity lookup obeys the same rules as the value lookup: a bare name shadows up the parents,
     // a dotted path descends the child scopes - and it reports the LEAF scope as the declaring one, which
-    // is what makes a cross-scope ZPAUTO operand resolve to the exact variable instance.
+    // is what makes a cross-scope ZA_AUTO operand resolve to the exact variable instance.
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
     uint32_t other   = scopes_make_child(&fix->scopes, fix->root, RC_STR("other"));
 

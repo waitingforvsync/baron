@@ -28,16 +28,16 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
 static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto1(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto2(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpentry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_zpinterrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_pool(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_auto1(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_auto2(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_entry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_interrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -73,17 +73,17 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
         };
     }
 
-    if (value_is_zpauto(v)) {
-        // A ZPAUTO address: known as far as sizing goes (the offset stands in, and the real base
+    if (value_is_za_auto(v)) {
+        // A ZA_AUTO address: known as far as sizing goes (the offset stands in, and the real base
         // cannot leave the zero page), with the identity riding along for the caller to accept -
         // an instruction operand, a data byte - or refuse - a count, a condition, a layout address.
         return (int_argument) {
             .type     = int_argument_type_known,
-            .value    = v.zpauto.offset,
-            .zpauto   = true,
-            .zp_scope = v.zpauto.scope,
-            .zp_def   = v.zpauto.def,
-            .zp_name  = v.zpauto.name
+            .value    = v.za_auto.offset,
+            .za_auto   = true,
+            .zp_scope = v.za_auto.scope,
+            .zp_def   = v.za_auto.def,
+            .zp_name  = v.za_auto.name
         };
     }
 
@@ -109,16 +109,16 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
     };
 }
 
-// Refuse a ZPAUTO address in a context that needs a real number NOW - a count, a condition, a layout
+// Refuse a ZA_AUTO address in a context that needs a real number NOW - a count, a condition, a layout
 // address: the address exists only after allocation, long after this decision must be made. Demotes the
 // argument to the dedicated error, which the caller's ordinary error path then reports (self-gated on
 // the final pass, at the use site, naming the variable).
-static int_argument int_argument_no_zpauto(int_argument arg, uint32_t at)
+static int_argument int_argument_no_za_auto(int_argument arg, uint32_t at)
 {
-    if (arg.zpauto) {
+    if (arg.za_auto) {
         return (int_argument) {
             .type         = int_argument_type_error,
-            .error        = error_type_zpauto_address,
+            .error        = error_type_za_auto_address,
             .error_at     = at,
             .error_detail = arg.zp_name
         };
@@ -352,16 +352,16 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
     {RC_STR_INIT("align"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_align}}},
     {RC_STR_INIT("section"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_section}}},
-    {RC_STR_INIT("zpreserve"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpreserve}}},
-    {RC_STR_INIT("zpauto"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto_n}}},   // ZPAUTO <n>, <names>
-    {RC_STR_INIT("zpauto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto1}}},   // 1-byte ZP variable
-    {RC_STR_INIT("zpauto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpauto2}}},   // 2-byte ZP variable
-    {RC_STR_INIT("unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_unreachable}}}, // dead fall-through
-    {RC_STR_INIT("cancall"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_cancall}}},   // a JSR's real targets
-    {RC_STR_INIT("canjump"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_canjump}}},   // a computed JMP's targets
-    {RC_STR_INIT("discard"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_discard}}},   // a variable's value dies here
-    {RC_STR_INIT("zpentry"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_zpentry}}},   // an external entry root
-    {RC_STR_INIT("zpinterrupt"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_zpinterrupt}}}, // an interrupt handler root
+    {RC_STR_INIT("za_pool"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_pool}}},
+    {RC_STR_INIT("za_auto"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_auto_n}}},   // ZA_AUTO <n>, <names>
+    {RC_STR_INIT("za_auto1"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_auto1}}},   // 1-byte ZP variable
+    {RC_STR_INIT("za_auto2"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_auto2}}},   // 2-byte ZP variable
+    {RC_STR_INIT("za_unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_unreachable}}},   // dead fall-through
+    {RC_STR_INIT("za_cancall"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_cancall}}},   // a JSR's real targets
+    {RC_STR_INIT("za_canjump"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_canjump}}},   // a computed JMP's targets
+    {RC_STR_INIT("za_discard"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_discard}}},   // a variable's value dies here
+    {RC_STR_INIT("za_entry"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_entry}}},   // an external entry root
+    {RC_STR_INIT("za_interrupt"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_interrupt}}},   // an interrupt handler root
     {RC_STR_INIT("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
     {RC_STR_INIT("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR_INIT("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
@@ -499,7 +499,7 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
 
     bool unresolved = false;
     if (flags.active) {
-        int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
+        int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (arg.type) {
             case int_argument_type_known:
                 if (arg.value < 0) {
@@ -539,7 +539,7 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
 
     bool unresolved = false;
     if (flags.active) {
-        int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
+        int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (arg.type) {
             case int_argument_type_known: {
                 uint32_t pc = sections_pc(&b->sections, section);
@@ -581,7 +581,7 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 
     bool unresolved = false;
     if (flags.active) {
-        int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
+        int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (arg.type) {
             case int_argument_type_known:
                 if (arg.value < 1) {
@@ -698,7 +698,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             bool is_cmos  = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("cmos"));
             bool is_guard = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("guard"));
             if (is_org || is_cmos || is_guard) {
-                int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, eq.next), eq.next);
+                int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, eq.next), eq.next);
                 switch (arg.type) {
                     case int_argument_type_known:
                         if (is_org) {
@@ -851,24 +851,24 @@ static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scop
     }
 }
 
-// Add one ZPRESERVE value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
+// Add one ZA_POOL value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
 // enumerated, a list is flattened, and a scalar is one byte - but it must land in the zero page ($00-$FF).
 // A forward reference defers (marks unresolved, reserves nothing this pass); a non-numeric or out-of-page
 // value is a semantic error. A dead branch reserves nothing.
-static parse_result zpreserve_add(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
+static parse_result za_pool_add(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
 {
     if (!flags.active) {
         return (parse_result) {0};
     }
 
     if (value_is_range(v)) {
-        return zpreserve_add(b, range_to_list(v.range, &scratch), flags, at, scratch);
+        return za_pool_add(b, range_to_list(v.range, &scratch), flags, at, scratch);
     }
 
     if (value_is_list(v)) {
         parse_result acc = {0};
         for (uint32_t i = 0; i < v.list.num; i++) {
-            acc = fold(acc, zpreserve_add(b, rc_view_value_get(v.list, i), flags, at, scratch));
+            acc = fold(acc, za_pool_add(b, rc_view_value_get(v.list, i), flags, at, scratch));
         }
         return acc;
     }
@@ -890,11 +890,11 @@ static parse_result zpreserve_add(baron *b, value v, parse_flags flags, cursor a
     return (parse_result) {0};
 }
 
-// ZPRESERVE <list> - declare the zero-page bytes the ZPAUTO1/ZPAUTO2 allocator may draw from, and (by its mere
+// ZA_POOL <list> - declare the zero-page bytes the ZA_AUTO1/ZA_AUTO2 allocator may draw from, and (by its mere
 // presence) ENABLE the whole feature. A comma-separated list of values, each a zero-page address or a range
 // of them (the same operand shape as EQUB); every value must fall within $00-$FF. The set is global and
 // rebuilt each pass. A dead branch parses the operand but reserves nothing and does not enable.
-static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_pool(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -902,7 +902,7 @@ static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t 
     bool unresolved = false;
 
     if (flags.active) {
-        zeropage_enable(&b->zeropage);   // ZPRESERVE turns the feature on even if the list is empty
+        zeropage_enable(&b->zeropage);   // ZA_POOL turns the feature on even if the list is empty
     }
 
     while (true) {
@@ -911,7 +911,7 @@ static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t 
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        parse_result ra = zpreserve_add(b, e.value, flags, cursor_at(at, pos), scratch);
+        parse_result ra = za_pool_add(b, e.value, flags, cursor_at(at, pos), scratch);
         unresolved |= ra.unresolved;
 
         lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
@@ -926,18 +926,18 @@ static parse_result handle_zpreserve(baron *b, cursor stmt, cursor at, uint32_t 
     }
 }
 
-// The ZPAUTO name-binding worker, shared by ZPAUTO1 / ZPAUTO2 / ZPAUTO <n>: declare `width`-byte zero-page
-// variables, auto-allocated from the ZPRESERVE set. Each name binds an ordinary scoped symbol (so `LDA foo`
+// The ZA_AUTO name-binding worker, shared by ZA_AUTO1 / ZA_AUTO2 / ZA_AUTO <n>: declare `width`-byte zero-page
+// variables, auto-allocated from the ZA_POOL set. Each name binds an ordinary scoped symbol (so `LDA foo`
 // sizes as zero page and `routine.foo` resolves from outside, all for free) to a fixed PLACEHOLDER address;
 // the real byte is assigned later, at the allocation phase. The variable's width + identity are recorded in
 // the zeropage var registry, but only on the single final pass (the settling passes need just the placeholder
-// binding for layout to converge). ZPAUTO is meaningless without a ZPRESERVE first: we flag that, but still
+// binding for layout to converge). ZA_AUTO is meaningless without a ZA_POOL first: we flag that, but still
 // bind the names so references do not cascade into undefined-symbol errors. A dead branch removes only the
 // binding it owns, like a dead label.
-static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
+static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
 {
     (void) stmt;      // the listing line is built from the allocated symbol, not the source echo
-    (void) section;   // ZPAUTO binds a symbol; the section it sits in is recorded later, at the instruction site
+    (void) section;   // ZA_AUTO binds a symbol; the section it sits in is recorded later, at the instruction site
     (void) scratch;
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
@@ -955,7 +955,7 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
         cursor def  = cursor_at(at, pos);
 
         if (is_dotted(name)) {
-            // A dotted name is a legal token but not a legal ZPAUTO - record it and consume just the name.
+            // A dotted name is a legal token but not a legal ZA_AUTO - record it and consume just the name.
             semantic_error(b, flags, error_type_expected_var_name, def);
         }
         else if (rc_str_is_equal_insensitive(name, RC_STR("a"))) {
@@ -963,7 +963,7 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
             // `ASL A` (accumulator) and silently drop the variable - and it even changes size (1 byte, not 2),
             // so no patch could rescue it. X and Y are safe now: they are registers only after a comma (an
             // index position a base operand never occupies), so `STA x` / `LDA (y),Y` attribute correctly.
-            semantic_error(b, flags, error_type_zpauto_register_name, def);
+            semantic_error(b, flags, error_type_za_auto_register_name, def);
         }
         else if (flags.active) {
             // The output pass leaves the binding ALONE: zeropage_finalize has already rewritten it to the
@@ -972,7 +972,7 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
             if (!flags.output) {
                 symbol_status st = scopes_set_symbol(
                     &b->scopes, scope, name,
-                    value_make_zpauto(scope, def, 0, name), def);
+                    value_make_za_auto(scope, def, 0, name), def);
 
                 if (st == symbol_status_duplicate) {
                     semantic_error_payload(b, flags, error_type_duplicate_symbol, def, name);
@@ -990,7 +990,7 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
             }
             else if (flags.listing && cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
                 // ...and instead lists the assignment the declaration BECAME: the symbol now holds the
-                // allocated byte, so `zpauto1 tmp` reads back as `tmp = &70 [auto]` - echoing the source
+                // allocated byte, so `za_auto1 tmp` reads back as `tmp = &70 [auto]` - echoing the source
                 // would only show a name with no address, and the address is the interesting part. The
                 // binding must still be OURS, scope-locally: the allocator UNDEFINES an unused variable,
                 // and without this check the lookup would walk up and print some outer namesake instead.
@@ -1017,20 +1017,20 @@ static parse_result handle_zpauto(baron *b, cursor stmt, cursor at, uint32_t sco
     }
 }
 
-static parse_result handle_zpauto1(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_auto1(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_zpauto(b, stmt, at, scope, section, flags, 1, scratch);
+    return handle_za_auto(b, stmt, at, scope, section, flags, 1, scratch);
 }
-static parse_result handle_zpauto2(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_auto2(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_zpauto(b, stmt, at, scope, section, flags, 2, scratch);
+    return handle_za_auto(b, stmt, at, scope, section, flags, 2, scratch);
 }
 
-// ZPAUTO <count>, <names> - the generic form: variables <count> bytes wide (a table or struct), of which
-// ZPAUTO1 / ZPAUTO2 are the 1- and 2-byte sugar. The count is a constant expression, evaluated here (a
+// ZA_AUTO <count>, <names> - the generic form: variables <count> bytes wide (a table or struct), of which
+// ZA_AUTO1 / ZA_AUTO2 are the 1- and 2-byte sugar. The count is a constant expression, evaluated here (a
 // forward reference defers a pass, like any operand); it must land in 1..256 (the zero page). Then the
 // name list is parsed by the shared worker, exactly as the fixed-width forms do.
-static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
@@ -1038,7 +1038,7 @@ static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t s
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
-    // A comma separates the count from the names: `ZPAUTO 4, table`.
+    // A comma separates the count from the names: `ZA_AUTO 4, table`.
     lexer_result comma = lexer_next(src, e.next, statement_tokens(b));
     if (comma.token.type != lexeme_type_comma) {
         return syntax_error(b, error_type_expected_var_name, cursor_at(at, e.next));
@@ -1049,7 +1049,7 @@ static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t s
     // do not cascade), exactly as the feature-off / bad-name paths do.
     uint16_t width = 1;
     bool     unresolved = false;
-    int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
+    int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
     if (arg.type == int_argument_type_unresolved) {
         unresolved = true;
     }
@@ -1057,24 +1057,24 @@ static parse_result handle_zpauto_n(baron *b, cursor stmt, cursor at, uint32_t s
         semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
     }
     else if (arg.value < 1 || arg.value > (int64_t) zeropage_size) {
-        semantic_error(b, flags, error_type_zpauto_bad_width, cursor_at(at, at.pos));
+        semantic_error(b, flags, error_type_za_auto_bad_width, cursor_at(at, at.pos));
     }
     else {
         width = (uint16_t) arg.value;
     }
 
-    parse_result r = handle_zpauto(b, stmt, cursor_at(at, comma.next), scope, section, flags, width, scratch);
+    parse_result r = handle_za_auto(b, stmt, cursor_at(at, comma.next), scope, section, flags, width, scratch);
     r.unresolved = r.unresolved || unresolved;
     return r;
 }
 
-// UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch, that control cannot fall
+// ZA_UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch, that control cannot fall
 // through to this point. The allocator's CFG would otherwise wire the branch's fall-through edge and treat
 // whatever is live down that dead path as live across the branch, pinning bytes needlessly. Recording this
-// pc lets zeropage_finalize prune that one edge. It is TRUSTED - a wrong UNREACHABLE (a fall-through that
+// pc lets zeropage_finalize prune that one edge. It is TRUSTED - a wrong ZA_UNREACHABLE (a fall-through that
 // really can happen) is one of the few ways to defeat the certainty contract, but it is the programmer's
 // explicit promise. Only meaningful on the final pass, and only with the feature enabled.
-static parse_result handle_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
     (void) scope;
@@ -1083,18 +1083,18 @@ static parse_result handle_unreachable(baron *b, cursor stmt, cursor at, uint32_
         zeropage_add_cflow(&b->zeropage, (zp_cflow) {
             .site   = sections_pc(&b->sections, section),
             .target = RC_INDEX_NONE,
-            .kind   = zp_cflow_unreachable,
+            .kind   = zp_cflow_za_unreachable,
             .at     = cursor_at(at, at.pos),
         });
     }
     return require_separator(b, at);
 }
 
-// The shared body of CANCALL / CANJUMP: parse a comma-separated list of target addresses and record one cflow
+// The shared body of ZA_CANCALL / ZA_CANJUMP: parse a comma-separated list of target addresses and record one cflow
 // of `kind` per target, sited on the last recorded instruction (the JSR / JMP / RTS this annotation
-// qualifies) - but only when that instruction's flow fits the kind (a call for CANCALL; a jump OR a return
-// for CANJUMP, the return being the RTS-dispatch trick - push a target address, RTS into it), so a stray
-// CANCALL after a JMP (or vice versa) binds to nothing rather than mis-annotating. Only the final pass
+// qualifies) - but only when that instruction's flow fits the kind (a call for ZA_CANCALL; a jump OR a return
+// for ZA_CANJUMP, the return being the RTS-dispatch trick - push a target address, RTS into it), so a stray
+// ZA_CANCALL after a JMP (or vice versa) binds to nothing rather than mis-annotating. Only the final pass
 // records instructions, so only then is there a site; the settling passes still parse the list so the
 // statement stays well-formed. A forward target defers.
 static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
@@ -1109,11 +1109,11 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
     if (flags.final) {
         uint32_t ni = zeropage_insn_count(&b->zeropage);
         while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).var_kill) {
-            ni--;   // a DISCARD between the instruction and its annotation is a marker, not the site
+            ni--;   // a ZA_DISCARD between the instruction and its annotation is a marker, not the site
         }
         if (ni > 0) {
             zp_insn last = zeropage_insn_get(&b->zeropage, ni - 1);
-            bool fits = (kind == zp_cflow_cancall)
+            bool fits = (kind == zp_cflow_za_cancall)
                             ? last.flow == zp_flow_call
                             : last.flow == zp_flow_jump || last.flow == zp_flow_return;
             if (fits) {
@@ -1129,7 +1129,7 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
         }
 
         if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage) && site != RC_INDEX_NONE) {
-            int_argument arg = int_argument_no_zpauto(int_argument_make(e.value, flags.final, pos), pos);
+            int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, pos), pos);
             switch (arg.type) {
                 case int_argument_type_known:
                     zeropage_add_cflow(&b->zeropage, (zp_cflow) {
@@ -1159,36 +1159,36 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
     }
 }
 
-// CANCALL <targets> - the programmer declares the real destination(s) of the JSR immediately preceding it (a
+// ZA_CANCALL <targets> - the programmer declares the real destination(s) of the JSR immediately preceding it (a
 // self-modified operand, or a dispatch the analysis cannot follow); with it, the callee footprint is bounded
-// by the union of the named routines. TRUSTED, like UNREACHABLE. Note that a constant target off the
+// by the union of the named routines. TRUSTED, like ZA_UNREACHABLE. Note that a constant target off the
 // assembled stream reads as a call OUT of the program (an external OS/ROM entry, empty footprint) - so a
 // self-modified JSR whose placeholder operand is such a constant is NOT caught by the analysis, and the
 // annotation is what makes it sound.
-static parse_result handle_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_cancall, scratch);
+    return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_za_cancall, scratch);
 }
 
-// CANJUMP <targets> - the programmer declares the possible destinations of the computed / indirect JMP
+// ZA_CANJUMP <targets> - the programmer declares the possible destinations of the computed / indirect JMP
 // immediately preceding it (a jump table). Without it, the jump reaches code the CFG cannot follow and, with
-// variables live, is refused (error_type_zpauto_computed_flow); with it, the CFG wires every named target as a
-// real successor edge, so liveness follows control to each one. TRUSTED, like UNREACHABLE. Also legal after
+// variables live, is refused (error_type_za_auto_computed_flow); with it, the CFG wires every named target as a
+// real successor edge, so liveness follows control to each one. TRUSTED, like ZA_UNREACHABLE. Also legal after
 // an RTS, for the dispatch trick (push a target address minus one, RTS into it): the annotated RTS is a jump
 // in a return's clothing, and gets the declared edges instead of ending the routine.
-static parse_result handle_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_canjump, scratch);
+    return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_za_canjump, scratch);
 }
 
-// DISCARD <var>[, <var>...] - the programmer's promise that the value each named ZPAUTO variable holds AT
+// ZA_DISCARD <var>[, <var>...] - the programmer's promise that the value each named ZA_AUTO variable holds AT
 // THIS POINT is never read again: everything read later comes from writes after here. Recorded as a size-0
 // marker in the zp instruction stream; liveness treats it as a full-width kill that stores nothing, which is
 // what lets an array rebuilt through indexed stores (`STA arr,X` - no provable byte written) have a live
 // range that starts at its rebuild instead of leaking back to the routine entry and around the caller's
-// loop. TRUSTED, like UNREACHABLE: a wrong DISCARD hands the variable's byte to someone else while the old
+// loop. TRUSTED, like ZA_UNREACHABLE: a wrong ZA_DISCARD hands the variable's byte to someone else while the old
 // value is still wanted. Whole variables only - the promise is hard enough to audit without byte windows.
-static parse_result handle_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -1202,10 +1202,10 @@ static parse_result handle_discard(baron *b, cursor stmt, cursor at, uint32_t sc
         int_argument arg = int_argument_make(e.value, flags.final, pos);
         switch (arg.type) {
             case int_argument_type_known:
-                if (!arg.zpauto || arg.value != 0) {
+                if (!arg.za_auto || arg.value != 0) {
                     // A number, a fixed address, or a var+n slice: nothing here the allocator manages whole.
-                    semantic_error_payload(b, flags, error_type_discard_needs_var, cursor_at(at, pos),
-                                           arg.zpauto ? arg.zp_name : (rc_str) {0});
+                    semantic_error_payload(b, flags, error_type_za_discard_needs_var, cursor_at(at, pos),
+                                           arg.za_auto ? arg.zp_name : (rc_str) {0});
                 }
                 else if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
                     zeropage_add_insn(&b->zeropage, (zp_insn) {
@@ -1245,10 +1245,10 @@ static parse_result handle_discard(baron *b, cursor stmt, cursor at, uint32_t sc
     }
 }
 
-// The shared body of ZPENTRY / ZPINTERRUPT: a bare marker, like UNREACHABLE, recording the pc it stands at
+// The shared body of ZA_ENTRY / ZA_INTERRUPT: a bare marker, like ZA_UNREACHABLE, recording the pc it stands at
 // as a declared program entry. Nothing is emitted, so a marker just inside a routine records the same pc as
 // its label - place it as the routine's first statement. zeropage_finalize turns the records into the
-// reachability roots (and, for ZPINTERRUPT, the pinning of the handler's communication vars and footprint).
+// reachability roots (and, for ZA_INTERRUPT, the pinning of the handler's communication vars and footprint).
 static parse_result handle_entry_mark(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
                                       bool interrupt, rc_arena scratch)
 {
@@ -1266,20 +1266,20 @@ static parse_result handle_entry_mark(baron *b, cursor stmt, cursor at, uint32_t
     return require_separator(b, at);
 }
 
-// ZPENTRY - marks the routine it opens as an external entry point (called from outside the program: a BASIC
+// ZA_ENTRY - marks the routine it opens as an external entry point (called from outside the program: a BASIC
 // framework, another executable). Declared entries become the ONLY sync roots for the allocator's
-// reachability check - one ZPENTRY anywhere replaces the default "each section's first instruction"
+// reachability check - one ZA_ENTRY anywhere replaces the default "each section's first instruction"
 // presumption. Deliberately NOT an interface contract: an external API whose inputs/outputs matter should
-// fix them to concrete addresses, not ZPAUTO them.
-static parse_result handle_zpentry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+// fix them to concrete addresses, not ZA_AUTO them.
+static parse_result handle_za_entry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_entry_mark(b, stmt, at, scope, section, flags, false, scratch);
 }
 
-// ZPINTERRUPT - marks the routine it opens as an interrupt handler. An async root: besides feeding the
+// ZA_INTERRUPT - marks the routine it opens as an interrupt handler. An async root: besides feeding the
 // reachability check, its communication vars (live-in at the handler) and its whole transitive footprint are
 // pinned against the rest of the program, because the handler can preempt at any instruction.
-static parse_result handle_zpinterrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+static parse_result handle_za_interrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_entry_mark(b, stmt, at, scope, section, flags, true, scratch);
 }
@@ -1401,7 +1401,7 @@ static const token print_token_entries[] = {
 static const token_table print_tokens = RC_VIEW(print_token_entries);
 
 // True on the one pass whose PRINT output the caller receives: the output pass when one runs (under
-// -v the text lands in channel 0 between the listing lines being built there, and a ZPAUTO symbol
+// -v the text lands in channel 0 between the listing lines being built there, and a ZA_AUTO symbol
 // prints its ALLOCATED address - during the settling passes it is not a number at all), the final
 // pass otherwise. Everything has settled by either, so each PRINT speaks exactly once.
 static bool print_on(const baron *b, parse_flags flags)
@@ -1746,7 +1746,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
     parse_result acc = {.next = sep.next};
 
     if (flags.active) {
-        int_argument cond = int_argument_no_zpauto(int_argument_make(e.value, flags.final, at.pos), at.pos);
+        int_argument cond = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
         switch (cond.type) {
             case int_argument_type_known:
                 if_cond = (cond.value != 0);
@@ -2798,9 +2798,9 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     rc_arena_reset(b->per_pass);
     sections_reset(&b->sections);
     if (!flags.output) {
-        // ZPRESERVE re-runs this pass and refills the (permanent) set. The OUTPUT pass leaves the whole
+        // ZA_POOL re-runs this pass and refills the (permanent) set. The OUTPUT pass leaves the whole
         // zeropage subsystem alone: allocation already ran, and the final pass's IR/vars stay readable
-        // (everything that appends to them is final-gated; ZPRESERVE re-marking its bits is idempotent).
+        // (everything that appends to them is final-gated; ZA_POOL re-marking its bits is idempotent).
         zeropage_reset(&b->zeropage);
     }
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
@@ -2851,7 +2851,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
         sections_note_sizes(&b->sections);
         // Convergence hardening: emission that shifted with no symbol moving still owes another pass
         // (an RND draw set displaced by a settling structure, say). Settling passes only - the final
-        // pass differs legitimately at INCBIN spans, the output pass at every ZPAUTO address.
+        // pass differs legitimately at INCBIN spans, the output pass at every ZA_AUTO address.
         if (!flags.final && !flags.output) {
             r.changed |= sections_emission_changed(&b->sections);
         }
@@ -2876,10 +2876,10 @@ static bool call_rewrites(const liveness *lv, call_targets ct, uint32_t v)
 }
 
 // Mark into `reach` every block reachable from `seed`, following the same edges control can take: the CFG's
-// successor slices (fall-throughs, branches, wired CANJUMP arms) plus each call's resolved callee entries.
+// successor slices (fall-throughs, branches, wired ZA_CANJUMP arms) plus each call's resolved callee entries.
 // An unknown or external call arm contributes nothing - external code is off the map, and an unannotated
 // computed call cannot extend reachability (its true callees may then warn, which is exactly the "add
-// CANCALL" nudge). `within`, when non-NULL, restricts the walk to blocks inside that set - how the region
+// ZA_CANCALL" nudge). `within`, when non-NULL, restricts the walk to blocks inside that set - how the region
 // closures below stay within the unreachable half of the graph.
 static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t seed,
                        const rc_bitset *within, rc_bitset *reach, rc_arena scratch)
@@ -2930,21 +2930,21 @@ static void pin_var(liveness *lv, uint32_t v, uint32_t nv)
     }
 }
 
-// Post-convergence zero-page allocation. Layout has settled with every ZPAUTO reference sized as a
+// Post-convergence zero-page allocation. Layout has settled with every ZA_AUTO reference sized as a
 // placeholder zero-page access, so assigning a real byte and patching the operand cannot perturb size. The
 // governing rule is CERTAINTY: this only patches a program it can prove correct, and turns anything it cannot
 // into a clear diagnostic pointing the user at a fix or an annotation. Three refusals:
-//   - a computed / indirect jump reaches code the CFG cannot follow (unknown_succ) -> error_type_zpauto_computed_flow;
+//   - a computed / indirect jump reaches code the CFG cannot follow (unknown_succ) -> error_type_za_auto_computed_flow;
 //   - a variable is live across a JSR whose callee footprint cannot be bounded (the callee reaches computed
-//     flow) -> error_type_zpauto_across_call;
+//     flow) -> error_type_za_auto_across_call;
 //   - a variable the recursion FRESHLY writes is held live across the recursive call (a per-level value one
-//     static byte cannot serve) -> error_type_zpauto_recursion; a read/accumulated value across recursion is fine;
+//     static byte cannot serve) -> error_type_za_auto_recursion; a read/accumulated value across recursion is fine;
 //   - more simultaneously-live variables than reserved bytes -> error_type_zeropage_full (a spill).
 // On any refusal it records the error(s) and patches nothing; run_passes then fails the assemble. Only a
 // fully analysable, colourable program has its operands + symbols rewritten to real addresses.
 // One deliberate leniency: a transfer to a CONSTANT destination matching nothing we assembled - JSR &FFEE,
 // JMP &FFEE, or JMP (&FFFC) through a fixed OS vector - is a transfer OUT of the program. External code
-// touches none of our variables (ZPRESERVE names exactly the bytes nothing outside the program uses), so
+// touches none of our variables (ZA_POOL names exactly the bytes nothing outside the program uses), so
 // such a call has an empty footprint and such a jump is a clean exit; neither needs an annotation.
 // `work` (cfg + liveness results) and `scratch` (their by-value scratch) are two working arenas the caller
 // hands in BY VALUE; nothing here outlives the call, so both are reclaimed by the caller. They must have
@@ -2968,20 +2968,20 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // monotonic. cfg_build asserts that invariant in debug builds; there is nothing to refuse here.
 
     // Guard 0 (indexed access is the user's responsibility): a variable reached by an indexed / indexed-
-    // indirect mode (var,X, var,Y, (var,X)) touches var+index at run time - the intended way to walk a ZPAUTO
+    // indirect mode (var,X, var,Y, (var,X)) touches var+index at run time - the intended way to walk a ZA_AUTO
     // table. The allocator reserves the WHOLE variable [base, base+width) and liveness marks it all live on any
     // access, so an index that stays inside the width only ever reads the variable's own bytes: sound. What
     // Baron cannot see is the run-time index - an index at or past the width walks into a neighbour, and no
     // static check can catch that. So this is not a refusal but an OPT-IN warning (severity_optional, silent
-    // until the warning level is raised), the same trust we place in CANCALL / UNREACHABLE. The CONSTANT base
+    // until the warning level is raised), the same trust we place in ZA_CANCALL / ZA_UNREACHABLE. The CONSTANT base
     // of the access is still bounds-checked below (Guard 0b): LDA var+4,X on a 4-wide table is refused because
     // the base is already off the end before any index is added. (Checked per recorded insn once vregs are
-    // resolved: a var_indexed insn that really names a ZPAUTO now has a vreg.)
+    // resolved: a var_indexed insn that really names a ZA_AUTO now has a vreg.)
     // Guard 0b (bounds): a var+offset access must lie WITHIN the variable's declared width. The access spans
     // `access` bytes at `var_offset`: 1 for a direct byte, 2 for an indirect pointer deref ((var),Y / (var),
     // which reads the pointer's low+high bytes). If [offset, offset+access) runs off the end, the stray byte is
-    // one the allocator never reserved for this variable - so refuse. A 1-byte ZPAUTO1 used as a pointer is the
-    // special case that gets the pointed "declare it ZPAUTO2" message; every other overrun (a var+n past a
+    // one the allocator never reserved for this variable - so refuse. A 1-byte ZA_AUTO1 used as a pointer is the
+    // special case that gets the pointed "declare it ZA_AUTO2" message; every other overrun (a var+n past a
     // table's end, a pointer straddling the top of a wider var) gets the general out-of-bounds message. (Both
     // need the resolved vreg for the width, hence here rather than at record time; an unknown offset is skipped.)
     for (uint32_t i = 0; i < insns.num; i++) {
@@ -2990,7 +2990,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             continue;
         }
         if (n.var_indexed) {
-            baron_warning_payload(b, error_type_zpauto_indexed_access, n.at, severity_optional,
+            baron_warning_payload(b, error_type_za_auto_indexed_access, n.at, severity_optional,
                                   zeropage_var_get(&b->zeropage, n.vreg).name);
         }
         if (n.var_offset != RC_INDEX_NONE) {
@@ -2998,8 +2998,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             uint32_t access = n.var_indirect ? 2u : 1u;
             if ((uint64_t) n.var_offset + access > width) {
                 error_type code = (n.var_indirect && width < 2)
-                                      ? error_type_zpauto_narrow_pointer   // never wide enough to be a pointer
-                                      : error_type_zpauto_out_of_bounds;
+                                      ? error_type_za_auto_narrow_pointer   // never wide enough to be a pointer
+                                      : error_type_za_auto_out_of_bounds;
                 baron_error(b, code, n.at);
                 refused = true;
             }
@@ -3014,8 +3014,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 
     rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
 
-    // cfg_build applies the control-flow annotations itself: an UNREACHABLE prunes a branch's dead fall-through
-    // edge, and a CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
+    // cfg_build applies the control-flow annotations itself: an ZA_UNREACHABLE prunes a branch's dead fall-through
+    // edge, and a ZA_CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
     cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), zeropage_entries(&b->zeropage),
                             &work, scratch);
     // No entry block: the old "block 0 is the program entry" presumption is retired (roots are handled
@@ -3039,16 +3039,16 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                    && cursor_is_equal(zeropage_var_get(&b->zeropage, u).def, var.def);
         }
         if (!already) {
-            baron_warning_payload(b, error_type_zpauto_unused, var.def, severity_warning, var.name);
+            baron_warning_payload(b, error_type_za_auto_unused, var.def, severity_warning, var.name);
         }
     }
 
-    // The root set: where control can enter the program from outside. Declared ZPENTRY / ZPINTERRUPT
+    // The root set: where control can enter the program from outside. Declared ZA_ENTRY / ZA_INTERRUPT
     // markers resolve to their blocks (the cfg marked each a leader, so "no block" reliably means the
-    // marker sits on no instruction - data, or a section's end - a static mistake we refuse). Any ZPENTRY
+    // marker sits on no instruction - data, or a section's end - a static mistake we refuse). Any ZA_ENTRY
     // replaces the default sync roots; without one, each section's first recorded block roots itself - the
     // generalisation of the old "block 0 is the entry" presumption, kind to the relocation workflow where
-    // a spliced section's code is entered at its own org. ZPINTERRUPT alone leaves the defaults in place
+    // a spliced section's code is entered at its own org. ZA_INTERRUPT alone leaves the defaults in place
     // (a handler is extra, not a statement about where the mainline starts).
     rc_view_zp_entry entries = zeropage_entries(&b->zeropage);
     uint32_t  nb           = g.blocks.num;
@@ -3068,11 +3068,11 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
         uint32_t bi = cfg_block_at(g, e.section, e.pc);
         if (bi == RC_INDEX_NONE) {
-            baron_error(b, error_type_zpentry_no_code, e.at);
+            baron_error(b, error_type_za_entry_no_code, e.at);
             refused = entry_unknown = true;
             continue;
         }
-        rc_bitset_set(&roots, bi);   // duplicates, and ZPENTRY + ZPINTERRUPT on one pc, collapse here
+        rc_bitset_set(&roots, bi);   // duplicates, and ZA_ENTRY + ZA_INTERRUPT on one pc, collapse here
         if (e.interrupt && !rc_bitset_is_set(&handler_seen, bi)) {
             rc_bitset_set(&handler_seen, bi);
             handler_blocks[num_handlers] = bi;
@@ -3102,7 +3102,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // The reachability warning: code touching a ZPAUTO variable that no root can reach is either an
+    // The reachability warning: code touching a ZA_AUTO variable that no root can reach is either an
     // undeclared handler (the silently-unsound shape this whole feature exists to catch) or dead code.
     // One warning per REGION, at its head (the natural "put your marker here" spot), not per block.
     // Skipped when a marker failed to resolve - an under-approximate root set would spray false alarms,
@@ -3121,7 +3121,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
             for (uint32_t i = 0; !rc_bitset_is_set(&reach, bi) && i < blk.num_insns; i++) {
                 zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
-                if (n.vreg != RC_INDEX_NONE && !n.var_kill) {   // a stray DISCARD is not a use worth warning over
+                if (n.vreg != RC_INDEX_NONE && !n.var_kill) {   // a stray ZA_DISCARD is not a use worth warning over
                     rc_bitset_set(&offending, bi);
                     any_offending = true;
                     break;
@@ -3180,7 +3180,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     }
                     if (fresh) {
                         basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
-                        baron_warning(b, error_type_zpauto_unreachable,
+                        baron_warning(b, error_type_za_auto_unreachable,
                                       rc_view_zp_insn_get(insns, blk.first_insn).at, severity_warning);
                     }
                     rc_bitset_union(&covered, &closure);
@@ -3195,7 +3195,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
         if (blk.unknown_succ) {
             zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
-            baron_error(b, error_type_zpauto_computed_flow, last.at);
+            baron_error(b, error_type_za_auto_computed_flow, last.at);
             refused = true;
         }
     }
@@ -3221,10 +3221,10 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             if (n.flow == zp_flow_call) {
                 call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
                 if (rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
-                    // What this call reaches - CANCALL overrides an untrackable literal target with a declared set.
+                    // What this call reaches - ZA_CANCALL overrides an untrackable literal target with a declared set.
                     footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, scratch);
                     if (fp.unknown_call) {
-                        baron_error(b, error_type_zpauto_across_call, n.at);
+                        baron_error(b, error_type_za_auto_across_call, n.at);
                         refused = true;
                     }
                     else if (fp.recursive && rc_bitset_intersects(&live, &fp.killed)) {
@@ -3234,7 +3234,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         // to interference. Judged on the UNREDUCED live set, deliberately: reading a value back
                         // after a recursive call that rewrites it IS the per-level pattern, however definite the
                         // cycle's write - the must-write kill below must not hide it.
-                        baron_error(b, error_type_zpauto_recursion, n.at);
+                        baron_error(b, error_type_za_auto_recursion, n.at);
                         refused = true;
                     }
                     else {
@@ -3282,7 +3282,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 // variable granularity, so a store PAIR that fully rewrites a pointer conservatively
                 // keeps it live too - a too-live set only adds interference edges, never misses any.
                 if (n.var_kill) {
-                    rc_bitset_clear(&live, n.vreg);   // a DISCARD ends the whole variable's range, pinning nothing
+                    rc_bitset_clear(&live, n.vreg);   // a ZA_DISCARD ends the whole variable's range, pinning nothing
                 }
                 else if (zp_insn_write_kills(n, zeropage_var_get(&b->zeropage, n.vreg).width)) {
                     rc_bitset_clear(&live, n.vreg);
@@ -3295,7 +3295,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // Guard 3 / interrupt pinning: a ZPINTERRUPT handler preempts at ARBITRARY instructions, so no
+    // Guard 3 / interrupt pinning: a ZA_INTERRUPT handler preempts at ARBITRARY instructions, so no
     // transaction discipline can be assumed around it. Two rules make its variables sound: (i) its
     // communication vars - live-in at the handler's entry, written by the mainline for the handler to read -
     // are pinned against everything, the handler's own temps included (the mainline may rewrite one at any
@@ -3303,11 +3303,11 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // in the handler's transitive footprint interferes with every var outside it - a handler temp can never
     // share a byte with mainline state it might fire on top of. Among the handler's own temps, ordinary
     // liveness still governs, so intra-handler reuse survives. A footprint the walk cannot bound (an
-    // unannotated computed call in the extent) is refused, with the same remedy as ever: CANCALL.
+    // unannotated computed call in the extent) is refused, with the same remedy as ever: ZA_CANCALL.
     for (uint32_t h = 0; h < num_handlers; h++) {
         footprint fp = footprint_compute(g, insns, cflows, handler_blocks[h], nv, &work, scratch);
         if (fp.unknown_call) {
-            baron_error(b, error_type_zpauto_across_call, handler_ats[h]);
+            baron_error(b, error_type_za_auto_across_call, handler_ats[h]);
             refused = true;
             continue;
         }
@@ -3327,15 +3327,15 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // The ZPENTRY input warning: an externally-called routine that reads a variable before writing it
+    // The ZA_ENTRY input warning: an externally-called routine that reads a variable before writing it
     // expects its caller to have poked the value - but an outside caller cannot know an allocator-chosen
-    // address, so a ZPAUTO input on a declared external interface is almost certainly a mistake (an
-    // external interface wants fixed bytes: ZPRESERVE them, or use plain addresses). The test is the
+    // address, so a ZA_AUTO input on a declared external interface is almost certainly a mistake (an
+    // external interface wants fixed bytes: ZA_POOL them, or use plain addresses). The test is the
     // read-before-write walk, not live-in: the backward fixpoint's shared return edges smear one call
     // site's live-after through a common helper into another call site (a helper called both before the
     // entry's init and from the main loop makes every loop-carried variable look live-in at the entry),
     // while the walk follows calls with per-callee summaries, so only genuine uninitialised reads count.
-    // Handler blocks are excluded - a stacked ZPENTRY+ZPINTERRUPT takes the stricter interrupt treatment,
+    // Handler blocks are excluded - a stacked ZA_ENTRY+ZA_INTERRUPT takes the stricter interrupt treatment,
     // and Guard 3's pinned comm vars ARE the supported live-in pattern there.
     rc_bitset sync_seen = {0};
     rc_bitset_resize(&sync_seen, nb ? nb : 1, &scratch);
@@ -3353,7 +3353,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                                                       bi, &work, scratch);
         for (uint32_t v = rc_bitset_get_first_set(&inputs); v != RC_INDEX_NONE;
              v = rc_bitset_get_next_set(&inputs, v + 1)) {
-            baron_warning_payload(b, error_type_zpentry_input, e.at, severity_warning,
+            baron_warning_payload(b, error_type_za_entry_input, e.at, severity_warning,
                                   zeropage_var_get(&b->zeropage, v).name);
         }
     }
@@ -3426,7 +3426,7 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             if (fin.fatal || baron_has_errors(b)) {
                 return assemble_failed(b);
             }
-            // Layout has settled: now assign real zero-page bytes to the ZPAUTO variables and rewrite
+            // Layout has settled: now assign real zero-page bytes to the ZA_AUTO variables and rewrite
             // their symbols to the chosen addresses. This refuses (records errors, assigns nothing) on
             // anything it cannot prove correct, so a fresh error here fails the assemble just like a
             // pass error would.
@@ -3434,11 +3434,11 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             if (baron_has_errors(b)) {
                 return assemble_failed(b);
             }
-            // The OUTPUT pass: one re-emission with the ZPAUTO symbols holding their allocated
+            // The OUTPUT pass: one re-emission with the ZA_AUTO symbols holding their allocated
             // addresses, whose sections ARE the result (there is no operand patching - a settling
             // pass's operands hold intra-variable offsets, meaningless as output). It must run
             // whenever the zp feature is on; -v rides the same pass to build the listing text, with
-            // the true bytes in every line. Re-emission cannot move anything: a ZPAUTO address is a
+            // the true bytes in every line. Re-emission cannot move anything: a ZA_AUTO address is a
             // typed value that every layout-affecting context refuses, and the contexts that accept
             // one (instruction operands, data elements) are width-stable, so the converged layout is
             // reproduced exactly. It runs final=false, so nothing gated on the settling pass
@@ -3668,7 +3668,7 @@ RC_TEST_STEP(assemble, addressing_modes, fix)
 
     // Register letters are only registers where the grammar expects one. A symbol named after a register
     // reads as that symbol in the operand base: `x`/`y`/`a` bound to &70 give a zero-page access, not a
-    // register. (`a` is legal as a plain symbol - only ZPAUTO forbids it.)
+    // register. (`a` is legal as a plain symbol - only ZA_AUTO forbids it.)
     RC_CHECK_TRUE(code_is(&fix->r, ASM("x = &70 : STA x"),  (uint8_t[]) {0x85, 0x70}, 2));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("y = &71 : LDA y"),  (uint8_t[]) {0xA5, 0x71}, 2));
     RC_CHECK_TRUE(code_is(&fix->r, ASM("a = &72 : LDA a"),  (uint8_t[]) {0xA5, 0x72}, 2));
@@ -3957,14 +3957,14 @@ RC_TEST_STEP(assemble, incsection_converges, fix)
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("endlab")), value_make_numeric(0x3003)));
 }
 
-RC_TEST_STEP(assemble, incsection_carries_zpauto_patches, fix)
+RC_TEST_STEP(assemble, incsection_carries_za_auto_patches, fix)
 {
     // The reason the fixup runs ABSOLUTELY last: the zero-page allocator patches operand bytes after the
     // final pass, in the section the instructions emitted into. The spliced copy must carry those PATCHED
     // bytes - the allocated &70, not the placeholder 0.
-#define ZP_SPLICE_PROG "ZPRESERVE &70..&7F\n" \
+#define ZP_SPLICE_PROG "ZA_POOL &70..&7F\n" \
                        "SECTION load, org=&3000\nINCSECTION code\nENDSECTION\n" \
-                       "SECTION code, org=&1100\nZPAUTO1 v\nSTA v : LDA v : RTS\nENDSECTION"
+                       "SECTION code, org=&1100\nZA_AUTO1 v\nSTA v : LDA v : RTS\nENDSECTION"
     RC_CHECK_TRUE(ASM(ZP_SPLICE_PROG) != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
@@ -3981,10 +3981,10 @@ RC_TEST_STEP(assemble, incsection_chains, fix)
 {
     // A chain defined most-dependent FIRST (a needs b needs c, both forward): the dependency-ordered fixup
     // copies bottom-up, so c's ZP-patched bytes arrive in a THROUGH b.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F\n"
                           "SECTION a, org=0\nEQUB 1\nINCSECTION b\nENDSECTION\n"
                           "SECTION b, org=&100\nEQUB 2\nINCSECTION c\nENDSECTION\n"
-                          "SECTION c, org=&200\nZPAUTO1 w\nSTA w : LDA w : RTS\nENDSECTION");
+                          "SECTION c, org=&200\nZA_AUTO1 w\nSTA w : LDA w : RTS\nENDSECTION");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("c"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
@@ -4084,38 +4084,38 @@ RC_TEST_STEP(assemble, basic_listing, fix)
     fix->desc.verbose = false;
 }
 
-RC_TEST_STEP(assemble, zpreserve_directive, fix)
+RC_TEST_STEP(assemble, za_pool_directive, fix)
 {
     // A plain range, a comma-list of ranges and a bare byte all parse and assemble cleanly (no code).
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&8F") != 0);
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F, &A0..&A7") != 0);
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&8F") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F, &A0..&A7") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 
     // An empty exclusive range is a legal empty list: it enables the feature but reserves nothing.
-    RC_CHECK_TRUE(ASM("ZPRESERVE 5..<5") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL 5..<5") != 0);
 
     // The address may be forward-referenced; it defers and settles on a later pass (still converges).
-    RC_CHECK_TRUE(ASM("ZPRESERVE base..base+3 : base = &70") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL base..base+3 : base = &70") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
-RC_TEST_STEP(assemble, zpreserve_errors, fix)
+RC_TEST_STEP(assemble, za_pool_errors, fix)
 {
     // Out of the zero page (high, and via a range that overshoots) - a recoverable semantic error.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &100")      == error_type_reserve_not_zeropage);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &FE..&102") == error_type_reserve_not_zeropage);
+    RC_CHECK_TRUE(ERR("ZA_POOL &100")      == error_type_reserve_not_zeropage);
+    RC_CHECK_TRUE(ERR("ZA_POOL &FE..&102") == error_type_reserve_not_zeropage);
     // A non-numeric operand is not an address.
-    RC_CHECK_TRUE(ERR("ZPRESERVE \"hi\"")    == error_type_operand_not_numeric);
+    RC_CHECK_TRUE(ERR("ZA_POOL \"hi\"")    == error_type_operand_not_numeric);
 }
 
-RC_TEST_STEP(assemble, zpauto_declares_scoped_var, fix)
+RC_TEST_STEP(assemble, za_auto_declares_scoped_var, fix)
 {
-    // ZPAUTO1/ZPAUTO2 bind scoped symbols; after convergence the allocator gives each a real zero-page byte.
+    // ZA_AUTO1/ZA_AUTO2 bind scoped symbols; after convergence the allocator gives each a real zero-page byte.
     // `foo` is held live across `ptr`'s whole range, so they interfere: FFD places the 2-byte `ptr` first
     // (&70-&71), then the 1-byte `foo` at the next free byte, &72. (An UNUSED declaration gets no byte and
-    // no definition at all - see zpauto_unused_is_warned_and_undefined.)
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : ZPAUTO2 ptr\n"
+    // no definition at all - see za_auto_unused_is_warned_and_undefined.)
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 foo : ZA_AUTO2 ptr\n"
                           "STA foo : STA ptr : LDA #&40 : STA ptr+1 : LDA (ptr),Y : ORA foo : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
@@ -4123,83 +4123,83 @@ RC_TEST_STEP(assemble, zpauto_declares_scoped_var, fix)
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("foo")), value_make_numeric(0x72)));
 
     // A comma-list declares several at once.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 p, q, r\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 p, q, r\n"
                       "STA p : STA q : STA r : LDA p : LDA q : LDA r : RTS") != 0);
     RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("p"))));
     RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("r"))));
 
     // Declared inside a named routine, a var is reachable from outside as routine.name (a dotted path).
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : .routine { ZPAUTO1 v : STA v : LDA v : RTS }") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : .routine { ZA_AUTO1 v : STA v : LDA v : RTS }") != 0);
     RC_CHECK_FALSE(value_is_none(baron_result_symbol(&fix->r, RC_STR("routine.v"))));
 }
 
-RC_TEST_STEP(assemble, zpauto_errors, fix)
+RC_TEST_STEP(assemble, za_auto_errors, fix)
 {
-    // A variable with no ZPRESERVE to allocate from is flagged (but still bound, to avoid a cascade).
-    RC_CHECK_TRUE(ERR("ZPAUTO1 foo") == error_type_var_without_reserve);
+    // A variable with no ZA_POOL to allocate from is flagged (but still bound, to avoid a cascade).
+    RC_CHECK_TRUE(ERR("ZA_AUTO1 foo") == error_type_var_without_reserve);
     // A missing or dotted name.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1")     == error_type_expected_var_name);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 a.b") == error_type_expected_var_name);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1")     == error_type_expected_var_name);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 a.b") == error_type_expected_var_name);
     // Re-declaring the same name in one scope is a duplicate (mirrors labels).
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 foo : ZPAUTO1 foo") == error_type_duplicate_symbol);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 foo : ZA_AUTO1 foo") == error_type_duplicate_symbol);
     // `a` alone is rejected (ambiguous with accumulator addressing, ASL A). X and Y are fine now - they only
     // read as registers after a comma - so a variable may be named x or y.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 A")      == error_type_zpauto_register_name);
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 x") != 0);
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 Y") != 0);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 A")      == error_type_za_auto_register_name);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 x") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO2 Y") != 0);
 }
 
-RC_TEST_STEP(assemble, zpauto_operand_is_zeropage, fix)
+RC_TEST_STEP(assemble, za_auto_operand_is_zeropage, fix)
 {
-    // A ZPAUTO variable in operand position assembles as a 2-byte zero-page access. Post-convergence the
+    // A ZA_AUTO variable in operand position assembles as a 2-byte zero-page access. Post-convergence the
     // allocator assigns the real byte and patches the operand in place - it never changes size (the layout-
     // independence property), so patching is sound. With one variable and a free block from &70, it lands on
     // the first reserved byte, &70; a 2-byte pointer's hi half is &71 (its low byte + 1).
     const uint8_t b0 = 0x70;   // the first reserved byte the single variable is allocated to
 
     // Declared then used: LDA zp / STA zp (read and write), operand patched to the allocated address.
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : LDA foo"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : ZA_AUTO1 foo : LDA foo"),
                           (uint8_t[]){0xA5, b0}, 2));
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 foo : STA foo"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : ZA_AUTO1 foo : STA foo"),
                           (uint8_t[]){0x85, b0}, 2));
 
     // Used BEFORE declared: still 2 bytes, still patched. It sizes as zero-page every pass (a VAR is always
     // ZP), so the layout converges no matter the eventual address - the binding from one pass resolves the next.
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : LDA foo : ZPAUTO1 foo"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : LDA foo : ZA_AUTO1 foo"),
                           (uint8_t[]){0xA5, b0}, 2));
 
     // A 2-byte pointer: lo is `ptr` (&70), hi is `ptr+1` (&71 - the base plus the intra-variable offset that
     // the operand carried); and the pointer drives indirect-indexed addressing (its intended use).
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : LDA ptr : LDA ptr+1"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : LDA ptr : LDA ptr+1"),
                           (uint8_t[]){0xA5, b0, 0xA5, (uint8_t)(b0 + 1)}, 4));
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : LDA (ptr),Y"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : LDA (ptr),Y"),
                           (uint8_t[]){0xB1, b0}, 2));
 
     // A variable named `x` (or `y`) now reads as a symbol in the operand base - the register-aware table is
     // only consulted after a comma - so it attributes and is patched to its allocated byte like any other.
-    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZPRESERVE &70..&7F : ZPAUTO1 x : STA x : LDA x"),
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : ZA_AUTO1 x : STA x : LDA x"),
                           (uint8_t[]){0x85, b0, 0xA5, b0}, 4));
 }
 
-// A ZPAUTO symbol's allocated zero-page address, or -1 if it is not a plain number (unbound / failed).
+// A ZA_AUTO symbol's allocated zero-page address, or -1 if it is not a plain number (unbound / failed).
 static int64_t zp_addr(const baron_result *r, const char *name)
 {
     value v = baron_result_symbol(r, rc_str_from_cstr(name));
     return value_is_numeric(v) ? (int64_t) v.numeric : -1;
 }
 
-RC_TEST_STEP(assemble, zpauto_allocates_and_reuses, fix)
+RC_TEST_STEP(assemble, za_auto_allocates_and_reuses, fix)
 {
     // D1 - two locals with disjoint live ranges share one byte. v1 dies (last read) before v2 is written, so
     // the colourer packs both onto &70.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v1, v2 : STA v1 : LDA v1 : STA v2 : LDA v2 : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v1, v2 : STA v1 : LDA v1 : STA v2 : LDA v2 : RTS") != 0);
     RC_CHECK(zp_addr(&fix->r, "v1"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "v2"), ==, 0x70);
 
     // D2 - the spec's mul shape: in1 is read first (input), tmp is written-then-read (temp), out1 is written
     // last (output). in1 and tmp overlap so tmp takes &71; out1 is born only after both die, so it REUSES
     // in1's &70. Six accesses collapse onto two bytes.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 in1, tmp, out1\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 in1, tmp, out1\n"
                       "LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS") != 0);
     RC_CHECK(zp_addr(&fix->r, "in1"),  ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "tmp"),  ==, 0x71);
@@ -4207,31 +4207,31 @@ RC_TEST_STEP(assemble, zpauto_allocates_and_reuses, fix)
 
     // D3 - a 2-byte pointer packs beside a 1-byte temp when they interfere. `a` is live across the pointer's
     // setup, so it cannot overlap ptr's two bytes (&70-&71) and lands at &72.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 t\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : ZA_AUTO1 t\n"
                       "STA t : STA ptr : STA ptr+1 : LDA t : LDA (ptr),Y : RTS") != 0);
     RC_CHECK(zp_addr(&fix->r, "ptr"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "t"),   ==, 0x72);
 }
 
-RC_TEST_STEP(assemble, zpauto_call_without_live_var_is_allowed, fix)
+RC_TEST_STEP(assemble, za_auto_call_without_live_var_is_allowed, fix)
 {
-    // A JSR is fine as long as no ZPAUTO variable is live across it: `t` is written and read BEFORE the call,
+    // A JSR is fine as long as no ZA_AUTO variable is live across it: `t` is written and read BEFORE the call,
     // dead by the time control leaves, so the callee cannot clobber it. Allocation proceeds normally.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 t : STA t : LDA t : JSR sub : RTS : .sub { RTS }");
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 t : STA t : LDA t : JSR sub : RTS : .sub { RTS }");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "t"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, zpauto_interprocedural_allocation, fix)
+RC_TEST_STEP(assemble, za_auto_interprocedural_allocation, fix)
 {
     // The interprocedural core: `keep` is live across a JSR to `sub`, which has its own local `loc`. The call
     // clobbers sub's footprint, so keep must NOT share loc's byte - it interferes with the whole callee
     // footprint and lands on a different byte. (Before this rule, both took &70 and the call would corrupt
     // keep.) keep is placed first at &70, loc is pushed to &71.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                           "LDA #1 : STA keep : JSR sub : LDA keep : RTS\n"
-                          ".sub { ZPAUTO1 loc : STA loc : LDA loc : RTS }");
+                          ".sub { ZA_AUTO1 loc : STA loc : LDA loc : RTS }");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"),    ==, 0x70);
@@ -4239,29 +4239,29 @@ RC_TEST_STEP(assemble, zpauto_interprocedural_allocation, fix)
 
     // Contrast: a var DEAD across the call does not interfere with the callee, so it may reuse the byte. Here
     // `tmp` dies before the call, so it can share sub.loc's byte.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 tmp\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 tmp\n"
                       "STA tmp : LDA tmp : JSR sub : RTS\n"
-                      ".sub { ZPAUTO1 loc : STA loc : LDA loc : RTS }") != 0);
+                      ".sub { ZA_AUTO1 loc : STA loc : LDA loc : RTS }") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "tmp"),     ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "sub.loc"), ==, 0x70);   // dead across the call -> reuses the callee's byte
 }
 
-RC_TEST_STEP(assemble, zpauto_dotted_interface_variables, fix)
+RC_TEST_STEP(assemble, za_auto_dotted_interface_variables, fix)
 {
     // A routine's inputs and outputs declared in ITS scope, reached by the caller via the dotted path: the
     // operands attribute (and so are patched - the byte compare is the proof), the argument written before
     // the call is held live TO the call (a call consumes its callees' inputs), so the unrelated temp `t`
     // cannot be coloured over it. The result, which sub definitely writes on every path, is KILLED at the
     // call (must-write): its range starts inside sub, after both t and wid are dead, so it reuses t's byte.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 t\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 t\n"
                           "LDA #3 : STA sub.wid\n"
                           "LDA #9 : STA t\n"
                           "LDA t\n"
                           "JSR sub\n"
                           "LDA sub.res\n"
                           "RTS\n"
-                          ".sub { ZPAUTO1 wid, res : LDA wid : STA res : RTS }");
+                          ".sub { ZA_AUTO1 wid, res : LDA wid : STA res : RTS }");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "t"),       ==, 0x70);
@@ -4278,31 +4278,31 @@ RC_TEST_STEP(assemble, zpauto_dotted_interface_variables, fix)
         21));
 }
 
-RC_TEST_STEP(assemble, zpauto_argument_survives_intermediate_call, fix)
+RC_TEST_STEP(assemble, za_auto_argument_survives_intermediate_call, fix)
 {
     // An argument stored before TWO calls must survive the first: sub.wid is live from its store to the
     // JSR sub that consumes it, so it is live ACROSS the intervening JSR other and interferes with other's
     // whole footprint - other.loc cannot take its byte.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F\n"
                           "LDA #3 : STA sub.wid : JSR other : JSR sub : RTS\n"
-                          ".other { ZPAUTO1 loc : STA loc : LDA loc : RTS }\n"
-                          ".sub { ZPAUTO1 wid : LDA wid : RTS }");
+                          ".other { ZA_AUTO1 loc : STA loc : LDA loc : RTS }\n"
+                          ".sub { ZA_AUTO1 wid : LDA wid : RTS }");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "other.loc"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "sub.wid"),   ==, 0x71);   // pushed off loc's byte by the intervening call
 }
 
-RC_TEST_STEP(assemble, zpauto_dotted_pipeline_reuses_input_bytes, fix)
+RC_TEST_STEP(assemble, za_auto_dotted_pipeline_reuses_input_bytes, fix)
 {
     // The reuse side of the same coin: two stages fed through their scoped interface variables, and the
     // whole relay runs in ONE byte. Each argument dies at its read inside its stage; each result - which
     // its stage definitely writes, so the call KILLS the pre-call value (must-write) - is born there and
     // dies at the caller's read, just as the next argument is stored. Four variables, one byte, and a
     // one-byte pool proves no interference exists anywhere.
-    uint32_t passes = ASM("ZPRESERVE &70\n"
-                          ".stage1 { ZPAUTO1 xin, res : LDA xin : ASL A : STA res : RTS }\n"
-                          ".stage2 { ZPAUTO1 xin, res : LDA xin : CLC : ADC #7 : STA res : RTS }\n"
+    uint32_t passes = ASM("ZA_POOL &70\n"
+                          ".stage1 { ZA_AUTO1 xin, res : LDA xin : ASL A : STA res : RTS }\n"
+                          ".stage2 { ZA_AUTO1 xin, res : LDA xin : CLC : ADC #7 : STA res : RTS }\n"
                           "LDA #5 : STA stage1.xin\n"
                           "JSR stage1\n"
                           "LDA stage1.res : STA stage2.xin\n"
@@ -4317,80 +4317,80 @@ RC_TEST_STEP(assemble, zpauto_dotted_pipeline_reuses_input_bytes, fix)
     RC_CHECK(zp_addr(&fix->r, "stage2.res"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, zpauto_result_survives_producer_tail, fix)
+RC_TEST_STEP(assemble, za_auto_result_survives_producer_tail, fix)
 {
     // The return edge: sub's RTS sees what is live after each call to sub, so res - whose only reads are
     // in the caller - stays live from its store to the RTS, and the LATER write to t inside sub cannot
     // land on its byte. (Without the edge, res looks dead the moment it is stored, its reads being
     // invisible from inside sub, and t's store would clobber the result before the caller reads it.)
-    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F\n"
                           "JSR sub\n"
                           "LDA sub.res\n"
                           "RTS\n"
-                          ".sub { ZPAUTO1 res, t : LDA #1 : STA res : LDA #2 : STA t : LDA t : RTS }");
+                          ".sub { ZA_AUTO1 res, t : LDA #1 : STA res : LDA #2 : STA t : LDA t : RTS }");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "sub.res"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "sub.t"),   ==, 0x71);   // written after res, which is still en route out
 }
 
-RC_TEST_STEP(assemble, zpauto_address_is_typed, fix)
+RC_TEST_STEP(assemble, za_auto_address_is_typed, fix)
 {
-    // A ZPAUTO address is a TYPED value that exists only after allocation, so every context that needs
+    // A ZA_AUTO address is a TYPED value that exists only after allocation, so every context that needs
     // a real number NOW refuses it - eagerly, on the final pass, at the use site, naming the variable.
     // (Before the type, the placeholder 0 leaked in silently: IF deleted code, SKIP skipped nothing.)
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : SKIP v") == error_type_zpauto_address);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : SKIPTO v") == error_type_zpauto_address);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : ALIGN v") == error_type_zpauto_address);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : ZPAUTO v, q") == error_type_zpauto_address);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : IF v : NOP : ENDIF") == error_type_zpauto_address);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v\n"
-                      "SECTION S, org = v : ENDSECTION") == error_type_zpauto_address);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : JSR sub : CANCALL v : RTS\n"
-                      ".sub RTS") == error_type_zpauto_address);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : SKIP v") == error_type_za_auto_address);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : SKIPTO v") == error_type_za_auto_address);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : ALIGN v") == error_type_za_auto_address);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : ZA_AUTO v, q") == error_type_za_auto_address);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : IF v : NOP : ENDIF") == error_type_za_auto_address);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
+                      "SECTION S, org = v : ENDSECTION") == error_type_za_auto_address);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : JSR sub : ZA_CANCALL v : RTS\n"
+                      ".sub RTS") == error_type_za_auto_address);
 
     // The only arithmetic an address supports is +/- an integer; everything else refuses through the
     // evaluator's ordinary type checks. A comparison, a multiply, a range endpoint - all caught.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : IF v = 1 : NOP : ENDIF") == error_type_type_mismatch);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : EQUB v * 2") == error_type_type_mismatch);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v\n"
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : IF v = 1 : NOP : ENDIF") == error_type_type_mismatch);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : EQUB v * 2") == error_type_type_mismatch);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
                       "FOR n = v..8 : NEXT") == error_type_type_mismatch);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v, q : STA v : LDA v : STA q : LDA q\n"
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v, q : STA v : LDA v : STA q : LDA q\n"
                       "EQUB v - q") == error_type_domain);   // two different bases have no knowable distance
 }
 
-RC_TEST_STEP(assemble, zpauto_address_arithmetic, fix)
+RC_TEST_STEP(assemble, za_auto_address_arithmetic, fix)
 {
     // The affine cases still work exactly as before: an offset rides the value, and the output pass
     // emits base+offset. The pointer idiom's bytes are the proof.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y : RTS");
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO2 p : STA p : STA p+1 : LDA (p),Y : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x60}, 7));
 
     // The distance between two offsets into the SAME variable is a plain number.
     RC_CHECK_TRUE(code_is(&fix->r,
-        ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y : EQUB (p+2)-p"),
+        ASM("ZA_POOL &70..&7F : ZA_AUTO2 p : STA p : STA p+1 : LDA (p),Y : EQUB (p+2)-p"),
         (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x02}, 7));
 }
 
-RC_TEST_STEP(assemble, zpauto_address_tables_work, fix)
+RC_TEST_STEP(assemble, za_auto_address_tables_work, fix)
 {
     // Data emission accepts an address: element widths are fixed, so the layout cannot depend on the
     // value, and the output pass emits the ALLOCATED address - address tables of variables just work.
     // (Before the type, EQUB var silently emitted the placeholder 0 into the real output.)
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : EQUB v : EQUW v+1");
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : EQUB v : EQUW v+1");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x70, 0x71, 0x00}, 7));
 }
 
-RC_TEST_STEP(assemble, zpauto_immediate_address_works, fix)
+RC_TEST_STEP(assemble, za_auto_immediate_address_works, fix)
 {
     // An immediate accepts an address too - the way a pointer is seeded with a variable's location.
     // (Before the type, LDA #var silently emitted #0: immediates are never attributed or patched.)
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 v\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : ZA_AUTO1 v\n"
                           "LDA #v : STA ptr : LDA #0 : STA ptr+1\n"
                           "STA v : LDA v\n"
                           "LDA (ptr),Y : RTS");
@@ -4403,63 +4403,63 @@ RC_TEST_STEP(assemble, zpauto_immediate_address_works, fix)
                      0x85, 0x72, 0xA5, 0x72, 0xB1, 0x70, 0x60}, 15));
 }
 
-RC_TEST_STEP(assemble, zpauto_alias_attributes, fix)
+RC_TEST_STEP(assemble, za_auto_alias_attributes, fix)
 {
     // The value CARRIES the variable's identity, so an alias attributes like the variable itself -
     // the instruction joins liveness and emits the real address. (Before, `LDA x` emitted &00: the
     // lex-based attribution saw only `x`, whose binding is an assignment, not a variable.)
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : x = v : STA x : LDA x : RTS");
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : x = v : STA x : LDA x : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
     // The output pass re-binds the alias against the real address, so the result symbol is honest.
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x70)));
 
-    // Offset arithmetic rides through the alias too, and the derived binding CONVERGES (the zpauto
+    // Offset arithmetic rides through the alias too, and the derived binding CONVERGES (the za_auto
     // equality case) - a hi-byte alias of a pointer works end to end.
-    uint32_t q = ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : hi = p + 1 : STA p : STA hi : LDA (p),Y : RTS");
+    uint32_t q = ASM("ZA_POOL &70..&7F : ZA_AUTO2 p : hi = p + 1 : STA p : STA hi : LDA (p),Y : RTS");
     RC_CHECK_TRUE(q != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(code_is(&fix->r, q, (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x60}, 7));
 }
 
-RC_TEST_STEP(assemble, zpauto_print_allocated_address, fix)
+RC_TEST_STEP(assemble, za_auto_print_allocated_address, fix)
 {
     // PRINT speaks on the output pass, where the symbol holds its allocated address - in EVERY mode
     // (before, a non-verbose PRINT printed the placeholder 0 while -v printed the real byte).
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : PRINT v");
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : PRINT v");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(rc_str_is_equal(fix->r.channels[0], RC_STR("112\n")));   // &70, in PRINT's decimal
 }
 
-RC_TEST_STEP(assemble, zpauto_print_hex_address, fix)
+RC_TEST_STEP(assemble, za_auto_print_hex_address, fix)
 {
-    // '~' is the reason PRINT can speak the BBC's language, and a ZPAUTO address is its headline case:
+    // '~' is the reason PRINT can speak the BBC's language, and a ZA_AUTO address is its headline case:
     // the placeholder must reach it without complaint on the earlier passes (a refusal there would be
     // reported at the final pass, where PRINT is still silent) and come out as the allocated byte.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : STA ptr : STA ptr+1\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : STA ptr : STA ptr+1\n"
                           "PRINT \"ptr at &\", ~ptr, \", high byte &\", ~ptr+1");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(rc_str_is_equal(fix->r.channels[0], RC_STR("ptr at &70, high byte &71\n")));
 }
 
-RC_TEST_STEP(assemble, zpauto_jmp_via_variable_vector, fix)
+RC_TEST_STEP(assemble, za_auto_jmp_via_variable_vector, fix)
 {
-    // A JMP through a ZPAUTO pointer is a dispatch through a cell WE own: computed flow, refused
-    // without a CANJUMP naming the arms. (Before, the placeholder vector &0000 read as an external
+    // A JMP through a ZA_AUTO pointer is a dispatch through a cell WE own: computed flow, refused
+    // without a ZA_CANJUMP naming the arms. (Before, the placeholder vector &0000 read as an external
     // OS cell - a clean exit - and the emitted operand was never patched.)
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO2 vec : STA vec : STA vec+1 : JMP (vec)\n"
-                      ".h RTS") == error_type_zpauto_computed_flow);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO2 vec : STA vec : STA vec+1 : JMP (vec)\n"
+                      ".h RTS") == error_type_za_auto_computed_flow);
 
     // Annotated, it works: the edge is wired, the vector stays LIVE to the jump (the dispatch reads
     // the pair), and the emitted operand carries the allocated cell.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 vec\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO2 vec\n"
                           "LDA #LO(h) : STA vec\n"
                           "LDA #HI(h) : STA vec+1\n"
                           "JMP (vec)\n"
-                          "CANJUMP h\n"
+                          "ZA_CANJUMP h\n"
                           ".h RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
@@ -4468,8 +4468,8 @@ RC_TEST_STEP(assemble, zpauto_jmp_via_variable_vector, fix)
         (uint8_t[]) {0xA9, 0x0B, 0x85, 0x70, 0xA9, 0x00, 0x85, 0x71, 0x6C, 0x70, 0x00, 0x60}, 12));
 
     // A one-byte variable cannot hold a two-byte vector - the pointer-width check applies here too.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 vec : STA vec : JMP (vec) : CANJUMP h\n"
-                      ".h RTS") == error_type_zpauto_narrow_pointer);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 vec : STA vec : JMP (vec) : ZA_CANJUMP h\n"
+                      ".h RTS") == error_type_za_auto_narrow_pointer);
 }
 
 RC_TEST_STEP(assemble, cmos_section_enables, fix)
@@ -4562,12 +4562,12 @@ RC_TEST_STEP(assemble, cmos_forward_reference_converges, fix)
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("C"), (uint8_t[]) {0xDA}, 1));
 }
 
-RC_TEST_STEP(assemble, cmos_zpauto_interplay, fix)
+RC_TEST_STEP(assemble, cmos_za_auto_interplay, fix)
 {
     // The zero-page analyses already model the CMOS shapes; with the gate open they take part:
     // STZ is a write-only def, so it KILLS - w's old value ends at the STZ and v can share its byte.
     uint32_t passes = ASM("SECTION C, cmos = TRUE\n"
-                          "ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+                          "ZA_POOL &70..&7F : ZA_AUTO1 v, w\n"
                           "STA w : LDA w\n"
                           "STZ w\n"
                           "STA v : LDA v : RTS\n"
@@ -4577,25 +4577,25 @@ RC_TEST_STEP(assemble, cmos_zpauto_interplay, fix)
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);
 
-    // The (zp) indirect dereferences a pointer pair: fine on a ZPAUTO2, the usual refusal on a ZPAUTO1.
+    // The (zp) indirect dereferences a pointer pair: fine on a ZA_AUTO2, the usual refusal on a ZA_AUTO1.
     RC_CHECK_TRUE(ASM("SECTION C, cmos = TRUE\n"
-                      "ZPRESERVE &70..&7F : ZPAUTO2 p\n"
+                      "ZA_POOL &70..&7F : ZA_AUTO2 p\n"
                       "STA p : STA p+1 : LDA (p) : RTS\n"
                       "ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(ERR("SECTION C, cmos = TRUE\n"
-                      "ZPRESERVE &70..&7F : ZPAUTO1 q\n"
+                      "ZA_POOL &70..&7F : ZA_AUTO1 q\n"
                       "STA q : LDA (q) : RTS\n"
-                      "ENDSECTION") == error_type_zpauto_narrow_pointer);
+                      "ENDSECTION") == error_type_za_auto_narrow_pointer);
 }
 
-RC_TEST_STEP(assemble, zpauto_conditional_result_is_preserved, fix)
+RC_TEST_STEP(assemble, za_auto_conditional_result_is_preserved, fix)
 {
     // The must-write kill needs EVERY path to write: here the store is skipped when the sum is zero, so the
     // caller's read may see the byte's pre-call value - res is genuinely live across its own call and is
     // kept clear of the routine's workspace (no sharing with xin), unlike the unconditional store above.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F\n"
-                          ".offset { ZPAUTO1 xin, res : LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS }\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F\n"
+                          ".offset { ZA_AUTO1 xin, res : LDA xin : CLC : ADC #7 : BEQ @+ : STA res : .@ RTS }\n"
                           "LDA #5 : STA offset.xin\n"
                           "JSR offset\n"
                           "LDA offset.res\n"
@@ -4606,30 +4606,30 @@ RC_TEST_STEP(assemble, zpauto_conditional_result_is_preserved, fix)
     RC_CHECK(zp_addr(&fix->r, "offset.res"), ==, 0x71);   // conditionally written: preserved, not reborn
 }
 
-RC_TEST_STEP(assemble, zpauto_allocation_refusals, fix)
+RC_TEST_STEP(assemble, za_auto_allocation_refusals, fix)
 {
     // The certainty contract: rather than emit code it cannot prove correct, the allocator errors and points
     // at the fix. Each of these MUST fail the assemble.
 
     // A variable FRESHLY written (STA cnt) then held live across the recursive call is a per-level value: each
     // level wants its own byte, which one static address cannot give. (Merely reading / accumulating it across
-    // the recursion is fine - see zpauto_recursion_shared_vs_per_level.)
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .r { ZPAUTO1 cnt : STA cnt : JSR r : LDA cnt : RTS }")
-                  == error_type_zpauto_recursion);
+    // the recursion is fine - see za_auto_recursion_shared_vs_per_level.)
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : .r { ZA_AUTO1 cnt : STA cnt : JSR r : LDA cnt : RTS }")
+                  == error_type_za_auto_recursion);
 
     // A computed / indirect jump reaches code the CFG cannot follow while a variable is in play - refuse and
     // ask for an annotation. The vector must be one of OUR labels: a cell we assembled holds a run-time value
     // that may point back into our own code. (A CONSTANT vector - JMP (&FFFC) - is a fixed OS vector and
-    // reads as a clean exit instead; see zpauto_external_calls_and_jumps.)
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : JMP (vec) : .vec EQUW &2000")
-                  == error_type_zpauto_computed_flow);
+    // reads as a clean exit instead; see za_auto_external_calls_and_jumps.)
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : JMP (vec) : .vec EQUW &2000")
+                  == error_type_za_auto_computed_flow);
 
     // More simultaneously-live variables than reserved bytes is a spill: p and q overlap but only &70 is free.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 p, q : STA p : STA q : LDA p : LDA q : RTS")
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 p, q : STA p : STA q : LDA p : LDA q : RTS")
                   == error_type_zeropage_full);
 }
 
-RC_TEST_STEP(assemble, zpauto_recursion_shared_vs_per_level, fix)
+RC_TEST_STEP(assemble, za_auto_recursion_shared_vs_per_level, fix)
 {
     // Recursion is only fatal for a value the cycle FRESHLY writes and then needs back after the child returns.
     // A value merely read or accumulated (DEC/INC) across the recursion rides on one shared byte quite happily -
@@ -4637,7 +4637,7 @@ RC_TEST_STEP(assemble, zpauto_recursion_shared_vs_per_level, fix)
     // the caller (outside the recursion) and only ever DEC'd inside `down`, while `keep` sits live across the
     // whole descent. Neither is freshly assigned within the cycle, so allocation proceeds; because both are live
     // across the call they interfere with `down`'s footprint and take distinct bytes.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, n\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, n\n"
                       "LDA #10 : STA keep : LDA #5 : STA n : JSR down\n"
                       "LDA keep : CLC : ADC n : RTS\n"
                       ".down { DEC n : BEQ done : JSR down : .done RTS }") != 0);
@@ -4648,111 +4648,111 @@ RC_TEST_STEP(assemble, zpauto_recursion_shared_vs_per_level, fix)
     // Contrast (the "would infinitely allocate" case, REFUSED): `level` is written afresh at every frame and
     // read back after the child returns, so each recursion level genuinely needs its OWN byte - unbounded in a
     // fixed zero page. This is the shape a real per-level temp (a factorial accumulator, a saved cursor) takes.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .descend { ZPAUTO1 level : STA level : JSR descend : LDA level : RTS }")
-                  == error_type_zpauto_recursion);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : .descend { ZA_AUTO1 level : STA level : JSR descend : LDA level : RTS }")
+                  == error_type_za_auto_recursion);
 
     // The same discrimination holds for MUTUAL recursion: the footprint walk spans the whole cycle (a calls b,
     // b calls a), so a fresh write anywhere in it is seen. Per-level `v` (STA in a, live across a's JSR b) is
     // refused; a shared counter DEC'd across the same cycle is allowed.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : .a { ZPAUTO1 v : STA v : JSR b : LDA v : RTS } : .b { JSR a : RTS }")
-                  == error_type_zpauto_recursion);
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, n\n"
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : .a { ZA_AUTO1 v : STA v : JSR b : LDA v : RTS } : .b { JSR a : RTS }")
+                  == error_type_za_auto_recursion);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, n\n"
                       "LDA #10 : STA keep : LDA #5 : STA n : JSR a : LDA keep : CLC : ADC n : RTS\n"
                       ".a { DEC n : BEQ done : JSR b : .done RTS } : .b { JSR a : RTS }") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
-RC_TEST_STEP(assemble, zpauto_indexed_access_warns, fix)
+RC_TEST_STEP(assemble, za_auto_indexed_access_warns, fix)
 {
     // Indexed / indexed-indirect access into an auto-variable (var,X / var,Y / (var,X)) touches var+index at
-    // run time - the intended way to walk a ZPAUTO table. The allocator reserves the whole variable and marks
+    // run time - the intended way to walk a ZA_AUTO table. The allocator reserves the whole variable and marks
     // it all live on the access, so an index within its width is sound; the run-time index itself is unprovable,
     // so it is an OPT-IN warning (silent until the level is raised), not a refusal. The variable still allocates.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, table : STA table : LDA table,X : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, table : STA table : LDA table,X : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);              // it assembles: no error-severity diagnostic
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_indexed_access));  // ... but the opt-in warning is recorded
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_indexed_access)); // ... but the opt-in warning is recorded
     RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);                       // and the table is placed as usual
 
     // `v,Y` (widens to absolute indexed, no zp form) and `(p,X)` (indexed-indirect) are likewise warned, not refused.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, v : STA v : LDA v,Y : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, v : STA v : LDA v,Y : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_indexed_access));
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, p : STA p : LDA (p,X) : RTS") != 0);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_indexed_access));
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, p : STA p : LDA (p,X) : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_indexed_access));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_indexed_access));
 
     // The CONSTANT base of an indexed access is still bounds-checked (Guard 0b): `t+4,X` on a 4-wide table is
     // refused because the base is already off the end, before any index is added.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 4, t : LDA t+4,X : RTS") == error_type_zpauto_out_of_bounds);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, t : LDA t+4,X : RTS") == error_type_za_auto_out_of_bounds);
 
-    // Pointer width is unchanged: a 1-byte ZPAUTO1 dereferenced as a pointer ((v),Y / (v)) is still refused -
+    // Pointer width is unchanged: a 1-byte ZA_AUTO1 dereferenced as a pointer ((v),Y / (v)) is still refused -
     // that is a compile-time-known 2-byte access off a 1-byte variable, nothing to do with a run-time index.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA (v),Y") == error_type_zpauto_narrow_pointer);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : STA (v),Y") == error_type_zpauto_narrow_pointer);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : LDA (v),Y") == error_type_za_auto_narrow_pointer);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA (v),Y") == error_type_za_auto_narrow_pointer);
 
     // The envelope-safe forms stay legal AND raise no warning: direct `var`, the `var+1` hi byte, and the
-    // whole-pointer `(var),Y` dereference of a 2-byte ZPAUTO2 (only the DATA is indexed by Y; the pointer is direct).
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v") != 0);
+    // whole-pointer `(var),Y` dereference of a 2-byte ZA_AUTO2 (only the DATA is indexed by Y; the pointer is direct).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_indexed_access));
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 p : STA p : STA p+1 : LDA (p),Y") != 0);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO2 p : STA p : STA p+1 : LDA (p),Y") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_indexed_access));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));
 }
 
-RC_TEST_STEP(assemble, zpauto_generic_width, fix)
+RC_TEST_STEP(assemble, za_auto_generic_width, fix)
 {
-    // ZPAUTO <n>, names declares n-byte variables (a table / struct); ZPAUTO1 / ZPAUTO2 are the 1/2-byte sugar.
+    // ZA_AUTO <n>, names declares n-byte variables (a table / struct); ZA_AUTO1 / ZA_AUTO2 are the 1/2-byte sugar.
     // A 4-byte table takes 4 consecutive reserved bytes; a 1-byte var that interferes packs after it, at +4.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 4, table : ZPAUTO1 flag\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, table : ZA_AUTO1 flag\n"
                       "STA table : STA table+3 : LDA flag : LDA table : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "flag"),  ==, 0x74);   // forced past the 4-byte table's span
 
     // The count is an ordinary constant expression.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 2+2, big : STA big+3 : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 2+2, big : STA big+3 : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 
     // Bounds: var+n within the width is fine; reaching past the end is refused (the byte belongs to nobody /
-    // a neighbour). This also now catches a ZPAUTO1 `var+1` hi-byte access that used to slip through silently.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 4, t : STA t+4 : RTS") == error_type_zpauto_out_of_bounds);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 v : LDA v+1 : RTS")   == error_type_zpauto_out_of_bounds);
+    // a neighbour). This also now catches a ZA_AUTO1 `var+1` hi-byte access that used to slip through silently.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, t : STA t+4 : RTS") == error_type_za_auto_out_of_bounds);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : LDA v+1 : RTS")   == error_type_za_auto_out_of_bounds);
 
-    // A pointer needs 2 bytes AT THE OFFSET, not exactly a ZPAUTO2: the first two bytes of a wider table work.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO 3, t : STA t : STA t+1 : LDA (t),Y : RTS") != 0);
+    // A pointer needs 2 bytes AT THE OFFSET, not exactly a ZA_AUTO2: the first two bytes of a wider table work.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 3, t : STA t : STA t+1 : LDA (t),Y : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     // ... but a pointer straddling the top of the table is out of bounds ((t+2),Y reads t+2, t+3 of a 3-wide t).
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 3, t : LDA (t+2),Y : RTS") == error_type_zpauto_out_of_bounds);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 3, t : LDA (t+2),Y : RTS") == error_type_za_auto_out_of_bounds);
 
     // A count outside 1..256 is rejected.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 0, x : STA x")   == error_type_zpauto_bad_width);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO 300, x : STA x") == error_type_zpauto_bad_width);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 0, x : STA x")   == error_type_za_auto_bad_width);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 300, x : STA x") == error_type_za_auto_bad_width);
 }
 
-RC_TEST_STEP(assemble, zpauto_layout_must_not_collide, fix)
+RC_TEST_STEP(assemble, za_auto_layout_must_not_collide, fix)
 {
     // The flow analysis identifies a block by (section, pc), so two sections sharing an address are distinct.
     // The ONLY collision left is two instructions at one address WITHIN a section (an org rewind).
 
     // A section with an explicit org is fine - the var still allocates.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : SECTION s, org=&2000 : STA v : LDA v : RTS : ENDSECTION") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : SECTION s, org=&2000 : STA v : LDA v : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
 
     // Two sections at DIFFERENT addresses are fine, and their variables reuse the same reserved byte (no flow
     // connects them, so they do not interfere).
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v, w\n"
                       "SECTION a, org=&2000 : STA v : LDA v : RTS : ENDSECTION\n"
                       "SECTION b, org=&3000 : STA w : LDA w : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);
 
-    // The paged-bank case: two sections loaded to the SAME address (coexisting banks) now coexist under ZPAUTO
+    // The paged-bank case: two sections loaded to the SAME address (coexisting banks) now coexist under ZA_AUTO
     // - the (section, pc) key tells the two banks apart, so this is no longer refused. Each bank's variable
     // reuses the same reserved byte, since no flow connects the banks.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v, w\n"
                       "SECTION a, org=&8000 : STA v : LDA v : RTS : ENDSECTION\n"
                       "SECTION b, org=&8000 : STA w : LDA w : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
@@ -4764,14 +4764,14 @@ RC_TEST_STEP(assemble, zpauto_layout_must_not_collide, fix)
     // monotonic. cfg_build asserts that invariant in debug builds; there is no same-section-collision error.)
 }
 
-RC_TEST_STEP(assemble, zpauto_var_live_across_cross_section_call, fix)
+RC_TEST_STEP(assemble, za_auto_var_live_across_cross_section_call, fix)
 {
     // A variable held live across a JSR into ANOTHER section is fully supported. The call resolves by the
     // target LABEL (`sub` lives in `bank`, so the edge crosses the section - a bare address never could), the
     // callee's footprint is computed across the boundary, and the live-across variable is kept clear of it.
     // `keep` is written, then read AFTER the call into `bank`; `bank`'s routine touches `tmp`. So keep is live
     // across the call, must interfere with tmp, and takes a DIFFERENT byte rather than sharing one.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, tmp\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, tmp\n"
                       "SECTION main, org=&1900 : STA keep : JSR sub : LDA keep : RTS : ENDSECTION\n"
                       "SECTION bank, org=&8000 : .sub : STA tmp : LDA tmp : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
@@ -4779,27 +4779,27 @@ RC_TEST_STEP(assemble, zpauto_var_live_across_cross_section_call, fix)
 
     // For contrast: with NOTHING live across the same cross-section call, keep and tmp DO share a byte - the
     // interference only exists because a value spanned the call, not because the call crosses a section.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, tmp\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, tmp\n"
                       "SECTION main, org=&1900 : STA keep : LDA keep : JSR sub : RTS : ENDSECTION\n"
                       "SECTION bank, org=&8000 : .sub : STA tmp : LDA tmp : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, zp_addr(&fix->r, "tmp"));   // nothing spans the call -> reuse
 }
 
-RC_TEST_STEP(assemble, zpauto_unreachable_prunes_dead_edge, fix)
+RC_TEST_STEP(assemble, za_auto_unreachable_prunes_dead_edge, fix)
 {
-    // UNREACHABLE tells the allocator an always-taken branch cannot fall through. `hot` (used on the taken
+    // ZA_UNREACHABLE tells the allocator an always-taken branch cannot fall through. `hot` (used on the taken
     // path) and `cold` (used only on the never-taken fall-through) would otherwise both be live across the
     // branch and interfere - two variables, but only &70 reserved, so a spill.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 hot, cold\n"
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 hot, cold\n"
                       "STA hot : BNE taken : LDA cold : RTS\n"
                       ".taken\n"
                       "LDA hot : RTS") == error_type_zeropage_full);
 
-    // With UNREACHABLE after the branch, the dead fall-through edge is pruned: cold is no longer live across
+    // With ZA_UNREACHABLE after the branch, the dead fall-through edge is pruned: cold is no longer live across
     // the branch, hot and cold no longer interfere, and they share the single reserved byte.
-    uint32_t passes = ASM("ZPRESERVE &70 : ZPAUTO1 hot, cold\n"
-                          "STA hot : BNE taken : UNREACHABLE : LDA cold : RTS\n"
+    uint32_t passes = ASM("ZA_POOL &70 : ZA_AUTO1 hot, cold\n"
+                          "STA hot : BNE taken : ZA_UNREACHABLE : LDA cold : RTS\n"
                           ".taken\n"
                           "LDA hot : RTS");
     RC_CHECK_TRUE(passes != 0);
@@ -4808,17 +4808,17 @@ RC_TEST_STEP(assemble, zpauto_unreachable_prunes_dead_edge, fix)
     RC_CHECK(zp_addr(&fix->r, "cold"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, zpauto_multi_entry_multi_exit, fix)
+RC_TEST_STEP(assemble, za_auto_multi_entry_multi_exit, fix)
 {
     // A single braced block with TWO entry points (each its own JSR target) and several RTS exits, including
     // the BCC over : RTS : .over early-out shape. Routines are recovered from the CFG, so this is not one
     // routine with one entry - it is two, and both allocate cleanly. v (entry1) and w (entry2) never overlap,
     // so they share &70.
-    uint32_t p = ASM("ZPRESERVE &70..&7F\n"
+    uint32_t p = ASM("ZA_POOL &70..&7F\n"
                      "JSR routine.entry1 : JSR routine.entry2 : RTS\n"
                      ".routine {\n"
-                     "  .entry1 : ZPAUTO1 v : STA v : LDA v : RTS\n"
-                     "  .entry2 : ZPAUTO1 w : STA w : BCC over : RTS\n"
+                     "  .entry1 : ZA_AUTO1 v : STA v : LDA v : RTS\n"
+                     "  .entry2 : ZA_AUTO1 w : STA w : BCC over : RTS\n"
                      "  .over : LDA w : RTS\n"
                      "}");
     RC_CHECK_TRUE(p != 0);
@@ -4827,61 +4827,61 @@ RC_TEST_STEP(assemble, zpauto_multi_entry_multi_exit, fix)
     RC_CHECK(zp_addr(&fix->r, "routine.w"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, zpauto_control_flow_crosses_scopes, fix)
+RC_TEST_STEP(assemble, za_auto_control_flow_crosses_scopes, fix)
 {
     // Scopes name; the CFG is recovered from real branches, not braces. Here `n` is written inside .work and is
     // live across a BEQ that leaves the block for the shared .done label in another scope (referenced there by
     // its dotted path - naming IS by scope). Liveness follows the edge across the brace, so the allocation is
     // still correct and `n` settles on &70. A statically-known target may cross a scope boundary freely.
-    uint32_t p = ASM("ZPRESERVE &70..&7F\n"
-                     ".work { ZPAUTO1 n : STA n : BEQ done : LDA n : STA n }\n"
+    uint32_t p = ASM("ZA_POOL &70..&7F\n"
+                     ".work { ZA_AUTO1 n : STA n : BEQ done : LDA n : STA n }\n"
                      ".done : LDA work.n : RTS");
     RC_CHECK_TRUE(p != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "work.n"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, zpauto_cancall_bounds_dispatched_call, fix)
+RC_TEST_STEP(assemble, za_auto_za_cancall_bounds_dispatched_call, fix)
 {
     // Baseline: the JSR is taken at its literal target (handlerA) alone, so `keep` (live across the call)
     // interferes only with handlerA's footprint. handlerB is never called, so its local is a free agent and
     // reuses keep's byte.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                       "STA keep : JSR handlerA : LDA keep : RTS\n"
-                      ".handlerA { ZPAUTO1 ha : STA ha : LDA ha : RTS }\n"
-                      ".handlerB { ZPAUTO1 hb : STA hb : LDA hb : RTS }") != 0);
+                      ".handlerA { ZA_AUTO1 ha : STA ha : LDA ha : RTS }\n"
+                      ".handlerB { ZA_AUTO1 hb : STA hb : LDA hb : RTS }") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"),        ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "handlerB.hb"), ==, 0x70);   // unseen callee -> reuses keep's byte
 
-    // CANCALL declares the call may reach handlerA OR handlerB (a self-modified / dispatched JSR). Now its
+    // ZA_CANCALL declares the call may reach handlerA OR handlerB (a self-modified / dispatched JSR). Now its
     // footprint covers both, keep interferes with handlerB.hb too, and hb is forced off keep's byte.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
-                          "STA keep : JSR handlerA : CANCALL handlerA, handlerB : LDA keep : RTS\n"
-                          ".handlerA { ZPAUTO1 ha : STA ha : LDA ha : RTS }\n"
-                          ".handlerB { ZPAUTO1 hb : STA hb : LDA hb : RTS }");
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                          "STA keep : JSR handlerA : ZA_CANCALL handlerA, handlerB : LDA keep : RTS\n"
+                          ".handlerA { ZA_AUTO1 ha : STA ha : LDA ha : RTS }\n"
+                          ".handlerB { ZA_AUTO1 hb : STA hb : LDA hb : RTS }");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"),        ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "handlerB.hb"), !=, 0x70);   // now inside the call footprint
 }
 
-RC_TEST_STEP(assemble, zpauto_canjump_bounds_computed_jump, fix)
+RC_TEST_STEP(assemble, za_auto_za_canjump_bounds_computed_jump, fix)
 {
     // An indirect JMP through a vector WE assembled is refused with a variable live across it: the cell's
     // run-time contents may point back into our own code, so the CFG cannot prove `keep` survives. (Only an
     // in-program vector is computed flow - a constant vector cell like JMP (&FFFC) lies outside the program
-    // and reads as a clean exit; see zpauto_external_calls_and_jumps.)
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+    // and reads as a clean exit; see za_auto_external_calls_and_jumps.)
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                       "STA keep : JMP (vector)\n"
                       ".hA : LDA keep : RTS\n"
                       ".hB : LDA keep : RTS\n"
-                      ".vector EQUW hA") == error_type_zpauto_computed_flow);
+                      ".vector EQUW hA") == error_type_za_auto_computed_flow);
 
-    // CANJUMP declares the jump table's targets, so the CFG wires each as a real successor edge: keep is live
+    // ZA_CANJUMP declares the jump table's targets, so the CFG wires each as a real successor edge: keep is live
     // into both arms and allocates cleanly onto &70.
-    uint32_t p = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
-                     "STA keep : JMP (vector) : CANJUMP hA, hB\n"
+    uint32_t p = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                     "STA keep : JMP (vector) : ZA_CANJUMP hA, hB\n"
                      ".hA : LDA keep : RTS\n"
                      ".hB : LDA keep : RTS\n"
                      ".vector EQUW hA");
@@ -4893,8 +4893,8 @@ RC_TEST_STEP(assemble, zpauto_canjump_bounds_computed_jump, fix)
     // OS. That arm reads as a clean exit (external code touches none of our variables), the in-program arm is
     // wired as usual, and keep still allocates. This is how you tell Baron a vector you own can hold an
     // external address - no separate annotation needed.
-    uint32_t q = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
-                     "STA keep : JMP (vector) : CANJUMP hA, &FFEE\n"
+    uint32_t q = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                     "STA keep : JMP (vector) : ZA_CANJUMP hA, &FFEE\n"
                      ".hA : LDA keep : RTS\n"
                      ".vector EQUW hA");
     RC_CHECK_TRUE(q != 0);
@@ -4902,19 +4902,19 @@ RC_TEST_STEP(assemble, zpauto_canjump_bounds_computed_jump, fix)
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, zpauto_rts_dispatch_canjump, fix)
+RC_TEST_STEP(assemble, za_auto_rts_dispatch_za_canjump, fix)
 {
-    // The RTS-dispatch trick: push a target address minus one, RTS into it. CANJUMP after the RTS marks it
+    // The RTS-dispatch trick: push a target address minus one, RTS into it. ZA_CANJUMP after the RTS marks it
     // as the jump it really is, wiring the declared edge - so v, consumed by the dispatch target, is live
     // through the pushes and the unrelated temp w cannot take its byte. (Unannotated, an RTS-dispatch is
-    // indistinguishable from a real return and remains a trusted precondition, like a wrong UNREACHABLE.)
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+    // indistinguishable from a real return and remains a trusted precondition, like a wrong ZA_UNREACHABLE.)
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 v, w\n"
                           "STA v\n"
                           "LDA #HI(target-1) : PHA\n"
                           "LDA #LO(target-1) : PHA\n"
                           "STA w : LDA w\n"
                           "RTS\n"
-                          "CANJUMP target\n"
+                          "ZA_CANJUMP target\n"
                           ".target : LDA v : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
@@ -4924,10 +4924,10 @@ RC_TEST_STEP(assemble, zpauto_rts_dispatch_canjump, fix)
     // The dispatch composes with the call analyses: a routine that RTS-dispatches into a helper has the
     // helper in its extent, so a caller variable live across the JSR is kept off the helper's local, and
     // the routine's returning exit is the HELPER's RTS, not the dispatch.
-    uint32_t q = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+    uint32_t q = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                      "STA keep : JSR disp : LDA keep : RTS\n"
-                     ".disp { LDA #HI(helper-1) : PHA : LDA #LO(helper-1) : PHA : RTS : CANJUMP helper }\n"
-                     ".helper { ZPAUTO1 loc : STA loc : LDA loc : RTS }");
+                     ".disp { LDA #HI(helper-1) : PHA : LDA #LO(helper-1) : PHA : RTS : ZA_CANJUMP helper }\n"
+                     ".helper { ZA_AUTO1 loc : STA loc : LDA loc : RTS }");
     RC_CHECK_TRUE(q != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"),       ==, 0x70);
@@ -4935,21 +4935,21 @@ RC_TEST_STEP(assemble, zpauto_rts_dispatch_canjump, fix)
 
     // An external arm - RTS-dispatching into the OS - is a clean exit that returns to our caller through
     // the OS routine's own RTS, so keep survives it with nothing to dodge.
-    uint32_t r = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+    uint32_t r = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                      "STA keep : JSR disp : LDA keep : RTS\n"
-                     ".disp { LDA #HI(&FFEE-1) : PHA : LDA #LO(&FFEE-1) : PHA : RTS : CANJUMP &FFEE }");
+                     ".disp { LDA #HI(&FFEE-1) : PHA : LDA #LO(&FFEE-1) : PHA : RTS : ZA_CANJUMP &FFEE }");
     RC_CHECK_TRUE(r != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
 
     // The PHP:RTI flavour (address pushed unadjusted, RTI pops the status byte first) is the same flow
     // class as RTS, so the annotation works identically.
-    uint32_t s = ASM("ZPRESERVE &70..&7F : ZPAUTO1 v, w\n"
+    uint32_t s = ASM("ZA_POOL &70..&7F : ZA_AUTO1 v, w\n"
                      "STA v\n"
                      "LDA #HI(target) : PHA : LDA #LO(target) : PHA : PHP\n"
                      "STA w : LDA w\n"
                      "RTI\n"
-                     "CANJUMP target\n"
+                     "ZA_CANJUMP target\n"
                      ".target : LDA v : RTS");
     RC_CHECK_TRUE(s != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
@@ -4957,13 +4957,13 @@ RC_TEST_STEP(assemble, zpauto_rts_dispatch_canjump, fix)
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
 }
 
-RC_TEST_STEP(assemble, zpauto_partial_write_tracks_bytes, fix)
+RC_TEST_STEP(assemble, za_auto_partial_write_tracks_bytes, fix)
 {
     // The demo.6502 bug distilled: ptr's MSB is set once up front; the loop rewrites only the LSB before
     // each deref. That store redefines one byte - the MSB flows through it - so ptr must stay live around
     // the loop and the loop temp may not overlap it. (Before per-byte liveness the LSB store read as a
     // full kill, tmp landed on ptr's bytes, and the MSB was clobbered at run time.)
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 tmp\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : ZA_AUTO1 tmp\n"
                           "LDA #&39 : STA ptr+1\n"
                           ".loop\n"
                           "LDA #0 : STA ptr\n"
@@ -4978,7 +4978,7 @@ RC_TEST_STEP(assemble, zpauto_partial_write_tracks_bytes, fix)
     // The flip side: partial writes accumulate across the width, so a pointer FULLY rewritten - both
     // bytes, one store each - genuinely dies at the rewrite, and a temp that expires beforehand still
     // shares its bytes.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr : ZPAUTO1 tmp\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : ZA_AUTO1 tmp\n"
                       "STA tmp : LDA tmp\n"
                       "STA ptr : LDA #&39 : STA ptr+1\n"
                       "LDA (ptr),Y : RTS") != 0);
@@ -4987,44 +4987,44 @@ RC_TEST_STEP(assemble, zpauto_partial_write_tracks_bytes, fix)
     RC_CHECK(zp_addr(&fix->r, "tmp"), ==, 0x70);   // dead before the rewrite begins - reuse is safe
 }
 
-RC_TEST_STEP(assemble, zpauto_unused_is_warned_and_undefined, fix)
+RC_TEST_STEP(assemble, za_auto_unused_is_warned_and_undefined, fix)
 {
-    // A ZPAUTO no instruction touches is warned (severity_warning - shown by default), given NO address,
+    // A ZA_AUTO no instruction touches is warned (severity_warning - shown by default), given NO address,
     // and its binding REMOVED - as if the declaration were not there. `gap` sits between two used vars:
     // with it skipped, y packs at &71 (previously gap pinned &71 to itself and pushed y to &72).
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 x, gap, y\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, gap, y\n"
                           "STA x : STA y : LDA x : LDA y : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // a warning, not a refusal
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unused));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_unused));
     RC_CHECK(zp_addr(&fix->r, "x"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "y"), ==, 0x71);                // gap took nothing
     RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("gap"))));   // and is not defined
 
     // A fully used trio raises no such warning.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 x, y\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, y\n"
                       "STA x : STA y : LDA x : LDA y : RTS") != 0);
-    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unused));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_unused));
 
     // An unused declaration inside a FOR body is one warning, not one per iteration (the instantiations
     // share a def cursor).
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : FOR i = 1..8 : ZPAUTO1 spare : NEXT : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : FOR i = 1..8 : ZA_AUTO1 spare : NEXT : RTS") != 0);
     uint32_t warnings = 0;
     for (uint32_t i = 0; i < fix->r.diagnostics.num; i++) {
-        if (rc_view_diagnostic_get(fix->r.diagnostics, i).code == error_type_zpauto_unused) {
+        if (rc_view_diagnostic_get(fix->r.diagnostics, i).code == error_type_za_auto_unused) {
             warnings++;
         }
     }
     RC_CHECK(warnings, ==, 1u);
 }
 
-RC_TEST_STEP(assemble, zpauto_external_calls_and_jumps, fix)
+RC_TEST_STEP(assemble, za_auto_external_calls_and_jumps, fix)
 {
     // A call or jump to a CONSTANT destination that matches nothing we assembled leaves the program - an OS
-    // or ROM entry. ZPRESERVE names precisely the bytes nothing outside the program uses, so external code
-    // cannot touch a ZPAUTO: the call contributes an EMPTY footprint and needs no CANCALL. Here `keep` rides
+    // or ROM entry. ZA_POOL names precisely the bytes nothing outside the program uses, so external code
+    // cannot touch a ZA_AUTO: the call contributes an EMPTY footprint and needs no ZA_CANCALL. Here `keep` rides
     // straight across JSR &FFEE (OSWRCH) and still allocates.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                           "STA keep : JSR &FFEE : LDA keep : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
@@ -5032,49 +5032,49 @@ RC_TEST_STEP(assemble, zpauto_external_calls_and_jumps, fix)
 
     // The idiomatic named OS entry is the same thing: a `name = expr` constant is not a code label, so the
     // destination still reads as external.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : oswrch = &FFEE : ZPAUTO1 keep\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : oswrch = &FFEE : ZA_AUTO1 keep\n"
                       "STA keep : JSR oswrch : LDA keep : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 
     // An indirect JMP through a CONSTANT vector cell (JMP (&FFFC)) dispatches through memory outside the
     // program: wherever it lands is external code, so the block is a clean exit, not computed flow.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : JMP (&FFFC)") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : JMP (&FFFC)") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 
     // A direct tail-jump out of the program is likewise a clean exit...
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v : STA v : LDA v : JMP &FFEE") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : JMP &FFEE") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 
     // ...and a callee ENDING in an external transfer still has a bounded footprint: sub touches only its own
     // loc (the tail JMP &FFEE contributes nothing), so keep - live across the JSR - is forced off loc's byte
     // and both allocate.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                       "STA keep : JSR sub : LDA keep : RTS\n"
-                      ".sub { ZPAUTO1 loc : STA loc : LDA loc : JMP &FFEE }") != 0);
+                      ".sub { ZA_AUTO1 loc : STA loc : LDA loc : JMP &FFEE }") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"),    ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "sub.loc"), ==, 0x71);
 }
 
-RC_TEST_STEP(assemble, zpauto_macro_local_is_per_invocation, fix)
+RC_TEST_STEP(assemble, za_auto_macro_local_is_per_invocation, fix)
 {
-    // A macro can declare its own ZPAUTO temp without caring where it lands. Each invocation runs in its own
+    // A macro can declare its own ZA_AUTO temp without caring where it lands. Each invocation runs in its own
     // child scope, so each `loc` is a DISTINCT variable (identity = scope + def), exactly like two sibling
     // blocks declaring the same name. Invoked twice, the two disjoint locals both settle on &70.
-    uint32_t passes = ASM("ZPRESERVE &70..&7F : MACRO USE : ZPAUTO1 loc : STA loc : LDA loc : ENDMACRO\n"
+    uint32_t passes = ASM("ZA_POOL &70..&7F : MACRO USE : ZA_AUTO1 loc : STA loc : LDA loc : ENDMACRO\n"
                           "USE\nUSE");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x85, 0x70, 0xA5, 0x70, 0x85, 0x70, 0xA5, 0x70}, 8));
 
     // Likewise inside a FOR body that iterates more than once: each iteration's temp is its own variable.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : FOR i = 0..1 : ZPAUTO1 loc : STA loc : LDA loc : NEXT") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : FOR i = 0..1 : ZA_AUTO1 loc : STA loc : LDA loc : NEXT") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
-RC_TEST(assemble, zpauto_rw_observation)
+RC_TEST(assemble, za_auto_rw_observation)
 {
-    // The final pass records each ZPAUTO-touching instruction into the ZP IR with its read/write class,
+    // The final pass records each ZA_AUTO-touching instruction into the ZP IR with its read/write class,
     // attributed to the right vreg. The IR is internal (not on baron_result yet), so we build a baron
     // directly and read its zeropage. [Stage B1]
     baron_desc desc = (baron_desc) {
@@ -5087,7 +5087,7 @@ RC_TEST(assemble, zpauto_rw_observation)
     {
         baron b = baron_make(&desc);
         uint32_t s = source_files_add_string(&b.source_files, RC_STR("t1"),
-            RC_STR("ZPRESERVE &70..&7F : ZPAUTO1 foo : STA foo : LDA foo : INC foo"));
+            RC_STR("ZA_POOL &70..&7F : ZA_AUTO1 foo : STA foo : LDA foo : INC foo"));
         run_passes(&b, s, desc.scratch);
         RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 3u);
         RC_CHECK((int) zeropage_insn_get(&b.zeropage, 0).rw, ==, (int) vref_write);
@@ -5103,7 +5103,7 @@ RC_TEST(assemble, zpauto_rw_observation)
     {
         baron b = baron_make(&desc);
         uint32_t s = source_files_add_string(&b.source_files, RC_STR("t2"),
-            RC_STR("ZPRESERVE &70..&7F : ZPAUTO2 ptr : STA ptr : STA ptr+1 : LDA (ptr),Y : STA (ptr),Y"));
+            RC_STR("ZA_POOL &70..&7F : ZA_AUTO2 ptr : STA ptr : STA ptr+1 : LDA (ptr),Y : STA (ptr),Y"));
         run_passes(&b, s, desc.scratch);
         RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 4u);
         RC_CHECK((int) zeropage_insn_get(&b.zeropage, 0).rw, ==, (int) vref_write);   // STA ptr
@@ -5116,11 +5116,11 @@ RC_TEST(assemble, zpauto_rw_observation)
     }
 
     // Every instruction is recorded (the CFG needs the whole stream), but an ordinary symbol or a literal
-    // address in operand position attributes to NO vreg - only ZPAUTO operands do.
+    // address in operand position attributes to NO vreg - only ZA_AUTO operands do.
     {
         baron b = baron_make(&desc);
         uint32_t s = source_files_add_string(&b.source_files, RC_STR("t3"),
-            RC_STR("ZPRESERVE &70..&7F : label = &50 : LDA label : LDA &2000 : LDA #7"));
+            RC_STR("ZA_POOL &70..&7F : label = &50 : LDA label : LDA &2000 : LDA #7"));
         run_passes(&b, s, desc.scratch);
         RC_CHECK(zeropage_insn_count(&b.zeropage), ==, 3u);   // all three LDAs are recorded...
         for (uint32_t i = 0; i < 3; i++) {
@@ -5133,7 +5133,7 @@ RC_TEST(assemble, zpauto_rw_observation)
     rc_arena_deinit(&desc.scratch);
 }
 
-RC_TEST(assemble, zpauto_liveness_end_to_end)
+RC_TEST(assemble, za_auto_liveness_end_to_end)
 {
     // The whole Stage C chain over REAL assembler output: parse the spec's `mul` routine, take the recorded
     // IR straight off b.zeropage, build the CFG and run liveness, and confirm the two facts the analysis
@@ -5149,7 +5149,7 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
 
     baron b = baron_make(&desc);
     uint32_t s = source_files_add_string(&b.source_files, RC_STR("mul"),
-        RC_STR("ZPRESERVE &70..&7F : ZPAUTO1 in1, tmp, out1\n"
+        RC_STR("ZA_POOL &70..&7F : ZA_AUTO1 in1, tmp, out1\n"
                ".mul { LDA in1 : ASL A : STA tmp : LDA in1 : CLC : ADC tmp : STA out1 : RTS }"));
     run_passes(&b, s, desc.scratch);
 
@@ -5177,126 +5177,126 @@ RC_TEST(assemble, zpauto_liveness_end_to_end)
     rc_arena_deinit(&desc.scratch);
 }
 
-RC_TEST_STEP(assemble, zpentry_parses_and_is_reserved, fix)
+RC_TEST_STEP(assemble, za_entry_parses_and_is_reserved, fix)
 {
     // The marker emits nothing, so it records the label's pc whichever side of the label it sits.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 v : .main : ZPENTRY : STA v : LDA v : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : ZA_AUTO1 v : .main : ZA_ENTRY : STA v : LDA v : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unreachable));
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 v : ZPENTRY : .main : STA v : LDA v : RTS") != 0);
-    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unreachable));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_unreachable));
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : ZA_AUTO1 v : ZA_ENTRY : .main : STA v : LDA v : RTS") != 0);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_unreachable));
 
     // The names are statement keywords now, so a label cannot be spelled after them...
-    RC_CHECK_TRUE(ERR(".zpentry RTS") == error_type_expected_label_name);
+    RC_CHECK_TRUE(ERR(".za_entry RTS") == error_type_expected_label_name);
     // ...and a marker takes no operand.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPENTRY 5 : RTS") == error_type_expected_separator);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_ENTRY 5 : RTS") == error_type_expected_separator);
 
-    // Without ZPRESERVE the feature is off and the marker is inert, like the other annotations.
-    RC_CHECK_TRUE(ASM("ZPENTRY : LDA #1 : RTS") != 0);
+    // Without ZA_POOL the feature is off and the marker is inert, like the other annotations.
+    RC_CHECK_TRUE(ASM("ZA_ENTRY : LDA #1 : RTS") != 0);
     RC_CHECK(fix->r.diagnostics.num, ==, 0u);
 }
 
-RC_TEST_STEP(assemble, zpentry_marks_no_code_errors, fix)
+RC_TEST_STEP(assemble, za_entry_marks_no_code_errors, fix)
 {
     // A marker at a pc where no instruction starts declares nothing - the end of the code...
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 v : .main STA v : LDA v : RTS : ZPENTRY")
-                  == error_type_zpentry_no_code);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 v : .main STA v : LDA v : RTS : ZA_ENTRY")
+                  == error_type_za_entry_no_code);
     // ...or a run of data (EQUB records no instruction).
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 v : .main STA v : LDA v : RTS\nZPENTRY : EQUB 1")
-                  == error_type_zpentry_no_code);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 v : .main STA v : LDA v : RTS\nZA_ENTRY : EQUB 1")
+                  == error_type_za_entry_no_code);
 
     // Mid-routine the marker is legal but marks THAT pc, so the prefix above it warns - self-diagnosing.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 v : .main STA v : ZPENTRY : LDA v : RTS") != 0);
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unreachable));
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : ZA_AUTO1 v : .main STA v : ZA_ENTRY : LDA v : RTS") != 0);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_unreachable));
 }
 
-RC_TEST_STEP(assemble, zpentry_replaces_default_roots, fix)
+RC_TEST_STEP(assemble, za_entry_replaces_default_roots, fix)
 {
     // Two routines, nothing calling the second. The default root is the section's first block, so only
     // `other` is off the map.
     #define TWO_ROUTINES(markers1, markers2) \
-        "ZPRESERVE &70..&7F : ZPAUTO1 u, w\n" \
+        "ZA_POOL &70..&7F : ZA_AUTO1 u, w\n" \
         ".main " markers1 "STA u : LDA u : RTS\n" \
         ".other " markers2 "STA w : LDA w : RTS\n"
     RC_CHECK_TRUE(ASM(TWO_ROUTINES("", "")) != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
 
-    // One ZPENTRY replaces the default: only the marked routine roots, so `other` still warns.
-    RC_CHECK_TRUE(ASM(TWO_ROUTINES("ZPENTRY : ", "")) != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+    // One ZA_ENTRY replaces the default: only the marked routine roots, so `other` still warns.
+    RC_CHECK_TRUE(ASM(TWO_ROUTINES("ZA_ENTRY : ", "")) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
 
     // Marking both covers everything.
-    RC_CHECK_TRUE(ASM(TWO_ROUTINES("ZPENTRY : ", "ZPENTRY : ")) != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK_TRUE(ASM(TWO_ROUTINES("ZA_ENTRY : ", "ZA_ENTRY : ")) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
     #undef TWO_ROUTINES
 }
 
-RC_TEST_STEP(assemble, zpentry_default_roots_per_section, fix)
+RC_TEST_STEP(assemble, za_entry_default_roots_per_section, fix)
 {
     // With no markers anywhere, EACH section's first block roots itself - the multi-section generalisation
     // of the old block-0 presumption, and what keeps the INCSECTION relocation workflow warning-free.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 u, w\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 u, w\n"
                       "SECTION one, org=&2000\n.m1 STA u : LDA u : RTS\nENDSECTION\n"
                       "SECTION two, org=&3000\n.m2 STA w : LDA w : RTS\nENDSECTION\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_keeps_default_roots, fix)
+RC_TEST_STEP(assemble, za_interrupt_keeps_default_roots, fix)
 {
     // A handler declaration says nothing about where the mainline starts, so the defaults stay: main is
     // rooted by its section, the handler by its marker - no warnings from either.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, h\n"
                       ".main STA m : LDA m : RTS\n"
-                      ".irq ZPINTERRUPT : STA h : LDA h : RTI\n") != 0);
+                      ".irq ZA_INTERRUPT : STA h : LDA h : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
 }
 
-RC_TEST_STEP(assemble, zpauto_unreachable_island_warns, fix)
+RC_TEST_STEP(assemble, za_auto_unreachable_island_warns, fix)
 {
     // The shape this whole feature exists to catch: an interrupt handler nothing calls. Its variables are
     // analysed as a disconnected island, so the layout around them is a guess - warn, once.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, h\n"
                       ".main STA m : LDA m : RTS\n"
                       ".irq STA h : LDA h : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);   // a warning, not an error
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
 }
 
-RC_TEST_STEP(assemble, zpauto_unreachable_region_dedup, fix)
+RC_TEST_STEP(assemble, za_auto_unreachable_region_dedup, fix)
 {
     // A multi-block island (branch + join) is ONE region: the head speaks once for all of it.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, h\n"
                       ".main STA m : LDA m : RTS\n"
                       ".irq STA h : BNE done : LDA h\n.done LDA h : RTI\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 1u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
 }
 
-RC_TEST_STEP(assemble, zpauto_unreachable_follows_calls, fix)
+RC_TEST_STEP(assemble, za_auto_unreachable_follows_calls, fix)
 {
-    // Reachability walks call targets and CANJUMP-wired dispatch arms, so a routine only ever entered
+    // Reachability walks call targets and ZA_CANJUMP-wired dispatch arms, so a routine only ever entered
     // through a JSR or a declared jump table is on the map - no warning.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
                       ".main JSR sub : RTS\n"
                       ".sub STA v : LDA v : RTS\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
 
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
-                      ".main STA v : JMP (vector) : CANJUMP hA\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      ".main STA v : JMP (vector) : ZA_CANJUMP hA\n"
                       ".hA LDA v : RTS\n"
                       ".vector EQUW hA\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_pins_comm_var, fix)
+RC_TEST_STEP(assemble, za_interrupt_pins_comm_var, fix)
 {
     // `flag` is written by the mainline and read by the handler - live-in at the handler entry, so it is
     // pinned against EVERYTHING: the mainline may store to it at any instant relative to the handler, so
     // no byte reuse exists for it, the handler's own temp included.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 flag, t, ht\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 flag, t, ht\n"
                       ".main STA flag : STA t : LDA t : RTS\n"
-                      ".irq ZPINTERRUPT : LDA flag : STA ht : LDA ht : RTI\n") != 0);
+                      ".irq ZA_INTERRUPT : LDA flag : STA ht : LDA ht : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     int64_t flag = zp_addr(&fix->r, "flag");
     int64_t t    = zp_addr(&fix->r, "t");
@@ -5307,97 +5307,97 @@ RC_TEST_STEP(assemble, zpinterrupt_pins_comm_var, fix)
     RC_CHECK_TRUE(t != ht);   // footprint isolation separates the handler temp from the mainline temp too
 }
 
-RC_TEST_STEP(assemble, zpentry_input_warns, fix)
+RC_TEST_STEP(assemble, za_entry_input_warns, fix)
 {
-    // A ZPENTRY routine reading `v` before writing it expects its caller to have poked the value - which
+    // A ZA_ENTRY routine reading `v` before writing it expects its caller to have poked the value - which
     // an outside caller cannot do at an allocator-chosen address. Warn, name the variable, allocate anyway.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
-                      ".main ZPENTRY : LDA v : STA v : RTS\n") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      ".main ZA_ENTRY : LDA v : STA v : RTS\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
-    RC_CHECK(diag_payload(&fix->r, error_type_zpentry_input), ==, RC_STR("v"));
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_entry_input), ==, RC_STR("v"));
     RC_CHECK_TRUE(zp_addr(&fix->r, "v") >= 0);
 
     // Written before read is an ordinary temp - nothing to say.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
-                      ".main ZPENTRY : STA v : LDA v : RTS\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      ".main ZA_ENTRY : STA v : LDA v : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 
     // The read may sit a call deep in the routine's extent - the footprint walk still sees it.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
-                      ".main ZPENTRY : JSR sub : RTS\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      ".main ZA_ENTRY : JSR sub : RTS\n"
                       ".sub LDA v : STA v : RTS\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
 }
 
-RC_TEST_STEP(assemble, zpentry_input_ignores_threaded_liveness, fix)
+RC_TEST_STEP(assemble, za_entry_input_ignores_threaded_liveness, fix)
 {
     // `keep` is held live ACROSS an in-program call to the marked routine, so the return edges thread it
     // through and it shows up live-in at the entry - but the routine never reads it unwritten, so it is
     // not an input. The read-before-write walk is exactly what keeps this quiet.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 keep, w\n"
-                      ".main ZPENTRY : STA keep : JSR rout : LDA keep : RTS\n"
-                      ".rout ZPENTRY : STA w : LDA w : RTS\n") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, w\n"
+                      ".main ZA_ENTRY : STA keep : JSR rout : LDA keep : RTS\n"
+                      ".rout ZA_ENTRY : STA w : LDA w : RTS\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 }
 
-RC_TEST_STEP(assemble, zpentry_input_ignores_shared_helper_smear, fix)
+RC_TEST_STEP(assemble, za_entry_input_ignores_shared_helper_smear, fix)
 {
     // The demo shape that broke the first cut of this warning: a helper called both from the entry's
     // pre-init stretch and from inside the main loop. The loop call site's live-after (f, live around
     // the loop) smears through the helper's shared return edge into the entry's unrelated call site,
     // so plain live-in claims f is an input - but f is written before every real read from the entry.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 f\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 f\n"
                       ".mainloop LDA f : JSR shared : JMP mainloop\n"
                       ".shared LDX #0 : RTS\n"
-                      ".entry ZPENTRY : JSR shared : LDA #0 : STA f : JMP mainloop\n"
-                      ".irq ZPINTERRUPT : INC f : RTI\n") != 0);
+                      ".entry ZA_ENTRY : JSR shared : LDA #0 : STA f : JMP mainloop\n"
+                      ".irq ZA_INTERRUPT : INC f : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 
     // Contrast: a genuinely conditional init IS an input - the untaken path reaches the read unwritten.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 f\n"
-                      ".entry ZPENTRY : BEQ over : STA f : .over LDA f : STA f : RTS\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
-    RC_CHECK(diag_payload(&fix->r, error_type_zpentry_input), ==, RC_STR("f"));
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 f\n"
+                      ".entry ZA_ENTRY : BEQ over : STA f : .over LDA f : STA f : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_entry_input), ==, RC_STR("f"));
 }
 
-RC_TEST_STEP(assemble, zpentry_input_is_byte_accurate, fix)
+RC_TEST_STEP(assemble, za_entry_input_is_byte_accurate, fix)
 {
     // Seeding only a pointer's low byte leaves the high byte an input to the deref...
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr\n"
-                      ".main ZPENTRY : LDA #0 : STA ptr : TAY : LDA (ptr),Y : STA ptr+1 : RTS\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 1u);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr\n"
+                      ".main ZA_ENTRY : LDA #0 : STA ptr : TAY : LDA (ptr),Y : STA ptr+1 : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
 
     // ...while seeding both bytes before the deref is a fully-initialised temp.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO2 ptr\n"
-                      ".main ZPENTRY : LDA #0 : STA ptr : STA ptr+1 : TAY : LDA (ptr),Y : STA ptr : RTS\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr\n"
+                      ".main ZA_ENTRY : LDA #0 : STA ptr : STA ptr+1 : TAY : LDA (ptr),Y : STA ptr : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 }
 
-RC_TEST_STEP(assemble, zpentry_input_spares_handlers, fix)
+RC_TEST_STEP(assemble, za_entry_input_spares_handlers, fix)
 {
     // A handler's live-in comm var IS the supported pattern (Guard 3 pins it) - no input warning there...
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 flag\n"
-                      ".main ZPENTRY : STA flag : RTS\n"
-                      ".irq ZPINTERRUPT : LDA flag : RTI\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 flag\n"
+                      ".main ZA_ENTRY : STA flag : RTS\n"
+                      ".irq ZA_INTERRUPT : LDA flag : RTI\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 
-    // ...and a stacked ZPENTRY+ZPINTERRUPT on one pc takes the stricter handler treatment, so the sync
+    // ...and a stacked ZA_ENTRY+ZA_INTERRUPT on one pc takes the stricter handler treatment, so the sync
     // marker stays quiet too.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 flag\n"
-                      ".main ZPENTRY : STA flag : LDA flag : RTS\n"
-                      ".irq ZPENTRY : ZPINTERRUPT : LDA flag : RTI\n") != 0);
-    RC_CHECK(diag_count(&fix->r, error_type_zpentry_input), ==, 0u);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 flag\n"
+                      ".main ZA_ENTRY : STA flag : LDA flag : RTS\n"
+                      ".irq ZA_ENTRY : ZA_INTERRUPT : LDA flag : RTI\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_separates_temps_from_mainline, fix)
+RC_TEST_STEP(assemble, za_interrupt_separates_temps_from_mainline, fix)
 {
     // The control: without the marker the handler is an island, its temp's range overlaps nothing the
     // analysis can see, and first-fit happily packs both temps onto one byte - the silent clobber.
     #define IRQ_TEMPS(marker) \
-        "ZPRESERVE &70..&7F : ZPAUTO1 m, h\n" \
+        "ZA_POOL &70..&7F : ZA_AUTO1 m, h\n" \
         ".main STA m : LDA m : RTS\n" \
         ".irq " marker "STA h : LDA h : RTI\n"
     RC_CHECK_TRUE(ASM(IRQ_TEMPS("")) != 0);
@@ -5405,181 +5405,181 @@ RC_TEST_STEP(assemble, zpinterrupt_separates_temps_from_mainline, fix)
     RC_CHECK(zp_addr(&fix->r, "h"), ==, 0x70);
 
     // With it, the handler's footprint interferes with everything outside - the temps split.
-    RC_CHECK_TRUE(ASM(IRQ_TEMPS("ZPINTERRUPT : ")) != 0);
+    RC_CHECK_TRUE(ASM(IRQ_TEMPS("ZA_INTERRUPT : ")) != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "h"));
     #undef IRQ_TEMPS
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_handler_temps_still_share, fix)
+RC_TEST_STEP(assemble, za_interrupt_handler_temps_still_share, fix)
 {
     // Inside the handler, ordinary liveness still governs: two temps with disjoint ranges share a byte.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h1, h2\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, h1, h2\n"
                       ".main STA m : LDA m : RTS\n"
-                      ".irq ZPINTERRUPT : STA h1 : LDA h1 : STA h2 : LDA h2 : RTI\n") != 0);
+                      ".irq ZA_INTERRUPT : STA h1 : LDA h1 : STA h2 : LDA h2 : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "h1"), ==, zp_addr(&fix->r, "h2"));
     RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "h1"));
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_two_handlers_separated, fix)
+RC_TEST_STEP(assemble, za_interrupt_two_handlers_separated, fix)
 {
     // An NMI can preempt an IRQ handler mid-flight, so two handlers' footprints must not share either -
     // which falls out of each footprint interfering with everything outside itself.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, hi, hn\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, hi, hn\n"
                       ".main STA m : LDA m : RTS\n"
-                      ".irq ZPINTERRUPT : STA hi : LDA hi : RTI\n"
-                      ".nmi ZPINTERRUPT : STA hn : LDA hn : RTI\n") != 0);
+                      ".irq ZA_INTERRUPT : STA hi : LDA hi : RTI\n"
+                      ".nmi ZA_INTERRUPT : STA hn : LDA hn : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(zp_addr(&fix->r, "hi") != zp_addr(&fix->r, "hn"));
     RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "hi"));
     RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "hn"));
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_unknown_call_refused, fix)
+RC_TEST_STEP(assemble, za_interrupt_unknown_call_refused, fix)
 {
     // A handler whose extent reaches computed flow has an unboundable footprint: the pinning cannot be
     // applied soundly, so the marker refuses (alongside Guard 1's own complaint at the jump itself). The
     // remedy is the same as ever - declare the targets.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, h\n"
                       ".main STA m : LDA m : RTS\n"
-                      ".irq ZPINTERRUPT : STA h : LDA h : JMP (vector)\n"
+                      ".irq ZA_INTERRUPT : STA h : LDA h : JMP (vector)\n"
                       ".vector EQUW irq\n") == 0u);
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_across_call));
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_computed_flow));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_across_call));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_computed_flow));
 
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, h\n"
                       ".main STA m : LDA m : RTS\n"
-                      ".irq ZPINTERRUPT : STA h : LDA h : JMP (vector) : CANJUMP done\n"
+                      ".irq ZA_INTERRUPT : STA h : LDA h : JMP (vector) : ZA_CANJUMP done\n"
                       ".done RTI\n"
                       ".vector EQUW done\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
-RC_TEST_STEP(assemble, zpentry_zero_vars_is_noop, fix)
+RC_TEST_STEP(assemble, za_entry_zero_vars_is_noop, fix)
 {
-    // No ZPAUTO variables: nothing to analyse, and a well-placed marker is a clean no-op...
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : .main ZPENTRY : LDA #1 : RTS") != 0);
+    // No ZA_AUTO variables: nothing to analyse, and a well-placed marker is a clean no-op...
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : .main ZA_ENTRY : LDA #1 : RTS") != 0);
     RC_CHECK(fix->r.diagnostics.num, ==, 0u);
     // ...but a marker sitting on nothing is still a static mistake worth refusing.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPENTRY : EQUB 1") == error_type_zpentry_no_code);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_ENTRY : EQUB 1") == error_type_za_entry_no_code);
 }
 
-RC_TEST_STEP(assemble, zpentry_duplicates_and_dual_decl, fix)
+RC_TEST_STEP(assemble, za_entry_duplicates_and_dual_decl, fix)
 {
     // Stacked markers on one pc collapse: one root, one handler record - and the stricter (interrupt)
     // treatment applies. No duplicate diagnostics from the repetition.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
-                      ".main ZPENTRY : ZPENTRY : ZPINTERRUPT : STA v : LDA v : RTS\n") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      ".main ZA_ENTRY : ZA_ENTRY : ZA_INTERRUPT : STA v : LDA v : RTS\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_unused_var_is_inert, fix)
+RC_TEST_STEP(assemble, za_interrupt_unused_var_is_inert, fix)
 {
     // Pinning may aim edges at an unused variable, but unused is decided first and the colourer skips it:
     // still just the unused warning, no address, no spill.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&71 : ZPAUTO1 used, gap\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&71 : ZA_AUTO1 used, gap\n"
                       ".main STA used : LDA used : RTS\n"
-                      ".irq ZPINTERRUPT : LDA used : RTI\n") != 0);
+                      ".irq ZA_INTERRUPT : LDA used : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unused));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_unused));
     RC_CHECK(zp_addr(&fix->r, "used"), ==, 0x70);
     RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("gap"))));
 }
 
-RC_TEST_STEP(assemble, zpinterrupt_handler_also_called, fix)
+RC_TEST_STEP(assemble, za_interrupt_handler_also_called, fix)
 {
     // A handler can be installed in a vector AND called directly (a shared service routine): the call
     // machinery and the pinning are independent and compose. Reached both ways, so no warning either.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 m, h\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 m, h\n"
                       ".main STA m : JSR irq : LDA m : RTS\n"
-                      ".irq ZPINTERRUPT : STA h : LDA h : RTI\n") != 0);
+                      ".irq ZA_INTERRUPT : STA h : LDA h : RTI\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK(diag_count(&fix->r, error_type_zpauto_unreachable), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
     RC_CHECK_TRUE(zp_addr(&fix->r, "m") != zp_addr(&fix->r, "h"));
 }
 
-RC_TEST_STEP(assemble, discard_confines_indexed_array, fix)
+RC_TEST_STEP(assemble, za_discard_confines_indexed_array, fix)
 {
     // The spritescale shape in miniature: two JMP-dispatched alternates on a loop. `arr` is initialised
     // only through `STA arr,X` - no provable byte written - so its reads leak liveness back to the
-    // routine entry and around the loop, through the sibling: without DISCARD, `t` must dodge all of it.
+    // routine entry and around the loop, through the sibling: without ZA_DISCARD, `t` must dodge all of it.
     #define ALTERNATES(marker) \
-        "ZPRESERVE &70..&7F\n" \
+        "ZA_POOL &70..&7F\n" \
         ".loop LDA &90 : BEQ done : LSR A : BCC toa\n" \
         "JMP rb\n" \
         ".toa JMP ra\n" \
         ".done RTS\n" \
-        ".ra { ZPAUTO 4, arr : " marker "LDX #0\n" \
+        ".ra { ZA_AUTO 4, arr : " marker "LDX #0\n" \
         ".l STA arr,X : INX : CPX #4 : BNE l\n" \
         "LDA arr+0 : STA &91 : JMP loop }\n" \
-        ".rb { ZPAUTO1 t : STA t : LDA t : STA &91 : JMP loop }\n"
+        ".rb { ZA_AUTO1 t : STA t : LDA t : STA &91 : JMP loop }\n"
     RC_CHECK_TRUE(ASM(ALTERNATES("")) != 0);
     RC_CHECK(zp_addr(&fix->r, "ra.arr"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "rb.t"), ==, 0x74);     // arr leaks through rb, so t dodges its span
 
-    RC_CHECK_TRUE(ASM(ALTERNATES("DISCARD arr : ")) != 0);
+    RC_CHECK_TRUE(ASM(ALTERNATES("ZA_DISCARD arr : ")) != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "ra.arr"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "rb.t"), ==, 0x70);     // the promise confines arr; t reuses its first byte
     #undef ALTERNATES
 }
 
-RC_TEST_STEP(assemble, discard_operand_errors, fix)
+RC_TEST_STEP(assemble, za_discard_operand_errors, fix)
 {
-    // Only a whole ZPAUTO variable can be discarded: a number, a var+n slice, or a label is refused, an
+    // Only a whole ZA_AUTO variable can be discarded: a number, a var+n slice, or a label is refused, an
     // unknown name defers and errors on the final pass, and the keyword itself is reserved.
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : DISCARD 5") == error_type_discard_needs_var);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : ZPAUTO1 v : STA v : LDA v : DISCARD v+1") == error_type_discard_needs_var);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : .lbl DISCARD lbl") == error_type_discard_needs_var);
-    RC_CHECK_TRUE(ERR("ZPRESERVE &70 : DISCARD nothere") == error_type_undefined_symbol);
-    RC_CHECK_TRUE(ERR(".discard RTS") == error_type_expected_label_name);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_DISCARD 5") == error_type_za_discard_needs_var);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 v : STA v : LDA v : ZA_DISCARD v+1") == error_type_za_discard_needs_var);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : .lbl ZA_DISCARD lbl") == error_type_za_discard_needs_var);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_DISCARD nothere") == error_type_undefined_symbol);
+    RC_CHECK_TRUE(ERR(".za_discard RTS") == error_type_expected_label_name);
 
     // The happy path parses as a comma list, like the other annotations.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 u, w : STA u : LDA u : STA w : LDA w\n"
-                      "DISCARD u, w : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 u, w : STA u : LDA u : STA w : LDA w\n"
+                      "ZA_DISCARD u, w : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
-RC_TEST_STEP(assemble, discard_only_var_is_unused, fix)
+RC_TEST_STEP(assemble, za_discard_only_var_is_unused, fix)
 {
-    // A DISCARD is a promise about a value, not a use of one: a variable nothing else touches is still
+    // A ZA_DISCARD is a promise about a value, not a use of one: a variable nothing else touches is still
     // unused - warned, unplaced, undefined - and the stray marker upsets nothing.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 used, ghost\n"
-                      ".main STA used : LDA used : DISCARD ghost : RTS") != 0);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 used, ghost\n"
+                      ".main STA used : LDA used : ZA_DISCARD ghost : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_zpauto_unused));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_unused));
     RC_CHECK(zp_addr(&fix->r, "used"), ==, 0x70);
     RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("ghost"))));
 }
 
-RC_TEST_STEP(assemble, discard_keeps_annotation_site_binding, fix)
+RC_TEST_STEP(assemble, za_discard_keeps_annotation_site_binding, fix)
 {
-    // CANCALL/CANJUMP bind to the previous INSTRUCTION; a DISCARD in between is a marker, not a site, so
+    // ZA_CANCALL/ZA_CANJUMP bind to the previous INSTRUCTION; a ZA_DISCARD in between is a marker, not a site, so
     // the RTS-dispatch annotation still lands on the RTS - the target stays wired (and so reachable).
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70..&7F : ZPAUTO1 v\n"
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
                       "LDA #0 : PHA : PHA\n"
-                      "RTS : DISCARD v : CANJUMP target\n"
+                      "RTS : ZA_DISCARD v : ZA_CANJUMP target\n"
                       ".target STA v : LDA v : RTS\n") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_FALSE(has_diag(&fix->r, error_type_zpauto_unreachable));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_unreachable));
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
 }
 
-RC_TEST_STEP(assemble, discard_is_must_write_at_the_call, fix)
+RC_TEST_STEP(assemble, za_discard_is_must_write_at_the_call, fix)
 {
     // Inside a JSR-called routine the promise counts as a definite rewrite: the caller's pre-call value
     // dies at the call, so `b1` - alive only between prep's store and the JSR - can share prep's byte.
     #define PREP_CALL(body) \
-        "ZPRESERVE &70..&7F : ZPAUTO1 prep, b1\n" \
+        "ZA_POOL &70..&7F : ZA_AUTO1 prep, b1\n" \
         ".main STA prep : STA b1 : LDA b1 : JSR sub : LDA prep : RTS\n" \
         ".sub " body " RTS\n"
     RC_CHECK_TRUE(ASM(PREP_CALL("STA &90 :")) != 0);
     RC_CHECK(zp_addr(&fix->r, "b1"), ==, 0x71);       // prep is live across the call: no sharing
 
-    RC_CHECK_TRUE(ASM(PREP_CALL("DISCARD prep :")) != 0);
+    RC_CHECK_TRUE(ASM(PREP_CALL("ZA_DISCARD prep :")) != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "prep"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "b1"), ==, 0x70);       // the pre-call value died at the JSR
@@ -5773,11 +5773,11 @@ RC_TEST_STEP(assemble, listing_full_shape, fix)
     fix->desc.verbose = true;   // the listing is opt-in
     // The whole listing format in one program: section framing at the margin (blank line after the
     // close), labels at the margin, instructions and data with address + hex + verbatim source, EQUS
-    // truncated after four bytes, assignments and ZPAUTO allocations echoed at the margin -
-    // and the ZPAUTO crown jewels: the declaration lists as the assignment it became (`var = &70 [auto]`)
+    // truncated after four bytes, assignments and ZA_AUTO allocations echoed at the margin -
+    // and the ZA_AUTO crown jewels: the declaration lists as the assignment it became (`var = &70 [auto]`)
     // and `sta var` shows the ALLOCATED byte (&70), not the placeholder, because the listing pass runs
     // after allocation has rewritten the symbols.
-    RC_CHECK_TRUE(ASM("section main, org=&900\nzpreserve &70..&7F\nzpauto1 var\n.label\nlda #&12\n"
+    RC_CHECK_TRUE(ASM("section main, org=&900\nza_pool &70..&7F\nza_auto1 var\n.label\nlda #&12\n"
                       "sta var\n.inner\nldx #1\nlda var\nrts\nequs \"ABCDEFGH\"\nequb 0\nendsection\nx = 5") != 0);
     RC_CHECK(VERB(), ==,
              RC_STR("section main, org=&900\n"
@@ -5873,8 +5873,8 @@ RC_TEST_STEP(assemble, listing_assignments_and_braces, fix)
     fix->desc.verbose = true;   // the listing is opt-in
     // Assignments echo verbatim at the margin (they emit nothing and land nowhere); braces echo at the
     // margin too, so the scope structure survives into the listing, whether the '{' shares the label's
-    // line or not; and a ZPAUTO declaration lists as the assignment it became: `tmp = &70 [auto]`.
-    RC_CHECK_TRUE(ASM("zpreserve &70..&7F\nbase = &12\n.sub {\nzpauto1 tmp\nsta tmp\nlda #base\nrts\n}") != 0);
+    // line or not; and a ZA_AUTO declaration lists as the assignment it became: `tmp = &70 [auto]`.
+    RC_CHECK_TRUE(ASM("za_pool &70..&7F\nbase = &12\n.sub {\nza_auto1 tmp\nsta tmp\nlda #base\nrts\n}") != 0);
     RC_CHECK(VERB(), ==,
              RC_STR("base = &12\n"
                     ".sub\n"
@@ -5941,9 +5941,9 @@ RC_TEST_STEP(assemble, diagnostics_carry_payloads, fix)
     RC_CHECK_TRUE(ERR(".back : SKIP 200 : BNE back") == error_type_branch_out_of_range);
     RC_CHECK(diag_payload(&fix->r, error_type_branch_out_of_range), ==, RC_STR("-202"));
 
-    // The unused-ZPAUTO warning names the variable.
-    RC_CHECK_TRUE(ASM("ZPRESERVE &70 : ZPAUTO1 spare : RTS") != 0);
-    RC_CHECK(diag_payload(&fix->r, error_type_zpauto_unused), ==, RC_STR("spare"));
+    // The unused-ZA_AUTO warning names the variable.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : ZA_AUTO1 spare : RTS") != 0);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_auto_unused), ==, RC_STR("spare"));
 }
 
 RC_TEST_STEP(assemble, define_binds_symbol, fix)

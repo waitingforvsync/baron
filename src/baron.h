@@ -3,7 +3,7 @@
 
 #include "scopes.h"
 #include "sections.h"
-#include "zeropage.h"    // the zero-page ZPRESERVE set (and, later, the ZPAUTO allocator)
+#include "zeropage.h"    // the zero-page ZA_POOL set (and, later, the ZA_AUTO allocator)
 #include "source_files.h"
 #include "macros.h"      // the macro store, and rc_array_token (the dynamic statement table)
 #include "functions.h"   // the user-FUNCTION store (and its dynamic operand-token table)

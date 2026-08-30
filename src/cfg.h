@@ -9,7 +9,7 @@
 // A basic block: a maximal straight-line run of instructions with a single entry (its first instruction) and
 // a single exit (its last). It indexes into the instruction list rather than owning insns. Successors are a
 // contiguous slice [succ_first, succ_first + succ_count) of the CFG's shared `succs` pool - a variable count,
-// so a CANJUMP jump table with many targets is representable, not just the one/two of a jump/branch.
+// so a ZA_CANJUMP jump table with many targets is representable, not just the one/two of a jump/branch.
 typedef struct basic_block {
     uint32_t section;        // the section this block lives in - with pc, the block's identity. Two sections
                              // (paged banks) may share a pc, so pc ALONE does not name a block: (section, pc)
@@ -21,15 +21,15 @@ typedef struct basic_block {
     uint32_t succ_first;     // index of this block's first successor in cfg.succs
     uint32_t succ_count;     // number of successor block indices
     bool     unknown_succ;   // control may ALSO leave to an address we cannot model: an indirect JMP through
-                             // a vector WE assembled (no CANJUMP), an indexed dispatch, or an unresolved
+                             // a vector WE assembled (no ZA_CANJUMP), an indexed dispatch, or an unresolved
                              // target. A CONSTANT destination off the recorded stream is NOT this - that is a
                              // transfer out of the program to external code, a clean exit (cfg_target_is_external).
                              // The succ slice then lists only the successors we CAN place, and liveness must treat
                              // live-out conservatively (everything live) rather than trust the slice as
                              // complete. This is NOT a plain RTS/RTI return - a return has NO successor and is
                              // fully known. (An RTS-dispatch masquerading as a return, and a self-modified JSR,
-                             // cannot be seen here; CANCALL/CANJUMP annotations supply the targets we cannot
-                             // recover - CANJUMP after the RTS marks the dispatch trick and wires its declared
+                             // cannot be seen here; ZA_CANCALL/ZA_CANJUMP annotations supply the targets we cannot
+                             // recover - ZA_CANJUMP after the RTS marks the dispatch trick and wires its declared
                              // edges. UNannotated, both remain unsound-if-unmarked preconditions.)
 } basic_block;
 
@@ -51,9 +51,9 @@ typedef struct cfg {
 } cfg;
 
 // Build the CFG for `insns` (recorded in program / pc order, sections interleaving). `cflows` supplies the
-// control-flow annotations (UNREACHABLE prunes a branch's dead fall-through; CANJUMP wires a computed JMP's
+// control-flow annotations (ZA_UNREACHABLE prunes a branch's dead fall-through; ZA_CANJUMP wires a computed JMP's
 // declared targets); `labels` maps each label's identity to its (section, pc) so a control transfer that named
-// a label resolves across sections; `entries` lists the declared ZPENTRY / ZPINTERRUPT markers, whose
+// a label resolves across sections; `entries` lists the declared ZA_ENTRY / ZA_INTERRUPT markers, whose
 // addresses are marked as leaders so a mid-run entry starts its own block. Blocks + successors live in
 // `arena`; `scratch` (by value) backs the transient leader set. An empty instruction list gives an empty CFG.
 // Assumes pc is monotonic WITHIN a section run (the block cut at every section change keeps it so, even as
@@ -75,14 +75,14 @@ uint32_t cfg_target_block(cfg g, zp_insn n);
 // direct branch/jump/call whose constant destination matches no assembled code, and for an indirect JMP
 // through a vector that is not one of our own labels (a fixed OS vector). Meaningful once cfg_target_block
 // has come back RC_INDEX_NONE: it separates "went somewhere we did not assemble" (benign - external code
-// touches no ZPAUTO, since ZPRESERVE names bytes nothing outside the program uses) from "went somewhere we
+// touches no ZA_AUTO, since ZA_POOL names bytes nothing outside the program uses) from "went somewhere we
 // cannot pin down" (the conservative taint / unknown-call case).
 bool cfg_target_is_external(cfg g, zp_insn n);
 
 // The i-th successor block index of `b` (i < b.succ_count). Reads the shared successor pool.
 uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 
-// The callee entry blocks a call site can reach. A CANCALL annotation at the site overrides the literal
+// The callee entry blocks a call site can reach. A ZA_CANCALL annotation at the site overrides the literal
 // target with the declared set (a declared address with no block is an external arm, contributing nothing);
 // otherwise the literal target resolves through cfg_target_block. `unknown` flags the one shape we cannot
 // enumerate: a computed, unannotated call. This is the single call-target policy, shared by the footprint
@@ -90,7 +90,7 @@ uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 typedef struct call_targets {
     rc_array_u32 blocks;    // in-program callee entry block indices
     bool         unknown;   // an untrackable (computed, unannotated) arm
-    bool         external;  // an arm that leaves the program (JSR &FFEE, or an external CANCALL target):
+    bool         external;  // an arm that leaves the program (JSR &FFEE, or an external ZA_CANCALL target):
                             // it returns having touched nothing, so a must-write intersection over the
                             // call's arms is empty - the call kills nothing when this is set
 } call_targets;

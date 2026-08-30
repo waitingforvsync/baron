@@ -522,19 +522,19 @@ liveness analysis over your actual code and packs them like a compiler allocatin
 safely, or it refuses:
 
 ```
-ZPRESERVE &70..&8F              ; the pool
+ZA_POOL &70..&8F                ; the pool
 
 .multiply
 {
-    ZPAUTO1 a2, b2              ; one-byte variables
-    ZPAUTO2 ptr                 ; a two-byte pair - a pointer
+    ZA_AUTO1 a2, b2             ; one-byte variables
+    ZA_AUTO2 ptr                ; a two-byte pair - a pointer
     STA a2
     ...
 }
 ```
 
 Variables whose lifetimes never overlap share bytes automatically; anything held live across a `JSR` is
-kept clear of everything the callee touches. It is entirely opt-in - no `ZPRESERVE`, no allocator - and it
+kept clear of everything the callee touches. It is entirely opt-in - no `ZA_POOL`, no allocator - and it
 has a whole guide to itself: [Zero page allocation](zero-page-allocation.md).
 
 ## IF and FOR ##

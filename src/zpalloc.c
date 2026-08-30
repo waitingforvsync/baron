@@ -50,7 +50,7 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
 
     // First-fit-decreasing over widths (widest first): place the more constrained wide variables before the
     // narrow ones, each at the lowest reserved base that clashes with no already-placed conflicting variable.
-    // Left-edge-optimal for the equal-width common case; good enough for a mix of widths (1, 2, or a ZPAUTO <n>
+    // Left-edge-optimal for the equal-width common case; good enough for a mix of widths (1, 2, or a ZA_AUTO <n>
     // table). The width set is unknown, so we sweep every width from the widest present down to 1.
     uint32_t max_w = 1;
     for (uint32_t v = 0; v < n; v++) {

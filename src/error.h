@@ -27,7 +27,7 @@ typedef enum error_type {
     error_type_expected_section_name, // SECTION was not followed by a name
     error_type_unclosed_section,      // SECTION reached '}' / a foreign closer / end of input before ENDSECTION
     error_type_unexpected_endsection, // ENDSECTION with no SECTION to match
-    error_type_expected_var_name,     // ZPAUTO1/ZPAUTO2 was not followed by a (bare) name
+    error_type_expected_var_name,     // ZA_AUTO1/ZA_AUTO2 was not followed by a (bare) name
     error_type_invalid_assignment,    // a dotted path on the left of '='
     error_type_expected_assign,       // a bare identifier statement with no '='
     error_type_expected_close_paren,
@@ -67,25 +67,25 @@ typedef enum error_type {
     error_type_bad_basic_line_number, // a BASIC line number past 32767 (the ROM's enterable maximum)
     error_type_basic_line_too_long,   // a tokenised BASIC line record past 255 bytes (its length is one byte)
     error_type_guard_exceeded,        // a section's emission ran past its `guard` address
-    error_type_reserve_not_zeropage,  // a ZPRESERVE address falls outside the zero page ($00-$FF)
-    error_type_var_without_reserve,   // a ZPAUTO1/ZPAUTO2 declared with no ZPRESERVE enabling the feature first
-    error_type_zeropage_full,         // no free reserved byte to place a ZPAUTO variable (a spill)
-    error_type_zpauto_across_call,    // a var live across a JSR whose callee footprint cannot be bounded
-    error_type_zpauto_recursion,      // a var FRESHLY written then held live across a recursive call (needs a byte per level)
-    error_type_zpauto_computed_flow,  // ZPAUTO active past a computed/indirect jump the analysis cannot follow
-    error_type_zpauto_register_name,  // a ZPAUTO variable named 'A' - ambiguous with accumulator addressing
-    error_type_zpauto_indexed_access, // a ZPAUTO reached by indexed / indexed-indirect addressing (var,X etc.) - opt-in warning, user owns the index bounds
-    error_type_zpauto_unused,         // a ZPAUTO no instruction touches - warned, given no address, and left undefined
-    error_type_zpauto_narrow_pointer, // a 1-byte ZPAUTO1 dereferenced as a pointer ((var),Y / (var)) - needs ZPAUTO2
-    error_type_zpauto_out_of_bounds,  // a var+n access reaches past the ZPAUTO variable's declared width
-    error_type_zpauto_bad_width,      // ZPAUTO <count> with a count outside 1..256
-    error_type_zpauto_address,        // a ZPAUTO address used where a number is needed NOW (a count, a
+    error_type_reserve_not_zeropage,  // a ZA_POOL address falls outside the zero page ($00-$FF)
+    error_type_var_without_reserve,   // a ZA_AUTO1/ZA_AUTO2 declared with no ZA_POOL enabling the feature first
+    error_type_zeropage_full,         // no free reserved byte to place a ZA_AUTO variable (a spill)
+    error_type_za_auto_across_call,   // a var live across a JSR whose callee footprint cannot be bounded
+    error_type_za_auto_recursion,     // a var FRESHLY written then held live across a recursive call (needs a byte per level)
+    error_type_za_auto_computed_flow, // ZA_AUTO active past a computed/indirect jump the analysis cannot follow
+    error_type_za_auto_register_name, // a ZA_AUTO variable named 'A' - ambiguous with accumulator addressing
+    error_type_za_auto_indexed_access, // a ZA_AUTO reached by indexed / indexed-indirect addressing (var,X etc.) - opt-in warning, user owns the index bounds
+    error_type_za_auto_unused,        // a ZA_AUTO no instruction touches - warned, given no address, and left undefined
+    error_type_za_auto_narrow_pointer, // a 1-byte ZA_AUTO1 dereferenced as a pointer ((var),Y / (var)) - needs ZA_AUTO2
+    error_type_za_auto_out_of_bounds, // a var+n access reaches past the ZA_AUTO variable's declared width
+    error_type_za_auto_bad_width,     // ZA_AUTO <count> with a count outside 1..256
+    error_type_za_auto_address,       // a ZA_AUTO address used where a number is needed NOW (a count, a
                                       // condition, a layout address) - addresses exist only after allocation
-    error_type_discard_needs_var,     // a DISCARD operand that is not a whole ZPAUTO variable
-    error_type_zpentry_no_code,       // a ZPENTRY/ZPINTERRUPT marker whose pc begins no assembled instruction
-    error_type_zpentry_input,         // warning: a ZPENTRY routine reads a ZPAUTO before writing it - an
+    error_type_za_discard_needs_var,  // a ZA_DISCARD operand that is not a whole ZA_AUTO variable
+    error_type_za_entry_no_code,      // a ZA_ENTRY/ZA_INTERRUPT marker whose pc begins no assembled instruction
+    error_type_za_entry_input,        // warning: a ZA_ENTRY routine reads a ZA_AUTO before writing it - an
                                       // external caller cannot know an allocator-chosen input address
-    error_type_zpauto_unreachable,    // warning: ZPAUTO-touching code unreachable from every declared/default root
+    error_type_za_auto_unreachable,   // warning: ZA_AUTO-touching code unreachable from every declared/default root
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

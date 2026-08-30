@@ -137,7 +137,7 @@ void zeropage_resolve_vregs(zeropage *zp)
         zp_insn *n = rc_array_zp_insn_at(&zp->insns, i);
         n->vreg = cursor_is_none(n->var_def) ? RC_INDEX_NONE
                                              : zeropage_find_var(zp, n->var_scope, n->var_def);
-        // A control transfer's target identity may name a ZPAUTO variable rather than a label - a
+        // A control transfer's target identity may name a ZA_AUTO variable rather than a label - a
         // JMP through a vector cell the allocator owns. Marked here (the registry is complete now,
         // like the vreg resolution above) so the CFG treats it as computed flow, not an OS vector.
         n->target_is_zpvar = !cursor_is_none(n->target_def)
@@ -261,7 +261,7 @@ RC_TEST(zeropage, enable_without_bytes)
     zeropage zp;
     zeropage_init(&zp, &arena);
 
-    // ZPRESERVE with an empty list enables the feature but reserves nothing.
+    // ZA_POOL with an empty list enables the feature but reserves nothing.
     zeropage_enable(&zp);
     RC_CHECK_TRUE(zeropage_is_enabled(&zp));
     RC_CHECK(zeropage_reserved_count(&zp), ==, 0u);

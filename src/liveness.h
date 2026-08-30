@@ -37,7 +37,7 @@ typedef struct liveness {
 } liveness;
 
 // Run the backward liveness fixpoint over `g`, build the per-instruction interference graph, and classify
-// each vreg. `insns` is the instruction stream the CFG indexes; `cflows` supplies the CANCALL overrides for
+// each vreg. `insns` is the instruction stream the CFG indexes; `cflows` supplies the ZA_CANCALL overrides for
 // call-target resolution - a call is treated as a USE of its callees' live-in (their inputs), so an argument
 // stored by the caller stays live up to the JSR; `vars` is the variable registry - vreg ids index into it,
 // its length bounds the id space, and the WIDTHS drive the partial-def rule (a write kills a live range only

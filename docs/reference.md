@@ -104,16 +104,16 @@ A filename destined for a disc image follows DFS rules: an optional single-chara
 
 | Syntax | Meaning |
 |--------|---------|
-| `ZPRESERVE addrs` | Hand the allocator a pool of zero-page bytes: a comma-separated list of addresses and `..` ranges. Its presence switches the feature on. |
-| `ZPAUTO1 names` | Declare one-byte auto-allocated variables. |
-| `ZPAUTO2 names` | Declare two-byte variables (pointer pairs). |
-| `ZPAUTO n, names` | Declare `n`-byte variables (1-256). |
-| `UNREACHABLE` | Assert the preceding branch is always taken - the fall-through path is pruned. |
-| `CANCALL targets` | After a computed/self-modified `JSR`: the routines it may reach. |
-| `CANJUMP targets` | After a computed/indirect `JMP`: the labels it may land on. |
-| `DISCARD vars` | Promise the named `ZPAUTO` variables' current values are dead - later reads see only later writes. For arrays rebuilt via `STA arr,X`, whose writes prove nothing. |
-| `ZPENTRY` | Mark the routine it opens as an externally-called entry point (a reachability root). Any `ZPENTRY` replaces the default "each section starts a routine" presumption. |
-| `ZPINTERRUPT` | Mark the routine it opens as an interrupt handler: a root whose variables are kept apart from the rest of the program. |
+| `ZA_POOL addrs` | Hand the allocator a pool of zero-page bytes: a comma-separated list of addresses and `..` ranges. Its presence switches the feature on. |
+| `ZA_AUTO1 names` | Declare one-byte auto-allocated variables. |
+| `ZA_AUTO2 names` | Declare two-byte variables (pointer pairs). |
+| `ZA_AUTO n, names` | Declare `n`-byte variables (1-256). |
+| `ZA_UNREACHABLE` | Assert the preceding branch is always taken - the fall-through path is pruned. |
+| `ZA_CANCALL targets` | After a computed/self-modified `JSR`: the routines it may reach. |
+| `ZA_CANJUMP targets` | After a computed/indirect `JMP`: the labels it may land on. |
+| `ZA_DISCARD vars` | Promise the named `ZA_AUTO` variables' current values are dead - later reads see only later writes. For arrays rebuilt via `STA arr,X`, whose writes prove nothing. |
+| `ZA_ENTRY` | Mark the routine it opens as an externally-called entry point (a reachability root). Any `ZA_ENTRY` replaces the default "each section starts a routine" presumption. |
+| `ZA_INTERRUPT` | Mark the routine it opens as an interrupt handler: a root whose variables are kept apart from the rest of the program. |
 
 The full story - liveness, footprints, sections, every error - is in
 [Zero page allocation](zero-page-allocation.md).
@@ -267,8 +267,8 @@ Your own `FUNCTION` names join the table as they are defined, callable as `name(
     value for `FUNCTION` guards.
   - `ROUND` now rounds to nearest (halves away from zero); truncation toward zero is the new
     `TRUNC`.
-  - Zero-page allocator additions: `ZPENTRY` / `ZPINTERRUPT` root markers (with
-    unreachable-code warnings) and the `DISCARD` dead-value annotation.
+  - Zero-page allocator additions: `ZA_ENTRY` / `ZA_INTERRUPT` root markers (with
+    unreachable-code warnings) and the `ZA_DISCARD` dead-value annotation.
   - `-D <sym>=<expr>` predefines symbols from the command line.
   - `REPEATED` joins as the friendlier name for `FULL`.
 - **0.1.0** (2026-08-26) - first release: the full assembler described here.

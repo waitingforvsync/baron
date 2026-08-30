@@ -45,7 +45,7 @@ static touch_window insn_window(zp_insn n, uint16_t width)
 {
     touch_window w = {0};
     if (n.var_kill) {
-        w.write_first = 0;    // a DISCARD "writes" the whole variable: the old value is promised dead here.
+        w.write_first = 0;    // a ZA_DISCARD "writes" the whole variable: the old value is promised dead here.
         w.write_count = width;   // No bytes are read, and the caller must not treat this as a store (no pin)
         return w;
     }
@@ -78,8 +78,8 @@ static void add_edge(rc_bitset *interfere, uint32_t a, uint32_t b)
 
 // Does this block hand control back to the caller of the routine containing it? True for an RTS/RTI - and
 // for a transfer OUT of the program, because the external routine's own RTS returns to OUR caller (the
-// tail-call idiom); that includes an external CANJUMP arm of a dispatch, which the CFG wires no edge for.
-// An RTS wearing a CANJUMP is the dispatch trick - control continues at the declared targets, not the
+// tail-call idiom); that includes an external ZA_CANJUMP arm of a dispatch, which the CFG wires no edge for.
+// An RTS wearing a ZA_CANJUMP is the dispatch trick - control continues at the declared targets, not the
 // caller - so it does NOT return here (its targets' own exits do), unless one of its arms is external.
 static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, basic_block blk)
 {
@@ -95,7 +95,7 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     bool annotated = false;
     for (uint32_t j = 0; j < cflows.num; j++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
-        if (cf.kind == zp_cflow_canjump && cf.site == last.pc) {
+        if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
             annotated = true;
             if (cfg_block_at(g, last.section, cf.target) == RC_INDEX_NONE) {
                 return true;   // an external arm hands back, via the external routine's RTS
@@ -157,14 +157,14 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
     }
 
-    // Each call site's callee entry blocks, resolved once (CANCALL overrides included). A call is treated
+    // Each call site's callee entry blocks, resolved once (ZA_CANCALL overrides included). A call is treated
     // as a USE of its callee's live-in set - the callee's inputs - which is what gives an argument stored
     // by the caller a live range reaching the JSR, so nothing can be coloured over it in between; and as a
     // KILL of the bytes its callees definitely write (the must-write sets below) - the caller's read after
     // the call receives the callee's value, so the pre-call byte is dead and a delivered result's range
     // starts at its call, not at the top of the caller. The arms that resolve to no blocks inject and kill
     // nothing: an external callee touches none of our bytes, and a computed unannotated call is the user's
-    // responsibility (CANCALL declares the targets whose inputs and writes then count).
+    // responsibility (ZA_CANCALL declares the targets whose inputs and writes then count).
     call_targets *calls = rc_arena_alloc_zero_type(&scratch, call_targets, insns.num);
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
@@ -510,7 +510,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             }
             touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
             if (n.var_kill) {
-                // A DISCARD ends the old value's range without storing anything: clear the bytes, pin
+                // A ZA_DISCARD ends the old value's range without storing anything: clear the bytes, pin
                 // nothing - another variable may own them at this very instant, and that is the point.
                 for (uint32_t i = 0; i < w.write_count; i++) {
                     rc_bitset_clear(&live, base[n.vreg] + w.write_first + i);
@@ -1069,7 +1069,7 @@ RC_TEST(liveness, full_byte_rewrite_kills_a_pointer)
     rc_arena_deinit(&arena);
 }
 
-// Push a DISCARD marker for `vreg`: size 0, no rw - the tests pre-resolve vregs, so identity fields stay 0.
+// Push a ZA_DISCARD marker for `vreg`: size 0, no rw - the tests pre-resolve vregs, so identity fields stay 0.
 static uint32_t kill_marker(rc_array_zp_insn *insns, uint32_t pc, uint32_t vreg, rc_arena *arena)
 {
     rc_array_zp_insn_push(insns,
@@ -1080,14 +1080,14 @@ static uint32_t kill_marker(rc_array_zp_insn *insns, uint32_t pc, uint32_t vreg,
     return pc;
 }
 
-RC_TEST(liveness, discard_kills_without_pinning)
+RC_TEST(liveness, za_discard_kills_without_pinning)
 {
     // v0 is read with no prior write, so it is normally live-in from the top - and the STA v1 above the
-    // read would pin v1 against it. A DISCARD between them promises the inflowing value is dead: the
+    // read would pin v1 against it. A ZA_DISCARD between them promises the inflowing value is dead: the
     // range is severed, v0 is no longer live-in, and crucially the marker itself pins nothing (it is a
     // promise, not a store - v1 may own the byte at that instant).
     //   2000  STA v1
-    //   2002  (DISCARD v0)
+    //   2002  (ZA_DISCARD v0)
     //   2002  LDA v0
     //   2004  RTS
     rc_arena arena = rc_arena_make_default();
@@ -1095,7 +1095,7 @@ RC_TEST(liveness, discard_kills_without_pinning)
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
     uint32_t pc = 0x2000;
     pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 1, vref_write, &arena);   // STA v1
-    kill_marker(&insns, pc, 0, &arena);                                                // DISCARD v0
+    kill_marker(&insns, pc, 0, &arena);                                                // ZA_DISCARD v0
     pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read,  &arena);   // LDA v0
     pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
     (void) pc;
@@ -1109,12 +1109,12 @@ RC_TEST(liveness, discard_kills_without_pinning)
     rc_arena_deinit(&arena);
 }
 
-RC_TEST(liveness, discard_covers_every_byte_and_feeds_must_write)
+RC_TEST(liveness, za_discard_covers_every_byte_and_feeds_must_write)
 {
-    // A 2-byte pointer read with no provable write leaks both bytes to live-in; one DISCARD covers the
+    // A 2-byte pointer read with no provable write leaks both bytes to live-in; one ZA_DISCARD covers the
     // whole width. And inside a CALLED routine the marker counts as a definite rewrite: the caller's
     // pre-call value dies at the JSR, exactly as if the callee had provably stored every byte.
-    //   caller 2000: JSR 3000 ; LDA (p),Y ; RTS      callee 3000: (DISCARD p) ; RTS
+    //   caller 2000: JSR 3000 ; LDA (p),Y ; RTS      callee 3000: (ZA_DISCARD p) ; RTS
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
@@ -1127,7 +1127,7 @@ RC_TEST(liveness, discard_covers_every_byte_and_feeds_must_write)
         &arena);                                                                          // LDA (p),Y
     pc += 2;
     pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
-    kill_marker(&insns, 0x3000, 0, &arena);                                               // DISCARD p
+    kill_marker(&insns, 0x3000, 0, &arena);                                               // ZA_DISCARD p
     touch(&insns, 0x3000, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
     (void) pc;
 
@@ -1135,7 +1135,7 @@ RC_TEST(liveness, discard_covers_every_byte_and_feeds_must_write)
     liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, pointer_and_temp(&arena), 0, &arena, scratch);
     uint32_t callee = cfg_block_at(g, 0, 0x3000);
     RC_CHECK_TRUE(callee != RC_INDEX_NONE);
-    RC_CHECK_TRUE(rc_bitset_is_set(&lv.must_write[callee], 0));   // the DISCARD is a definite full rewrite
+    RC_CHECK_TRUE(rc_bitset_is_set(&lv.must_write[callee], 0));   // the ZA_DISCARD is a definite full rewrite
     RC_CHECK_FALSE(liveness_is_live_in(&lv, 0, 0));               // so p's range starts AT the call, not before
 
     rc_arena_deinit(&scratch);

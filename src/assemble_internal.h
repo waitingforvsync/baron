@@ -18,14 +18,14 @@ typedef struct baron baron;
 // checks (range, undefined-on-final) on the settling pass. `active` says whether a statement's
 // effects apply: inside a false IF branch it is cleared, so the statement is parsed for structure
 // (to find the matching ENDIF) but emits nothing, binds nothing and raises nothing. `listing` marks
-// the one extra pass run after zero-page allocation: everything is settled and the ZPAUTO symbols
+// the one extra pass run after zero-page allocation: everything is settled and the ZA_AUTO symbols
 // hold their real addresses, so re-emission produces the true output bytes and the verbose listing
 // is built as we go (diagnostics stay quiet - their gate is final, which a listing pass is not).
 // The flags are independent, hence a struct not a bool.
 typedef struct parse_flags {
     bool final;     // the single armed pass after convergence: diagnostics record, the zp IR fills
     bool active;    // false inside a dead IF/FOR branch: parse for extent, effect nothing
-    bool output;    // the post-allocation re-emission pass: ZPAUTO symbols hold their real addresses,
+    bool output;    // the post-allocation re-emission pass: ZA_AUTO symbols hold their real addresses,
                     // and the sections it builds ARE the output (there is no operand patching)
     bool listing;   // build the -v listing text (rides on the output pass; implies output)
 } parse_flags;
@@ -79,10 +79,10 @@ typedef struct int_argument {
     error_type        error;        // set when type == int_argument_type_error
     uint32_t          error_at;
     rc_str            error_detail; // the error's payload (e.g. the undefined symbol's name), or {0}
-    bool              zpauto;       // the value was a ZPAUTO address: `value` holds the OFFSET within
+    bool              za_auto;      // the value was a ZA_AUTO address: `value` holds the OFFSET within
                                     // the variable (the real base exists only after allocation), and
                                     // zp_scope/zp_def/zp_name carry its identity. Callers that need a
-                                    // real number NOW must refuse (error_type_zpauto_address); the
+                                    // real number NOW must refuse (error_type_za_auto_address); the
                                     // operand and data-emission paths accept, and the output pass
                                     // re-evaluates against the allocated address.
     uint32_t          zp_scope;
@@ -91,7 +91,7 @@ typedef struct int_argument {
 } int_argument;
 
 // Reduce an evaluated expression value to an integer argument (pure: inputs in, result out). A plain
-// numeric comes back known; a ZPAUTO address comes back known-with-the-zpauto-flag (see above); a
+// numeric comes back known; a ZA_AUTO address comes back known-with-the-za_auto-flag (see above); a
 // forward reference (unknown symbol) comes back unresolved, to settle on a later pass; a value that
 // can never be an address - or an unknown symbol on the final pass - comes back as an error. `at` is
 // the offset to blame.

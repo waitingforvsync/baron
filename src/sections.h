@@ -132,7 +132,7 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count);   // append `cou
 // make the output wrong - but it means something's emission depends on more than the symbols, which is
 // worth another pass to let it settle (e.g. an RND draw set shifted by a settling structure). Call it on
 // SETTLING passes only: the final pass legitimately differs wherever INCBIN sits (real bytes load only
-// there), and the output pass differs wherever a ZPAUTO address lands. The first pass, with nothing to
+// there), and the output pass differs wherever a ZA_AUTO address lands. The first pass, with nothing to
 // compare against, reports false.
 bool sections_emission_changed(sections *sec);
 

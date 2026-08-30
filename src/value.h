@@ -4,13 +4,13 @@
 #include "richc/arena.h"
 #include "richc/mstr.h"
 #include "richc/str.h"
-#include "cursor.h"  // cursor, half of a ZPAUTO variable's identity
+#include "cursor.h"  // cursor, half of a ZA_AUTO variable's identity
 #include "error.h"   // error_type, the shared diagnostic vocabulary
 
 
 // The single value type flowing through Baron's expression machinery. It is a
 // tagged union: none (uninitialised), a number, a boolean, a string, a list of
-// values, a numeric range, an error, or a ZPAUTO address. Evaluation errors (unknown
+// values, a numeric range, an error, or a ZA_AUTO address. Evaluation errors (unknown
 // symbol, divide by zero, ...) are carried as a value rather than aborting, so
 // they can propagate to the end of an expression and let assembly continue
 // across an as-yet-unresolvable reference.
@@ -43,7 +43,7 @@ typedef enum value_type {
     value_type_list,
     value_type_range,
     value_type_error,
-    value_type_zpauto,                  // the address of a ZPAUTO variable, unknown until allocation
+    value_type_za_auto,                  // the address of a ZA_AUTO variable, unknown until allocation
 } value_type;
 
 
@@ -69,18 +69,18 @@ typedef struct value_error {
 } value_error;
 
 
-// The address of a ZPAUTO variable before allocation has chosen it. Real addresses exist only after
+// The address of a ZA_AUTO variable before allocation has chosen it. Real addresses exist only after
 // the whole program has converged, so during assembly a variable's symbol carries THIS instead of a
-// number: the variable's identity - the (declaring scope, ZPAUTO def cursor) pair the zero-page IR
+// number: the variable's identity - the (declaring scope, ZA_AUTO def cursor) pair the zero-page IR
 // keys on - plus a byte offset within it (`ptr+1` is the same identity at offset 1). Contexts that
 // genuinely need a number (a count, a condition, a layout address) refuse it with a clear error;
 // instruction operands and data emissions accept it and receive the real address on the output pass.
-typedef struct value_zpauto {
+typedef struct value_za_auto {
     uint32_t scope;     // the variable's declaring scope index...
-    cursor   def;       // ...and its ZPAUTO statement's def cursor: together, its identity
+    cursor   def;       // ...and its ZA_AUTO statement's def cursor: together, its identity
     int32_t  offset;    // byte offset within the variable
     rc_str   name;      // the variable's name, for diagnostics (view into permanent backing)
-} value_zpauto;
+} value_za_auto;
 
 struct value {
     value_type type;
@@ -90,7 +90,7 @@ struct value {
         value_list   list;              // rc_view_value: const value *, num
         value_range  range;
         value_error  error;
-        value_zpauto zpauto;
+        value_za_auto za_auto;
     };
 };
 
@@ -114,7 +114,7 @@ value value_make_error(error_type e);
 value value_make_error_detail(error_type e, rc_str detail);   // + a payload string (e.g. the symbol name)
 value value_make_range(value_range r);
 value value_make_list(rc_view_value items);    // wraps the view; does not copy
-value value_make_zpauto(uint32_t scope, cursor def, int32_t offset, rc_str name);
+value value_make_za_auto(uint32_t scope, cursor def, int32_t offset, rc_str name);
 
 // Deep-copy v into arena so it can outlive the (scratch) arena it was built in. A value
 // is a non-owning handle, so a plain copy still points at the old backing; this is the
@@ -146,8 +146,8 @@ bool value_is_string(value v);
 bool value_is_list(value v);
 bool value_is_range(value v);
 bool value_is_error(value v);
-bool value_is_zpauto(value v);
-bool value_is_simple(value v);     // numeric, boolean, string, error, or zpauto: stands alone
+bool value_is_za_auto(value v);
+bool value_is_simple(value v);     // numeric, boolean, string, error, or za_auto: stands alone
 bool value_is_compound(value v);   // list or range: gathers other values
 
 // Structural equality: types must match, then compared field-wise (lists
