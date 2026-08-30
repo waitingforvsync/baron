@@ -87,6 +87,8 @@ typedef enum error_type {
                                       // external caller cannot know an allocator-chosen input address
     error_type_za_auto_unreachable,   // warning: ZA_AUTO-touching code unreachable from every declared/default root
     error_type_za_returnto_no_code,   // warning: a ZA_RETURNTO target that begins no assembled instruction
+    error_type_skip_spans_instruction, // a BITZP/BITABS resume address landing inside a recorded instruction -
+                                      // the two streams interleave mid-instruction, which the CFG cannot model
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

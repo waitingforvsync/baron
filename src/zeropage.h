@@ -47,13 +47,16 @@ typedef enum vref_rw {
 // An instruction's control-flow class, from the opcode table's op_branch/op_jump/op_call/op_return flags.
 // The CFG builder splits basic blocks on these: a branch is 2-way (target + fall-through), a jump 1-way, a
 // return has no successor, and a call (JSR) is IN-BLOCK - it falls through, and the callee is reached via
-// the call graph, not a CFG edge.
+// the call graph, not a CFG edge. A skip is the BITZP/BITABS trick - a lone BIT opcode whose operand fetch
+// swallows the next skip_bytes bytes: exactly one successor, the resume address pc + size + skip_bytes.
+// The swallowed record at pc+1 is entered only by an explicit branch, never from the skip itself.
 typedef enum zp_flow {
     zp_flow_normal = 0,
     zp_flow_branch,
     zp_flow_jump,
     zp_flow_call,
     zp_flow_return,
+    zp_flow_skip,
 } zp_flow;
 
 // How a control transfer reaches its destination. A DIRECT transfer's operand IS the destination (abs / rel).
@@ -78,6 +81,7 @@ typedef struct zp_insn {
     uint32_t pc;              // this instruction's address
     uint16_t size;           // its length in bytes (1 + operand bytes)
     uint8_t  flow;           // zp_flow
+    uint8_t  skip_bytes;     // zp_flow_skip only: run-time bytes the BIT swallows (BITZP 1, BITABS 2); else 0
     uint8_t  rw;             // vref_rw, if it touches `vreg`
     uint32_t vreg;           // the ZA_AUTO it touches, or RC_INDEX_NONE - RESOLVED from (var_scope, var_def)
     uint32_t var_scope;      // scope the operand's base name was declared in (with var_def, the vreg identity)

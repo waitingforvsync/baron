@@ -43,6 +43,8 @@ static parse_result handle_za_interrupt(baron *b, cursor stmt, cursor at, uint32
 static parse_result handle_equb(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equw(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_bitzp(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_bitabs(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_open_brace(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -370,6 +372,8 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("equs"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},   // EQUS is an alias of EQUB
     {RC_STR_INIT("equw"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equw}}},   // 16-bit words
     {RC_STR_INIT("equd"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equd}}},   // 32-bit words
+    {RC_STR_INIT("bitzp"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_bitzp}}},   // &24: BIT zp swallowing the next byte
+    {RC_STR_INIT("bitabs"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_bitabs}}},   // &2C: BIT abs swallowing the next two
     {RC_STR_INIT("if"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_if}}},
     {RC_STR_INIT("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR_INIT("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
@@ -1100,8 +1104,9 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
 // annotation's kind, else RC_INDEX_NONE and the annotation binds to nothing rather than mis-annotating.
 // ZA_CANCALL and ZA_RETURNTO qualify a call; ZA_CANJUMP a jump, a branch (a self-modified operand) or a
 // return (the RTS-dispatch trick - push a target address, RTS into it); ZA_RETURN a jump or a branch only
-// (an RTS already returns, and a call resumes in-stream). Meaningful on the final pass only - that is when
-// instructions are recorded.
+// (an RTS already returns, and a call resumes in-stream). A BITZP/BITABS skip fits nothing, deliberately:
+// it is a real emitted byte, so an annotation separated from its transfer by one detaches - the pc it
+// would name is wrong anyway. Meaningful on the final pass only - that is when instructions are recorded.
 static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 {
     uint32_t ni = zeropage_insn_count(&b->zeropage);
@@ -1477,6 +1482,55 @@ static parse_result handle_equw(baron *b, cursor stmt, cursor at, uint32_t scope
 static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_equ(b, stmt, at, scope, section, flags, 4, scratch);
+}
+
+// BITZP / BITABS - the classic overlapping-streams trick: emit a lone BIT opcode (&24 zero page / &2C
+// absolute) whose operand fetch swallows the next 1 / 2 bytes. On the fall-through path the BIT executes
+// (a harmless read of a junk address; the flags it trashes are the programmer's business) and control
+// resumes past the swallowed bytes; a branch straight past us executes the swallowed instruction instead.
+// The byte is emitted on every pass (the pc must not wobble) and recorded into the zero-page IR on the
+// final pass, so the CFG knows fall-through resumes at pc + 1 + swallow and that the record at pc + 1 is
+// reached only by an explicit branch - a swallowed store must not read as a write on the path that hops it.
+static parse_result handle_bit_skip(baron *b, cursor stmt, cursor at, uint32_t section, parse_flags flags, uint8_t swallow)
+{
+    if (flags.active) {
+        uint32_t pc0   = sections_pc(&b->sections, section);
+        uint32_t code0 = sections_code(&b->sections, section).num;
+        sections_emit_u8(&b->sections, section, swallow == 2 ? 0x2C : 0x24);
+        if (flags.final && zeropage_is_enabled(&b->zeropage)) {
+            zeropage_add_insn(&b->zeropage, (zp_insn) {
+                .pc           = pc0,
+                .size         = 1,
+                .flow         = zp_flow_skip,
+                .skip_bytes   = swallow,
+                .rw           = vref_none,
+                .vreg         = RC_INDEX_NONE,
+                .var_scope    = RC_INDEX_NONE,
+                .var_def      = cursor_none(),
+                .var_offset   = RC_INDEX_NONE,
+                .target       = RC_INDEX_NONE,
+                .target_scope = RC_INDEX_NONE,
+                .target_def   = cursor_none(),
+                .section      = section,
+                .at           = stmt,
+            });
+        }
+        verbose_code_line(b, flags, stmt, at.pos, section, pc0, code0);
+    }
+    return require_separator(b, at);
+}
+
+static parse_result handle_bitzp(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) scope;
+    (void) scratch;
+    return handle_bit_skip(b, stmt, at, section, flags, 1);
+}
+static parse_result handle_bitabs(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) scope;
+    (void) scratch;
+    return handle_bit_skip(b, stmt, at, section, flags, 2);
 }
 
 // The '#' that may introduce a PRINT channel. It is not a statement token ('#' never starts a
@@ -3144,6 +3198,26 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 if (cfg_block_at(g, n.section, cf.target) == RC_INDEX_NONE) {
                     baron_warning(b, error_type_za_returnto_no_code, cf.at, severity_warning);
                 }
+                break;
+            }
+        }
+    }
+
+    // A BITZP/BITABS whose resume address lands INSIDE a recorded instruction (a 3-byte instruction
+    // straight after BITABS, say) means the two streams interleave mid-instruction - beyond what blocks
+    // can express, so the analysis would be wrong and any allocation unsound. Refuse. Two 1-byte
+    // instructions under a BITABS, or data in the swallowed bytes, straddle nothing and are fine.
+    for (uint32_t i = 0; i < insns.num; i++) {
+        zp_insn n = rc_view_zp_insn_get(insns, i);
+        if (n.flow != zp_flow_skip) {
+            continue;
+        }
+        uint32_t resume = n.pc + n.size + n.skip_bytes;
+        for (uint32_t j = 0; j < insns.num; j++) {
+            zp_insn m = rc_view_zp_insn_get(insns, j);
+            if (m.section == n.section && m.pc < resume && m.pc + m.size > resume) {
+                baron_error_payload(b, error_type_skip_spans_instruction, n.at,
+                                    n.skip_bytes == 2 ? RC_STR("BITABS") : RC_STR("BITZP"));
                 break;
             }
         }
@@ -5246,6 +5320,101 @@ RC_TEST_STEP(assemble, za_auto_terminator_cut, fix)
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);   // the back edge survives the data gap
 }
 
+RC_TEST_STEP(assemble, za_auto_bitabs_swallowed_store, fix)
+{
+    // The BIT-skip trick vs must-write: the callee's STA res is swallowed by a BITABS, so it runs only on
+    // the branch-taken path - res is NOT definitely written, the caller's pre-call value must survive the
+    // JSR, and t (live inside the callee) needs its own byte.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 res, t\n"
+                          "STA res : JSR sub : LDA res : RTS\n"
+                          ".sub BEQ store\n"
+                          "STA t : LDA t\n"
+                          "BITABS\n"
+                          ".store STA res : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "res"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "t"),   ==, 0x71);   // res lives across the callee, so t cannot take its byte
+
+    // The contrast: drop the marker and the store IS on every path (the fall-through falls straight into
+    // .store), so must-write kills res at the JSR and t shares its byte - correct there, and exactly the
+    // claim that was WRONG for the real trick before the marker existed.
+    passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 res, t\n"
+                 "STA res : JSR sub : LDA res : RTS\n"
+                 ".sub BEQ store\n"
+                 "STA t : LDA t\n"
+                 ".store STA res : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK(zp_addr(&fix->r, "res"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "t"),   ==, 0x70);   // definitely rewritten: the pre-call value needs no byte
+}
+
+RC_TEST_STEP(assemble, za_auto_bitabs_swallowed_read, fix)
+{
+    // The BIT-skip trick vs liveness: the swallowed ADC zp2 reads only on the branch-taken path, so on the
+    // fall-through path zp2 is dead through w's whole life and one byte serves both. The pool is a single
+    // byte to make the claim structural: any phantom interference would spill.
+    uint32_t passes = ASM("ZA_POOL &70..&70 : ZA_AUTO1 zp2, w\n"
+                          "STA zp2\n"
+                          "BNE here\n"
+                          "STA w : LDA w\n"
+                          "BITABS\n"
+                          ".here ADC zp2\n"
+                          "RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "zp2"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"),   ==, 0x70);
+
+    // The contrast is the raw EQUB &2C spelling: the byte is invisible to the analysis, the gap-skip edge
+    // routes the fall-through THROUGH the swallowed read, zp2 and w interfere, and the one-byte pool spills.
+    // (Conservative, so merely imprecise - but the reason the keyword exists rather than the idiom.)
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&70 : ZA_AUTO1 zp2, w\n"
+                      "STA zp2\n"
+                      "BNE here\n"
+                      "STA w : LDA w\n"
+                      "EQUB &2C\n"
+                      ".here ADC zp2\n"
+                      "RTS") == error_type_zeropage_full);
+}
+
+RC_TEST_STEP(assemble, bitabs_emits_and_lists, fix)
+{
+    // Without the allocator in play BITABS/BITZP are plain emission: one byte, &2C / &24, pc advances by
+    // one, dead branches emit nothing. And each lists as an ordinary one-byte code line.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BITABS : LDA #1 : RTS"), (uint8_t[]) {0x2C, 0xA9, 0x01, 0x60}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BITZP : NOP"), (uint8_t[]) {0x24, 0xEA}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF FALSE\nBITABS\nENDIF"), (uint8_t[]) {0}, 0));
+
+    fix->desc.verbose = true;   // the listing is opt-in
+    RC_CHECK_TRUE(ASM("bitabs\nlda #1\nrts") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000  2C              bitabs\n"
+                    "  0001  A9 01           lda #1\n"
+                    "  0003  60              rts\n"));
+    fix->desc.verbose = false;
+}
+
+RC_TEST_STEP(assemble, bitabs_resume_mid_instruction_errors, fix)
+{
+    // A recorded instruction straddling the resume address (a 3-byte LDA straight after BITABS) means the
+    // two streams interleave mid-instruction - beyond what the CFG can express, so it refuses.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
+                      "BITABS\n"
+                      "LDA &1234\n"
+                      "RTS") == error_type_skip_spans_instruction);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_skip_spans_instruction));
+
+    // Legal shapes stay silent: two 1-byte instructions under a BITABS, the BITZP flavour over one, and
+    // swallowed data (nothing recorded, nothing to straddle).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\nBITABS\nNOP\nNOP\nRTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\nBITZP\nNOP\nRTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\nBITABS\nEQUB 1, 2\nRTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
 RC_TEST_STEP(assemble, za_auto_canjump_on_branch, fix)
 {
     // A self-modified BRANCH: the literal operand is a placeholder (.ph, which touches nothing), the real
@@ -5720,11 +5889,34 @@ RC_TEST_STEP(assemble, za_entry_input_ignores_shared_helper_smear, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 
-    // Contrast: a genuinely conditional init IS an input - the untaken path reaches the read unwritten.
+    // A conditional init is deliberately NOT an input: the warning gates on may-write, so a store on
+    // ANY route to the read silences it. The graph cannot see the flag correlation that guards such
+    // reads in real code (the untaken-path read never actually runs), and flagging every one of these
+    // drowned the true inputs - the whole reason the gate is "may", not "definitely".
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 f\n"
                       ".entry ZA_ENTRY : BEQ over : STA f : .over LDA f : STA f : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
+}
+
+RC_TEST_STEP(assemble, za_entry_input_is_may_write_gated, fix)
+{
+    // The spritescale shape that drove the may-write gate, in miniature: setup writes v only on one
+    // path (real code pairs this with a "nothing to do" flag the caller checks - a correlation no
+    // analysis of the graph can see), and the entry reads v after the call. Under the old definite-
+    // assignment gate this exact program warned; the may gate is silent, because SOME route through
+    // setup supplies v, so no external caller is being asked to poke it.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      ".entry ZA_ENTRY : JSR setup : LDA v : STA v : RTS\n"
+                      ".setup BEQ none : STA v : .none RTS\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
+
+    // The control: remove the writing arm and v really can only come from outside - still warned.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      ".entry ZA_ENTRY : JSR setup : LDA v : STA v : RTS\n"
+                      ".setup BEQ none : NOP : .none RTS\n") != 0);
     RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
-    RC_CHECK(diag_payload(&fix->r, error_type_za_entry_input), ==, RC_STR("f"));
+    RC_CHECK(diag_payload(&fix->r, error_type_za_entry_input), ==, RC_STR("v"));
 }
 
 RC_TEST_STEP(assemble, za_entry_input_is_byte_accurate, fix)

@@ -75,6 +75,7 @@ rc_str error_type_name(error_type e)
         case error_type_za_entry_input:          return RC_STR("ZA_AUTO input to a ZA_ENTRY routine: '%' (external callers cannot know its address)");
         case error_type_za_auto_unreachable:     return RC_STR("ZA_AUTO used in code unreachable from any entry (missing ZA_ENTRY/ZA_INTERRUPT, or dead code)");
         case error_type_za_returnto_no_code:     return RC_STR("ZA_RETURNTO target does not begin an assembled instruction");
+        case error_type_skip_spans_instruction:  return RC_STR("% resumes in the middle of an instruction");
         case error_type_undefined_symbol:        return RC_STR("Undefined symbol: '%'");
         case error_type_duplicate_symbol:        return RC_STR("Duplicate symbol: '%'");
         case error_type_original_definition:     return RC_STR("First defined here: '%'");

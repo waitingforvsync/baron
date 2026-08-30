@@ -251,6 +251,15 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
             case zp_flow_return:
                 mark_leader(&leaders, insn.section, after);    // boundary (block after a return)
                 break;
+            case zp_flow_skip:
+                // The BIT-skip trick: the swallowed instruction at `after` runs only when branched to
+                // directly, so it must start its own block (no edge from the skip reaches it); the
+                // fall-through resumes past the swallowed bytes - the resume point needs a block of its
+                // own even mid-run (the ZA_ENTRY precedent). A leader bit on a data address (nothing
+                // recorded at the resume) is harmless: pass 2 only consults leaders at recorded pcs.
+                mark_leader(&leaders, insn.section, after);
+                mark_leader(&leaders, insn.section, after + insn.skip_bytes);
+                break;
             case zp_flow_normal:
             default:
                 break;
@@ -262,8 +271,9 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         // ZA_CANCALL (its callee arms) and ZA_RETURNTO (its resumption points); a jump, branch or return
         // takes ZA_CANJUMP - the return being the RTS-dispatch trick (jump to a pushed address), the branch
         // a self-modified operand. ZA_RETURN and ZA_UNREACHABLE carry no target; the RC_INDEX_NONE guard
-        // skips them.
-        if (insn.flow != zp_flow_normal) {
+        // skips them. A skip takes no annotation at all (annotation_site never sites one there), so we
+        // leave it out rather than let it scan for ZA_CANJUMPs it can never own.
+        if (insn.flow != zp_flow_normal && insn.flow != zp_flow_skip) {
             for (uint32_t j = 0; j < cflows.num; j++) {
                 zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
                 bool fits = (insn.flow == zp_flow_call)
@@ -325,11 +335,13 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         }
         rc_array_basic_block_at(&result.blocks, current)->num_insns++;
         // Does THIS instruction force a cut before the next record? A branch/jump/return always ends its
-        // block; a call does too when an annotation reroutes its continuation or declares there is none.
-        // ZA_UNREACHABLE just past a NORMAL instruction cuts as well (pass 3 severs that fall-through the
-        // same way); its size > 0 guard keeps a size-0 ZA_DISCARD marker - which shares its neighbour's
-        // pc - from matching an annotation meant for the neighbour.
+        // block; so does a skip (its fall-through resumes PAST the record at pc+1, which must never glue
+        // into our block); a call does too when an annotation reroutes its continuation or declares there
+        // is none. ZA_UNREACHABLE just past a NORMAL instruction cuts as well (pass 3 severs that
+        // fall-through the same way); its size > 0 guard keeps a size-0 ZA_DISCARD marker - which shares
+        // its neighbour's pc - from matching an annotation meant for the neighbour.
         prev_cuts = insn.flow == zp_flow_branch || insn.flow == zp_flow_jump || insn.flow == zp_flow_return
+                 || insn.flow == zp_flow_skip
                  || (insn.flow == zp_flow_call
                      && (cflow_at(cflows, zp_cflow_za_returnto, insn.pc)
                       || cflow_at(cflows, zp_cflow_za_unreachable, insn.pc + insn.size)))
@@ -417,6 +429,34 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     }
                 }
                 break;
+            case zp_flow_skip: {
+                // The BIT-skip trick: exactly one successor, the resume address past the swallowed bytes.
+                // NEVER an edge to pc+1 - the swallowed instruction runs only when branched to directly,
+                // which is the entire point of modelling this (a swallowed store must not look like a
+                // definite write on the fall-through path). ZA_UNREACHABLE sited at the resume severs,
+                // as it does for a call/normal fall-through. If nothing was recorded at the resume (the
+                // skip hops inline data), control carries on at the next recorded same-section
+                // instruction - but the plain gap-skip loop would land on the swallowed block itself
+                // (it sits at pc+1, BEFORE the resume), so we insist on pc >= resume. Nothing found is
+                // the end of the program - a clean end, not an unknown.
+                uint32_t resume = after + last.skip_bytes;
+                if (!cflow_at(cflows, zp_cflow_za_unreachable, resume)) {
+                    uint32_t ft = block_at(result.blocks.view, last.section, resume);
+                    if (ft != RC_INDEX_NONE) {
+                        add_succ(&result, block, ft, arena);
+                    }
+                    else {
+                        for (uint32_t j = bi + 1; j < result.blocks.num; j++) {
+                            basic_block cand = rc_array_basic_block_get(&result.blocks, j);
+                            if (cand.section == last.section && cand.pc >= resume) {
+                                add_succ(&result, block, j, arena);
+                                break;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
             case zp_flow_call:
             case zp_flow_normal:
             default: {
@@ -484,6 +524,18 @@ static uint32_t push_insn(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, z
                    .at = (cursor) {0}},
         arena);
     return pc + size;
+}
+
+// A BITZP/BITABS marker: one emitted byte whose operand fetch swallows the next `swallow` bytes at run
+// time. Returns the pc just PAST the marker byte - where the swallowed instruction sits, not the resume.
+static uint32_t push_skip(rc_array_zp_insn *insns, uint32_t pc, uint8_t swallow, rc_arena *arena)
+{
+    rc_array_zp_insn_push(insns,
+        (zp_insn) {.pc = pc, .size = 1, .flow = zp_flow_skip, .skip_bytes = swallow, .rw = vref_none,
+                   .vreg = RC_INDEX_NONE, .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE,
+                   .target_def = cursor_none(), .at = (cursor) {0}},
+        arena);
+    return pc + 1;
 }
 
 RC_TEST(cfg, empty_stream_is_empty)
@@ -1161,6 +1213,162 @@ RC_TEST(cfg, entry_marker_splits_midrun_block)
     RC_CHECK_TRUE(bi != RC_INDEX_NONE);
     RC_CHECK(rc_array_basic_block_get(&g.blocks, bi).first_insn, ==, 1u);
     RC_CHECK_TRUE(cfg_block_at(g, 9, 0x3000) == RC_INDEX_NONE);   // the stray marker resolved to nothing
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, skip_swallowed_insn_gets_own_block)
+{
+    // The BIT-skip trick in its classic shape: the swallowed instruction runs only via the branch, and the
+    // marker's fall-through hops straight over it to the resume. Getting this wrong is the whole reason the
+    // marker exists - before it, the gap-skip edge routed the fall-through THROUGH the swallowed store.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  BEQ 2005 (branch)
+    //   2002  ADC zp1  (the fall-through flavour)
+    //   2004  BITABS   (swallows the next 2 bytes)
+    //   2005  ADC zp2  (the branch-taken flavour - swallowed on fall-through)
+    //   2007  RTS      (the resume point: both paths converge here)
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2005, &arena);          // BEQ 2005 @2000
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // ADC zp1  @2002
+    pc = push_skip(&insns, pc, 2, &arena);                                  // BITABS   @2004
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // ADC zp2  @2005
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS      @2007
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 4u);
+    uint32_t fall      = cfg_block_at(g, 0, 0x2002);
+    uint32_t swallowed = cfg_block_at(g, 0, 0x2005);
+    uint32_t resume    = cfg_block_at(g, 0, 0x2007);
+    RC_CHECK_TRUE(fall != RC_INDEX_NONE && swallowed != RC_INDEX_NONE && resume != RC_INDEX_NONE);
+
+    basic_block bf = rc_array_basic_block_get(&g.blocks, fall);
+    RC_CHECK(bf.num_insns, ==, 2u);            // ADC zp1 + the marker (the skip terminates the block)
+    RC_CHECK(bf.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, bf, 0), ==, resume);   // over the swallowed instruction, never into it
+    RC_CHECK_FALSE(bf.unknown_succ);
+
+    basic_block bs = rc_array_basic_block_get(&g.blocks, swallowed);
+    RC_CHECK(bs.num_insns, ==, 1u);
+    RC_CHECK(bs.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, bs, 0), ==, resume);   // the branch-taken path falls through to the same resume
+
+    basic_block bb = rc_array_basic_block_get(&g.blocks, 0);   // the BEQ
+    RC_CHECK(bb.succ_count, ==, 2u);            // not-taken (2002) + taken (2005), untouched by the marker
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, skip_resumes_past_data_gap)
+{
+    // A skip hopping inline DATA: nothing is recorded at the resume address, so the edge must gap-skip to
+    // the next recorded instruction - but constrained to pc >= resume, or it would land on the swallowed
+    // block itself, which sits at pc+1, BEFORE the resume. The second stream proves that guard.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+
+    //   2000  BITABS   (swallows 2 data bytes)
+    //   2001  EQUB x,y (unrecorded)
+    //   2003  EQUS ... (5 more unrecorded bytes - resume lands in data too)
+    //   2008  LDA #    (the next recorded instruction)
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+    push_skip(&insns, 0x2000, 2, &arena);                                 // BITABS @2000
+    push_insn(&insns, 0x2008, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA    @2008
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    uint32_t after = cfg_block_at(g, 0, 0x2008);
+    RC_CHECK_TRUE(after != RC_INDEX_NONE);
+    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b0.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, b0, 0), ==, after);   // the constrained gap-skip
+    RC_CHECK_FALSE(b0.unknown_succ);
+
+    //   2000  BITABS   (swallows a RECORDED 2-byte instruction this time)
+    //   2001  BEQ 2008 (swallowed - a later block than the marker's, at a pc BEFORE the resume)
+    //   2003  EQUS ... (data at the resume address)
+    //   2008  LDA #
+    rc_array_zp_insn guard = rc_array_zp_insn_make(4, &arena);
+    push_skip(&guard, 0x2000, 2, &arena);                                  // BITABS   @2000
+    push_insn(&guard, 0x2001, 2, zp_flow_branch, 0x2008, &arena);          // BEQ 2008 @2001
+    push_insn(&guard, 0x2008, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA      @2008
+
+    cfg gg = cfg_build(guard.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    uint32_t swallowed = cfg_block_at(gg, 0, 0x2001);
+    uint32_t resume    = cfg_block_at(gg, 0, 0x2008);
+    RC_CHECK_TRUE(swallowed != RC_INDEX_NONE && resume != RC_INDEX_NONE);
+    basic_block bm = rc_array_basic_block_get(&gg.blocks, 0);
+    RC_CHECK(bm.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(gg, bm, 0), ==, resume);   // pc >= resume held: NOT the swallowed block at 2001
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, skb_resumes_at_pc_plus_two)
+{
+    // The 1-byte flavour (&24, BIT zp): resume is pc+2, hopping a single swallowed byte. And a skip that
+    // runs off the end of the stream is a clean dead end - no edge, no taint - like any other fall-through.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+
+    //   2000  BITZP  (swallows 1 byte)
+    //   2001  INX    (swallowed)
+    //   2002  RTS    (the resume)
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+    uint32_t pc = 0x2000;
+    pc = push_skip(&insns, pc, 1, &arena);                                  // BITZP @2000
+    pc = push_insn(&insns, pc, 1, zp_flow_normal, RC_INDEX_NONE, &arena);   // INX   @2001
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS   @2002
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    uint32_t resume = cfg_block_at(g, 0, 0x2002);
+    RC_CHECK_TRUE(resume != RC_INDEX_NONE);
+    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b0.num_insns, ==, 1u);
+    RC_CHECK(b0.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, b0, 0), ==, resume);
+
+    rc_array_zp_insn tail = rc_array_zp_insn_make(2, &arena);
+    push_skip(&tail, 0x2000, 2, &arena);   // BITABS with nothing after it at all
+    cfg gt = cfg_build(tail.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block bt = rc_array_basic_block_get(&gt.blocks, 0);
+    RC_CHECK(bt.succ_count, ==, 0u);
+    RC_CHECK_FALSE(bt.unknown_succ);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, skip_respects_za_unreachable_at_resume)
+{
+    // ZA_UNREACHABLE sited at the resume address severs the skip's one edge, exactly as it severs a
+    // call/normal fall-through - the composition costs nothing and someone will eventually want it.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+
+    //   2000  BITABS
+    //   2001  ADC zp (swallowed)
+    //   2003  RTS    <- ZA_UNREACHABLE sited here (the resume address)
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+    push_skip(&insns, 0x2000, 2, &arena);                                  // BITABS @2000
+    push_insn(&insns, 0x2001, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // ADC zp @2001
+    push_insn(&insns, 0x2003, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS    @2003
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(1, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2003, .target = RC_INDEX_NONE,
+                                                .kind = zp_cflow_za_unreachable}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b0.num_insns, ==, 1u);
+    RC_CHECK(b0.succ_count, ==, 0u);   // the resume edge is severed...
+    RC_CHECK_FALSE(b0.unknown_succ);   // ...knowingly
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

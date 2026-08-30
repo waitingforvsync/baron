@@ -132,6 +132,9 @@ Only the final pass records anything - earlier passes exist to let the layout se
   position of the `ZA_AUTO` statement).
 - `zp_insn` - one per *instruction*: pc, size, control-flow class (`zp_flow`), which variable it touches
   and how (`rw` read/write flags, constant offset, indexed/indirect flags), and its transfer target.
+  A `BITZP`/`BITABS` skip marker is a real 1-byte record here too (`zp_flow_skip`, with `skip_bytes`
+  carrying how much the BIT swallows) - plain `EQUB` data records nothing, which is exactly why the raw
+  spelling of the trick cannot be modelled.
 - `zp_cflow` - the annotations: `ZA_UNREACHABLE`, `ZA_CANCALL`, `ZA_CANJUMP`, `ZA_RETURN`, `ZA_RETURNTO`.
 - `zp_label` - each label's identity mapped to its physical `(section, pc)`.
 
@@ -233,6 +236,16 @@ The details that make the CFG honest:
   data-consuming callee resumes exactly there. Nothing found at all is the end of the stream, a clean
   dead end. (A *branch's* not-taken edge stays pure pc arithmetic - a not-taken branch into data is a
   broken program, not a continuation.)
+- **A skip marker (`BITZP`/`BITABS`, `zp_flow_skip`) hops its swallowed bytes.** Pass 1 marks two
+  leaders: the instruction at `pc+1` (the swallowed one - it starts its own block, entered only by an
+  explicit branch, since the marker wires **no** edge to it) and the resume point
+  `pc + 1 + skip_bytes` (pure arithmetic: a BIT always fetches its full operand). Pass 2 cuts after
+  the marker like any terminator; pass 3 wires exactly one successor to the resume - falling back to
+  the data-gap skip, constrained to `pc >= resume` so it can never land back on the swallowed block.
+  A recorded instruction *straddling* the resume point (a 3-byte instruction under a `BITABS`) means
+  the streams interleave mid-instruction - inexpressible, so finalize refuses it
+  (`error_type_skip_spans_instruction`). Everything downstream needs no special cases: the swallowed
+  store/read simply lives in a branch-only block, so must-write and liveness are correct by structure.
 - **Annotations adjust the graph**: `ZA_UNREACHABLE` prunes a dead fall-through edge - a branch's
   not-taken arm, or the continuation of a never-returning `JSR`; `ZA_CANJUMP` wires a computed jump's or
   self-modified branch's declared targets as real successors **in place of** any literal edge (external
@@ -419,22 +432,31 @@ fixed addresses outside the pool (an auto-allocated address moves between builds
 entry is protected exactly as far as a strict poke-`CALL`-peek transaction requires, which ordinary
 liveness already provides - so a sync entry is *only* a root.
 
-**The input warning.** A sync root that *reads* a variable before writing it is expecting its caller
-to have set the value - impossible at an auto-allocated address - so each `ZA_ENTRY` block is checked
-and every such variable warned (`za_entry_input`, default-visible; handler blocks are exempt, their
-live-in being Guard 3's supported comm-var pattern). The test is NOT `live_in` at the root:
-the backward fixpoint's return edges are context-insensitive, so a helper called both from the
-entry's pre-init stretch and from inside the main loop smears the loop call site's live-after
-through the shared `RTS` into the entry's unrelated call site, and every loop-carried variable then
-looks live-in at the root along a path that cannot execute. Instead
-`liveness_read_before_write` (`src/liveness.c`) re-runs the must-write engine forward from the root
-- same byte id space, same per-entry extents, same intersection meet - and harvests each read of a
-byte the definitely-written-so-far set does not cover; a call applies its callees' summaries in
-place (their input bytes count only where the caller has not already covered them, their must-writes
-extend the covered set), which is per-call-site precise where the return edges are not. Summaries
-interleave in one outer fixpoint: must-write shrinks from full, read-before-write grows from empty.
-Unknown and external arms contribute nothing - a warning must not demand annotations, and Guard 1
-refuses computed flow anyway.
+**The input warning.** A sync root that reads a variable *nothing in the program could yet have
+written* is expecting its caller to have set the value - impossible at an auto-allocated address - so
+each `ZA_ENTRY` block is checked and every such variable warned (`za_entry_input`, default-visible;
+handler blocks are exempt, their live-in being Guard 3's supported comm-var pattern). The test is NOT
+`live_in` at the root: the backward fixpoint's return edges are context-insensitive, so a helper
+called both from the entry's pre-init stretch and from inside the main loop smears the loop call
+site's live-after through the shared `RTS` into the entry's unrelated call site, and every
+loop-carried variable then looks live-in at the root along a path that cannot execute. Instead
+`liveness_read_before_write` (`src/liveness.c`) runs a forward **may-write** flow from the root
+(union meet over predecessors, seeded empty - a byte is covered once ANY route to this point contains
+a write of it) and harvests each read the covered set misses; a call applies its callees' summaries
+in place (their input bytes count only where the caller's set does not already cover them, their
+may-writes - the union over their arms - extend it), which is per-call-site precise where the return
+edges are not. Two phases: the may-write summaries grow to their fixpoint first, then, coverage
+frozen, the input summaries grow to theirs. The gate is deliberately *may*, not the allocator's
+must-write: a definite-assignment gate flagged correct programs whose guarding correlations no
+analysis of this IR can see - the flag-guarded init (writes skipped exactly when a "nothing visible"
+flag is set, reads guarded by the same flag) and the value-correlated dispatch (written under `X = 0`,
+read only in the handler dispatched when `X = 0`) - and drowned the true inputs. What "may" gives up,
+knowingly: purely loop-carried state (read at a loop's top, written only later inside it) is silenced
+by its own back edge, and a forgotten init on one path is silenced by an init on another. Coverage
+details: an indexed / unknown-offset store counts for its whole variable here (it proves no byte, but
+may have written any - the inverse of the allocator's kill rule), while a `ZA_DISCARD` counts for
+nothing (it declares the old value dead; it supplies no new one). Unknown and external arms
+contribute nothing - a warning must not demand annotations, and Guard 1 refuses computed flow anyway.
 
 ## Colouring ##
 

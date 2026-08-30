@@ -92,7 +92,7 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     }
     zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
     if (last.flow != zp_flow_jump && last.flow != zp_flow_branch && last.flow != zp_flow_return) {
-        return false;   // normal/call flow: not an exit of any kind
+        return false;   // normal/call/skip flow: not an exit of any kind (a skip always resumes in-stream)
     }
     bool annotated = false;
     for (uint32_t j = 0; j < cflows.num; j++) {
@@ -221,8 +221,13 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
         npreds += blk.succ_count;
     }
+    // Two separate loops, deliberately: the prefix sum reads pred_count[b - 1], so zeroing the counts
+    // (they are reused as the fill cursors) must wait until the whole sum is done - fused into one loop,
+    // each pred_first after the first came out zero and every block's preds landed on top of each other.
     for (uint32_t b = 0; b < nb; b++) {
         pred_first[b] = (b == 0) ? 0 : pred_first[b - 1] + pred_count[b - 1];
+    }
+    for (uint32_t b = 0; b < nb; b++) {
         pred_count[b] = 0;   // reused as the fill cursor
     }
     uint32_t *preds = npreds ? rc_arena_alloc_type(&scratch, uint32_t, npreds) : NULL;
@@ -610,15 +615,126 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
     return block < lv->num_blocks && vreg < lv->num_vars && rc_bitset_is_set(&lv->live_out[block], vreg);
 }
 
-// The read-before-write walk. Structurally this is the must-write engine from liveness_analyze run a
-// second time (same byte id space, same per-entry extent walks, same forward intersection meet), with one
-// extra harvest per routine: after the definite-write sets stabilise, a sweep over the extent collects
-// every read of a byte the routine has not provably written yet - the routine's inputs. Calls apply the
-// callee's summaries instead of edges: its inputs count only where the caller's written set does not
-// already cover them, and its must-writes extend the written set - which is exactly what keeps one call
-// site's context from leaking into another (the imprecision the backward fixpoint's shared return edges
-// accept). The outer fixpoint interleaves both summaries: must-write shrinks from FULL, read-before-write
-// grows from empty, both bounded, so it terminates.
+// The bytes an instruction MAY write - the gate for the entry-input harvest below. The allocator's
+// insn_window counts only PROVABLE redefinitions (an indexed store proves nothing, so it kills nothing);
+// the input question is the opposite one - "could anything in the program have supplied this value?" -
+// so here an indexed / unknown-offset store counts for its WHOLE variable (it may have written any
+// byte), while a ZA_DISCARD counts for nothing at all: it declares the old value dead, it supplies no
+// new one.
+static touch_window may_write_window(zp_insn n, uint16_t width)
+{
+    touch_window w = {0};
+    if (n.var_kill || !(n.rw & vref_write)) {
+        return w;
+    }
+    bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
+    w.write_first = direct ? n.var_offset : 0;
+    w.write_count = direct ? 1u : width;
+    return w;
+}
+
+// The shared plumbing of the entry-input walk's two phases: the graph and stream, the may-write
+// summaries the flow consumes, and the working rows it fills (the footprint walk's context pattern).
+typedef struct rbw_ctx {
+    cfg              g;
+    rc_view_zp_insn  insns;
+    rc_view_zp_var   vars;
+    call_targets    *calls;        // per-insn call arms (empty rows for non-calls)
+    rc_bitset       *mayb;         // per-entry may-write summaries (phase 1's product)
+    const uint32_t  *base;         // vreg -> first byte id
+    const uint32_t  *preds, *pred_first, *pred_count;
+    bool            *in_ext;      // the extent of the entry under analysis
+    uint32_t        *stack;
+    rc_bitset       *mayin, *mayout;   // per-block "bytes some route may have written by here"
+    rc_bitset       *row;          // one scratch row
+} rbw_ctx;
+
+// One entry's forward may-write flow: walk its extent into in_ext, then run the union fixpoint into
+// mayin/mayout - a byte is in mayin[b] once ANY route from the entry to b contains a write of it. The
+// union meet needs no entry special case (an entry with no in-extent predecessors meets nothing = empty)
+// and deliberately includes loop back edges. gen(b) = the block's own may-writes plus its callees'
+// summaries (union over a call's arms - one writing arm is enough for "may"). Returns whether the
+// extent is tainted by an unknown successor.
+static bool may_write_flow(rbw_ctx *c, uint32_t e)
+{
+    uint32_t nb = c->g.blocks.num;
+    for (uint32_t b = 0; b < nb; b++) { c->in_ext[b] = false; }
+    uint32_t sp = 0;
+    c->stack[sp++] = e;
+    c->in_ext[e] = true;
+    bool tainted = false;
+    while (sp > 0) {
+        basic_block blk = rc_array_basic_block_get(&c->g.blocks, c->stack[--sp]);
+        tainted = tainted || blk.unknown_succ;
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            uint32_t t = cfg_succ(c->g, blk, s);
+            if (!c->in_ext[t]) { c->in_ext[t] = true; c->stack[sp++] = t; }
+        }
+    }
+    for (uint32_t b = 0; b < nb; b++) {
+        if (c->in_ext[b]) {
+            rc_bitset_reset(&c->mayin[b]);
+            rc_bitset_reset(&c->mayout[b]);
+        }
+    }
+    bool pass = true;
+    while (pass) {
+        pass = false;
+        for (uint32_t b = 0; b < nb; b++) {
+            if (!c->in_ext[b]) {
+                continue;
+            }
+            rc_bitset_reset(c->row);
+            for (uint32_t p = 0; p < c->pred_count[b]; p++) {
+                uint32_t pb = c->preds[c->pred_first[b] + p];
+                if (c->in_ext[pb]) {
+                    rc_bitset_union(c->row, &c->mayout[pb]);
+                }
+            }
+            if (!rc_bitset_is_equal(c->row, &c->mayin[b])) {
+                rc_bitset_copy(&c->mayin[b], c->row);
+                pass = true;
+            }
+            basic_block blk = rc_array_basic_block_get(&c->g.blocks, b);
+            for (uint32_t k = 0; k < blk.num_insns; k++) {
+                uint32_t ni = blk.first_insn + k;
+                zp_insn  n  = rc_view_zp_insn_get(c->insns, ni);
+                if (n.flow == zp_flow_call) {
+                    for (uint32_t a = 0; a < c->calls[ni].blocks.view.num; a++) {
+                        rc_bitset_union(c->row, &c->mayb[rc_array_u32_get(&c->calls[ni].blocks, a)]);
+                    }
+                }
+                if (n.vreg == RC_INDEX_NONE) {
+                    continue;
+                }
+                touch_window w = may_write_window(n, rc_view_zp_var_get(c->vars, n.vreg).width);
+                for (uint32_t i = 0; i < w.write_count; i++) {
+                    rc_bitset_set(c->row, c->base[n.vreg] + w.write_first + i);
+                }
+            }
+            if (!rc_bitset_is_equal(c->row, &c->mayout[b])) {
+                rc_bitset_copy(&c->mayout[b], c->row);
+                pass = true;
+            }
+        }
+    }
+    return tainted;
+}
+
+// The entry-input walk: which variables can a routine read while NOTHING in the program could yet have
+// written them - values that can only have come from outside, which is fatal at an allocator-chosen
+// address. Deliberately gated on MAY-write, not the sibling engine's must-write: a write on ANY route
+// to the read silences it. A definite-assignment gate flagged correct programs whose guarding
+// correlations no analysis of this IR can see - the flag-guarded init (writes skipped exactly when a
+// "nothing to do" flag is set, reads guarded by the same flag) and the value-correlated dispatch
+// (written under X==0, read only in the handler dispatched when X==0) - and drowned the real signal.
+// The price, paid knowingly: purely loop-carried state (read at a loop's top, written only later inside
+// it) is silenced by its own back edge. Calls apply summaries, not edges: a callee's may-writes extend
+// the caller's set, and its own input set counts only where the caller's set does not already cover it
+// - which keeps one call site's context out of another. Two phases, because an interleave would not
+// converge cleanly: the may-write summaries grow to their fixpoint first, then - coverage frozen - the
+// input summaries grow to theirs (interleaved, an early under-covered harvest could flag a read the
+// final coverage silences, and a grow-only summary would never take it back).
 rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                                      rc_view_zp_var vars, uint32_t root, rc_arena *arena, rc_arena scratch)
 {
@@ -671,8 +787,13 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
         }
         npreds += blk.succ_count;
     }
+    // Two separate loops, deliberately: the prefix sum reads pred_count[b - 1], so zeroing the counts
+    // (they are reused as the fill cursors) must wait until the whole sum is done - fused into one loop,
+    // each pred_first after the first came out zero and every block's preds landed on top of each other.
     for (uint32_t b = 0; b < nb; b++) {
         pred_first[b] = (b == 0) ? 0 : pred_first[b - 1] + pred_count[b - 1];
+    }
+    for (uint32_t b = 0; b < nb; b++) {
         pred_count[b] = 0;   // reused as the fill cursor
     }
     uint32_t *preds = npreds ? rc_arena_alloc_type(&scratch, uint32_t, npreds) : NULL;
@@ -690,23 +811,29 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
         rc_bitset_set(&full, i);
     }
 
-    // mwb[e] = bytes routine e definitely writes before returning (starts FULL, shrinks);
-    // rbwb[e] = bytes some path from e reads before writing (starts empty, grows). Entry rows only.
-    rc_bitset *mwb  = make_rows(nb, nbytes, &scratch);
-    rc_bitset *rbwb = make_rows(nb, nbytes, &scratch);
-    for (uint32_t e = 0; e < nb; e++) {
-        if (is_entry[e]) {
-            rc_bitset_copy(&mwb[e], &full);
-        }
-    }
-    rc_bitset *mwin  = make_rows(nb, nbytes, &scratch);
-    rc_bitset *mwout = make_rows(nb, nbytes, &scratch);
+    // mayb[e] = bytes routine e MAY have written by the time it returns (the union over its returning
+    // routes); rbwb[e] = bytes some read in e consumes that nothing could yet have written. Entry rows
+    // only; both grow from empty.
+    rc_bitset *mayb   = make_rows(nb, nbytes, &scratch);
+    rc_bitset *rbwb   = make_rows(nb, nbytes, &scratch);
+    rc_bitset *mayin  = make_rows(nb, nbytes, &scratch);
+    rc_bitset *mayout = make_rows(nb, nbytes, &scratch);
     rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
-    rc_bitset  mrow  = {0}; rc_bitset_resize(&mrow, nbytes, &scratch);
+    rc_bitset  row   = {0}; rc_bitset_resize(&row, nbytes, &scratch);
     rc_bitset  reads = {0}; rc_bitset_resize(&reads, nbytes, &scratch);
     bool      *in_ext = rc_arena_alloc_type(&scratch, bool, nb);
     uint32_t  *stack  = rc_arena_alloc_type(&scratch, uint32_t, nb);
+    rbw_ctx c = {
+        .g = g, .insns = insns, .vars = vars, .calls = calls, .mayb = mayb, .base = base,
+        .preds = preds, .pred_first = pred_first, .pred_count = pred_count,
+        .in_ext = in_ext, .stack = stack, .mayin = mayin, .mayout = mayout, .row = &row,
+    };
 
+    // Phase 1: the may-write summaries, to their fixpoint - monotone, since a callee's growing summary
+    // only ever grows its callers' flows. A routine's summary is the union over its RETURNING exits
+    // (a write on a never-returning path cannot precede a post-call read); no returning path at all
+    // vacuously covers everything (the caller's continuation never runs). A tainted extent contributes
+    // nothing - Guard 1 refuses the program anyway, no point stacking warnings on top of its error.
     bool changed = true;
     while (changed) {
         changed = false;
@@ -714,140 +841,86 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
             if (!is_entry[e]) {
                 continue;
             }
-            for (uint32_t b = 0; b < nb; b++) { in_ext[b] = false; }
-            uint32_t sp = 0;
-            stack[sp++] = e;
-            in_ext[e] = true;
-            bool tainted = false;
-            while (sp > 0) {
-                basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
-                tainted = tainted || blk.unknown_succ;
-                for (uint32_t s = 0; s < blk.succ_count; s++) {
-                    uint32_t t = cfg_succ(g, blk, s);
-                    if (!in_ext[t]) { in_ext[t] = true; stack[sp++] = t; }
+            bool tainted = may_write_flow(&c, e);
+            rc_bitset_reset(&acc);
+            if (!tainted) {
+                bool any_return = false;
+                for (uint32_t b = 0; b < nb; b++) {
+                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                    if (in_ext[b] && block_returns(g, insns, cflows, blk)) {
+                        rc_bitset_union(&acc, &mayout[b]);
+                        any_return = true;
+                    }
+                }
+                if (!any_return) {
+                    rc_bitset_copy(&acc, &full);
                 }
             }
+            if (!rc_bitset_is_equal(&acc, &mayb[e])) {
+                rc_bitset_copy(&mayb[e], &acc);
+                changed = true;
+            }
+        }
+    }
 
-            rc_bitset_reset(&acc);
+    // Phase 2: the input harvest, to its own fixpoint with the coverage frozen. Replay each block from
+    // its stable may-in and collect the reads that land outside the running set - checking each
+    // instruction's reads BEFORE applying its writes, so a read-modify-write consumes the old value. A
+    // callee contributes its own input set, filtered by what this caller may already have covered, then
+    // extends the running set with its may-writes. Reads come from insn_window (its read side is the
+    // consumption question, unchanged); only the coverage side uses the may window.
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (uint32_t e = 0; e < nb; e++) {
+            if (!is_entry[e]) {
+                continue;
+            }
+            bool tainted = may_write_flow(&c, e);
             rc_bitset_reset(&reads);
-            bool any_return = false;
             if (!tainted) {
-                for (uint32_t b = 0; b < nb; b++) {
-                    if (in_ext[b]) {
-                        rc_bitset_copy(&mwin[b], &full);
-                        rc_bitset_copy(&mwout[b], &full);
-                    }
-                }
-                bool pass = true;
-                while (pass) {
-                    pass = false;
-                    for (uint32_t b = 0; b < nb; b++) {
-                        if (!in_ext[b]) {
-                            continue;
-                        }
-                        if (b == e) {
-                            rc_bitset_reset(&mrow);
-                        }
-                        else {
-                            rc_bitset_copy(&mrow, &full);
-                            for (uint32_t p = 0; p < pred_count[b]; p++) {
-                                uint32_t pb = preds[pred_first[b] + p];
-                                if (in_ext[pb]) {
-                                    rc_bitset_intersection(&mrow, &mwout[pb]);
-                                }
-                            }
-                        }
-                        if (!rc_bitset_is_equal(&mrow, &mwin[b])) {
-                            rc_bitset_copy(&mwin[b], &mrow);
-                            pass = true;
-                        }
-                        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-                        for (uint32_t k = 0; k < blk.num_insns; k++) {
-                            uint32_t ni = blk.first_insn + k;
-                            zp_insn  n  = rc_view_zp_insn_get(insns, ni);
-                            if (n.flow == zp_flow_call) {
-                                rc_bitset ck = call_kill_bytes(calls[ni], mwb, nbytes, &scratch);
-                                rc_bitset_union(&mrow, &ck);
-                            }
-                            if (n.vreg == RC_INDEX_NONE) {
-                                continue;
-                            }
-                            touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
-                            for (uint32_t i = 0; i < w.write_count; i++) {
-                                rc_bitset_set(&mrow, base[n.vreg] + w.write_first + i);
-                            }
-                        }
-                        if (!rc_bitset_is_equal(&mrow, &mwout[b])) {
-                            rc_bitset_copy(&mwout[b], &mrow);
-                            pass = true;
-                        }
-                    }
-                }
-
-                // The harvest: with the written-so-far sets stable, replay each block and collect the
-                // reads that land outside them - checking each instruction's reads BEFORE applying its
-                // writes, so a read-modify-write consumes the old value. A callee contributes its own
-                // input set, filtered by what this caller has already covered.
                 for (uint32_t b = 0; b < nb; b++) {
                     if (!in_ext[b]) {
                         continue;
                     }
-                    rc_bitset_copy(&mrow, &mwin[b]);
+                    rc_bitset_copy(&acc, &mayin[b]);
                     basic_block blk = rc_array_basic_block_get(&g.blocks, b);
                     for (uint32_t k = 0; k < blk.num_insns; k++) {
                         uint32_t ni = blk.first_insn + k;
                         zp_insn  n  = rc_view_zp_insn_get(insns, ni);
                         if (n.flow == zp_flow_call) {
-                            for (uint32_t c = 0; c < calls[ni].blocks.view.num; c++) {
-                                rc_bitset *crbw = &rbwb[rc_array_u32_get(&calls[ni].blocks, c)];
+                            for (uint32_t a = 0; a < calls[ni].blocks.view.num; a++) {
+                                rc_bitset *crbw = &rbwb[rc_array_u32_get(&calls[ni].blocks, a)];
                                 for (uint32_t bit = rc_bitset_get_first_set(crbw); bit != RC_INDEX_NONE;
                                      bit = rc_bitset_get_next_set(crbw, bit + 1)) {
-                                    if (!rc_bitset_is_set(&mrow, bit)) {
+                                    if (!rc_bitset_is_set(&acc, bit)) {
                                         rc_bitset_set(&reads, bit);
                                     }
                                 }
                             }
-                            rc_bitset ck = call_kill_bytes(calls[ni], mwb, nbytes, &scratch);
-                            rc_bitset_union(&mrow, &ck);
+                            for (uint32_t a = 0; a < calls[ni].blocks.view.num; a++) {
+                                rc_bitset_union(&acc, &mayb[rc_array_u32_get(&calls[ni].blocks, a)]);
+                            }
                         }
                         if (n.vreg == RC_INDEX_NONE) {
                             continue;
                         }
-                        touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
-                        for (uint32_t i = 0; i < w.read_count; i++) {
-                            uint32_t bit = base[n.vreg] + w.read_first + i;
-                            if (!rc_bitset_is_set(&mrow, bit)) {
+                        uint16_t width = rc_view_zp_var_get(vars, n.vreg).width;
+                        touch_window r = insn_window(n, width);
+                        for (uint32_t i = 0; i < r.read_count; i++) {
+                            uint32_t bit = base[n.vreg] + r.read_first + i;
+                            if (!rc_bitset_is_set(&acc, bit)) {
                                 rc_bitset_set(&reads, bit);
                             }
                         }
+                        touch_window w = may_write_window(n, width);
                         for (uint32_t i = 0; i < w.write_count; i++) {
-                            rc_bitset_set(&mrow, base[n.vreg] + w.write_first + i);
+                            rc_bitset_set(&acc, base[n.vreg] + w.write_first + i);
                         }
                     }
                 }
-
-                for (uint32_t b = 0; b < nb; b++) {
-                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-                    if (!in_ext[b] || !block_returns(g, insns, cflows, blk)) {
-                        continue;
-                    }
-                    if (!any_return) {
-                        rc_bitset_copy(&acc, &mwout[b]);
-                        any_return = true;
-                    }
-                    else {
-                        rc_bitset_intersection(&acc, &mwout[b]);
-                    }
-                }
             }
-            if (!tainted && !any_return) {
-                rc_bitset_copy(&acc, &full);   // never returns: vacuously writes everything
-            }
-            if (!rc_bitset_is_equal(&acc, &mwb[e])) {
-                rc_bitset_copy(&mwb[e], &acc);
-                changed = true;
-            }
-            rc_bitset_union(&reads, &rbwb[e]);   // summaries only ever grow
+            rc_bitset_union(&reads, &rbwb[e]);   // an ascending chain now the coverage is frozen
             if (!rc_bitset_is_equal(&reads, &rbwb[e])) {
                 rc_bitset_copy(&rbwb[e], &reads);
                 changed = true;
@@ -1244,6 +1317,165 @@ RC_TEST(liveness, unknown_successor_keeps_everything_live)
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 0));   // v0 forced live out by the taint...
     RC_CHECK_TRUE(liveness_is_live_out(&lv, 0, 1));   // ...as is v1
     RC_CHECK_TRUE(liveness_interferes(&lv, 0, 1));    // so v0's def collides with v1 - no reuse across it
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(liveness, diamond_meet_reads_real_predecessors)
+{
+    // A regression for the predecessor-list build: the prefix sum once read counts its own loop had
+    // already zeroed, so every pred_first came out 0 and the lists landed on top of one another. In this
+    // diamond the empty arm's recorded "predecessor" was then ITSELF, which parked its definite-write set
+    // at the FULL seed - so the join's meet claimed v written on every path, killing a caller's live
+    // value at the JSR. Small straight-line programs dodged the scatter by luck; the diamond does not.
+    //   caller 2000: JSR 3000 ; RTS
+    //   callee 3000: BEQ 3008 ; JMP 300A ; 3008: STA v ; 300A: LDA v ; RTS
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+    uint32_t pc = 0x2000;
+    pc = touch(&insns, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena);       // JSR 3000
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    pc = 0x3000;
+    pc = touch(&insns, pc, 2, zp_flow_branch, 0x3008, RC_INDEX_NONE, vref_none, &arena);     // BEQ 3008
+    pc = touch(&insns, pc, 3, zp_flow_jump, 0x300A, RC_INDEX_NONE, vref_none, &arena);       // JMP 300A
+    pc = 0x3008;
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_write, &arena);         // STA v
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read, &arena);          // LDA v @300A
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(1, &arena), 0, &arena, scratch);
+    uint32_t callee = cfg_block_at(g, 0, 0x3000);
+    RC_CHECK_TRUE(callee != RC_INDEX_NONE);
+    RC_CHECK_FALSE(rc_bitset_is_set(&lv.must_write[callee], 0));   // one arm writes nothing: not definite
+
+    // The entry-input walk sees the same diamond through its MAY gate: the STA arm writes v on one
+    // route to the join, so the join's read is no external input - even as must-write rightly refuses
+    // the definite claim above. The two engines answer opposite questions about one shape.
+    rc_bitset inputs = liveness_read_before_write(g, insns.view, (rc_view_zp_cflow) {0},
+                                                  width1_vars(1, &arena), callee, &arena, scratch);
+    RC_CHECK_FALSE(rc_bitset_is_set(&inputs, 0));
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(liveness, entry_inputs_are_may_write_gated)
+{
+    // The entry-input walk's four corners. It warns only when NO route in the program could have written
+    // the value before the read: a plain read-before-anything IS an input; an indexed-only init is NOT
+    // (the store proves no byte, but may have written any); a ZA_DISCARD supplies nothing, so a read
+    // after one still IS an input; and loop-carried state is silenced by its own back edge - the
+    // documented price of the may gate.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
+
+    // 2000: LDA v ; RTS -> an input.
+    rc_array_zp_insn plain = rc_array_zp_insn_make(4, &arena);
+    touch(&plain, 0x2000, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read, &arena);
+    touch(&plain, 0x2002, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    cfg g1 = cfg_build(plain.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    rc_bitset in1 = liveness_read_before_write(g1, plain.view, (rc_view_zp_cflow) {0},
+                                               width1_vars(1, &arena), 0, &arena, scratch);
+    RC_CHECK_TRUE(rc_bitset_is_set(&in1, 0));
+
+    // 2000: STA v,X ; LDA v ; RTS -> not an input (the indexed store may have supplied it).
+    rc_array_zp_insn idx = rc_array_zp_insn_make(4, &arena);
+    rc_array_zp_insn_push(&idx,
+        (zp_insn) {.pc = 0x2000, .size = 2, .flow = zp_flow_normal, .rw = vref_write, .vreg = 0,
+                   .var_indexed = true, .var_offset = RC_INDEX_NONE, .target = RC_INDEX_NONE,
+                   .target_scope = RC_INDEX_NONE, .target_def = cursor_none(), .at = (cursor) {0}},
+        &arena);
+    touch(&idx, 0x2002, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read, &arena);
+    touch(&idx, 0x2004, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    cfg g2 = cfg_build(idx.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    rc_bitset in2 = liveness_read_before_write(g2, idx.view, (rc_view_zp_cflow) {0},
+                                               width1_vars(1, &arena), 0, &arena, scratch);
+    RC_CHECK_FALSE(rc_bitset_is_set(&in2, 0));
+
+    // 2000: (ZA_DISCARD v) ; LDA v ; RTS -> still an input: a discard declares the old value dead,
+    // it does not supply a new one.
+    rc_array_zp_insn disc = rc_array_zp_insn_make(4, &arena);
+    kill_marker(&disc, 0x2000, 0, &arena);
+    touch(&disc, 0x2000, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read, &arena);
+    touch(&disc, 0x2002, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    cfg g3 = cfg_build(disc.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    rc_bitset in3 = liveness_read_before_write(g3, disc.view, (rc_view_zp_cflow) {0},
+                                               width1_vars(1, &arena), 0, &arena, scratch);
+    RC_CHECK_TRUE(rc_bitset_is_set(&in3, 0));
+
+    // 2000: .top LDA v ; STA v ; BNE top ; RTS -> silenced: the back edge carries the write around to
+    // the read, so "some route wrote it first" holds even though iteration one reads it cold.
+    rc_array_zp_insn loop = rc_array_zp_insn_make(6, &arena);
+    touch(&loop, 0x2000, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read, &arena);
+    touch(&loop, 0x2002, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_write, &arena);
+    touch(&loop, 0x2004, 2, zp_flow_branch, 0x2000, RC_INDEX_NONE, vref_none, &arena);
+    touch(&loop, 0x2006, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    cfg g4 = cfg_build(loop.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    rc_bitset in4 = liveness_read_before_write(g4, loop.view, (rc_view_zp_cflow) {0},
+                                               width1_vars(1, &arena), 0, &arena, scratch);
+    RC_CHECK_FALSE(rc_bitset_is_set(&in4, 0));
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(liveness, skip_swallowed_write_is_branch_path_only)
+{
+    // The BIT-skip trick, seen by must-write: the callee's STA keep is swallowed by a BITABS, so it runs
+    // only when the BEQ takes - the fall-through path returns WITHOUT writing keep, and the intersection
+    // over returning paths must come up empty. The contrast stream drops the marker (plain data in the
+    // gap): the gap-skip fall-through then routes THROUGH the store, and must-write claims it - which is
+    // exactly the unsoundness the marker exists to prevent.
+    //   caller 2000: JSR 3000 ; RTS
+    //   callee 3000: BEQ 3005 ; LDA # ; BITABS ; 3005: STA keep ; 3007: RTS
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+    uint32_t pc = 0x2000;
+    pc = touch(&insns, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena);     // JSR 3000
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    pc = 0x3000;
+    pc = touch(&insns, pc, 2, zp_flow_branch, 0x3005, RC_INDEX_NONE, vref_none, &arena);   // BEQ 3005
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);   // LDA #
+    rc_array_zp_insn_push(&insns,
+        (zp_insn) {.pc = pc, .size = 1, .flow = zp_flow_skip, .skip_bytes = 2, .rw = vref_none,
+                   .vreg = RC_INDEX_NONE, .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE,
+                   .target_def = cursor_none(), .at = (cursor) {0}},
+        &arena);                                                                            // BITABS @3004
+    pc += 1;
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_write, &arena);        // STA keep @3005
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);   // RTS @3007
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(1, &arena), 0, &arena, scratch);
+    uint32_t callee = cfg_block_at(g, 0, 0x3000);
+    RC_CHECK_TRUE(callee != RC_INDEX_NONE);
+    RC_CHECK_FALSE(rc_bitset_is_set(&lv.must_write[callee], 0));   // the store is NOT on every returning path
+
+    // The contrast: same program with plain data where the marker was. The gap-skip edge routes the
+    // fall-through through the store, so must-write (wrongly, for the real trick) claims keep.
+    rc_array_zp_insn bare = rc_array_zp_insn_make(8, &arena);
+    pc = 0x2000;
+    pc = touch(&bare, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena);      // JSR 3000
+    pc = touch(&bare, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    pc = 0x3000;
+    pc = touch(&bare, pc, 2, zp_flow_branch, 0x3005, RC_INDEX_NONE, vref_none, &arena);    // BEQ 3005
+    pc = touch(&bare, pc, 2, zp_flow_normal, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);    // LDA #
+    pc = 0x3005;                                                                            // a data byte @3004
+    pc = touch(&bare, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_write, &arena);         // STA keep @3005
+    pc = touch(&bare, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);    // RTS @3007
+    (void) pc;
+
+    cfg gb = cfg_build(bare.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    liveness lb = liveness_analyze(gb, bare.view, (rc_view_zp_cflow) {0}, width1_vars(1, &arena), 0, &arena, scratch);
+    uint32_t cb = cfg_block_at(gb, 0, 0x3000);
+    RC_CHECK_TRUE(cb != RC_INDEX_NONE);
+    RC_CHECK_TRUE(rc_bitset_is_set(&lb.must_write[cb], 0));
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

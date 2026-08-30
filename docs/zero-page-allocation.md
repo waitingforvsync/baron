@@ -21,6 +21,7 @@ This is the usage guide. If you want to know *how* Baron pulls it off, the machi
 - [What you can rely on](#what-you-can-rely-on)
 - [Subroutine inputs and outputs](#subroutine-inputs-and-outputs)
 - [Inline data after a JSR](#inline-data-after-a-jsr)
+- [The BIT-skip trick](#the-bit-skip-trick)
 - [Annotations](#annotations)
 - [The rules](#the-rules)
 - [Tips for tight packing](#tips-for-tight-packing)
@@ -294,6 +295,34 @@ path - `ZA_RETURNTO` on the caller side names the real resumption point(s). And 
 never comes back at all, say so with `ZA_UNREACHABLE` right after it, and nothing downstream is held
 live on its account. All three are described with the other [annotations](#annotations) below.
 
+## The BIT-skip trick ##
+
+Another old favourite: a lone `BIT` opcode whose operand fetch swallows the next instruction, so two
+code paths share their tail without a jump:
+
+```
+    BEQ addsecond
+    ADC first
+    BITABS                  ; &2C - the BIT swallows the next two bytes
+.addsecond
+    ADC second              ; runs only when branched to; fall-through hops straight over it
+    STA total               ; both paths land here
+```
+
+Spell the skip byte `BITABS` (emits `&2C`, a `BIT abs` - swallows the next **two** bytes) or `BITZP`
+(emits `&24`, a `BIT zp` - swallows **one**) rather than a raw `EQUB`, and the allocator models the
+trick exactly: the swallowed instruction touches its variables only on the branch-taken path, and the
+fall-through path resumes past it, executing nothing but a harmless flag-trashing read. With a raw
+`EQUB &2C` the byte is invisible and the analysis assumes the fall-through runs the swallowed
+instruction too - reads merely pack less tightly, but a swallowed *store* would be credited to a path
+that never performs it, which is exactly the kind of claim the allocator must not make. Use the
+keywords; they also read better.
+
+What you swallow is yours to choose - a 2-byte instruction under `BITABS`, two 1-byte instructions,
+one 1-byte instruction under `BITZP`, even two bytes of inline data. The one shape Baron refuses is a
+resume point that lands *inside* an instruction (say a 3-byte `LDA addr` right after `BITABS`): the
+two streams then interleave mid-instruction, past what the analysis can express.
+
 ## Annotations ##
 
 Some facts Baron cannot see from the instruction stream, and rather than guess it stops and asks. An
@@ -561,6 +590,7 @@ fall back to a hand-placed address.
 | `Access past the end of ZA_AUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
 | `ZA_DISCARD needs a whole ZA_AUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZA_AUTO` variable, whole. |
 | `ZA_ENTRY/ZA_INTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |
+| `BITABS resumes in the middle of an instruction` | The instruction after a `BITABS`/`BITZP` runs past the skip's resume point (a 3-byte instruction under a `BITABS`, say), so the two streams interleave mid-instruction. Swallow something that fits. |
 
 And five warnings:
 
@@ -570,4 +600,4 @@ And five warnings:
 | `Unused ZA_AUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition** - referencing it is an error, exactly as if the declaration were not there. Use it or remove it. |
 | `Unchecked indexed access into ZA_AUTO variable: '...'` | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. |
 | `ZA_AUTO used in code unreachable from any entry (missing ZA_ENTRY/ZA_INTERRUPT, or dead code)` | default | Nothing can reach this code from any entry. Usually a handler or a BASIC-called routine missing its marker; sometimes dead code; occasionally a routine behind a computed call that wants a `ZA_CANCALL`. |
-| `ZA_AUTO input to a ZA_ENTRY routine: '...' (external callers cannot know its address)` | default | A `ZA_ENTRY` routine reads the variable before writing it on some path, so it expects its caller to have set the value - and an outside caller cannot know an auto-allocated address. Give the interface a fixed home (see `ZA_ENTRY` above), or initialise the variable before the first read. |
+| `ZA_AUTO input to a ZA_ENTRY routine: '...' (external callers cannot know its address)` | default | A `ZA_ENTRY` routine reads the variable and *nothing in the program could have written it first* - the value can only come from the caller, and an outside caller cannot know an auto-allocated address. Give the interface a fixed home (see `ZA_ENTRY` above), or initialise the variable before the first read. A write on any path silences it (a guarded init, a setup routine that may skip work, counts as supplying the value - the flag correlations that make such code correct are yours to uphold). |
