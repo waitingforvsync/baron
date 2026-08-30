@@ -64,8 +64,8 @@ typedef struct value_range {
 // machinery can surface (today: the symbol NAME behind an unknown_symbol, so "Undefined symbol: 'x'"
 // can say which - the evaluator is the only place that still knows it). {0} detail when there is none.
 typedef struct value_error {
-    error_type code;
-    rc_str     detail;
+    uint16_t code;     // error_type (members store fixed widths, never enum types)
+    rc_str   detail;
 } value_error;
 
 
@@ -83,7 +83,7 @@ typedef struct value_za_auto {
 } value_za_auto;
 
 struct value {
-    value_type type;
+    uint8_t type;   // value_type
     union {
         double       numeric;           // also the boolean payload, canonically 1.0 / 0.0
         rc_str       string;            // view into source or arena; concat allocates

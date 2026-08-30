@@ -14,16 +14,15 @@ line_col line_col_from_offset(rc_str text, uint32_t pos)
     // plenty: this only ever runs while rendering diagnostics, of which a sane program has few. Columns are
     // counted in BYTES ('\n' alone ends a line; tabs and multi-byte characters count one per byte) - a
     // deliberate simplification until someone's editor complains.
-    line_col lc = {.line = 1, .col = 1};
+    uint32_t line = 1;
     uint32_t line_start = 0;
     for (uint32_t i = 0; i < pos; i++) {
         if (text.data[i] == '\n') {
-            lc.line += 1;
+            line += 1;
             line_start = i + 1;
         }
     }
-    lc.col = pos - line_start + 1;
-    return lc;
+    return (line_col) {.line = line, .col = pos - line_start + 1};
 }
 
 // The label after the location: companion frames are context for the error above them, not fresh failures,

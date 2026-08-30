@@ -52,7 +52,7 @@ uint32_t source_files_find(const source_files *sf, rc_str name)
 {
     RC_ASSERT(sf != NULL);
     for (uint32_t i = 0; i < sf->nodes.num; i++) {
-        if (rc_str_is_equal(RC_AT(sf->nodes, i).name, name)) {
+        if (rc_str_is_equal(rc_array_source_file_get(&sf->nodes, i).name, name)) {
             return i;
         }
     }
@@ -62,13 +62,13 @@ uint32_t source_files_find(const source_files *sf, rc_str name)
 rc_str source_files_text(const source_files *sf, uint32_t index)
 {
     RC_ASSERT(sf != NULL);
-    return RC_AT(sf->nodes, index).text;
+    return rc_array_source_file_get(&sf->nodes, index).text;
 }
 
 rc_str source_files_name(const source_files *sf, uint32_t index)
 {
     RC_ASSERT(sf != NULL);
-    return RC_AT(sf->nodes, index).name;
+    return rc_array_source_file_get(&sf->nodes, index).name;
 }
 
 

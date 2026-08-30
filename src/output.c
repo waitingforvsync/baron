@@ -32,7 +32,7 @@ static rc_str write_error(rc_str filename, rc_arena *arena)
 static value section_attr(section s, rc_str key)
 {
     for (uint32_t i = 0; i < s.attributes.num; i++) {
-        attribute a = RC_AT(s.attributes, i);
+        attribute a = rc_array_attribute_get(&s.attributes, i);
         if (rc_str_is_equal(a.key, key)) {
             return a.v;
         }
@@ -110,12 +110,22 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
 
         rc_array_output_entry_push(
             &entries,
-            (output_entry) {.filename = filename, .load = load, .exec = exec, .code = s.code.view},
+            (output_entry) {
+                .filename = filename,
+                .load     = load,
+                .exec     = exec,
+                .code     = s.code.view,
+            },
             arena);
     }
 
     return (output_spec_result) {
-        .spec = {.title = title, .boot = boot, .cycle = cycle, .entries = entries.view},
+        .spec = {
+            .title   = title,
+            .boot    = boot,
+            .cycle   = cycle,
+            .entries = entries.view,
+        },
     };
 }
 

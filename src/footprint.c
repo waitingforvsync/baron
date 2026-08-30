@@ -48,14 +48,13 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
     uint32_t nb = c->g.blocks.num;
     rc_bitset seen = {0};
     rc_bitset_resize(&seen, nb, &scratch);
-    uint32_t *stack = rc_arena_alloc_type(&scratch, uint32_t, nb);
-    uint32_t  sp    = 0;
-    stack[sp++] = entry;
+    rc_array_u32 stack = rc_array_u32_make(nb, &scratch);
+    rc_array_u32_push(&stack, entry, &scratch);
     rc_bitset_set(&seen, entry);
 
-    while (sp > 0) {
-        uint32_t bi = stack[--sp];
-        basic_block blk = rc_array_basic_block_get(&c->g.blocks, bi);
+    while (stack.num > 0) {
+        uint32_t bi = rc_array_u32_pop(&stack);
+        basic_block blk = rc_view_basic_block_get(c->g.blocks, bi);
         if (blk.unknown_succ) {
             *c->unknown = true;   // a callee that leaves via a computed jump: footprint cannot be bounded
         }
@@ -80,7 +79,7 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
             uint32_t succ = cfg_succ(c->g, blk, s);
             if (!rc_bitset_is_set(&seen, succ)) {
                 rc_bitset_set(&seen, succ);
-                stack[sp++] = succ;
+                rc_array_u32_push(&stack, succ, &scratch);
             }
         }
     }
@@ -91,61 +90,65 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
 footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t entry_block,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
 {
-    footprint fp = {
-        .touched      = {0},
-        .killed       = {0},
-        .unknown_call = false,
-        .recursive    = false,
-    };
-    rc_bitset_resize(&fp.touched, num_vars, arena);
-    rc_bitset_resize(&fp.killed, num_vars, arena);
-    if (entry_block >= g.blocks.num || num_vars == 0) {
-        return fp;
+    rc_bitset touched = {0};
+    rc_bitset killed  = {0};
+    rc_bitset_resize(&touched, num_vars, arena);
+    rc_bitset_resize(&killed, num_vars, arena);
+    bool unknown   = false;
+    bool recursive = false;
+    if (entry_block < g.blocks.num && num_vars != 0) {
+        rc_bitset on_stack = {0};
+        rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
+        fp_ctx c = {
+            .g         = g,
+            .insns     = insns,
+            .cflows    = cflows,
+            .touched   = &touched,
+            .killed    = &killed,
+            .on_stack  = &on_stack,
+            .unknown   = &unknown,
+            .recursive = &recursive,
+        };
+        fp_visit(&c, entry_block, scratch);
     }
-    rc_bitset on_stack = {0};
-    rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
-    fp_ctx c = {
-        .g         = g,
-        .insns     = insns,
-        .cflows    = cflows,
-        .touched   = &fp.touched,
-        .killed    = &fp.killed,
-        .on_stack  = &on_stack,
-        .unknown   = &fp.unknown_call,
-        .recursive = &fp.recursive,
+    return (footprint) {
+        .touched      = touched,
+        .killed       = killed,
+        .unknown_call = unknown,
+        .recursive    = recursive,
     };
-    fp_visit(&c, entry_block, scratch);
-    return fp;
 }
 
 footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, zp_insn call,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
 {
-    footprint fp = {
-        .touched      = {0},
-        .killed       = {0},
-        .unknown_call = false,
-        .recursive    = false,
-    };
-    rc_bitset_resize(&fp.touched, num_vars, arena);
-    rc_bitset_resize(&fp.killed, num_vars, arena);
-    if (num_vars == 0) {
-        return fp;
+    rc_bitset touched = {0};
+    rc_bitset killed  = {0};
+    rc_bitset_resize(&touched, num_vars, arena);
+    rc_bitset_resize(&killed, num_vars, arena);
+    bool unknown   = false;
+    bool recursive = false;
+    if (num_vars != 0) {
+        rc_bitset on_stack = {0};
+        rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
+        fp_ctx c = {
+            .g         = g,
+            .insns     = insns,
+            .cflows    = cflows,
+            .touched   = &touched,
+            .killed    = &killed,
+            .on_stack  = &on_stack,
+            .unknown   = &unknown,
+            .recursive = &recursive,
+        };
+        fp_visit_call(&c, call, scratch);
     }
-    rc_bitset on_stack = {0};
-    rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
-    fp_ctx c = {
-        .g         = g,
-        .insns     = insns,
-        .cflows    = cflows,
-        .touched   = &fp.touched,
-        .killed    = &fp.killed,
-        .on_stack  = &on_stack,
-        .unknown   = &fp.unknown_call,
-        .recursive = &fp.recursive,
+    return (footprint) {
+        .touched      = touched,
+        .killed       = killed,
+        .unknown_call = unknown,
+        .recursive    = recursive,
     };
-    fp_visit_call(&c, call, scratch);
-    return fp;
 }
 
 

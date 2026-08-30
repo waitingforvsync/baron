@@ -18,6 +18,134 @@ static rc_span_bitset make_rows(uint32_t n, uint32_t width, rc_arena *arena)
     return rows;
 }
 
+// Rows of u32 lists: ret_from (below) keeps, per returning block, the call sites that reach it.
+#define RC_ARRAY_TYPE rc_array_u32
+#define RC_ARRAY_NAME u32_list
+#include "richc/template/array.h"
+
+// The dense byte id space: vreg v's bytes occupy [base[v], base[v] + width), and owner maps each byte
+// back to its vreg for the variable-level projections. Fixed counts, so spans; owner.num IS nbytes.
+typedef struct byte_ids {
+    rc_span_u32 base;    // per vreg: its first byte id
+    rc_span_u32 owner;   // per byte: the owning vreg
+} byte_ids;
+
+static byte_ids byte_ids_make(rc_view_zp_var vars, rc_arena *arena)
+{
+    rc_span_u32 base = rc_span_u32_make(vars.num ? rc_arena_alloc_type(arena, uint32_t, vars.num) : NULL,
+                                        vars.num);
+    uint32_t nbytes = 0;
+    for (uint32_t v = 0; v < vars.num; v++) {
+        rc_span_u32_set(base, v, nbytes);
+        nbytes += rc_view_zp_var_get(vars, v).width;
+    }
+    rc_span_u32 owner = rc_span_u32_make(nbytes ? rc_arena_alloc_type(arena, uint32_t, nbytes) : NULL,
+                                         nbytes);
+    for (uint32_t v = 0; v < vars.num; v++) {
+        for (uint32_t k = 0; k < rc_view_zp_var_get(vars, v).width; k++) {
+            rc_span_u32_set(owner, rc_span_u32_get(base, v) + k, v);
+        }
+    }
+    return (byte_ids) {.base = base, .owner = owner};
+}
+
+// Predecessor lists, in the same first/count/pool shape the cfg's successors use: block b's
+// predecessors are preds[first[b] .. first[b] + count[b]).
+typedef struct pred_lists {
+    rc_span_u32 first;
+    rc_span_u32 count;
+    rc_span_u32 preds;
+} pred_lists;
+
+static pred_lists pred_lists_make(cfg g, rc_arena *arena)
+{
+    uint32_t nb = g.blocks.num;
+    rc_span_u32 count = rc_span_u32_make(rc_arena_alloc_zero_type(arena, uint32_t, nb), nb);
+    rc_span_u32 first = rc_span_u32_make(rc_arena_alloc_type(arena, uint32_t, nb), nb);
+    uint32_t npreds = 0;
+    for (uint32_t b = 0; b < nb; b++) {
+        basic_block blk = rc_view_basic_block_get(g.blocks, b);
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            *rc_span_u32_at(count, cfg_succ(g, blk, s)) += 1;
+        }
+        npreds += blk.succ_count;
+    }
+    // Two separate loops, deliberately: the prefix sum reads count[b - 1], so zeroing the counts (they
+    // are reused as the fill cursors) must wait until the whole sum is done - fused into one loop, each
+    // first[] after the head came out zero and every block's preds landed on top of each other.
+    for (uint32_t b = 0; b < nb; b++) {
+        rc_span_u32_set(first, b, b == 0 ? 0 : rc_span_u32_get(first, b - 1) + rc_span_u32_get(count, b - 1));
+    }
+    for (uint32_t b = 0; b < nb; b++) {
+        rc_span_u32_set(count, b, 0);   // reused as the fill cursor
+    }
+    rc_span_u32 preds = rc_span_u32_make(npreds ? rc_arena_alloc_type(arena, uint32_t, npreds) : NULL,
+                                         npreds);
+    for (uint32_t b = 0; b < nb; b++) {
+        basic_block blk = rc_view_basic_block_get(g.blocks, b);
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            uint32_t t = cfg_succ(g, blk, s);
+            rc_span_u32_set(preds, rc_span_u32_get(first, t) + rc_span_u32_get(count, t), b);
+            *rc_span_u32_at(count, t) += 1;
+        }
+    }
+    return (pred_lists) {.first = first, .count = count, .preds = preds};
+}
+
+// Each call site's callee entry blocks, resolved once (ZA_CANCALL overrides included); non-call rows
+// stay zeroed - a valid empty call_targets.
+static rc_span_call_targets calls_make(cfg g, rc_view_zp_cflow cflows, rc_view_zp_insn insns,
+                                       rc_arena *arena)
+{
+    rc_span_call_targets calls = rc_span_call_targets_make(
+        insns.num ? rc_arena_alloc_zero_type(arena, call_targets, insns.num) : NULL, insns.num);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        zp_insn n = rc_view_zp_insn_get(insns, i);
+        if (n.flow == zp_flow_call) {
+            rc_span_call_targets_set(calls, i, cfg_call_targets(g, cflows, n, arena));
+        }
+    }
+    return calls;
+}
+
+// The set of call-target entry blocks: the routines whose summaries the interprocedural fixpoints keep.
+static rc_bitset entry_blocks(rc_span_call_targets calls, uint32_t nb, rc_arena *arena)
+{
+    rc_bitset is_entry = {0};
+    rc_bitset_resize(&is_entry, nb, arena);
+    for (uint32_t i = 0; i < calls.num; i++) {
+        call_targets ct = rc_span_call_targets_get(calls, i);
+        for (uint32_t c = 0; c < ct.blocks.num; c++) {
+            rc_bitset_set(&is_entry, rc_view_u32_get(ct.blocks, c));
+        }
+    }
+    return is_entry;
+}
+
+// Walk the extent of the routine entered at `e` - the blocks reachable through intraprocedural edges -
+// into `in_ext` (reset first; `stack` is the reusable worklist). Returns whether any block in the
+// extent has an unknown successor: the taint that forfeits an interprocedural claim.
+static bool extent_walk(cfg g, uint32_t e, rc_bitset *in_ext, rc_array_u32 *stack, rc_arena *arena)
+{
+    rc_bitset_reset(in_ext);
+    rc_array_u32_resize(stack, 0, arena);
+    rc_array_u32_push(stack, e, arena);
+    rc_bitset_set(in_ext, e);
+    bool tainted = false;
+    while (stack->num > 0) {
+        basic_block blk = rc_view_basic_block_get(g.blocks, rc_array_u32_pop(stack));
+        tainted = tainted || blk.unknown_succ;
+        for (uint32_t s = 0; s < blk.succ_count; s++) {
+            uint32_t t = cfg_succ(g, blk, s);
+            if (!rc_bitset_is_set(in_ext, t)) {
+                rc_bitset_set(in_ext, t);
+                rc_array_u32_push(stack, t, arena);
+            }
+        }
+    }
+    return tainted;
+}
+
 // ---- the byte id space ----
 // Liveness is tracked per BYTE, not per variable: vreg v's bytes occupy [base[v], base[v] + width[v]) in a
 // dense byte id space, and the dataflow sets below are byte sets. This is what makes partial writes come
@@ -40,29 +168,24 @@ typedef struct touch_window {
 
 static touch_window insn_window(zp_insn n, uint16_t width)
 {
-    touch_window w = {0};
     if (n.var_kill) {
-        w.write_first = 0;    // a ZA_DISCARD "writes" the whole variable: the old value is promised dead here.
-        w.write_count = width;   // No bytes are read, and the caller must not treat this as a store (no pin)
-        return w;
+        // A ZA_DISCARD "writes" the whole variable: the old value is promised dead here. No bytes are
+        // read, and the caller must not treat this as a store (no pin).
+        return (touch_window) {.write_first = 0, .write_count = width};
     }
     bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
-    if (n.rw & vref_read) {
-        uint32_t access = n.var_indirect ? 2u : 1u;
-        if (direct && n.var_offset + access <= width) {
-            w.read_first = n.var_offset;
-            w.read_count = access;
-        }
-        else {
-            w.read_first = 0;   // indexed / unknown offset: any byte's old value may be consumed
-            w.read_count = width;
-        }
-    }
-    if ((n.rw & vref_write) && direct) {
-        w.write_first = n.var_offset;
-        w.write_count = 1;   // a 6502 store writes one byte
-    }
-    return w;
+    bool narrow = direct && n.var_offset + (n.var_indirect ? 2u : 1u) <= width;
+    return (touch_window) {
+        // Reads: the addressed byte (two for an indirect pointer deref) when the offset is known and in
+        // range, else the whole variable - indexed / unknown offset may consume any byte's old value.
+        .read_first  = (n.rw & vref_read) && narrow ? n.var_offset : 0,
+        .read_count  = !(n.rw & vref_read) ? 0
+                     : narrow              ? (n.var_indirect ? 2u : 1u)
+                                           : width,
+        // Writes: only a direct store proves anything, and a 6502 store writes one byte.
+        .write_first = (n.rw & vref_write) && direct ? n.var_offset : 0,
+        .write_count = (n.rw & vref_write) && direct ? 1u : 0u,
+    };
 }
 
 static void add_edge(rc_span_bitset interfere, uint32_t a, uint32_t b)
@@ -165,18 +288,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
 
     // Stand up the byte id space: contiguous per-variable byte runs, plus the byte -> owning-vreg map the
     // projections read.
-    uint32_t *base = rc_arena_alloc_type(&scratch, uint32_t, num_vars);
-    uint32_t nbytes = 0;
-    for (uint32_t v = 0; v < num_vars; v++) {
-        base[v] = nbytes;
-        nbytes += rc_view_zp_var_get(vars, v).width;
-    }
-    uint32_t *owner = rc_arena_alloc_type(&scratch, uint32_t, nbytes);
-    for (uint32_t v = 0; v < num_vars; v++) {
-        for (uint32_t k = 0; k < rc_view_zp_var_get(vars, v).width; k++) {
-            owner[base[v] + k] = v;
-        }
-    }
+    byte_ids ids    = byte_ids_make(vars, &scratch);
+    uint32_t nbytes = ids.owner.num;
 
     // Each call site's callee entry blocks, resolved once (ZA_CANCALL overrides included). A call is treated
     // as a USE of its callee's live-in set - the callee's inputs - which is what gives an argument stored
@@ -186,13 +299,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // starts at its call, not at the top of the caller. The arms that resolve to no blocks inject and kill
     // nothing: an external callee touches none of our bytes, and a computed unannotated call is the user's
     // responsibility (ZA_CANCALL declares the targets whose inputs and writes then count).
-    call_targets *calls = rc_arena_alloc_zero_type(&scratch, call_targets, insns.num);
-    for (uint32_t i = 0; i < insns.num; i++) {
-        zp_insn n = rc_view_zp_insn_get(insns, i);
-        if (n.flow == zp_flow_call) {
-            calls[i] = cfg_call_targets(g, cflows, n, &scratch);
-        }
-    }
+    rc_span_call_targets calls = calls_make(g, cflows, insns, &scratch);
 
     // A full set for the unknown_succ taint: a block whose control may leave to an address we cannot model
     // must assume every byte is live out (the computed target might read any of them).
@@ -210,46 +317,15 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // routine with no returning path vacuously must-writes everything (its caller's post-call code never
     // runs); an unknown-succ block anywhere in the extent forfeits the lot (Guard 1 refuses such programs
     // anyway). Sound in one direction only: an under-approximation just kills less.
-    bool *is_entry = rc_arena_alloc_zero_type(&scratch, bool, nb);
-    for (uint32_t i = 0; i < insns.num; i++) {
-        for (uint32_t c = 0; c < calls[i].blocks.num; c++) {
-            is_entry[rc_view_u32_get(calls[i].blocks, c)] = true;
-        }
-    }
+    rc_bitset is_entry = entry_blocks(calls, nb, &scratch);
 
     // Predecessor lists, once, for the forward meets.
-    uint32_t *pred_count = rc_arena_alloc_zero_type(&scratch, uint32_t, nb);
-    uint32_t *pred_first = rc_arena_alloc_type(&scratch, uint32_t, nb);
-    uint32_t  npreds     = 0;
-    for (uint32_t b = 0; b < nb; b++) {
-        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-        for (uint32_t s = 0; s < blk.succ_count; s++) {
-            pred_count[cfg_succ(g, blk, s)]++;
-        }
-        npreds += blk.succ_count;
-    }
-    // Two separate loops, deliberately: the prefix sum reads pred_count[b - 1], so zeroing the counts
-    // (they are reused as the fill cursors) must wait until the whole sum is done - fused into one loop,
-    // each pred_first after the first came out zero and every block's preds landed on top of each other.
-    for (uint32_t b = 0; b < nb; b++) {
-        pred_first[b] = (b == 0) ? 0 : pred_first[b - 1] + pred_count[b - 1];
-    }
-    for (uint32_t b = 0; b < nb; b++) {
-        pred_count[b] = 0;   // reused as the fill cursor
-    }
-    uint32_t *preds = npreds ? rc_arena_alloc_type(&scratch, uint32_t, npreds) : NULL;
-    for (uint32_t b = 0; b < nb; b++) {
-        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-        for (uint32_t s = 0; s < blk.succ_count; s++) {
-            uint32_t t = cfg_succ(g, blk, s);
-            preds[pred_first[t] + pred_count[t]++] = b;
-        }
-    }
+    pred_lists pl = pred_lists_make(g, &scratch);
 
     // mwb[e] = the byte set routine e definitely writes, for entry blocks (others unused). Start FULL.
     rc_span_bitset mwb = make_rows(nb, nbytes, &scratch);
     for (uint32_t e = 0; e < nb; e++) {
-        if (is_entry[e]) {
+        if (rc_bitset_is_set(&is_entry, e)) {
             rc_bitset_copy(rc_span_bitset_at(mwb, e), &full);
         }
     }
@@ -257,30 +333,18 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     rc_span_bitset mwout  = make_rows(nb, nbytes, &scratch);
     rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
     rc_bitset  mrow  = {0}; rc_bitset_resize(&mrow, nbytes, &scratch);
-    bool      *in_ext = rc_arena_alloc_type(&scratch, bool, nb);   // extent of the entry under analysis
-    uint32_t  *stack  = rc_arena_alloc_type(&scratch, uint32_t, nb);
+    rc_bitset  in_ext = {0};                                 // extent of the entry under analysis
+    rc_bitset_resize(&in_ext, nb, &scratch);
+    rc_array_u32 stack = rc_array_u32_make(nb, &scratch);    // the extent walk's worklist
 
     bool mw_changed = true;
     while (mw_changed) {
         mw_changed = false;
         for (uint32_t e = 0; e < nb; e++) {
-            if (!is_entry[e]) {
+            if (!rc_bitset_is_set(&is_entry, e)) {
                 continue;
             }
-            // The routine's extent: blocks reachable from e through intraprocedural edges.
-            for (uint32_t b = 0; b < nb; b++) { in_ext[b] = false; }
-            uint32_t sp = 0;
-            stack[sp++] = e;
-            in_ext[e] = true;
-            bool tainted = false;
-            while (sp > 0) {
-                basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
-                tainted = tainted || blk.unknown_succ;
-                for (uint32_t s = 0; s < blk.succ_count; s++) {
-                    uint32_t t = cfg_succ(g, blk, s);
-                    if (!in_ext[t]) { in_ext[t] = true; stack[sp++] = t; }
-                }
-            }
+            bool tainted = extent_walk(g, e, &in_ext, &stack, &scratch);
 
             rc_bitset_reset(&acc);   // accumulates the intersection over returning exits
             bool any_return = false;
@@ -289,7 +353,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                 // entry), out = in + every definite write in the block (a straight line accumulates
                 // unconditionally, so order within the block is irrelevant).
                 for (uint32_t b = 0; b < nb; b++) {
-                    if (in_ext[b]) {
+                    if (rc_bitset_is_set(&in_ext, b)) {
                         rc_bitset_copy(rc_span_bitset_at(mwin, b), &full);
                         rc_bitset_copy(rc_span_bitset_at(mwout, b), &full);
                     }
@@ -298,7 +362,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                 while (pass) {
                     pass = false;
                     for (uint32_t b = 0; b < nb; b++) {
-                        if (!in_ext[b]) {
+                        if (!rc_bitset_is_set(&in_ext, b)) {
                             continue;
                         }
                         if (b == e) {
@@ -306,9 +370,10 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                         }
                         else {
                             rc_bitset_copy(&mrow, &full);
-                            for (uint32_t p = 0; p < pred_count[b]; p++) {
-                                uint32_t pb = preds[pred_first[b] + p];
-                                if (in_ext[pb]) {
+                            uint32_t p0 = rc_span_u32_get(pl.first, b);
+                            for (uint32_t p = 0; p < rc_span_u32_get(pl.count, b); p++) {
+                                uint32_t pb = rc_span_u32_get(pl.preds, p0 + p);
+                                if (rc_bitset_is_set(&in_ext, pb)) {
                                     rc_bitset_intersection(&mrow, rc_span_bitset_at(mwout, pb));
                                 }
                             }
@@ -317,20 +382,22 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                             rc_bitset_copy(rc_span_bitset_at(mwin, b), &mrow);
                             pass = true;
                         }
-                        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                        basic_block blk = rc_view_basic_block_get(g.blocks, b);
                         for (uint32_t k = 0; k < blk.num_insns; k++) {
                             uint32_t ni = blk.first_insn + k;
                             zp_insn  n  = rc_view_zp_insn_get(insns, ni);
                             if (n.flow == zp_flow_call) {
-                                rc_bitset ck = call_kill_bytes(calls[ni], mwb.view, nbytes, &scratch);
+                                rc_bitset ck = call_kill_bytes(rc_span_call_targets_get(calls, ni),
+                                                               mwb.view, nbytes, &scratch);
                                 rc_bitset_union(&mrow, &ck);
                             }
                             if (n.vreg == RC_INDEX_NONE) {
                                 continue;
                             }
-                            touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                            touch_window w  = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                            uint32_t     vb = rc_span_u32_get(ids.base, n.vreg);
                             for (uint32_t i = 0; i < w.write_count; i++) {
-                                rc_bitset_set(&mrow, base[n.vreg] + w.write_first + i);
+                                rc_bitset_set(&mrow, vb + w.write_first + i);
                             }
                         }
                         if (!rc_bitset_is_equal(&mrow, rc_span_bitset_at(mwout, b))) {
@@ -340,8 +407,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                     }
                 }
                 for (uint32_t b = 0; b < nb; b++) {
-                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-                    if (!in_ext[b] || !block_returns(g, insns, cflows, blk)) {
+                    basic_block blk = rc_view_basic_block_get(g.blocks, b);
+                    if (!rc_bitset_is_set(&in_ext, b) || !block_returns(g, insns, cflows, blk)) {
                         continue;
                     }
                     // A returning exit carries whatever the routine wrote before handing back.
@@ -369,7 +436,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     rc_span_bitset ckills = make_rows(insns.num, 0, &scratch);
     for (uint32_t i = 0; i < insns.num; i++) {
         if (rc_view_zp_insn_get(insns, i).flow == zp_flow_call) {
-            rc_span_bitset_set(ckills, i, call_kill_bytes(calls[i], mwb.view, nbytes, &scratch));
+            rc_span_bitset_set(ckills, i,
+                               call_kill_bytes(rc_span_call_targets_get(calls, i), mwb.view, nbytes, &scratch));
         }
     }
 
@@ -381,23 +449,14 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // only reads are in the caller, which intraprocedural liveness cannot see). ret_from[b] lists the call
     // sites whose callees' extents contain returning block b; after[i] snapshots the live set just after
     // call i, maintained inside the fixpoint below.
-    rc_array_u32 *ret_from = rc_arena_alloc_zero_type(&scratch, rc_array_u32, nb);
+    rc_span_u32_list ret_from = rc_span_u32_list_make(rc_arena_alloc_zero_type(&scratch, rc_array_u32, nb), nb);
     for (uint32_t i = 0; i < insns.num; i++) {
-        for (uint32_t c = 0; c < calls[i].blocks.num; c++) {
-            for (uint32_t b = 0; b < nb; b++) { in_ext[b] = false; }
-            uint32_t sp = 0;
-            stack[sp++] = rc_view_u32_get(calls[i].blocks, c);
-            in_ext[stack[0]] = true;
-            while (sp > 0) {
-                basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
-                for (uint32_t s = 0; s < blk.succ_count; s++) {
-                    uint32_t t = cfg_succ(g, blk, s);
-                    if (!in_ext[t]) { in_ext[t] = true; stack[sp++] = t; }
-                }
-            }
+        call_targets ct = rc_span_call_targets_get(calls, i);
+        for (uint32_t c = 0; c < ct.blocks.num; c++) {
+            (void) extent_walk(g, rc_view_u32_get(ct.blocks, c), &in_ext, &stack, &scratch);
             for (uint32_t b = 0; b < nb; b++) {
-                if (in_ext[b] && block_returns(g, insns, cflows, rc_array_basic_block_get(&g.blocks, b))) {
-                    rc_array_u32_push(&ret_from[b], i, &scratch);
+                if (rc_bitset_is_set(&in_ext, b) && block_returns(g, insns, cflows, rc_view_basic_block_get(g.blocks, b))) {
+                    rc_array_u32_push(rc_span_u32_list_at(ret_from, b), i, &scratch);
                 }
             }
         }
@@ -409,14 +468,14 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
     }
     for (uint32_t e = 0; e < nb; e++) {
-        if (!is_entry[e]) {
+        if (!rc_bitset_is_set(&is_entry, e)) {
             continue;
         }
         for (uint32_t v = 0; v < num_vars; v++) {
             uint16_t width = rc_view_zp_var_get(vars, v).width;
             bool     all   = true;
             for (uint32_t i = 0; i < width && all; i++) {
-                all = rc_bitset_is_set(rc_span_bitset_at(mwb, e), base[v] + i);
+                all = rc_bitset_is_set(rc_span_bitset_at(mwb, e), rc_span_u32_get(ids.base, v) + i);
             }
             if (all) {
                 rc_bitset_set(rc_span_bitset_at(must_write, e), v);
@@ -438,7 +497,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     while (changed) {
         changed = false;
         for (uint32_t bi = nb; bi-- > 0; ) {
-            basic_block block = rc_array_basic_block_get(&g.blocks, bi);
+            basic_block block = rc_view_basic_block_get(g.blocks, bi);
             rc_bitset_reset(&new_out);
             for (uint32_t k = 0; k < block.succ_count; k++) {
                 rc_bitset_union(&new_out, rc_span_bitset_at(bin, cfg_succ(g, block, k)));
@@ -446,10 +505,11 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             if (block.unknown_succ) {
                 rc_bitset_union(&new_out, &full);
             }
-            for (uint32_t r = 0; r < ret_from[bi].view.num; r++) {
+            rc_array_u32 rf = rc_span_u32_list_get(ret_from, bi);
+            for (uint32_t r = 0; r < rf.num; r++) {
                 // A returning block hands control back to each caller: what is live after those calls is
                 // live here - the return edge that keeps an escaping result alive inside its producer.
-                rc_bitset_union(&new_out, rc_span_bitset_at(after, rc_array_u32_get(&ret_from[bi], r)));
+                rc_bitset_union(&new_out, rc_span_bitset_at(after, rc_array_u32_get(&rf, r)));
             }
             rc_bitset_copy(&new_in, &new_out);
             for (uint32_t k = block.num_insns; k-- > 0; ) {
@@ -468,19 +528,21 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                          i = rc_bitset_get_next_set(rc_span_bitset_at(ckills, ni), i + 1)) {
                         rc_bitset_clear(&new_in, i);
                     }
-                    for (uint32_t c = 0; c < calls[ni].blocks.num; c++) {
-                        rc_bitset_union(&new_in, rc_span_bitset_at(bin, rc_view_u32_get(calls[ni].blocks, c)));
+                    call_targets ct = rc_span_call_targets_get(calls, ni);
+                    for (uint32_t c = 0; c < ct.blocks.num; c++) {
+                        rc_bitset_union(&new_in, rc_span_bitset_at(bin, rc_view_u32_get(ct.blocks, c)));
                     }
                 }
                 if (n.vreg == RC_INDEX_NONE) {
                     continue;
                 }
-                touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                touch_window w  = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                uint32_t     vb = rc_span_u32_get(ids.base, n.vreg);
                 for (uint32_t i = 0; i < w.write_count; i++) {
-                    rc_bitset_clear(&new_in, base[n.vreg] + w.write_first + i);
+                    rc_bitset_clear(&new_in, vb + w.write_first + i);
                 }
                 for (uint32_t i = 0; i < w.read_count; i++) {
-                    rc_bitset_set(&new_in, base[n.vreg] + w.read_first + i);
+                    rc_bitset_set(&new_in, vb + w.read_first + i);
                 }
             }
             if (!rc_bitset_is_equal(&new_out, rc_span_bitset_at(bout, bi)) || !rc_bitset_is_equal(&new_in, rc_span_bitset_at(bin, bi))) {
@@ -496,11 +558,11 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     for (uint32_t b = 0; b < nb; b++) {
         for (uint32_t i = rc_bitset_get_first_set(rc_span_bitset_at(bin, b)); i != RC_INDEX_NONE;
              i = rc_bitset_get_next_set(rc_span_bitset_at(bin, b), i + 1)) {
-            rc_bitset_set(rc_span_bitset_at(live_in, b), owner[i]);
+            rc_bitset_set(rc_span_bitset_at(live_in, b), rc_span_u32_get(ids.owner, i));
         }
         for (uint32_t i = rc_bitset_get_first_set(rc_span_bitset_at(bout, b)); i != RC_INDEX_NONE;
              i = rc_bitset_get_next_set(rc_span_bitset_at(bout, b), i + 1)) {
-            rc_bitset_set(rc_span_bitset_at(live_out, b), owner[i]);
+            rc_bitset_set(rc_span_bitset_at(live_out, b), rc_span_u32_get(ids.owner, i));
         }
     }
 
@@ -513,7 +575,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // reuses in's byte", "keep hits the whole callee footprint" legality falls out of these overlaps.
     rc_bitset live = {0}; rc_bitset_resize(&live, nbytes, &scratch);
     for (uint32_t b = 0; b < nb; b++) {
-        basic_block block = rc_array_basic_block_get(&g.blocks, b);
+        basic_block block = rc_view_basic_block_get(g.blocks, b);
         rc_bitset_copy(&live, rc_span_bitset_at(bout, b));
         for (uint32_t k = block.num_insns; k-- > 0; ) {
             uint32_t ni = block.first_insn + k;
@@ -527,32 +589,34 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                      i = rc_bitset_get_next_set(rc_span_bitset_at(ckills, ni), i + 1)) {
                     rc_bitset_clear(&live, i);
                 }
-                for (uint32_t c = 0; c < calls[ni].blocks.num; c++) {
-                    rc_bitset_union(&live, rc_span_bitset_at(bin, rc_view_u32_get(calls[ni].blocks, c)));
+                call_targets ct = rc_span_call_targets_get(calls, ni);
+                for (uint32_t c = 0; c < ct.blocks.num; c++) {
+                    rc_bitset_union(&live, rc_span_bitset_at(bin, rc_view_u32_get(ct.blocks, c)));
                 }
             }
             if (n.vreg == RC_INDEX_NONE) {
                 continue;
             }
-            touch_window w = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+            touch_window w  = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+            uint32_t     vb = rc_span_u32_get(ids.base, n.vreg);
             if (n.var_kill) {
                 // A ZA_DISCARD ends the old value's range without storing anything: clear the bytes, pin
                 // nothing - another variable may own them at this very instant, and that is the point.
                 for (uint32_t i = 0; i < w.write_count; i++) {
-                    rc_bitset_clear(&live, base[n.vreg] + w.write_first + i);
+                    rc_bitset_clear(&live, vb + w.write_first + i);
                 }
             }
             else if (n.rw & vref_write) {
                 for (uint32_t o = rc_bitset_get_first_set(&live); o != RC_INDEX_NONE;
                      o = rc_bitset_get_next_set(&live, o + 1)) {
-                    add_edge(interfere, n.vreg, owner[o]);
+                    add_edge(interfere, n.vreg, rc_span_u32_get(ids.owner, o));
                 }
                 for (uint32_t i = 0; i < w.write_count; i++) {
-                    rc_bitset_clear(&live, base[n.vreg] + w.write_first + i);
+                    rc_bitset_clear(&live, vb + w.write_first + i);
                 }
             }
             for (uint32_t i = 0; i < w.read_count; i++) {
-                rc_bitset_set(&live, base[n.vreg] + w.read_first + i);
+                rc_bitset_set(&live, vb + w.read_first + i);
             }
         }
     }
@@ -562,7 +626,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         rc_bitset *lin = rc_span_bitset_at(bin, entry_block);
         for (uint32_t a = rc_bitset_get_first_set(lin); a != RC_INDEX_NONE; a = rc_bitset_get_next_set(lin, a + 1)) {
             for (uint32_t b = rc_bitset_get_next_set(lin, a + 1); b != RC_INDEX_NONE; b = rc_bitset_get_next_set(lin, b + 1)) {
-                add_edge(interfere, owner[a], owner[b]);
+                add_edge(interfere, rc_span_u32_get(ids.owner, a), rc_span_u32_get(ids.owner, b));
             }
         }
     }
@@ -640,30 +704,31 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
 // new one.
 static touch_window may_write_window(zp_insn n, uint16_t width)
 {
-    touch_window w = {0};
     if (n.var_kill || !(n.rw & vref_write)) {
-        return w;
+        return (touch_window) {0};
     }
     bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
-    w.write_first = direct ? n.var_offset : 0;
-    w.write_count = direct ? 1u : width;
-    return w;
+    return (touch_window) {
+        .write_first = direct ? n.var_offset : 0,
+        .write_count = direct ? 1u : width,
+    };
 }
 
 // The shared plumbing of the entry-input walk's two phases: the graph and stream, the may-write
 // summaries the flow consumes, and the working rows it fills (the footprint walk's context pattern).
 typedef struct rbw_ctx {
-    cfg              g;
-    rc_view_zp_insn  insns;
-    rc_view_zp_var   vars;
-    call_targets    *calls;        // per-insn call arms (empty rows for non-calls)
-    rc_view_bitset   mayb;         // per-entry may-write summaries (phase 1's product)
-    const uint32_t  *base;         // vreg -> first byte id
-    const uint32_t  *preds, *pred_first, *pred_count;
-    bool            *in_ext;      // the extent of the entry under analysis
-    uint32_t        *stack;
-    rc_span_bitset   mayin, mayout;    // per-block "bytes some route may have written by here"
-    rc_bitset       *row;          // one scratch row
+    cfg                  g;
+    rc_view_zp_insn      insns;
+    rc_view_zp_var       vars;
+    rc_span_call_targets calls;    // per-insn call arms (empty rows for non-calls)
+    rc_view_bitset       mayb;     // per-entry may-write summaries (phase 1's product)
+    rc_view_u32          base;     // vreg -> first byte id
+    pred_lists           pl;
+    rc_bitset           *in_ext;   // the extent of the entry under analysis
+    rc_array_u32        *stack;    // the extent walk's worklist
+    rc_span_bitset       mayin, mayout;   // per-block "bytes some route may have written by here"
+    rc_bitset           *row;      // one scratch row
+    rc_arena            *scratch;  // backs the worklist's (never-needed) growth
 } rbw_ctx;
 
 // One entry's forward may-write flow: walk its extent into in_ext, then run the union fixpoint into
@@ -675,21 +740,9 @@ typedef struct rbw_ctx {
 static bool may_write_flow(rbw_ctx *c, uint32_t e)
 {
     uint32_t nb = c->g.blocks.num;
-    for (uint32_t b = 0; b < nb; b++) { c->in_ext[b] = false; }
-    uint32_t sp = 0;
-    c->stack[sp++] = e;
-    c->in_ext[e] = true;
-    bool tainted = false;
-    while (sp > 0) {
-        basic_block blk = rc_array_basic_block_get(&c->g.blocks, c->stack[--sp]);
-        tainted = tainted || blk.unknown_succ;
-        for (uint32_t s = 0; s < blk.succ_count; s++) {
-            uint32_t t = cfg_succ(c->g, blk, s);
-            if (!c->in_ext[t]) { c->in_ext[t] = true; c->stack[sp++] = t; }
-        }
-    }
+    bool tainted = extent_walk(c->g, e, c->in_ext, c->stack, c->scratch);
     for (uint32_t b = 0; b < nb; b++) {
-        if (c->in_ext[b]) {
+        if (rc_bitset_is_set(c->in_ext, b)) {
             rc_bitset_reset(rc_span_bitset_at(c->mayin, b));
             rc_bitset_reset(rc_span_bitset_at(c->mayout, b));
         }
@@ -698,13 +751,14 @@ static bool may_write_flow(rbw_ctx *c, uint32_t e)
     while (pass) {
         pass = false;
         for (uint32_t b = 0; b < nb; b++) {
-            if (!c->in_ext[b]) {
+            if (!rc_bitset_is_set(c->in_ext, b)) {
                 continue;
             }
             rc_bitset_reset(c->row);
-            for (uint32_t p = 0; p < c->pred_count[b]; p++) {
-                uint32_t pb = c->preds[c->pred_first[b] + p];
-                if (c->in_ext[pb]) {
+            uint32_t p0 = rc_span_u32_get(c->pl.first, b);
+            for (uint32_t p = 0; p < rc_span_u32_get(c->pl.count, b); p++) {
+                uint32_t pb = rc_span_u32_get(c->pl.preds, p0 + p);
+                if (rc_bitset_is_set(c->in_ext, pb)) {
                     rc_bitset_union(c->row, rc_span_bitset_at(c->mayout, pb));
                 }
             }
@@ -712,13 +766,14 @@ static bool may_write_flow(rbw_ctx *c, uint32_t e)
                 rc_bitset_copy(rc_span_bitset_at(c->mayin, b), c->row);
                 pass = true;
             }
-            basic_block blk = rc_array_basic_block_get(&c->g.blocks, b);
+            basic_block blk = rc_view_basic_block_get(c->g.blocks, b);
             for (uint32_t k = 0; k < blk.num_insns; k++) {
                 uint32_t ni = blk.first_insn + k;
                 zp_insn  n  = rc_view_zp_insn_get(c->insns, ni);
                 if (n.flow == zp_flow_call) {
-                    for (uint32_t a = 0; a < c->calls[ni].blocks.num; a++) {
-                        rc_bitset_union(c->row, rc_view_bitset_at(c->mayb, rc_view_u32_get(c->calls[ni].blocks, a)));
+                    call_targets ct = rc_span_call_targets_get(c->calls, ni);
+                    for (uint32_t a = 0; a < ct.blocks.num; a++) {
+                        rc_bitset_union(c->row, rc_view_bitset_at(c->mayb, rc_view_u32_get(ct.blocks, a)));
                     }
                 }
                 if (n.vreg == RC_INDEX_NONE) {
@@ -726,7 +781,7 @@ static bool may_write_flow(rbw_ctx *c, uint32_t e)
                 }
                 touch_window w = may_write_window(n, rc_view_zp_var_get(c->vars, n.vreg).width);
                 for (uint32_t i = 0; i < w.write_count; i++) {
-                    rc_bitset_set(c->row, c->base[n.vreg] + w.write_first + i);
+                    rc_bitset_set(c->row, rc_view_u32_get(c->base, n.vreg) + w.write_first + i);
                 }
             }
             if (!rc_bitset_is_equal(c->row, rc_span_bitset_at(c->mayout, b))) {
@@ -763,64 +818,17 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
         return result;
     }
 
-    uint32_t *base = rc_arena_alloc_type(&scratch, uint32_t, num_vars);
-    uint32_t nbytes = 0;
-    for (uint32_t v = 0; v < num_vars; v++) {
-        base[v] = nbytes;
-        nbytes += rc_view_zp_var_get(vars, v).width;
-    }
-    uint32_t *owner = rc_arena_alloc_type(&scratch, uint32_t, nbytes);
-    for (uint32_t v = 0; v < num_vars; v++) {
-        for (uint32_t k = 0; k < rc_view_zp_var_get(vars, v).width; k++) {
-            owner[base[v] + k] = v;
-        }
-    }
+    byte_ids ids    = byte_ids_make(vars, &scratch);
+    uint32_t nbytes = ids.owner.num;
 
-    call_targets *calls = rc_arena_alloc_zero_type(&scratch, call_targets, insns.num);
-    for (uint32_t i = 0; i < insns.num; i++) {
-        zp_insn n = rc_view_zp_insn_get(insns, i);
-        if (n.flow == zp_flow_call) {
-            calls[i] = cfg_call_targets(g, cflows, n, &scratch);
-        }
-    }
+    rc_span_call_targets calls = calls_make(g, cflows, insns, &scratch);
 
     // Summaries are needed for every call-target entry plus the root itself (the root is a routine too,
     // just one nothing inside the program calls).
-    bool *is_entry = rc_arena_alloc_zero_type(&scratch, bool, nb);
-    is_entry[root] = true;
-    for (uint32_t i = 0; i < insns.num; i++) {
-        for (uint32_t c = 0; c < calls[i].blocks.num; c++) {
-            is_entry[rc_view_u32_get(calls[i].blocks, c)] = true;
-        }
-    }
+    rc_bitset is_entry = entry_blocks(calls, nb, &scratch);
+    rc_bitset_set(&is_entry, root);
 
-    uint32_t *pred_count = rc_arena_alloc_zero_type(&scratch, uint32_t, nb);
-    uint32_t *pred_first = rc_arena_alloc_type(&scratch, uint32_t, nb);
-    uint32_t  npreds     = 0;
-    for (uint32_t b = 0; b < nb; b++) {
-        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-        for (uint32_t s = 0; s < blk.succ_count; s++) {
-            pred_count[cfg_succ(g, blk, s)]++;
-        }
-        npreds += blk.succ_count;
-    }
-    // Two separate loops, deliberately: the prefix sum reads pred_count[b - 1], so zeroing the counts
-    // (they are reused as the fill cursors) must wait until the whole sum is done - fused into one loop,
-    // each pred_first after the first came out zero and every block's preds landed on top of each other.
-    for (uint32_t b = 0; b < nb; b++) {
-        pred_first[b] = (b == 0) ? 0 : pred_first[b - 1] + pred_count[b - 1];
-    }
-    for (uint32_t b = 0; b < nb; b++) {
-        pred_count[b] = 0;   // reused as the fill cursor
-    }
-    uint32_t *preds = npreds ? rc_arena_alloc_type(&scratch, uint32_t, npreds) : NULL;
-    for (uint32_t b = 0; b < nb; b++) {
-        basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-        for (uint32_t s = 0; s < blk.succ_count; s++) {
-            uint32_t t = cfg_succ(g, blk, s);
-            preds[pred_first[t] + pred_count[t]++] = b;
-        }
-    }
+    pred_lists pl = pred_lists_make(g, &scratch);
 
     rc_bitset full = {0};
     rc_bitset_resize(&full, nbytes, &scratch);
@@ -838,12 +846,23 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
     rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
     rc_bitset  row   = {0}; rc_bitset_resize(&row, nbytes, &scratch);
     rc_bitset  reads = {0}; rc_bitset_resize(&reads, nbytes, &scratch);
-    bool      *in_ext = rc_arena_alloc_type(&scratch, bool, nb);
-    uint32_t  *stack  = rc_arena_alloc_type(&scratch, uint32_t, nb);
+    rc_bitset  in_ext = {0};
+    rc_bitset_resize(&in_ext, nb, &scratch);
+    rc_array_u32 stack = rc_array_u32_make(nb, &scratch);
     rbw_ctx c = {
-        .g = g, .insns = insns, .vars = vars, .calls = calls, .mayb = mayb.view, .base = base,
-        .preds = preds, .pred_first = pred_first, .pred_count = pred_count,
-        .in_ext = in_ext, .stack = stack, .mayin = mayin, .mayout = mayout, .row = &row,
+        .g       = g,
+        .insns   = insns,
+        .vars    = vars,
+        .calls   = calls,
+        .mayb    = mayb.view,
+        .base    = ids.base.view,
+        .pl      = pl,
+        .in_ext  = &in_ext,
+        .stack   = &stack,
+        .mayin   = mayin,
+        .mayout  = mayout,
+        .row     = &row,
+        .scratch = &scratch,
     };
 
     // Phase 1: the may-write summaries, to their fixpoint - monotone, since a callee's growing summary
@@ -855,7 +874,7 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
     while (changed) {
         changed = false;
         for (uint32_t e = 0; e < nb; e++) {
-            if (!is_entry[e]) {
+            if (!rc_bitset_is_set(&is_entry, e)) {
                 continue;
             }
             bool tainted = may_write_flow(&c, e);
@@ -863,8 +882,8 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
             if (!tainted) {
                 bool any_return = false;
                 for (uint32_t b = 0; b < nb; b++) {
-                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
-                    if (in_ext[b] && block_returns(g, insns, cflows, blk)) {
+                    basic_block blk = rc_view_basic_block_get(g.blocks, b);
+                    if (rc_bitset_is_set(&in_ext, b) && block_returns(g, insns, cflows, blk)) {
                         rc_bitset_union(&acc, rc_span_bitset_at(mayout, b));
                         any_return = true;
                     }
@@ -890,24 +909,25 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
     while (changed) {
         changed = false;
         for (uint32_t e = 0; e < nb; e++) {
-            if (!is_entry[e]) {
+            if (!rc_bitset_is_set(&is_entry, e)) {
                 continue;
             }
             bool tainted = may_write_flow(&c, e);
             rc_bitset_reset(&reads);
             if (!tainted) {
                 for (uint32_t b = 0; b < nb; b++) {
-                    if (!in_ext[b]) {
+                    if (!rc_bitset_is_set(&in_ext, b)) {
                         continue;
                     }
                     rc_bitset_copy(&acc, rc_span_bitset_at(mayin, b));
-                    basic_block blk = rc_array_basic_block_get(&g.blocks, b);
+                    basic_block blk = rc_view_basic_block_get(g.blocks, b);
                     for (uint32_t k = 0; k < blk.num_insns; k++) {
                         uint32_t ni = blk.first_insn + k;
                         zp_insn  n  = rc_view_zp_insn_get(insns, ni);
                         if (n.flow == zp_flow_call) {
-                            for (uint32_t a = 0; a < calls[ni].blocks.num; a++) {
-                                rc_bitset *crbw = rc_span_bitset_at(rbwb, rc_view_u32_get(calls[ni].blocks, a));
+                            call_targets ct = rc_span_call_targets_get(calls, ni);
+                            for (uint32_t a = 0; a < ct.blocks.num; a++) {
+                                rc_bitset *crbw = rc_span_bitset_at(rbwb, rc_view_u32_get(ct.blocks, a));
                                 for (uint32_t bit = rc_bitset_get_first_set(crbw); bit != RC_INDEX_NONE;
                                      bit = rc_bitset_get_next_set(crbw, bit + 1)) {
                                     if (!rc_bitset_is_set(&acc, bit)) {
@@ -915,24 +935,25 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
                                     }
                                 }
                             }
-                            for (uint32_t a = 0; a < calls[ni].blocks.num; a++) {
-                                rc_bitset_union(&acc, rc_span_bitset_at(mayb, rc_view_u32_get(calls[ni].blocks, a)));
+                            for (uint32_t a = 0; a < ct.blocks.num; a++) {
+                                rc_bitset_union(&acc, rc_span_bitset_at(mayb, rc_view_u32_get(ct.blocks, a)));
                             }
                         }
                         if (n.vreg == RC_INDEX_NONE) {
                             continue;
                         }
                         uint16_t width = rc_view_zp_var_get(vars, n.vreg).width;
+                        uint32_t vb    = rc_span_u32_get(ids.base, n.vreg);
                         touch_window r = insn_window(n, width);
                         for (uint32_t i = 0; i < r.read_count; i++) {
-                            uint32_t bit = base[n.vreg] + r.read_first + i;
+                            uint32_t bit = vb + r.read_first + i;
                             if (!rc_bitset_is_set(&acc, bit)) {
                                 rc_bitset_set(&reads, bit);
                             }
                         }
                         touch_window w = may_write_window(n, width);
                         for (uint32_t i = 0; i < w.write_count; i++) {
-                            rc_bitset_set(&acc, base[n.vreg] + w.write_first + i);
+                            rc_bitset_set(&acc, vb + w.write_first + i);
                         }
                     }
                 }
@@ -947,7 +968,7 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
 
     for (uint32_t bit = rc_bitset_get_first_set(rc_span_bitset_at(rbwb, root)); bit != RC_INDEX_NONE;
          bit = rc_bitset_get_next_set(rc_span_bitset_at(rbwb, root), bit + 1)) {
-        rc_bitset_set(&result, owner[bit]);
+        rc_bitset_set(&result, rc_span_u32_get(ids.owner, bit));
     }
     return result;
 }
@@ -1304,7 +1325,7 @@ RC_TEST(liveness, za_return_block_is_returning_exit)
     cfg gc = cfg_build(cond.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     liveness lc = liveness_analyze(gc, cond.view, cflows.view, width1_vars(2, &arena), RC_INDEX_NONE, &arena, scratch);
     uint32_t centry = cfg_block_at(gc, 0, 0x3000);
-    basic_block cb = rc_array_basic_block_get(&gc.blocks, centry);
+    basic_block cb = rc_view_basic_block_get(gc.blocks, centry);
     RC_CHECK(cb.succ_count, ==, 1u);   // the not-taken edge to the RTS block survives...
     RC_CHECK_FALSE(cb.unknown_succ);   // ...and the self-modified operand does not taint
     RC_CHECK_TRUE(rc_bitset_is_set(rc_view_bitset_at(lc.must_write, centry), 1));

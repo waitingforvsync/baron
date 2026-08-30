@@ -50,10 +50,7 @@ uint32_t scopes_make_root(scopes *s)
     // added to a scope lazily allocates its root block in the shared pool. No construction ceremony needed.
     return rc_array_scope_node_push(
         &s->nodes,
-        (scope_node) {
-            .name   = (rc_str) {0},
-            .parent = RC_INDEX_NONE,
-        },
+        (scope_node) {.parent = RC_INDEX_NONE},   // name stays empty (zero-init)
         s->arena);
 }
 
@@ -76,7 +73,7 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name)
     // child map.
     if (name.len > 0) {
         rc_trie_child_add(
-            &RC_AT(s->nodes, parent_index).children,
+            &rc_array_scope_node_at(&s->nodes, parent_index)->children,
             &s->child_pool,
             name,
             child_index,
@@ -90,7 +87,7 @@ uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
     RC_ASSERT(s != NULL);
     RC_ASSERT(name.len > 0);
 
-    rc_trie_child kids  = RC_AT(s->nodes, parent_index).children;
+    rc_trie_child kids  = rc_array_scope_node_get(&s->nodes, parent_index).children;
     uint32_t      found = rc_trie_child_find(kids, &s->child_pool, name);   // probe with the caller's (maybe scratch) view
     if (found != RC_INDEX_NONE) {
         return rc_trie_child_value_get(&s->child_pool, found);
@@ -106,7 +103,7 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, va
     RC_ASSERT(s != NULL);
     RC_ASSERT(is_leaf_name(name));
 
-    rc_trie_symbol *syms  = &RC_AT(s->nodes, scope_index).symbols;
+    rc_trie_symbol *syms  = &rc_array_scope_node_at(&s->nodes, scope_index)->symbols;
     uint32_t        found = rc_trie_symbol_find(*syms, &s->symbol_pool, name);
     if (found != RC_INDEX_NONE) {
         symbol existing = rc_trie_symbol_value_get(&s->symbol_pool, found);
@@ -136,14 +133,14 @@ bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name)
 {
     RC_ASSERT(s != NULL);
     RC_ASSERT(is_leaf_name(name));
-    return rc_trie_symbol_delete(RC_AT(s->nodes, scope_index).symbols, &s->symbol_pool, name);
+    return rc_trie_symbol_delete(rc_array_scope_node_get(&s->nodes, scope_index).symbols, &s->symbol_pool, name);
 }
 
 cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
 {
     RC_ASSERT(s != NULL && is_leaf_name(name));
 
-    rc_trie_symbol syms  = RC_AT(s->nodes, scope_index).symbols;
+    rc_trie_symbol syms  = rc_array_scope_node_get(&s->nodes, scope_index).symbols;
     uint32_t       found = rc_trie_symbol_find(syms, &s->symbol_pool, name);
     return found == RC_INDEX_NONE
                ? cursor_none()
@@ -307,7 +304,7 @@ value scopes_find_local_label(const scopes *s, uint32_t scope_index, uint32_t so
         .use_pos = use_pos,
         .forward = forward,
     };
-    rc_trie_symbol_foreach(RC_AT(s->nodes, scope_index).symbols, &s->symbol_pool, &search);
+    rc_trie_symbol_foreach(rc_array_scope_node_get(&s->nodes, scope_index).symbols, &s->symbol_pool, &search);
     // No candidate: report it as an unknown symbol, so an unresolved @- / @+ defers like any forward
     // reference (and becomes undefined_symbol on the final pass if it never binds).
     return search.found ? search.result : value_make_error(error_type_unknown_symbol);

@@ -14,7 +14,7 @@
 
 typedef struct basic_line_result {
     rc_view_bytes bytes;   // the whole record: 0D, line hi, line lo, length, tokenised text; empty on error
-    error_type    error;   // error_type_none, or bad_basic_line_number / basic_line_too_long
+    uint16_t      error;    // error_type
 } basic_line_result;
 
 // Tokenise one whole source line. `line` starts at the first digit of the line number (the caller

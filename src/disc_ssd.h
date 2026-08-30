@@ -13,7 +13,7 @@
 // sector - emulators happily treat the missing remainder as zeroes, and it keeps a mostly-empty disc
 // small on the host.
 typedef struct disc_ssd_result {
-    rc_array_bytes image;
+    rc_view_bytes image;   // built in full by disc_ssd_make
     rc_str         error;
 } disc_ssd_result;
 

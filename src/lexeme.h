@@ -101,7 +101,7 @@ typedef struct lexeme_unary_op {
 typedef struct lexeme_binary_op {
     value (*apply)(value a, value b, rc_arena *arena);
     uint8_t precedence;                 // higher binds tighter
-    assoc   associativity;
+    uint8_t  associativity;   // assoc
 } lexeme_binary_op;
 
 
@@ -160,7 +160,7 @@ typedef struct lexeme_closer {
 // and X / Y mark the index.
 typedef enum reg_name { reg_a, reg_x, reg_y } reg_name;
 typedef struct lexeme_register {
-    reg_name which;
+    uint8_t which;   // reg_name
 } lexeme_register;
 
 

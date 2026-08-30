@@ -6,7 +6,7 @@
 baron baron_make(baron_desc *a)
 {
     RC_ASSERT(a != NULL);
-    baron b;
+    baron b = {0};   // zero-init covers the depth counters and the channel handles
     b.permanent = &a->permanent;   // borrowed: the arenas stay the caller's to free
     b.per_pass  = &a->per_pass;
 
@@ -18,15 +18,9 @@ baron baron_make(baron_desc *a)
     macros_init(&b.macros, &a->per_pass);         // run_pass reseeds its store + token table each pass
     functions_init(&b.functions, &a->per_pass);   // ditto for the operand table
 
-    b.include_depth  = 0;
-    b.macro_depth    = 0;
-    b.function_depth = 0;
-    b.diagnostics    = rc_array_diagnostic_make(256, &a->permanent);
-    for (uint32_t i = 0; i < baron_num_channels; i++) {
-        b.channels[i] = (rc_mstr) {0};   // empty handles; run_pass re-zeroes them, appends allocate lazily
-    }
-    b.want_verbose   = a->verbose;      // whether to run the listing pass at all
-    b.defines        = a->defines;      // "name=expression" predefines, applied at the top of every pass
+    b.diagnostics  = rc_array_diagnostic_make(256, &a->permanent);
+    b.want_verbose = a->verbose;   // whether to run the listing pass at all
+    b.defines      = a->defines;   // "name=expression" predefines, applied at the top of every pass
     return b;
 }
 
@@ -42,7 +36,12 @@ void baron_error_payload(baron *b, error_type code, cursor at, rc_str payload)
 {
     RC_ASSERT(b != NULL);
     rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = severity_error, .payload = payload_copy(b, payload)},
+        (diagnostic) {
+            .code     = code,
+            .at       = at,
+            .severity = severity_error,
+            .payload  = payload_copy(b, payload),
+        },
         b->permanent);
 }
 
@@ -50,7 +49,12 @@ void baron_warning_payload(baron *b, error_type code, cursor at, uint8_t severit
 {
     RC_ASSERT(b != NULL && severity != severity_error);   // a warning is a positive level; 0 would fail the assemble
     rc_array_diagnostic_push(&b->diagnostics,
-        (diagnostic) {.code = code, .at = at, .severity = severity, .payload = payload_copy(b, payload)},
+        (diagnostic) {
+            .code     = code,
+            .at       = at,
+            .severity = severity,
+            .payload  = payload_copy(b, payload),
+        },
         b->permanent);
 }
 

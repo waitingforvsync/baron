@@ -45,8 +45,8 @@ typedef struct basic_block {
 // with no successor. So the "routines" fall out as the sets of blocks reachable from an entry without
 // crossing a call/return; a program with several subroutines yields several disconnected clusters here.
 typedef struct cfg {
-    rc_array_basic_block blocks;
-    rc_array_u32         succs;    // the shared successor pool; each block owns a contiguous slice of it
+    rc_view_basic_block  blocks;   // built in full by cfg_build; nothing grows or mutates it after
+    rc_view_u32          succs;    // the shared successor pool; each block owns a contiguous slice of it
     rc_view_zp_label     labels;   // the label markers, retained so a target that named a label resolves to
                                    // its block on demand (cfg_target_block) - the callee footprint walk needs
                                    // it after the graph is built, not just during construction
@@ -100,6 +100,10 @@ typedef struct call_targets {
                             // it returns having touched nothing, so a must-write intersection over the
                             // call's arms is empty - the call kills nothing when this is set
 } call_targets;
+
+#define RC_ARRAY_TYPE call_targets
+#define RC_ARRAY_NAME call_targets
+#include "richc/template/array.h"
 
 call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_arena *arena);
 

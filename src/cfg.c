@@ -26,22 +26,30 @@ typedef struct target_loc {
 static target_loc resolve_target_loc(rc_view_zp_label labels, zp_insn n)
 {
     if (n.target_via != zp_target_via_direct) {
-        return (target_loc) {.section = 0, .pc = 0, .found = false};
+        return (target_loc) {0};   // not found
     }
     if (n.target_scope != RC_INDEX_NONE) {
         for (uint32_t i = 0; i < labels.num; i++) {
             zp_label l = rc_view_zp_label_get(labels, i);
             if (l.scope == n.target_scope && cursor_is_equal(l.def, n.target_def)) {
-                return (target_loc) {.section = l.section, .pc = l.pc, .found = true};
+                return (target_loc) {
+                    .section = l.section,
+                    .pc      = l.pc,
+                    .found   = true,
+                };
             }
         }
         // A symbolic target with no marker (e.g. a `name = expr` constant, not a code label): treat the
         // resolved value as a bare address in n's own section, exactly like a numeric target.
     }
     if (n.target != RC_INDEX_NONE) {
-        return (target_loc) {.section = n.section, .pc = n.target, .found = true};
+        return (target_loc) {
+            .section = n.section,
+            .pc      = n.target,
+            .found   = true,
+        };
     }
-    return (target_loc) {.section = 0, .pc = 0, .found = false};
+    return (target_loc) {0};   // not found
 }
 
 // The leader-set index for (section, pc): one 64 KB span of bits per section. Callers only pass sections that
@@ -86,7 +94,7 @@ static uint32_t block_at(rc_view_basic_block blocks, uint32_t section, uint32_t 
 
 uint32_t cfg_block_at(cfg g, uint32_t section, uint32_t pc)
 {
-    return block_at(g.blocks.view, section, pc);
+    return block_at(g.blocks, section, pc);
 }
 
 // Does `n`'s control transfer leave the assembled program for EXTERNAL code (an OS or ROM entry)? Only
@@ -137,13 +145,13 @@ bool cfg_target_is_external(cfg g, zp_insn n)
 uint32_t cfg_target_block(cfg g, zp_insn n)
 {
     target_loc tl = resolve_target_loc(g.labels, n);
-    return tl.found ? block_at(g.blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
+    return tl.found ? block_at(g.blocks, tl.section, tl.pc) : RC_INDEX_NONE;
 }
 
 uint32_t cfg_succ(cfg g, basic_block b, uint32_t i)
 {
     RC_ASSERT(i < b.succ_count);
-    return rc_view_u32_get(g.succs.view, b.succ_first + i);
+    return rc_view_u32_get(g.succs, b.succ_first + i);
 }
 
 call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_arena *arena)
@@ -190,9 +198,9 @@ call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_aren
 // blocks array, so a `block` pointer into the blocks array stays valid across this (only the pool relocates).
 // A block's successors are pushed contiguously, so succ_first (set before the first push) + succ_count spans
 // them.
-static void add_succ(cfg *g, basic_block *block, uint32_t succ_block, rc_arena *arena)
+static void add_succ(rc_array_u32 *succs, basic_block *block, uint32_t succ_block, rc_arena *arena)
 {
-    rc_array_u32_push(&g->succs, succ_block, arena);
+    rc_array_u32_push(succs, succ_block, arena);
     block->succ_count++;
 }
 
@@ -212,10 +220,11 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
               rc_view_zp_entry entries, rc_arena *arena, rc_arena scratch)
 {
     RC_ASSERT(arena != NULL);
-    cfg result = {.blocks = rc_array_basic_block_make(16, arena), .succs = rc_array_u32_make(32, arena),
-                  .labels = labels};
+    // Built through growable locals; the result hands out views of the finished graph.
+    rc_array_basic_block blocks = rc_array_basic_block_make(16, arena);
+    rc_array_u32         succs  = rc_array_u32_make(32, arena);
     if (insns.num == 0) {
-        return result;
+        return (cfg) {.labels = labels};
     }
 
     // The leader set is one 64 KB span per section, so the SAME address in two sections (paged banks) is two
@@ -326,19 +335,15 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         if (i == 0 || insn.section != prev_sec
             || (new_addr && (addr_is_leader(&leaders, insn.section, insn.pc) || prev_cuts))) {
             current = rc_array_basic_block_push(
-                &result.blocks,
+                &blocks,
                 (basic_block) {
-                    .section      = insn.section,
-                    .pc           = insn.pc,
-                    .first_insn   = i,
-                    .num_insns    = 0,
-                    .succ_first   = 0,
-                    .succ_count   = 0,
-                    .unknown_succ = false,
+                    .section    = insn.section,
+                    .pc         = insn.pc,
+                    .first_insn = i,   // num_insns counts up from zero-init; succs wired in pass 3
                 },
                 arena);
         }
-        rc_array_basic_block_at(&result.blocks, current)->num_insns++;
+        rc_array_basic_block_at(&blocks, current)->num_insns++;
         // Does THIS instruction force a cut before the next record? A branch/jump/return always ends its
         // block; so does a skip (its fall-through resumes PAST the record at pc+1, which must never glue
         // into our block); a call does too when an annotation reroutes its continuation or declares there
@@ -367,12 +372,12 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // reroutes a call's continuation to its declared resumption points. A target that names no block and is
     // not annotated yields the unknown_succ taint - UNLESS it is external (a constant destination off the
     // stream, or a constant OS vector), which is a clean exit out of the program (see target_is_external).
-    for (uint32_t bi = 0; bi < result.blocks.num; bi++) {
-        basic_block *block = rc_array_basic_block_at(&result.blocks, bi);
+    for (uint32_t bi = 0; bi < blocks.num; bi++) {
+        basic_block *block = rc_array_basic_block_at(&blocks, bi);
         zp_insn last = rc_view_zp_insn_get(insns, block->first_insn + block->num_insns - 1);
         uint32_t after = last.pc + last.size;
         target_loc tl  = resolve_target_loc(labels, last);
-        block->succ_first = result.succs.num;
+        block->succ_first = succs.num;
         switch (last.flow) {
             case zp_flow_branch:
             case zp_flow_jump: {
@@ -380,9 +385,9 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     // Not-taken (in-stream) fall-through, unless ZA_UNREACHABLE asserts control cannot reach
                     // it. Pure pc arithmetic, deliberately without the call/normal arm's data-gap skip: a
                     // not-taken branch landing in inline data is a broken program, not a continuation.
-                    uint32_t ft = block_at(result.blocks.view, last.section, after);
+                    uint32_t ft = block_at(blocks.view, last.section, after);
                     if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
-                        add_succ(&result, block, ft, arena);
+                        add_succ(&succs, block, ft, arena);
                     }
                 }
                 // The taken edge. Declared ZA_CANJUMP targets replace the literal outright (resolved in the
@@ -398,16 +403,16 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
                     if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
                         annotated = true;
-                        uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
+                        uint32_t tb = block_at(blocks.view, last.section, cf.target);
                         if (tb != RC_INDEX_NONE) {
-                            add_succ(&result, block, tb, arena);
+                            add_succ(&succs, block, tb, arena);
                         }
                     }
                 }
                 if (!annotated && !returns) {
-                    uint32_t taken = tl.found ? block_at(result.blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
+                    uint32_t taken = tl.found ? block_at(blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
                     if (taken != RC_INDEX_NONE) {
-                        add_succ(&result, block, taken, arena);
+                        add_succ(&succs, block, taken, arena);
                     }
                     else if (!target_is_external(labels, last)) {
                         block->unknown_succ = true;   // a destination we cannot place -> conservative
@@ -427,9 +432,9 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 for (uint32_t i = 0; i < cflows.num; i++) {
                     zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
                     if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
-                        uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
+                        uint32_t tb = block_at(blocks.view, last.section, cf.target);
                         if (tb != RC_INDEX_NONE) {
-                            add_succ(&result, block, tb, arena);
+                            add_succ(&succs, block, tb, arena);
                         }
                     }
                 }
@@ -446,15 +451,15 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 // the end of the program - a clean end, not an unknown.
                 uint32_t resume = after + last.skip_bytes;
                 if (!cflow_at(cflows, zp_cflow_za_unreachable, resume)) {
-                    uint32_t ft = block_at(result.blocks.view, last.section, resume);
+                    uint32_t ft = block_at(blocks.view, last.section, resume);
                     if (ft != RC_INDEX_NONE) {
-                        add_succ(&result, block, ft, arena);
+                        add_succ(&succs, block, ft, arena);
                     }
                     else {
-                        for (uint32_t j = bi + 1; j < result.blocks.num; j++) {
-                            basic_block cand = rc_array_basic_block_get(&result.blocks, j);
+                        for (uint32_t j = bi + 1; j < blocks.num; j++) {
+                            basic_block cand = rc_array_basic_block_get(&blocks, j);
                             if (cand.section == last.section && cand.pc >= resume) {
-                                add_succ(&result, block, j, arena);
+                                add_succ(&succs, block, j, arena);
                                 break;
                             }
                         }
@@ -477,17 +482,17 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
                         if (cf.kind == zp_cflow_za_returnto && cf.site == last.pc) {
                             redirected = true;
-                            uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
+                            uint32_t tb = block_at(blocks.view, last.section, cf.target);
                             if (tb != RC_INDEX_NONE) {
-                                add_succ(&result, block, tb, arena);
+                                add_succ(&succs, block, tb, arena);
                             }
                         }
                     }
                 }
                 if (!redirected && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
-                    uint32_t ft = block_at(result.blocks.view, last.section, after);
+                    uint32_t ft = block_at(blocks.view, last.section, after);
                     if (ft != RC_INDEX_NONE) {
-                        add_succ(&result, block, ft, arena);
+                        add_succ(&succs, block, ft, arena);
                     }
                     else {
                         // The fall-through pc has no block: inline data displaced the next instruction
@@ -497,9 +502,9 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                         // edge. Blocks tile the instruction list in order, so the first later block in our
                         // section starts at exactly that instruction; nothing found is the end of the
                         // program (or a routine falling off its end) - a clean end, not an unknown.
-                        for (uint32_t j = bi + 1; j < result.blocks.num; j++) {
-                            if (rc_array_basic_block_get(&result.blocks, j).section == last.section) {
-                                add_succ(&result, block, j, arena);
+                        for (uint32_t j = bi + 1; j < blocks.num; j++) {
+                            if (rc_array_basic_block_get(&blocks, j).section == last.section) {
+                                add_succ(&succs, block, j, arena);
                                 break;
                             }
                         }
@@ -510,7 +515,11 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         }
     }
 
-    return result;
+    return (cfg) {
+        .blocks = blocks.view,
+        .succs  = succs.view,
+        .labels = labels,
+    };
 }
 
 
@@ -568,7 +577,7 @@ RC_TEST(cfg, straight_line_is_one_block)
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
-    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
     RC_CHECK(b.first_insn, ==, 0u);
     RC_CHECK(b.num_insns, ==, 3u);
@@ -597,7 +606,7 @@ RC_TEST(cfg, indirect_jump_is_unknown_successor)
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
-    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);
     RC_CHECK(b.succ_count, ==, 0u);           // no successor we can place...
     RC_CHECK_TRUE(b.unknown_succ);            // ...but control DOES leave, so stay conservative
@@ -628,7 +637,7 @@ RC_TEST(cfg, branch_splits_into_blocks_with_edges)
     RC_CHECK(g.blocks.num, ==, 3u);
 
     // Block 0: LDX + BNE, leader 2000, two successors - fall-through (block 1) and target (block 2).
-    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b0 = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b0.pc, ==, 0x2000u);
     RC_CHECK(b0.num_insns, ==, 2u);
     RC_CHECK(b0.succ_count, ==, 2u);
@@ -636,14 +645,14 @@ RC_TEST(cfg, branch_splits_into_blocks_with_edges)
     RC_CHECK(cfg_succ(g, b0, 1), ==, 2u);   // taken -> the RTS block
 
     // Block 1: the fall-through LDA, leader 2004, falls through to block 2.
-    basic_block b1 = rc_array_basic_block_get(&g.blocks, 1);
+    basic_block b1 = rc_view_basic_block_get(g.blocks, 1);
     RC_CHECK(b1.pc, ==, 0x2004u);
     RC_CHECK(b1.num_insns, ==, 1u);
     RC_CHECK(b1.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, b1, 0), ==, 2u);
 
     // Block 2: the RTS target, leader 2006, no successor.
-    basic_block b2 = rc_array_basic_block_get(&g.blocks, 2);
+    basic_block b2 = rc_view_basic_block_get(g.blocks, 2);
     RC_CHECK(b2.pc, ==, 0x2006u);
     RC_CHECK(b2.num_insns, ==, 1u);
     RC_CHECK(b2.succ_count, ==, 0u);
@@ -668,7 +677,7 @@ RC_TEST(cfg, jump_target_leads_backward_edge)
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
-    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b.pc, ==, 0x2000u);
     RC_CHECK(b.num_insns, ==, 2u);
     RC_CHECK(b.succ_count, ==, 1u);
@@ -695,7 +704,7 @@ RC_TEST(cfg, call_is_in_block_not_an_edge)
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 1u);
-    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 2u);        // JSR and RTS in one block
     RC_CHECK(b.succ_count, ==, 0u);           // ends in RTS - no intraprocedural successor
 
@@ -728,7 +737,7 @@ RC_TEST(cfg, za_canjump_wires_declared_targets)
     rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2006, .target = 0x2003, .kind = zp_cflow_za_canjump}, &arena);
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2006));
+    basic_block b = rc_view_basic_block_get(g.blocks, cfg_block_at(g, 0, 0x2006));
     RC_CHECK_FALSE(b.unknown_succ);            // ZA_CANJUMP resolved it - no taint
     RC_CHECK(b.succ_count, ==, 2u);
     RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2000));
@@ -736,7 +745,7 @@ RC_TEST(cfg, za_canjump_wires_declared_targets)
 
     // Without the annotation the same JMP stays an unknown successor with no placeable edges.
     cfg g2 = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block b2 = rc_array_basic_block_get(&g2.blocks, cfg_block_at(g2, 0, 0x2006));
+    basic_block b2 = rc_view_basic_block_get(g2.blocks, cfg_block_at(g2, 0, 0x2006));
     RC_CHECK_TRUE(b2.unknown_succ);
     RC_CHECK(b2.succ_count, ==, 0u);
 
@@ -769,7 +778,7 @@ RC_TEST(cfg, za_canjump_external_arm_and_midblock_target)
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 3u);   // [2000], [2002,2004] (split by the declared target), [2005]
-    basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2005));
+    basic_block b = rc_view_basic_block_get(g.blocks, cfg_block_at(g, 0, 0x2005));
     RC_CHECK_FALSE(b.unknown_succ);   // both arms accounted for - no taint
     RC_CHECK(b.succ_count, ==, 1u);   // only the in-program arm is an edge
     RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2002));
@@ -796,11 +805,11 @@ RC_TEST(cfg, external_constant_targets_are_clean_exits)
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 2u);
-    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b0 = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b0.succ_count, ==, 1u);          // fall-through to the JMP block only
     RC_CHECK(cfg_succ(g, b0, 0), ==, 1u);
     RC_CHECK_FALSE(b0.unknown_succ);          // the taken arm exits the program - fully known
-    basic_block b1 = rc_array_basic_block_get(&g.blocks, 1);
+    basic_block b1 = rc_view_basic_block_get(g.blocks, 1);
     RC_CHECK(b1.succ_count, ==, 0u);
     RC_CHECK_FALSE(b1.unknown_succ);          // an exit, not computed flow
 
@@ -824,7 +833,7 @@ RC_TEST(cfg, vector_jump_external_vs_own_label)
     rc_array_zp_insn constant = rc_array_zp_insn_make(1, &arena);
     rc_array_zp_insn_push(&constant, jmp, &arena);
     cfg ga = cfg_build(constant.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block ba = rc_array_basic_block_get(&ga.blocks, 0);
+    basic_block ba = rc_view_basic_block_get(ga.blocks, 0);
     RC_CHECK_FALSE(ba.unknown_succ);   // a clean exit, no annotation needed
     RC_CHECK(ba.succ_count, ==, 0u);
 
@@ -839,14 +848,14 @@ RC_TEST(cfg, vector_jump_external_vs_own_label)
     rc_array_zp_label_push(&labels,
         (zp_label) {.scope = 5, .def = vec_def, .section = 0, .pc = 0x2100}, &arena);
     cfg gb = cfg_build(owned.view, (rc_view_zp_cflow) {0}, labels.view, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block bb = rc_array_basic_block_get(&gb.blocks, 0);
+    basic_block bb = rc_view_basic_block_get(gb.blocks, 0);
     RC_CHECK_TRUE(bb.unknown_succ);
     RC_CHECK(bb.succ_count, ==, 0u);   // and NO edge to the vector cell's own address (it is data, not a target)
 
     // (c) the same named cell with NO marker (a `wrchv = &20E` constant, not a code label): a cell outside
     // the program, so external again.
     cfg gc = cfg_build(owned.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block bc = rc_array_basic_block_get(&gc.blocks, 0);
+    basic_block bc = rc_view_basic_block_get(gc.blocks, 0);
     RC_CHECK_FALSE(bc.unknown_succ);
     RC_CHECK(bc.succ_count, ==, 0u);
 
@@ -878,7 +887,7 @@ RC_TEST(cfg, size0_marker_shares_its_address)
     RC_CHECK(g.blocks.num, ==, 3u);                       // [2000] [marker+2002+branch] [2006]
     uint32_t bi = cfg_block_at(g, 0, 0x2002);
     RC_CHECK_TRUE(bi != RC_INDEX_NONE);
-    basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+    basic_block blk = rc_view_basic_block_get(g.blocks, bi);
     RC_CHECK(blk.first_insn, ==, 1u);                     // the marker opens the block...
     RC_CHECK(blk.num_insns, ==, 3u);                      // ...and the branch closes it
     RC_CHECK(blk.succ_count, ==, 2u);                     // fall-through first, then the taken edge
@@ -912,12 +921,12 @@ RC_TEST(cfg, terminator_cut_across_data_gap)
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 2u);   // [2000,2002(JMP)] and [200A,200C] - the gap must not glue them
-    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b0 = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b0.num_insns, ==, 2u);
     RC_CHECK(b0.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, b0, 0), ==, 0u);   // the loop edge survives the gap
     RC_CHECK_FALSE(b0.unknown_succ);
-    basic_block b1 = rc_array_basic_block_get(&g.blocks, 1);
+    basic_block b1 = rc_view_basic_block_get(g.blocks, 1);
     RC_CHECK(b1.pc, ==, 0x200Au);
     RC_CHECK(b1.succ_count, ==, 0u);        // ends in RTS; nothing (modelled) reaches it either
 
@@ -931,7 +940,7 @@ RC_TEST(cfg, terminator_cut_across_data_gap)
     (void) pc;
     cfg gr = cfg_build(ret.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(gr.blocks.num, ==, 2u);   // the RTS keeps its return semantics; the tail code is its own block
-    RC_CHECK(rc_array_basic_block_get(&gr.blocks, 0).succ_count, ==, 0u);
+    RC_CHECK(rc_view_basic_block_get(gr.blocks, 0).succ_count, ==, 0u);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -969,7 +978,7 @@ RC_TEST(cfg, gap_skip_call_fall_through)
     uint32_t caller = cfg_block_at(g, 0, 0x2000);
     uint32_t resume = cfg_block_at(g, 0, 0x2008);
     RC_CHECK_TRUE(caller != RC_INDEX_NONE && resume != RC_INDEX_NONE);
-    basic_block b = rc_array_basic_block_get(&g.blocks, caller);
+    basic_block b = rc_view_basic_block_get(g.blocks, caller);
     RC_CHECK(b.num_insns, ==, 1u);          // the JSR alone (the leader at 2008 cut it)
     RC_CHECK(b.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, b, 0), ==, resume);   // the gap-skip edge to the post-data instruction
@@ -979,7 +988,7 @@ RC_TEST(cfg, gap_skip_call_fall_through)
     rc_array_zp_insn tail = rc_array_zp_insn_make(2, &arena);
     push_insn(&tail, 0x2000, 3, zp_flow_call, 0xFFEE, &arena);   // JSR &FFEE, then only data to the end
     cfg gt = cfg_build(tail.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block bt = rc_array_basic_block_get(&gt.blocks, 0);
+    basic_block bt = rc_view_basic_block_get(gt.blocks, 0);
     RC_CHECK(bt.succ_count, ==, 0u);
     RC_CHECK_FALSE(bt.unknown_succ);
 
@@ -1011,7 +1020,7 @@ RC_TEST(cfg, za_unreachable_severs_call_fall_through)
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     RC_CHECK(g.blocks.num, ==, 2u);   // the annotation cuts after the JSR...
-    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b0 = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b0.num_insns, ==, 1u);
     RC_CHECK(b0.succ_count, ==, 0u);   // ...and severs the edge
     RC_CHECK_FALSE(b0.unknown_succ);
@@ -1026,7 +1035,7 @@ RC_TEST(cfg, za_unreachable_severs_call_fall_through)
     pc = push_insn(&gapped, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @200A
     (void) pc;
     cfg gg = cfg_build(gapped.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block bg = rc_array_basic_block_get(&gg.blocks, 0);
+    basic_block bg = rc_view_basic_block_get(gg.blocks, 0);
     RC_CHECK(bg.num_insns, ==, 1u);
     RC_CHECK(bg.succ_count, ==, 0u);   // no gap-skip past a declared-dead continuation
     RC_CHECK_FALSE(bg.unknown_succ);
@@ -1055,7 +1064,7 @@ RC_TEST(cfg, za_return_on_jump)
                                                 .kind = zp_cflow_za_return}, &arena);
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b.succ_count, ==, 0u);
     RC_CHECK_FALSE(b.unknown_succ);   // declared a return - the taint the unannotated twin gets is gone
 
@@ -1067,12 +1076,12 @@ RC_TEST(cfg, za_return_on_jump)
     pc = push_insn(&direct, pc, 3, zp_flow_jump, 0x2000, &arena);           // JMP 2000 @2002 (placeholder)
     (void) pc;
     cfg gd = cfg_build(direct.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block bd = rc_array_basic_block_get(&gd.blocks, 0);
+    basic_block bd = rc_view_basic_block_get(gd.blocks, 0);
     RC_CHECK(bd.succ_count, ==, 0u);   // the literal edge is NOT wired
     RC_CHECK_FALSE(bd.unknown_succ);
     // And without the annotation the same placeholder DOES wire its edge - the contrast that proves the override.
     cfg gu = cfg_build(direct.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    RC_CHECK(rc_array_basic_block_get(&gu.blocks, 0).succ_count, ==, 1u);
+    RC_CHECK(rc_view_basic_block_get(gu.blocks, 0).succ_count, ==, 1u);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -1099,7 +1108,7 @@ RC_TEST(cfg, za_return_composes_with_canjump)
     rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2003, .target = RC_INDEX_NONE, .kind = zp_cflow_za_return}, &arena);
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2003));
+    basic_block b = rc_view_basic_block_get(g.blocks, cfg_block_at(g, 0, 0x2003));
     RC_CHECK(b.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2000));
     RC_CHECK_FALSE(b.unknown_succ);
@@ -1141,7 +1150,7 @@ RC_TEST(cfg, za_returnto_redirects_call)
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     uint32_t resume = cfg_block_at(g, 0, 0x200A);
     RC_CHECK_TRUE(resume != RC_INDEX_NONE);   // the declared target split its block
-    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b.num_insns, ==, 1u);            // the annotated JSR terminates its block
     RC_CHECK(b.succ_count, ==, 1u);           // the 5000 arm is off the stream - nothing wired for it
     RC_CHECK(cfg_succ(g, b, 0), ==, resume);  // NOT the gap-skip edge to 2008
@@ -1174,7 +1183,7 @@ RC_TEST(cfg, za_canjump_on_branch)
     rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2000, .target = 0x2006, .kind = zp_cflow_za_canjump}, &arena);
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b.succ_count, ==, 2u);
     RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2002));   // fall-through first, as ever
     RC_CHECK(cfg_succ(g, b, 1), ==, cfg_block_at(g, 0, 0x2006));   // the declared arm, not the placeholder
@@ -1185,7 +1194,7 @@ RC_TEST(cfg, za_canjump_on_branch)
     push_insn(&bare, 0x2000, 2, zp_flow_branch, RC_INDEX_NONE, &arena);
     push_insn(&bare, 0x2002, 1, zp_flow_return, RC_INDEX_NONE, &arena);
     cfg gb = cfg_build(bare.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    RC_CHECK_TRUE(rc_array_basic_block_get(&gb.blocks, 0).unknown_succ);
+    RC_CHECK_TRUE(rc_view_basic_block_get(gb.blocks, 0).unknown_succ);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -1216,7 +1225,7 @@ RC_TEST(cfg, entry_marker_splits_midrun_block)
     RC_CHECK(g.blocks.num, ==, 2u);
     uint32_t bi = cfg_block_at(g, 0, 0x2002);
     RC_CHECK_TRUE(bi != RC_INDEX_NONE);
-    RC_CHECK(rc_array_basic_block_get(&g.blocks, bi).first_insn, ==, 1u);
+    RC_CHECK(rc_view_basic_block_get(g.blocks, bi).first_insn, ==, 1u);
     RC_CHECK_TRUE(cfg_block_at(g, 9, 0x3000) == RC_INDEX_NONE);   // the stray marker resolved to nothing
 
     rc_arena_deinit(&scratch);
@@ -1252,18 +1261,18 @@ RC_TEST(cfg, skip_swallowed_insn_gets_own_block)
     uint32_t resume    = cfg_block_at(g, 0, 0x2007);
     RC_CHECK_TRUE(fall != RC_INDEX_NONE && swallowed != RC_INDEX_NONE && resume != RC_INDEX_NONE);
 
-    basic_block bf = rc_array_basic_block_get(&g.blocks, fall);
+    basic_block bf = rc_view_basic_block_get(g.blocks, fall);
     RC_CHECK(bf.num_insns, ==, 2u);            // ADC zp1 + the marker (the skip terminates the block)
     RC_CHECK(bf.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, bf, 0), ==, resume);   // over the swallowed instruction, never into it
     RC_CHECK_FALSE(bf.unknown_succ);
 
-    basic_block bs = rc_array_basic_block_get(&g.blocks, swallowed);
+    basic_block bs = rc_view_basic_block_get(g.blocks, swallowed);
     RC_CHECK(bs.num_insns, ==, 1u);
     RC_CHECK(bs.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, bs, 0), ==, resume);   // the branch-taken path falls through to the same resume
 
-    basic_block bb = rc_array_basic_block_get(&g.blocks, 0);   // the BEQ
+    basic_block bb = rc_view_basic_block_get(g.blocks, 0);   // the BEQ
     RC_CHECK(bb.succ_count, ==, 2u);            // not-taken (2002) + taken (2005), untouched by the marker
 
     rc_arena_deinit(&scratch);
@@ -1289,7 +1298,7 @@ RC_TEST(cfg, skip_resumes_past_data_gap)
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     uint32_t after = cfg_block_at(g, 0, 0x2008);
     RC_CHECK_TRUE(after != RC_INDEX_NONE);
-    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b0 = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b0.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, b0, 0), ==, after);   // the constrained gap-skip
     RC_CHECK_FALSE(b0.unknown_succ);
@@ -1307,7 +1316,7 @@ RC_TEST(cfg, skip_resumes_past_data_gap)
     uint32_t swallowed = cfg_block_at(gg, 0, 0x2001);
     uint32_t resume    = cfg_block_at(gg, 0, 0x2008);
     RC_CHECK_TRUE(swallowed != RC_INDEX_NONE && resume != RC_INDEX_NONE);
-    basic_block bm = rc_array_basic_block_get(&gg.blocks, 0);
+    basic_block bm = rc_view_basic_block_get(gg.blocks, 0);
     RC_CHECK(bm.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(gg, bm, 0), ==, resume);   // pc >= resume held: NOT the swallowed block at 2001
 
@@ -1335,7 +1344,7 @@ RC_TEST(cfg, skb_resumes_at_pc_plus_two)
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
     uint32_t resume = cfg_block_at(g, 0, 0x2002);
     RC_CHECK_TRUE(resume != RC_INDEX_NONE);
-    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b0 = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b0.num_insns, ==, 1u);
     RC_CHECK(b0.succ_count, ==, 1u);
     RC_CHECK(cfg_succ(g, b0, 0), ==, resume);
@@ -1343,7 +1352,7 @@ RC_TEST(cfg, skb_resumes_at_pc_plus_two)
     rc_array_zp_insn tail = rc_array_zp_insn_make(2, &arena);
     push_skip(&tail, 0x2000, 2, &arena);   // BITABS with nothing after it at all
     cfg gt = cfg_build(tail.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block bt = rc_array_basic_block_get(&gt.blocks, 0);
+    basic_block bt = rc_view_basic_block_get(gt.blocks, 0);
     RC_CHECK(bt.succ_count, ==, 0u);
     RC_CHECK_FALSE(bt.unknown_succ);
 
@@ -1370,7 +1379,7 @@ RC_TEST(cfg, skip_respects_za_unreachable_at_resume)
                                                 .kind = zp_cflow_za_unreachable}, &arena);
 
     cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    basic_block b0 = rc_view_basic_block_get(g.blocks, 0);
     RC_CHECK(b0.num_insns, ==, 1u);
     RC_CHECK(b0.succ_count, ==, 0u);   // the resume edge is severed...
     RC_CHECK_FALSE(b0.unknown_succ);   // ...knowingly

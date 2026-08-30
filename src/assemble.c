@@ -508,7 +508,7 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
     bool unresolved = false;
     if (flags.active) {
         int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
-        switch (arg.type) {
+        switch ((int_argument_type) arg.type) {
             case int_argument_type_known:
                 if (arg.value < 0) {
                     semantic_error(b, flags, error_type_skip_backwards, cursor_at(at, at.pos));   // skip nothing
@@ -548,7 +548,7 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
     bool unresolved = false;
     if (flags.active) {
         int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
-        switch (arg.type) {
+        switch ((int_argument_type) arg.type) {
             case int_argument_type_known: {
                 uint32_t pc = sections_pc(&b->sections, section);
                 if (arg.value < pc) {
@@ -590,7 +590,7 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
     bool unresolved = false;
     if (flags.active) {
         int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
-        switch (arg.type) {
+        switch ((int_argument_type) arg.type) {
             case int_argument_type_known:
                 if (arg.value < 1) {
                     semantic_error(b, flags, error_type_bad_alignment, cursor_at(at, at.pos));   // pad nothing
@@ -707,7 +707,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             bool is_guard = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("guard"));
             if (is_org || is_cmos || is_guard) {
                 int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, eq.next), eq.next);
-                switch (arg.type) {
+                switch ((int_argument_type) arg.type) {
                     case int_argument_type_known:
                         if (is_org) {
                             sections_org(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
@@ -767,7 +767,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             uint32_t pc    = sections_pc(&b->sections, child);
             if (guard != RC_INDEX_NONE && pc > guard) {
                 char storage[16];
-                rc_mstr over = {.data = storage, .len = 0, .cap = sizeof storage};
+                rc_mstr over = {.data = storage, .cap = sizeof storage};
                 rc_mstr_append_u32(&over, pc - guard, NULL);
                 semantic_error_payload(b, flags, error_type_guard_exceeded, stmt, over.view);
             }
@@ -1155,7 +1155,7 @@ static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cf
         return acc;
     }
     int_argument arg = int_argument_no_za_auto(int_argument_make(v, flags.final, at.pos), at.pos);
-    switch (arg.type) {
+    switch ((int_argument_type) arg.type) {
         case int_argument_type_known:
             zeropage_add_cflow(&b->zeropage, (zp_cflow) {
                 .site   = site,
@@ -1291,7 +1291,7 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
         int_argument arg = int_argument_make(e.value, flags.final, pos);
-        switch (arg.type) {
+        switch ((int_argument_type) arg.type) {
             case int_argument_type_known:
                 if (!arg.za_auto || arg.value != 0) {
                     // A number, a fixed address, or a var+n slice: nothing here the allocator manages whole.
@@ -1798,7 +1798,7 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
 // never needs to grow (hence the NULL arena); scopes_get_or_make_child owns a copy on first sighting.
 static rc_mstr anon_scope_key(char *storage, uint32_t cap, cursor at)
 {
-    rc_mstr m = {.data = storage, .len = 0, .cap = cap};
+    rc_mstr m = {.data = storage, .cap = cap};
     rc_mstr_append_char(&m, '@', NULL);
     rc_mstr_append_u32(&m, at.source, NULL);
     rc_mstr_append_char(&m, ':', NULL);
@@ -1909,7 +1909,12 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
             cursor_at(at, acc.next),
             scope,
             section,
-            (parse_flags) {.final = flags.final, .active = flags.active && if_cond, .output = flags.output, .listing = flags.listing},
+            (parse_flags) {
+                .final   = flags.final,
+                .active  = flags.active && if_cond,
+                .output  = flags.output,
+                .listing = flags.listing,
+            },
             scratch
         )
     );
@@ -1930,7 +1935,12 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
                 cursor_at(at, t.next),
                 scope,
                 section,
-                (parse_flags) {.final = flags.final, .active = flags.active && else_cond, .output = flags.output, .listing = flags.listing},
+                (parse_flags) {
+                    .final   = flags.final,
+                    .active  = flags.active && else_cond,
+                    .output  = flags.output,
+                    .listing = flags.listing,
+                },
                 scratch
             )
         );
@@ -1952,7 +1962,12 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
                 cursor_at(at, sep.next),
                 scope,
                 section,
-                (parse_flags) {.final = flags.final, .active = flags.active && else_cond, .output = flags.output, .listing = flags.listing},
+                (parse_flags) {
+                    .final   = flags.final,
+                    .active  = flags.active && else_cond,
+                    .output  = flags.output,
+                    .listing = flags.listing,
+                },
                 scratch
             )
         );
@@ -2132,7 +2147,12 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
             scopes_set_symbol(&b->scopes, child, name, rc_view_value_get(items, i), at);
         }
         acc = fold(acc, parse_block(b, cursor_at(at, body_start), child, section,
-                                    (parse_flags) {.final = flags.final, .active = active_body, .output = flags.output, .listing = flags.listing}, scratch));
+                                    (parse_flags) {
+                                        .final   = flags.final,
+                                        .active  = active_body,
+                                        .output  = flags.output,
+                                        .listing = flags.listing,
+                                    }, scratch));
     }
     if (acc.fatal) {
         return acc;
@@ -2184,7 +2204,7 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
                     verbose_text_line(b, flags, stmt, e.next, sections_pc(&b->sections, section), verbose_text_address);
                     uint32_t errors_before = baron_error_count(b);
                     b->include_depth++;
-                    pulled = parse_file(b, (cursor) {.source = inc_source, .pos = 0}, scope, section, flags, scratch);
+                    pulled = parse_file(b, (cursor) {.source = inc_source}, scope, section, flags, scratch);
                     b->include_depth--;
                     if (pulled.fatal) {
                         return pulled;   // a broken statement stream in the included file aborts the whole assemble
@@ -2383,7 +2403,12 @@ static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scop
 
     // Scan the body inactively to find its ENDMACRO. Nested calls consume their arguments but do not expand
     // (see handle_macro_invocation), so the scan never recurses and always stops at this macro's ENDMACRO.
-    parse_result scan = parse_block(b, body, scope, section, (parse_flags) {.final = flags.final, .active = false, .output = flags.output, .listing = flags.listing}, scratch);
+    parse_result scan = parse_block(b, body, scope, section, (parse_flags) {
+                                                              .final   = flags.final,
+                                                              .active  = false,
+                                                              .output  = flags.output,
+                                                              .listing = flags.listing,
+                                                          }, scratch);
     if (scan.fatal) {
         return scan;   // a structurally broken body aborts, reported at the definition
     }
@@ -2507,13 +2532,18 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
     return require_separator(b, cursor_at(at, fs.next));
 }
 
-// Try to match one overload against the call text at `at`. Returns true (and sets *end, the cursor at the
-// trailing separator) when every slot matches and the statement then ends. Literal slots are recognised via
+// Try to match one overload against the call text at `at`. `matched` is true (and `end` is the cursor at
+// the trailing separator) when every slot matches and the statement then ends. Literal slots are recognised via
 // the macro's OWN literal table; parameter slots consume one expression in `scope` - its value is ignored
 // here, so matching is purely structural and a forward-referenced argument matches like any other (the choice
 // of overload is thus identical every pass). A parse failure (no operand where one is needed) fails the fit.
-static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_signature sig,
-                            uint32_t scope, uint32_t section, uint32_t *end, rc_arena scratch)
+typedef struct macro_match {
+    bool     matched;
+    uint32_t end;
+} macro_match;
+
+static macro_match macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_signature sig,
+                                   uint32_t scope, uint32_t section, rc_arena scratch)
 {
     uint32_t pos = at.pos;
     for (uint32_t k = 0; k < sig.slots.num; k++) {
@@ -2521,21 +2551,21 @@ static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_sig
         if (slot.type == macro_slot_literal) {
             lexer_result lr = lexer_next(src, pos, m->literal_table.view);
             if (lr.token.type != lexeme_type_macro_literal || lr.token.macro_literal.id != slot.literal_id) {
-                return false;
+                return (macro_match) {0};
             }
             pos = lr.next;
         }
         else if (slot.type == macro_slot_comma) {
             lexer_result lr = lexer_next(src, pos, m->literal_table.view);
             if (lr.token.type != lexeme_type_comma) {
-                return false;
+                return (macro_match) {0};
             }
             pos = lr.next;
         }
         else {
             expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
             if (e.error != expr_error_none) {
-                return false;   // no operand here (or a broken one): this overload does not fit
+                return (macro_match) {0};   // no operand here (or a broken one): this overload does not fit
             }
             pos = e.next;
         }
@@ -2543,10 +2573,9 @@ static bool macro_try_match(baron *b, rc_str src, cursor at, macro *m, macro_sig
     lexer_result term = lexer_next(src, pos, statement_tokens(b));
     if (term.token.type == lexeme_type_terminator
         || (term.token.type == lexeme_type_closer && term.token.closer.id == closer_brace)) {
-        *end = pos;
-        return true;
+        return (macro_match) {.matched = true, .end = pos};
     }
-    return false;
+    return (macro_match) {0};
 }
 
 // name arg1, arg2 - a macro call. Match an overload, then (when live) stamp its body out into a fresh child
@@ -2563,10 +2592,11 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
     uint32_t chosen = RC_INDEX_NONE;
     uint32_t args_end = at.pos;
     for (uint32_t si = 0; si < m->signatures.num; si++) {
-        uint32_t end;
-        if (macro_try_match(b, src, at, m, rc_array_macro_signature_get(&m->signatures, si), scope, section, &end, scratch)) {
+        macro_match mm = macro_try_match(b, src, at, m, rc_array_macro_signature_get(&m->signatures, si),
+                                         scope, section, scratch);
+        if (mm.matched) {
             chosen = si;
-            args_end = end;
+            args_end = mm.end;
             break;
         }
     }
@@ -2790,19 +2820,20 @@ static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
         return true;
     }
 
-    uint32_t *src  = rc_arena_alloc_type(&scratch, uint32_t, all.num);
-    bool     *done = rc_arena_alloc_zero_type(&scratch, bool, all.num);
+    rc_span_u32 src = rc_span_u32_make(rc_arena_alloc_type(&scratch, uint32_t, all.num), all.num);
+    rc_bitset done = {0};   // the released set
+    rc_bitset_resize(&done, all.num, &scratch);
     uint32_t remaining = all.num;
     bool ok = true;
     for (uint32_t i = 0; i < all.num; i++) {
         splice sp = rc_view_splice_get(all, i);
-        src[i] = sections_find(&b->sections, sp.src_name);
-        if (src[i] == RC_INDEX_NONE) {
+        rc_span_u32_set(src, i, sections_find(&b->sections, sp.src_name));
+        if (rc_span_u32_get(src, i) == RC_INDEX_NONE) {
             if (apply) {
                 baron_error_payload(b, error_type_unknown_section, sp.at, sp.src_name);
                 ok = false;
             }
-            done[i] = true;   // absent: it blocks nothing (and cannot sit on a cycle)
+            rc_bitset_set(&done, i);   // absent: it blocks nothing (and cannot sit on a cycle)
             remaining--;
         }
     }
@@ -2813,26 +2844,26 @@ static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
     while (remaining > 0) {
         bool progress = false;
         for (uint32_t i = 0; i < all.num; i++) {
-            if (done[i]) {
+            if (rc_bitset_is_set(&done, i)) {
                 continue;
             }
             bool ready = true;   // ready iff nothing unapplied still splices INTO our source
             for (uint32_t j = 0; j < all.num && ready; j++) {
-                ready = done[j] || rc_view_splice_get(all, j).dst != src[i];
+                ready = rc_bitset_is_set(&done, j) || rc_view_splice_get(all, j).dst != rc_span_u32_get(src, i);
             }
             if (ready) {
                 if (apply) {
                     splice sp = rc_view_splice_get(all, i);
-                    sections_copy_in(&b->sections, sp.dst, sp.dst_offset, src[i]);
+                    sections_copy_in(&b->sections, sp.dst, sp.dst_offset, rc_span_u32_get(src, i));
                 }
-                done[i] = true;
+                rc_bitset_set(&done, i);
                 remaining--;
                 progress = true;
             }
         }
         if (!progress) {
             for (uint32_t i = 0; i < all.num; i++) {
-                if (!done[i]) {
+                if (!rc_bitset_is_set(&done, i)) {
                     splice sp = rc_view_splice_get(all, i);
                     baron_error_payload(b, error_type_circular_incsection, sp.at, sp.src_name);
                 }
@@ -2862,7 +2893,7 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
     uint32_t src = source_files_add_string(&b->source_files, name.view, define);
 
     rc_str text = source_files_text(&b->source_files, src);
-    cursor def  = {.source = src, .pos = 0};
+    cursor def  = {.source = src};
 
     lexer_result nm = lexer_next(text, 0, base_statement_tokens);
     if (nm.token.type != lexeme_type_identifier) {
@@ -2972,7 +3003,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     }
     r = fold(r, parse_file(
         b,
-        (cursor) {.source = source, .pos = 0},
+        (cursor) {.source = source},
         scope,
         section,
         flags,
@@ -3021,6 +3052,17 @@ static bool call_rewrites(const liveness *lv, call_targets ct, uint32_t v)
 // computed call cannot extend reachability (its true callees may then warn, which is exactly the "add
 // ZA_CANCALL" nudge). `within`, when non-NULL, restricts the walk to blocks inside that set - how the region
 // closures below stay within the unreachable half of the graph.
+// One declared interrupt handler: its entry block and the marker's cursor (for Guard 3's diagnostics).
+// Collected by pushing - fewer resolve than there are markers, duplicates collapsing on the way.
+typedef struct zp_handler {
+    uint32_t block;
+    cursor   at;
+} zp_handler;
+
+#define RC_ARRAY_TYPE zp_handler
+#define RC_ARRAY_NAME zp_handler
+#include "richc/template/array.h"
+
 static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t seed,
                        const rc_bitset *within, rc_bitset *reach, rc_arena scratch)
 {
@@ -3028,12 +3070,11 @@ static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, ui
         || (within != NULL && !rc_bitset_is_set(within, seed))) {
         return;
     }
-    uint32_t *stack = rc_arena_alloc_type(&scratch, uint32_t, g.blocks.num);
-    uint32_t  sp    = 0;
-    stack[sp++] = seed;
+    rc_array_u32 stack = rc_array_u32_make(g.blocks.num, &scratch);
+    rc_array_u32_push(&stack, seed, &scratch);
     rc_bitset_set(reach, seed);
-    while (sp > 0) {
-        basic_block blk = rc_array_basic_block_get(&g.blocks, stack[--sp]);
+    while (stack.num > 0) {
+        basic_block blk = rc_view_basic_block_get(g.blocks, rc_array_u32_pop(&stack));
         for (uint32_t i = 0; i < blk.num_insns; i++) {
             zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
             if (n.flow != zp_flow_call) {
@@ -3044,7 +3085,7 @@ static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, ui
                 uint32_t t = rc_view_u32_get(ct.blocks, c);
                 if (!rc_bitset_is_set(reach, t) && (within == NULL || rc_bitset_is_set(within, t))) {
                     rc_bitset_set(reach, t);
-                    stack[sp++] = t;
+                    rc_array_u32_push(&stack, t, &scratch);
                 }
             }
         }
@@ -3052,7 +3093,7 @@ static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, ui
             uint32_t t = cfg_succ(g, blk, k);
             if (!rc_bitset_is_set(reach, t) && (within == NULL || rc_bitset_is_set(within, t))) {
                 rc_bitset_set(reach, t);
-                stack[sp++] = t;
+                rc_array_u32_push(&stack, t, &scratch);
             }
         }
     }
@@ -3236,11 +3277,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     rc_bitset handler_seen = {0};
     rc_bitset_resize(&roots, nb ? nb : 1, &scratch);
     rc_bitset_resize(&handler_seen, nb ? nb : 1, &scratch);
-    uint32_t *handler_blocks = entries.num ? rc_arena_alloc_type(&scratch, uint32_t, entries.num) : NULL;
-    cursor   *handler_ats    = entries.num ? rc_arena_alloc_type(&scratch, cursor, entries.num) : NULL;
-    uint32_t  num_handlers   = 0;
-    bool      any_sync       = false;
-    bool      entry_unknown  = false;
+    rc_array_zp_handler handlers = rc_array_zp_handler_make(entries.num ? entries.num : 1, &scratch);
+    bool any_sync      = false;
+    bool entry_unknown = false;
     for (uint32_t i = 0; i < entries.num; i++) {
         zp_entry e = rc_view_zp_entry_get(entries, i);
         if (!e.interrupt) {
@@ -3255,9 +3294,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         rc_bitset_set(&roots, bi);   // duplicates, and ZA_ENTRY + ZA_INTERRUPT on one pc, collapse here
         if (e.interrupt && !rc_bitset_is_set(&handler_seen, bi)) {
             rc_bitset_set(&handler_seen, bi);
-            handler_blocks[num_handlers] = bi;
-            handler_ats[num_handlers]    = e.at;
-            num_handlers++;
+            rc_array_zp_handler_push(&handlers, (zp_handler) {.block = bi, .at = e.at}, &scratch);
         }
     }
     if (!any_sync) {
@@ -3266,7 +3303,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         // hence no root - correctly nothing to reach.
         uint32_t max_section = 0;
         for (uint32_t bi = 0; bi < nb; bi++) {
-            uint32_t sec = rc_array_basic_block_get(&g.blocks, bi).section;
+            uint32_t sec = rc_view_basic_block_get(g.blocks, bi).section;
             if (sec > max_section) {
                 max_section = sec;
             }
@@ -3274,7 +3311,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         rc_bitset section_seen = {0};   // indexed by section, and data-only sections can leave gaps
         rc_bitset_resize(&section_seen, max_section + 1, &scratch);
         for (uint32_t bi = 0; bi < nb; bi++) {
-            uint32_t sec = rc_array_basic_block_get(&g.blocks, bi).section;
+            uint32_t sec = rc_view_basic_block_get(g.blocks, bi).section;
             if (!rc_bitset_is_set(&section_seen, sec)) {
                 rc_bitset_set(&section_seen, sec);
                 rc_bitset_set(&roots, bi);
@@ -3298,7 +3335,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         rc_bitset_resize(&offending, nb, &scratch);
         bool any_offending = false;
         for (uint32_t bi = 0; bi < nb; bi++) {
-            basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+            basic_block blk = rc_view_basic_block_get(g.blocks, bi);
             for (uint32_t i = 0; !rc_bitset_is_set(&reach, bi) && i < blk.num_insns; i++) {
                 zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
                 if (n.vreg != RC_INDEX_NONE && !n.var_kill) {   // a stray ZA_DISCARD is not a use worth warning over
@@ -3314,7 +3351,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             // cycle has no head, so a mop-up sweep catches anything the heads did not claim.
             rc_bitset unreached = {0};
             rc_bitset_resize(&unreached, nb, &scratch);
-            bool *upred = rc_arena_alloc_zero_type(&scratch, bool, nb);
+            rc_bitset upred = {0};   // "has an unreached predecessor" - a set, so a bitset
+            rc_bitset_resize(&upred, nb, &scratch);
             for (uint32_t bi = 0; bi < nb; bi++) {
                 if (!rc_bitset_is_set(&reach, bi)) {
                     rc_bitset_set(&unreached, bi);
@@ -3324,7 +3362,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 if (rc_bitset_is_set(&reach, bi)) {
                     continue;
                 }
-                basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+                basic_block blk = rc_view_basic_block_get(g.blocks, bi);
                 for (uint32_t i = 0; i < blk.num_insns; i++) {
                     zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
                     if (n.flow != zp_flow_call) {
@@ -3333,19 +3371,19 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     call_targets ct = cfg_call_targets(g, cflows, n, &scratch);
                     for (uint32_t c = 0; c < ct.blocks.num; c++) {
                         uint32_t t = rc_view_u32_get(ct.blocks, c);
-                        if (!rc_bitset_is_set(&reach, t)) { upred[t] = true; }
+                        if (!rc_bitset_is_set(&reach, t)) { rc_bitset_set(&upred, t); }
                     }
                 }
                 for (uint32_t k = 0; k < blk.succ_count; k++) {
                     uint32_t t = cfg_succ(g, blk, k);
-                    if (!rc_bitset_is_set(&reach, t)) { upred[t] = true; }
+                    if (!rc_bitset_is_set(&reach, t)) { rc_bitset_set(&upred, t); }
                 }
             }
             rc_bitset covered = {0};
             rc_bitset_resize(&covered, nb, &scratch);
             for (uint32_t pass = 0; pass < 2; pass++) {
                 for (uint32_t bi = 0; bi < nb; bi++) {
-                    bool head = pass == 0 ? (!rc_bitset_is_set(&reach, bi) && !upred[bi])
+                    bool head = pass == 0 ? (!rc_bitset_is_set(&reach, bi) && !rc_bitset_is_set(&upred, bi))
                                           : (rc_bitset_is_set(&offending, bi) && !rc_bitset_is_set(&covered, bi));
                     if (!head) {
                         continue;
@@ -3359,7 +3397,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         fresh = rc_bitset_is_set(&offending, c) && !rc_bitset_is_set(&covered, c);
                     }
                     if (fresh) {
-                        basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+                        basic_block blk = rc_view_basic_block_get(g.blocks, bi);
                         baron_warning(b, error_type_za_auto_unreachable,
                                       rc_view_zp_insn_get(insns, blk.first_insn).at, severity_warning);
                     }
@@ -3372,7 +3410,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // Guard 1: a computed / indirect jump (unknown_succ) leaves for code we cannot model. With any variable in
     // play we cannot prove it is not clobbered there, so refuse and ask for an annotation.
     for (uint32_t bi = 0; bi < g.blocks.num && nv > 0; bi++) {
-        basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+        basic_block blk = rc_view_basic_block_get(g.blocks, bi);
         if (blk.unknown_succ) {
             zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
             baron_error(b, error_type_za_auto_computed_flow, last.at);
@@ -3389,7 +3427,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     rc_bitset live = {0};
     rc_bitset_resize(&live, nv, &scratch);
     for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
-        basic_block blk = rc_array_basic_block_get(&g.blocks, bi);
+        basic_block blk = rc_view_basic_block_get(g.blocks, bi);
         rc_bitset_reset(&live);
         for (uint32_t v = 0; v < nv; v++) {
             if (liveness_is_live_out(&lv, bi, v)) {
@@ -3484,15 +3522,16 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // share a byte with mainline state it might fire on top of. Among the handler's own temps, ordinary
     // liveness still governs, so intra-handler reuse survives. A footprint the walk cannot bound (an
     // unannotated computed call in the extent) is refused, with the same remedy as ever: ZA_CANCALL.
-    for (uint32_t h = 0; h < num_handlers; h++) {
-        footprint fp = footprint_compute(g, insns, cflows, handler_blocks[h], nv, &work, scratch);
+    for (uint32_t h = 0; h < handlers.num; h++) {
+        zp_handler hd = rc_array_zp_handler_get(&handlers, h);
+        footprint fp = footprint_compute(g, insns, cflows, hd.block, nv, &work, scratch);
         if (fp.unknown_call) {
-            baron_error(b, error_type_za_auto_across_call, handler_ats[h]);
+            baron_error(b, error_type_za_auto_across_call, hd.at);
             refused = true;
             continue;
         }
         for (uint32_t v = 0; v < nv; v++) {
-            if (liveness_is_live_in(&lv, handler_blocks[h], v)) {
+            if (liveness_is_live_in(&lv, hd.block, v)) {
                 pin_var(&lv, v, nv);
             }
         }
@@ -3544,7 +3583,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         if (col.any_spilled) {
             // An unplaced USED variable is a spill; an unused one was deliberately skipped (warned above).
             for (uint32_t v = 0; v < nv; v++) {
-                if (col.base[v] == RC_INDEX_NONE && liveness_class_of(&lv, v) != vreg_class_unused) {
+                if (rc_view_u32_get(col.base, v) == RC_INDEX_NONE && liveness_class_of(&lv, v) != vreg_class_unused) {
                     zp_var var = zeropage_var_get(&b->zeropage, v);
                     baron_error_payload(b, error_type_zeropage_full, var.def, var.name);
                 }
@@ -3559,12 +3598,12 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             // if the declaration were not there.
             for (uint32_t v = 0; v < nv; v++) {
                 zp_var var = zeropage_var_get(&b->zeropage, v);
-                if (col.base[v] == RC_INDEX_NONE) {
+                if (rc_view_u32_get(col.base, v) == RC_INDEX_NONE) {
                     scopes_remove_symbol(&b->scopes, var.scope, var.name);
                 }
                 else {
                     scopes_set_symbol(&b->scopes, var.scope, var.name,
-                                      value_make_numeric((double) col.base[v]), var.def);
+                                      value_make_numeric((double) rc_view_u32_get(col.base, v)), var.def);
                 }
             }
         }
@@ -3625,7 +3664,11 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             // (diagnostics, the zeropage IR) records twice.
             if (b->want_verbose || zeropage_is_enabled(&b->zeropage)) {
                 parse_result out = run_pass(b, source,
-                    (parse_flags) {.active = true, .output = true, .listing = b->want_verbose}, scratch);
+                    (parse_flags) {
+                        .active  = true,
+                        .output  = true,
+                        .listing = b->want_verbose,
+                    }, scratch);
                 if (out.fatal || baron_has_errors(b)) {
                     return assemble_failed(b);
                 }
@@ -3645,7 +3688,7 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
     // symbol) where there is one; otherwise it is genuine oscillation.
     parse_result diag = run_pass(b, source, (parse_flags) {.final = true, .active = true}, scratch);
     if (!diag.fatal && !baron_has_errors(b)) {
-        baron_error(b, error_type_no_convergence, (cursor) {.source = source, .pos = 0});
+        baron_error(b, error_type_no_convergence, (cursor) {.source = source});
     }
     return assemble_failed(b);
 }

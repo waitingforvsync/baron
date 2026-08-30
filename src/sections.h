@@ -98,7 +98,8 @@ typedef struct sections {
     rc_array_section           nodes;       // index 0 is the default section
     rc_array_splice            splices;     // this pass's INCSECTIONs, in statement order
     rc_array_section_size      sizes;       // name -> size at the end of the last pass
-    rc_array_section_emission  emissions;   // per-section {size, crc} at the end of the last settling pass
+    rc_view_section_emission   emissions;   // per-section {size, crc} at the end of the last settling pass
+                                            // - rebuilt in full each settling pass, so a view
 } sections;
 
 enum { sections_default = 0 };   // index of the default section

@@ -2,6 +2,7 @@
 #define BARON_ZPALLOC_H_
 
 #include "liveness.h"
+#include "richc/array/u32.h"
 #include "zeropage.h"   // rc_view_zp_var
 #include "richc/arena.h"
 #include "richc/bitset.h"
@@ -12,9 +13,8 @@
 // bytes) or a deliberately-skipped unused variable (told apart by its class). `any_spilled` is the quick
 // "did anything fail" flag; skipped unused variables do not raise it.
 typedef struct zp_coloring {
-    uint32_t  num_vars;
-    uint32_t *base;          // [num_vars] assigned ZP base byte, or RC_INDEX_NONE (spilled, or unused)
-    bool      any_spilled;
+    rc_view_u32 base;          // per vreg: assigned ZP base byte, or RC_INDEX_NONE (spilled, or unused)
+    bool        any_spilled;
 } zp_coloring;
 
 // Width-aware graph colouring: assign each variable a base byte drawn from `reserved` such that two variables

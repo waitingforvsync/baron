@@ -61,14 +61,21 @@ value value_make_list(rc_view_value items)
 
 value value_make_za_auto(uint32_t scope, cursor def, int32_t offset, rc_str name)
 {
-    return (value) {.type = value_type_za_auto,
-                    .za_auto = {.scope = scope, .def = def, .offset = offset, .name = name}};
+    return (value) {
+        .type    = value_type_za_auto,
+        .za_auto = {
+            .scope  = scope,
+            .def    = def,
+            .offset = offset,
+            .name   = name,
+        },
+    };
 }
 
 
 value value_make_copy(value v, rc_arena *arena)
 {
-    switch (v.type) {
+    switch ((value_type) v.type) {
         case value_type_none:
         case value_type_numeric:
         case value_type_boolean:
@@ -103,23 +110,27 @@ value value_make_copy(value v, rc_arena *arena)
 }
 
 
-// A range endpoint is a whole number. Pull the int64 out of v, or hand back the
-// reason it cannot be one as an error value (none means success, *out is set). An
-// error operand passes straight through so it can propagate.
-static value range_int(value v, int64_t *out)
+// A range endpoint is a whole number, pulled from v - or the reason it cannot be one, carried in `err`
+// as an error value (none means success and `v` holds the integer). An error operand passes straight
+// through so it can propagate.
+typedef struct range_endpoint {
+    int64_t v;
+    value   err;
+} range_endpoint;
+
+static range_endpoint range_int(value v)
 {
     if (value_is_error(v)) {
-        return v;
+        return (range_endpoint) {.err = v};
     }
     if (!value_is_number(v)) {
-        return value_make_error(error_type_type_mismatch);
+        return (range_endpoint) {.err = value_make_error(error_type_type_mismatch)};
     }
     double d = v.numeric;
     if (floor(d) != d || d < (double)INT64_MIN || d > (double)INT64_MAX) {
-        return value_make_error(error_type_domain);   // not a whole number (or out of range / NaN)
+        return (range_endpoint) {.err = value_make_error(error_type_domain)};   // not whole (or out of range / NaN)
     }
-    *out = (int64_t)d;
-    return value_make_none();
+    return (range_endpoint) {.v = (int64_t)d, .err = value_make_none()};
 }
 
 // The sign of x as -1 / 0 / +1.
@@ -130,11 +141,11 @@ static int64_t sign64(int64_t x)
 
 value value_make_range_pair(value lhs, value rhs, bool exclusive)
 {
-    int64_t start;
-    value err = range_int(lhs, &start);
-    if (!value_is_none(err)) {
-        return err;
+    range_endpoint lo = range_int(lhs);
+    if (!value_is_none(lo.err)) {
+        return lo.err;
     }
+    int64_t start = lo.v;
 
     if (value_is_range(rhs)) {
         // Stepped form a..(b..c): the inner range's start is our second element, so the
@@ -151,7 +162,11 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
             return value_make_error(error_type_domain);   // zero or inconsistent step
         }
         if (!r.has_end) {
-            return value_make_range((value_range) {.start = start, .step = step, .has_start = true});
+            return value_make_range((value_range) {
+                .start     = start,
+                .step      = step,
+                .has_start = true,
+            });
         }
         if (sign64(r.end - r.start) != sign64(step)) {
             return value_make_error(error_type_domain);   // the end does not continue the same way
@@ -167,11 +182,11 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
     }
 
     // Simple form a..b: step stays 0 (the direction is inferred from the endpoints).
-    int64_t end;
-    err = range_int(rhs, &end);
-    if (!value_is_none(err)) {
-        return err;
+    range_endpoint hi = range_int(rhs);
+    if (!value_is_none(hi.err)) {
+        return hi.err;
     }
+    int64_t end = hi.v;
     if (exclusive) {
         if (start >= end) {
             return value_make_list((rc_view_value) {0});   // '..<' that does not ascend is a legal empty sequence
@@ -191,22 +206,20 @@ value value_make_range_open_end(value lhs, bool exclusive)
     if (exclusive) {
         return value_make_error(error_type_domain);   // 'a..<' has nothing to exclude
     }
-    int64_t start;
-    value err = range_int(lhs, &start);
-    if (!value_is_none(err)) {
-        return err;
+    range_endpoint lo = range_int(lhs);
+    if (!value_is_none(lo.err)) {
+        return lo.err;
     }
-    return value_make_range((value_range) {.start = start, .has_start = true});
+    return value_make_range((value_range) {.start = lo.v, .has_start = true});
 }
 
 value value_make_range_open_start(value rhs, bool exclusive)
 {
-    int64_t end;
-    value err = range_int(rhs, &end);   // a range here (..b..c) coerces to type_mismatch
-    if (!value_is_none(err)) {
-        return err;
+    range_endpoint hi = range_int(rhs);   // a range here (..b..c) coerces to type_mismatch
+    if (!value_is_none(hi.err)) {
+        return hi.err;
     }
-    return value_make_range((value_range) {.end = end - (exclusive ? 1 : 0), .has_end = true});
+    return value_make_range((value_range) {.end = hi.v - (exclusive ? 1 : 0), .has_end = true});
 }
 
 value value_make_range_open(bool exclusive)
@@ -226,7 +239,7 @@ int64_t value_range_step(value_range r)
 }
 
 
-value_type value_type_of(value v)  { return v.type; }
+value_type value_type_of(value v)  { return (value_type) v.type; }
 bool value_is_none(value v)        { return v.type == value_type_none; }
 bool value_is_numeric(value v)     { return v.type == value_type_numeric; }
 bool value_is_boolean(value v)     { return v.type == value_type_boolean; }
@@ -252,7 +265,7 @@ bool value_is_equal(value a, value b)
         return false;
     }
 
-    switch (a.type) {
+    switch ((value_type) a.type) {
         case value_type_none:
             return true;
         case value_type_numeric:
@@ -273,7 +286,7 @@ bool value_is_equal(value a, value b)
                 return false;
             }
             for (uint32_t i = 0; i < a.list.num; i++) {
-                if (!value_is_equal(a.list.data[i], b.list.data[i])) {
+                if (!value_is_equal(rc_view_value_get(a.list, i), rc_view_value_get(b.list, i))) {
                     return false;
                 }
             }
@@ -294,7 +307,7 @@ bool value_is_equal(value a, value b)
 
 void value_format(rc_mstr *out, value v, rc_arena *arena)
 {
-    switch (v.type) {
+    switch ((value_type) v.type) {
         case value_type_none:
             rc_mstr_append(out, RC_STR("none"), arena);
             return;
@@ -333,7 +346,7 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
                 if (i > 0) {
                     rc_mstr_append(out, RC_STR(", "), arena);
                 }
-                value_format(out, v.list.data[i], arena);
+                value_format(out, rc_view_value_get(v.list, i), arena);
             }
             rc_mstr_append_char(out, '}', arena);
             return;

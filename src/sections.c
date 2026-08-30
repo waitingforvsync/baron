@@ -18,7 +18,7 @@ void sections_init(sections *sec, rc_arena *per_pass, rc_arena *permanent)
     sec->nodes     = (rc_array_section) {0};   // sections_reset builds the list each pass
     sec->splices   = (rc_array_splice) {0};
     sec->sizes     = (rc_array_section_size) {0};   // lazily made; deliberately NOT reset per pass
-    sec->emissions = (rc_array_section_emission) {0};   // ditto: last settling pass's fingerprints
+    sec->emissions = (rc_view_section_emission) {0};   // ditto: last settling pass's fingerprints
 }
 
 void sections_reset(sections *sec)
@@ -36,13 +36,13 @@ void sections_reset(sections *sec)
 uint32_t sections_pc(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
-    return RC_AT(sec->nodes, id).pc;
+    return rc_array_section_get(&sec->nodes, id).pc;
 }
 
 rc_view_bytes sections_code(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
-    return RC_AT(sec->nodes, id).code.view;
+    return rc_array_section_get(&sec->nodes, id).code.view;
 }
 
 rc_view_section sections_all(const sections *sec)
@@ -54,7 +54,7 @@ rc_view_section sections_all(const sections *sec)
 rc_view_attribute sections_attributes(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
-    return RC_AT(sec->nodes, id).attributes.view;
+    return rc_array_section_get(&sec->nodes, id).attributes.view;
 }
 
 uint32_t sections_find(const sections *sec, rc_str name)
@@ -64,7 +64,7 @@ uint32_t sections_find(const sections *sec, rc_str name)
     // the default at index 0 has a zero-initialised {0} name (NULL data, which rc_str_is_equal rejects)
     // and is never a target of a name lookup anyway.
     for (uint32_t i = 0; i < sec->nodes.num; i++) {
-        rc_str n = RC_AT(sec->nodes, i).name;
+        rc_str n = rc_array_section_get(&sec->nodes, i).name;
         if (n.len != 0 && rc_str_is_equal(n, name)) {
             return i;
         }
@@ -89,57 +89,65 @@ uint32_t sections_make(sections *sec, rc_str name)
 void sections_add_attribute(sections *sec, uint32_t id, rc_str key, value v, cursor at)
 {
     RC_ASSERT(sec != NULL);
-    section *s = &RC_AT(sec->nodes, id);
+    section *s = rc_array_section_at(&sec->nodes, id);
     value copy = value_make_copy(v, sec->arena);   // durable backing in the (per-pass) manager arena
 
     // Upsert: a key already present (inherited from a parent, most often) is replaced in place; otherwise
     // append. The bag is made lazily so a section with no attributes carries none.
     for (uint32_t i = 0; i < s->attributes.num; i++) {
-        if (rc_str_is_equal(RC_AT(s->attributes, i).key, key)) {
-            RC_AT(s->attributes, i) = (attribute) { .key = key, .v = copy, .at = at };
+        if (rc_str_is_equal(rc_array_attribute_get(&s->attributes, i).key, key)) {
+            *rc_array_attribute_at(&s->attributes, i) = (attribute) {
+                .key = key,
+                .v   = copy,
+                .at  = at,
+            };
             return;
         }
     }
     if (s->attributes.data == NULL) {
         s->attributes = rc_array_attribute_make(section_attrs_reserve, sec->arena);
     }
-    rc_array_attribute_push(&s->attributes, (attribute) { .key = key, .v = copy, .at = at }, sec->arena);
+    rc_array_attribute_push(&s->attributes, (attribute) {
+                .key = key,
+                .v   = copy,
+                .at  = at,
+            }, sec->arena);
 }
 
 void sections_org(sections *sec, uint32_t id, uint32_t addr)
 {
     RC_ASSERT(sec != NULL);
-    RC_AT(sec->nodes, id).pc = addr;   // only the effective address moves; code still appends at code.num
+    rc_array_section_at(&sec->nodes, id)->pc = addr;   // only the effective address moves; code still appends at code.num
 }
 
 void sections_set_cmos(sections *sec, uint32_t id, bool cmos)
 {
     RC_ASSERT(sec != NULL);
-    RC_AT(sec->nodes, id).cmos = cmos;
+    rc_array_section_at(&sec->nodes, id)->cmos = cmos;
 }
 
 bool sections_cmos(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
-    return RC_AT(sec->nodes, id).cmos;
+    return rc_array_section_get(&sec->nodes, id).cmos;
 }
 
 void sections_set_guard(sections *sec, uint32_t id, uint32_t addr)
 {
     RC_ASSERT(sec != NULL);
-    RC_AT(sec->nodes, id).guard = addr;
+    rc_array_section_at(&sec->nodes, id)->guard = addr;
 }
 
 uint32_t sections_guard(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
-    return RC_AT(sec->nodes, id).guard;
+    return rc_array_section_get(&sec->nodes, id).guard;
 }
 
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
 {
     RC_ASSERT(sec != NULL);
-    section *s = &RC_AT(sec->nodes, id);
+    section *s = rc_array_section_at(&sec->nodes, id);
     rc_array_bytes_push(&s->code, b, sec->arena);
     s->pc += 1;
 }
@@ -153,7 +161,7 @@ void sections_emit_u16(sections *sec, uint32_t id, uint16_t w)
 void sections_skip(sections *sec, uint32_t id, uint32_t count)
 {
     RC_ASSERT(sec != NULL);
-    section *s = &RC_AT(sec->nodes, id);
+    section *s = rc_array_section_at(&sec->nodes, id);
     for (uint32_t i = 0; i < count; i++) {
         rc_array_bytes_push(&s->code, 0, sec->arena);
     }
@@ -183,16 +191,16 @@ bool sections_emission_changed(sections *sec)
     rc_array_section_emission next = rc_array_section_emission_make(sec->nodes.num, sec->permanent);
     for (uint32_t i = 0; i < sec->nodes.num; i++) {
         section_emission e = {
-            .size = RC_AT(sec->nodes, i).code.num,
-            .crc  = crc32_bytes(RC_AT(sec->nodes, i).code.view),
+            .size = rc_array_section_get(&sec->nodes, i).code.num,
+            .crc  = crc32_bytes(rc_array_section_get(&sec->nodes, i).code.view),
         };
         if (!first && i < sec->emissions.num) {
-            section_emission prev = rc_array_section_emission_get(&sec->emissions, i);
+            section_emission prev = rc_view_section_emission_get(sec->emissions, i);
             changed = changed || prev.size != e.size || prev.crc != e.crc;
         }
         rc_array_section_emission_push(&next, e, sec->permanent);
     }
-    sec->emissions = next;
+    sec->emissions = next.view;
     return changed;
 }
 
@@ -201,7 +209,7 @@ bool sections_emission_changed(sections *sec)
 static uint32_t prior_size(const sections *sec, rc_str name)
 {
     for (uint32_t i = 0; i < sec->sizes.num; i++) {
-        section_size e = RC_AT(sec->sizes, i);
+        section_size e = rc_array_section_size_get(&sec->sizes, i);
         if (rc_str_is_equal(e.name, name)) {
             return e.size;
         }
@@ -214,8 +222,8 @@ static uint32_t prior_size(const sections *sec, rc_str name)
 static void size_upsert(sections *sec, rc_str name, uint32_t size)
 {
     for (uint32_t i = 0; i < sec->sizes.num; i++) {
-        if (rc_str_is_equal(RC_AT(sec->sizes, i).name, name)) {
-            RC_AT(sec->sizes, i).size = size;
+        if (rc_str_is_equal(rc_array_section_size_get(&sec->sizes, i).name, name)) {
+            rc_array_section_size_at(&sec->sizes, i)->size = size;
             return;
         }
     }
@@ -242,7 +250,13 @@ void sections_splice(sections *sec, uint32_t dst, rc_str src_name, cursor at)
     }
     rc_array_splice_push(
         &sec->splices,
-        (splice) {.dst = dst, .dst_offset = offset, .src_name = src_name, .count = count, .at = at},
+        (splice) {
+            .dst        = dst,
+            .dst_offset = offset,
+            .src_name   = src_name,
+            .count      = count,
+            .at         = at,
+        },
         sec->arena);
 }
 
@@ -256,7 +270,7 @@ bool sections_splices_changed(const sections *sec)
 {
     RC_ASSERT(sec != NULL);
     for (uint32_t i = 0; i < sec->splices.num; i++) {
-        splice sp  = RC_AT(sec->splices, i);
+        splice sp  = rc_array_splice_get(&sec->splices, i);
         uint32_t src = sections_find(sec, sp.src_name);
         uint32_t now = (src != RC_INDEX_NONE) ? sections_code(sec, src).num : 0;
         if (now != sp.count) {
@@ -270,7 +284,7 @@ void sections_note_sizes(sections *sec)
 {
     RC_ASSERT(sec != NULL);
     for (uint32_t i = 0; i < sec->nodes.num; i++) {
-        section s = RC_AT(sec->nodes, i);
+        section s = rc_array_section_get(&sec->nodes, i);
         if (s.name.len != 0) {
             size_upsert(sec, s.name, s.code.num);
         }
@@ -278,7 +292,7 @@ void sections_note_sizes(sections *sec)
     // A splice source that never appeared this pass is pinned at 0, so a section that VANISHED across
     // passes (an IF arm flipping) cannot leave a stale size re-reserving itself forever.
     for (uint32_t i = 0; i < sec->splices.num; i++) {
-        rc_str name = RC_AT(sec->splices, i).src_name;
+        rc_str name = rc_array_splice_get(&sec->splices, i).src_name;
         if (sections_find(sec, name) == RC_INDEX_NONE) {
             size_upsert(sec, name, 0);
         }
@@ -288,7 +302,7 @@ void sections_note_sizes(sections *sec)
 void sections_copy_in(sections *sec, uint32_t dst, uint32_t offset, uint32_t src)
 {
     RC_ASSERT(sec != NULL && dst != src);
-    section *d = &RC_AT(sec->nodes, dst);
+    section *d = rc_array_section_at(&sec->nodes, dst);
     rc_view_bytes s = sections_code(sec, src);
     RC_ASSERT((uint64_t) offset + s.num <= d->code.num);   // the span was reserved at exactly this size
     for (uint32_t i = 0; i < s.num; i++) {
@@ -310,23 +324,30 @@ section section_make_copy(section s, rc_arena *arena)
     RC_ASSERT(arena != NULL);
     // Everything the section references is copied, not just the code: the name and attribute keys are views
     // into source text held by a DIFFERENT arena, and a copy that borrowed them would quietly die with it.
-    section copy = {
-        .name = str_make_copy(s.name, arena),
-        .pc   = s.pc,
-        .cmos = s.cmos,
-        .code = rc_array_bytes_make_copy(s.code.view, 0, arena),
-    };
+    rc_array_attribute attributes = {0};
     if (s.attributes.num != 0) {
-        copy.attributes = rc_array_attribute_make(s.attributes.num, arena);
+        attributes = rc_array_attribute_make(s.attributes.num, arena);
         for (uint32_t i = 0; i < s.attributes.num; i++) {
-            attribute a = RC_AT(s.attributes, i);
+            attribute a = rc_array_attribute_get(&s.attributes, i);
             rc_array_attribute_push(
-                &copy.attributes,
-                (attribute) {.key = str_make_copy(a.key, arena), .v = value_make_copy(a.v, arena), .at = a.at},
+                &attributes,
+                (attribute) {
+                    .key = str_make_copy(a.key, arena),
+                    .v   = value_make_copy(a.v, arena),
+                    .at  = a.at,
+                },
                 arena);
         }
     }
-    return copy;
+    return (section) {
+        .name       = str_make_copy(s.name, arena),
+        .pc         = s.pc,
+        .cmos       = s.cmos,
+        .guard      = s.guard,   // the piecemeal copy used to drop this (harmless - nothing reads a
+                                 // saved section's guard - but a copy should be a copy)
+        .code       = rc_array_bytes_make_copy(s.code.view, 0, arena),
+        .attributes = attributes,
+    };
 }
 
 #ifdef BARON_TESTS
@@ -519,7 +540,7 @@ RC_TEST(sections, make_copy_owns_its_backing)
     sections_emit_u8(&sec, id, 0x2A);
     sections_add_attribute(&sec, id, key, value_make_string(file), cursor_none());
 
-    section copy = section_make_copy(RC_AT(sec.nodes, id), &kept);
+    section copy = section_make_copy(rc_array_section_get(&sec.nodes, id), &kept);
 
     // The decisive move: kill the arena everything was built in. If the copy borrowed any of it, the reads
     // below touch freed memory (which the sanitizer build turns into a hard failure).
@@ -531,8 +552,8 @@ RC_TEST(sections, make_copy_owns_its_backing)
     RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 0), ==, 0xA9u);
     RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 1), ==, 0x2Au);
     RC_CHECK(copy.attributes.num, ==, 1u);
-    RC_CHECK(RC_AT(copy.attributes, 0).key, ==, RC_STR("filename"));
-    RC_CHECK_TRUE(value_is_equal(RC_AT(copy.attributes, 0).v, value_make_string(RC_STR("game.bin"))));
+    RC_CHECK(rc_array_attribute_get(&copy.attributes, 0).key, ==, RC_STR("filename"));
+    RC_CHECK_TRUE(value_is_equal(rc_array_attribute_get(&copy.attributes, 0).v, value_make_string(RC_STR("game.bin"))));
 
     rc_arena_deinit(&kept);
 }

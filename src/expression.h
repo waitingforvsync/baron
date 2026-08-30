@@ -35,7 +35,7 @@ typedef enum expr_error {
 typedef struct expr_result {
     value      value;       // the evaluated value (may itself be an eval-error value)
     uint32_t   next;        // cursor just past the consumed text
-    expr_error error;       // a parse error, or expr_error_none
+    uint8_t error;          // expr_error: a parse error, or expr_error_none
     uint32_t   error_at;    // cursor where a parse error was spotted (when error set)
 } expr_result;
 
@@ -73,7 +73,7 @@ token_table expression_operand_base(void);
 typedef struct function_body_scan {
     uint32_t   next;         // just past the return expression (or the '=' for an empty return)
     bool       defined;      // false = forward declaration (empty body + empty return)
-    error_type error;        // error_type_none, or a structural problem in the body
+    uint16_t error;          // error_type: error_type_none, or a structural problem in the body
     uint32_t   error_at;     // where the structural problem was seen
 } function_body_scan;
 

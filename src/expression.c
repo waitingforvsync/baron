@@ -513,53 +513,56 @@ static uint32_t range_count(value_range r)
 // are each {2}) -> {2,2}; but {{1,2},{3,4,5}} is 2-of-(a {2} and a {3}, which agree on
 // nothing) -> just {2}. "What they all agree on" is the common leading prefix of the
 // elements' shapes, and each element can only ever trim that prefix shorter.
-static uint32_t shape_dims(value v, uint32_t dims[], uint32_t max)
+typedef struct shape {
+    uint32_t rank;
+    uint32_t dims[MAX_RANK];
+} shape;
+
+static shape shape_of(value v, uint32_t max)
 {
     if (max == 0) {
-        return 0;   // out of room: report no further axes
+        return (shape) {0};   // out of room: report no further axes
     }
     if (value_is_range(v)) {
         if (!v.range.has_start || !v.range.has_end) {
-            return 0;   // unbounded: no length to report
+            return (shape) {0};   // unbounded: no length to report
         }
-        dims[0] = range_count(v.range);
-        return 1;   // a bounded range is a compact rank-1 list of numbers
+        // A bounded range is a compact rank-1 list of numbers.
+        return (shape) {.rank = 1, .dims[0] = range_count(v.range)};
     }
     if (!value_is_list(v)) {
-        return 0;   // a scalar: empty shape, rank 0
+        return (shape) {0};   // a scalar: empty shape, rank 0
     }
-    
-    dims[0] = v.list.num;   // axis 0 is always just how many things we are holding
     if (v.list.num == 0) {
-        return 1;   // empty list: shape {0}, with no elements to descend into
+        return (shape) {.rank = 1};   // empty list: shape {0}, no elements to descend into
     }
 
-    // Element 0 proposes the inner shape. We let it write straight into our own buffer at
-    // dims+1, so dims ends up as [our length, elem0's shape...] - if everyone agrees, that
-    // IS the answer and nobody need touch it again.
-    uint32_t inner = shape_dims(rc_view_value_get(v.list, 0), dims + 1, max - 1);
-
-    // Every other element now gets a say, but only to trim: we shape it off to one side and
-    // keep however many leading axes still match. The moment inner hits 0 there is nothing
-    // left to agree on, so we stop looking (the inner > 0 guard)
+    // Element 0 proposes the inner shape; every other element gets a say, but only to trim -
+    // we keep however many leading axes still match. The moment inner hits 0 there is nothing
+    // left to agree on, so we stop looking (the inner > 0 guard).
+    shape first = shape_of(rc_view_value_get(v.list, 0), max - 1);
+    uint32_t inner = first.rank;
     for (uint32_t i = 1; i < v.list.num && inner > 0; i++) {
-        uint32_t other[MAX_RANK];
-        uint32_t ri = shape_dims(rc_view_value_get(v.list, i), other, max - 1);
+        shape other = shape_of(rc_view_value_get(v.list, i), max - 1);
         uint32_t common = 0;
-        while (common < inner && common < ri && dims[1 + common] == other[common]) {
+        while (common < inner && common < other.rank && first.dims[common] == other.dims[common]) {
             common++;
         }
         inner = common;   // the agreed prefix can only shrink, never grow
     }
 
-    return 1 + inner;   // our own axis, plus whatever inner axes survived the haggling
+    // Axis 0 is always just how many things we are holding, then the surviving inner axes.
+    shape s = {.rank = 1 + inner, .dims[0] = v.list.num};
+    for (uint32_t k = 0; k < inner; k++) {
+        s.dims[1 + k] = first.dims[k];
+    }
+    return s;
 }
 
 // The rank of v: the length of its uniform-length-prefix shape (0 for a scalar).
 static uint32_t rank_of(value v)
 {
-    uint32_t dims[MAX_RANK];
-    return shape_dims(v, dims, MAX_RANK);
+    return shape_of(v, MAX_RANK).rank;
 }
 
 // The shape() function: the axis lengths as a list of numbers (a scalar -> the empty list).
@@ -578,12 +581,11 @@ static value fn_shape(rc_view_value args, rc_arena *arena)
         return value_make_error(error_type_domain);   // an unbounded range has no length to report
     }
 
-    uint32_t dims[MAX_RANK];
-    uint32_t rank = shape_dims(v, dims, MAX_RANK);
+    shape s = shape_of(v, MAX_RANK);
 
     rc_array_value out = {0};
-    for (uint32_t i = 0; i < rank; i++) {
-        rc_array_value_push(&out, value_make_numeric((double)dims[i]), arena);
+    for (uint32_t i = 0; i < s.rank; i++) {
+        rc_array_value_push(&out, value_make_numeric((double)s.dims[i]), arena);
     }
 
     return value_make_list(out.view);
@@ -778,7 +780,7 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
     if (value_is_range(index)) {
         rc_array_u32 idx = range_indices(index.range, s.len, arena);
         for (uint32_t j = 0; j < idx.num; j++) {
-            rc_mstr_append_char(&m, s.data[RC_AT(idx, j)], arena);
+            rc_mstr_append_char(&m, s.data[rc_array_u32_get(&idx, j)], arena);
         }
     }
     else if (value_is_list(index)) {
@@ -846,7 +848,7 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
     if (value_is_range(sel)) {
         rc_array_u32 idx = range_indices(sel.range, len, arena);
         for (uint32_t j = 0; j < idx.num; j++) {
-            value e = subscript(rc_view_value_get(v.list, RC_AT(idx, j)), rest, arena);
+            value e = subscript(rc_view_value_get(v.list, rc_array_u32_get(&idx, j)), rest, arena);
             rc_array_value_push(&out, e, arena);
         }
     }
@@ -1275,7 +1277,7 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
 
     rc_array_value out = {0};
     for (uint32_t i = 0; i < n; i++) {
-        rc_array_value_push(&out, RC_AT(pairs, i).v, arena);
+        rc_array_value_push(&out, rc_array_sort_pair_get(&pairs, i).v, arena);
     }
     return value_make_list(out.view);
 }
@@ -1785,11 +1787,11 @@ typedef enum body_stop {
 } body_stop;
 
 typedef struct body_result {
-    body_stop  stop;
+    uint8_t  stop;           // body_stop
     uint32_t   next;         // past the return expression, or AT the elif/else/endif keyword, or at EOF
     value      value;        // the return value (stop == body_stop_return); value_make_none() = empty return
     bool       saw_statement;// did any assignment / IF run before the stop (to tell a forward decl from a body)
-    error_type error;        // error_type_none, or a structural body error
+    uint16_t error;          // error_type
     uint32_t   error_at;
     rc_str     error_detail; // a payload for the error, when one helps (the duplicated local's name)
 } body_result;
@@ -1798,7 +1800,11 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
 
 static body_result body_fail(error_type code, uint32_t at)
 {
-    return (body_result) {.next = at, .error = code, .error_at = at};
+    return (body_result) {
+        .next     = at,
+        .error    = code,
+        .error_at = at,
+    };
 }
 
 // A single-token '=' table, to read the assignment operator after a body statement's target name.
@@ -1912,14 +1918,22 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
             parser sp = body_sub(p, active);
             expr_result rhs = parse_precedence(&sp, lr.next, 0);
             if (rhs.error == expr_error_expected_expression) {
-                return (body_result) {.stop = body_stop_return, .next = lr.next,
-                                      .value = value_make_none(), .saw_statement = saw};   // empty (forward)
+                return (body_result) {
+                    .stop          = body_stop_return,
+                    .next          = lr.next,
+                    .value         = value_make_none(),   // empty (a forward declaration)
+                    .saw_statement = saw,
+                };
             }
             if (rhs.error != expr_error_none) {
                 return body_fail(error_type_expression, rhs.error_at);
             }
-            return (body_result) {.stop = body_stop_return, .next = rhs.next,
-                                  .value = rhs.value, .saw_statement = saw};
+            return (body_result) {
+                .stop          = body_stop_return,
+                .next          = rhs.next,
+                .value         = rhs.value,
+                .saw_statement = saw,
+            };
         }
 
         if (lr.token.type == lexeme_type_closer) {
@@ -1951,7 +1965,11 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
 
         if (lr.token.type == lexeme_type_terminator) {
             if (lexer_at_end(p->text, lr.next)) {
-                return (body_result) {.stop = body_stop_eof, .next = lr.next, .saw_statement = saw};
+                return (body_result) {
+                    .stop          = body_stop_eof,
+                    .next          = lr.next,
+                    .saw_statement = saw,
+                };
             }
             pos = lr.next;   // a blank statement
             continue;
@@ -2045,15 +2063,27 @@ function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, cons
     body_result br = interpret_statements(&p, pos, false);   // inactive: just walk to the top-level '='
 
     if (br.error != error_type_none) {
-        return (function_body_scan) {.next = br.error_at, .error = br.error, .error_at = br.error_at};
+        return (function_body_scan) {
+            .next     = br.error_at,
+            .error    = br.error,
+            .error_at = br.error_at,
+        };
     }
     if (br.stop != body_stop_return) {
-        return (function_body_scan) {.next = br.next, .error = error_type_unclosed_function, .error_at = br.next};
+        return (function_body_scan) {
+            .next     = br.next,
+            .error    = error_type_unclosed_function,
+            .error_at = br.next,
+        };
     }
 
     bool empty_return = value_is_none(br.value);
     if (br.saw_statement && empty_return) {
-        return (function_body_scan) {.next = br.next, .error = error_type_unclosed_function, .error_at = br.next};
+        return (function_body_scan) {
+            .next     = br.next,
+            .error    = error_type_unclosed_function,
+            .error_at = br.next,
+        };
     }
     // A forward declaration is an empty body AND an empty return; anything with a real return is defined.
     return (function_body_scan) {.next = br.next, .defined = !empty_return};

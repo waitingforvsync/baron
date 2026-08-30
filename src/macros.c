@@ -149,7 +149,11 @@ macro_add_status macros_add_signature(macros *m, uint32_t index, rc_view_macro_s
     }
 
     // A new overload: insert it in specificity order (stable, so equal-rank keeps definition order).
-    macro_signature ns = {.slots = slots, .body = body, .defined = defined};
+    macro_signature ns = {
+        .slots   = slots,
+        .body    = body,
+        .defined = defined,
+    };
     uint32_t pos = 0;
     while (pos < e->signatures.num
            && !macro_signature_before(ns.slots, rc_array_macro_signature_get(&e->signatures, pos).slots)) {

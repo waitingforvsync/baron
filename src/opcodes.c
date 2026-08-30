@@ -431,9 +431,9 @@ static addr_mode resolve_direct(mnemonic m, index_reg idx, bool known, int64_t a
 // The outcome of looking for a trailing ",X" / ",Y" after a plain operand: which index (if
 // any), the cursor past it, and any error.
 typedef struct index_result {
-    index_reg      reg;
+    uint8_t  reg;     // index_reg
     uint32_t       next;        // the separator position when there is no index
-    error_type     error;
+    uint16_t error;   // error_type
     uint32_t       error_at;
 } index_result;
 
@@ -504,10 +504,8 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
                                      uint32_t operand_pos)
 {
     operand_ref none = {
-        .def              = cursor_none(),
-        .scope            = RC_INDEX_NONE,
-        .rw               = vref_none,
-        .outside_envelope = false,
+        .def   = cursor_none(),
+        .scope = RC_INDEX_NONE,   // rw/outside_envelope: zero-init (vref_none is the default)
     };
     if (operand_pos == RC_INDEX_NONE) {
         return none;

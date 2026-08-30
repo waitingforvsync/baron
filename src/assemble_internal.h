@@ -75,8 +75,8 @@ typedef enum int_argument_type {
 
 typedef struct int_argument {
     int64_t           value;        // valid when type == int_argument_type_known
-    int_argument_type type;
-    error_type        error;        // set when type == int_argument_type_error
+    uint8_t  type;           // int_argument_type
+    uint16_t error;          // error_type        // set when type == int_argument_type_error
     uint32_t          error_at;
     rc_str            error_detail; // the error's payload (e.g. the undefined symbol's name), or {0}
     bool              za_auto;      // the value was a ZA_AUTO address: `value` holds the OFFSET within

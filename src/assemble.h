@@ -41,7 +41,7 @@ enum { baron_num_channels = 10 };
 // vocabulary; the renderer substitutes `payload` for the '%' in the code's message template (a symbol
 // name, a branch distance, an ERROR statement's text - {0} when the message stands alone).
 typedef struct diagnostic {
-    error_type code;
+    uint16_t   code;       // error_type
     cursor     at;
     uint8_t    severity;   // 0 = error; higher = warning level (see severity_* above)
     rc_str     payload;    // permanent-backed (the recording helper copies), or {0} for none

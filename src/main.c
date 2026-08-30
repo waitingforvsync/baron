@@ -311,7 +311,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "baron: %.*s\n", (int) d.error.len, d.error.data);
                     failed = true;
                 }
-                else if (!check && rc_file_save_binary(rc_str_from_cstr(out), d.image.view) != RC_FILE_OK) {
+                else if (!check && rc_file_save_binary(rc_str_from_cstr(out), d.image) != RC_FILE_OK) {
                     fprintf(stderr, "baron: cannot write '%s'\n", out);
                     failed = true;
                 }

@@ -39,14 +39,11 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
 {
     (void) scratch;
     uint32_t n = vars.num;
-    zp_coloring col = {
-        .num_vars    = n,
-        .base        = n ? rc_arena_alloc_type(arena, uint32_t, n) : NULL,
-        .any_spilled = false,
-    };
+    rc_span_u32 base = rc_span_u32_make(n ? rc_arena_alloc_type(arena, uint32_t, n) : NULL, n);
     for (uint32_t v = 0; v < n; v++) {
-        col.base[v] = RC_INDEX_NONE;
+        rc_span_u32_set(base, v, RC_INDEX_NONE);
     }
+    bool any_spilled = false;
 
     // First-fit-decreasing over widths (widest first): place the more constrained wide variables before the
     // narrow ones, each at the lowest reserved base that clashes with no already-placed conflicting variable.
@@ -68,32 +65,32 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
             if (liveness_class_of(lv, v) == vreg_class_unused) {
                 continue;   // no instruction touches it: no address (base stays NONE, and NOT a spill)
             }
-            for (uint32_t base = 0; base + w <= zp_bytes; base++) {
-                if (!span_reserved(reserved, base, w)) {
+            for (uint32_t at = 0; at + w <= zp_bytes; at++) {
+                if (!span_reserved(reserved, at, w)) {
                     continue;
                 }
                 bool clash = false;
                 for (uint32_t u = 0; u < n; u++) {
-                    if (u == v || col.base[u] == RC_INDEX_NONE || !conflicts(lv, v, u)) {
+                    if (u == v || rc_span_u32_get(base, u) == RC_INDEX_NONE || !conflicts(lv, v, u)) {
                         continue;
                     }
                     uint32_t uw = rc_view_zp_var_get(vars, u).width;
-                    if (spans_overlap(base, w, col.base[u], uw)) {
+                    if (spans_overlap(at, w, rc_span_u32_get(base, u), uw)) {
                         clash = true;
                         break;
                     }
                 }
                 if (!clash) {
-                    col.base[v] = base;
+                    rc_span_u32_set(base, v, at);
                     break;
                 }
             }
-            if (col.base[v] == RC_INDEX_NONE) {
-                col.any_spilled = true;
+            if (rc_span_u32_get(base, v) == RC_INDEX_NONE) {
+                any_spilled = true;
             }
         }
     }
-    return col;
+    return (zp_coloring) {.base = base.view, .any_spilled = any_spilled};
 }
 
 
@@ -164,9 +161,9 @@ RC_TEST(zpalloc, disjoint_share_interfering_split)
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
 
     RC_CHECK_FALSE(col.any_spilled);
-    RC_CHECK(col.base[0], ==, 0x70u);   // first placed
-    RC_CHECK(col.base[1], ==, 0x71u);   // interferes with v0 -> next byte
-    RC_CHECK(col.base[2], ==, 0x70u);   // disjoint from both -> reuses v0's byte
+    RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);   // first placed
+    RC_CHECK(rc_view_u32_get(col.base, 1), ==, 0x71u);   // interferes with v0 -> next byte
+    RC_CHECK(rc_view_u32_get(col.base, 2), ==, 0x70u);   // disjoint from both -> reuses v0's byte
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -192,8 +189,8 @@ RC_TEST(zpalloc, width_two_takes_consecutive_bytes)
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
 
     RC_CHECK_FALSE(col.any_spilled);
-    RC_CHECK(col.base[0], ==, 0x70u);   // 2-byte pointer, first by FFD, at 0x70-0x71
-    RC_CHECK(col.base[1], ==, 0x72u);   // 1-byte temp cannot overlap -> 0x72
+    RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);   // 2-byte pointer, first by FFD, at 0x70-0x71
+    RC_CHECK(rc_view_u32_get(col.base, 1), ==, 0x72u);   // 1-byte temp cannot overlap -> 0x72
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -219,9 +216,9 @@ RC_TEST(zpalloc, unused_variable_is_skipped)
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
 
     RC_CHECK_FALSE(col.any_spilled);            // a skipped unused var is NOT a spill
-    RC_CHECK(col.base[0], ==, 0x70u);
-    RC_CHECK(col.base[1], ==, RC_INDEX_NONE);   // no address at all
-    RC_CHECK(col.base[2], ==, 0x71u);           // packs as if v1 were never declared
+    RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);
+    RC_CHECK(rc_view_u32_get(col.base, 1), ==, RC_INDEX_NONE);   // no address at all
+    RC_CHECK(rc_view_u32_get(col.base, 2), ==, 0x71u);           // packs as if v1 were never declared
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -245,8 +242,8 @@ RC_TEST(zpalloc, spill_when_out_of_bytes)
     zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
 
     RC_CHECK_TRUE(col.any_spilled);
-    RC_CHECK(col.base[0], ==, 0x70u);
-    RC_CHECK(col.base[1], ==, RC_INDEX_NONE);   // spilled
+    RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);
+    RC_CHECK(rc_view_u32_get(col.base, 1), ==, RC_INDEX_NONE);   // spilled
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

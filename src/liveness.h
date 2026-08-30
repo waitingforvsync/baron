@@ -4,15 +4,9 @@
 #include "cfg.h"
 #include "zeropage.h"   // rc_view_zp_insn, vref_rw
 #include "richc/arena.h"
-#include "richc/array/u8.h"   // rc_view_u8: the classes row (u8 storage for vreg_class values)
+#include "richc/array/u8.h"       // rc_view_u8: the classes row (u8 storage for vreg_class values)
+#include "richc/array/bitset.h"   // bitset rows - the shape every dataflow result takes
 #include "richc/bitset.h"
-
-// Bitset rows - the shape every dataflow result takes (one row per block, or per vreg). The arena owns
-// the storage; a fixed-count allocation travels as a SPAN (mutable rows, no growth), and a result only
-// ever read travels as a VIEW.
-#define RC_ARRAY_TYPE rc_bitset
-#define RC_ARRAY_NAME bitset
-#include "richc/template/array.h"
 
 
 // How a variable relates to its routine's boundary, inferred from liveness. This is a Stage C heuristic
