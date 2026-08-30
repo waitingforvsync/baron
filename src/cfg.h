@@ -30,7 +30,9 @@ typedef struct basic_block {
                              // fully known. (An RTS-dispatch masquerading as a return, and a self-modified JSR,
                              // cannot be seen here; ZA_CANCALL/ZA_CANJUMP annotations supply the targets we cannot
                              // recover - ZA_CANJUMP after the RTS marks the dispatch trick and wires its declared
-                             // edges. UNannotated, both remain unsound-if-unmarked preconditions.)
+                             // edges, ZA_CANJUMP after a jump/branch REPLACES the literal edge (a self-modified
+                             // operand's placeholder), and ZA_RETURN declares the transfer a return to our own
+                             // caller. UNannotated, all remain unsound-if-unmarked preconditions.)
 } basic_block;
 
 #define RC_ARRAY_TYPE basic_block
@@ -51,8 +53,11 @@ typedef struct cfg {
 } cfg;
 
 // Build the CFG for `insns` (recorded in program / pc order, sections interleaving). `cflows` supplies the
-// control-flow annotations (ZA_UNREACHABLE prunes a branch's dead fall-through; ZA_CANJUMP wires a computed JMP's
-// declared targets); `labels` maps each label's identity to its (section, pc) so a control transfer that named
+// control-flow annotations (ZA_UNREACHABLE prunes a dead fall-through - a branch's not-taken edge, or the
+// point past a never-returning JSR; ZA_CANJUMP wires a computed JMP's / self-modified branch's declared
+// targets in place of the literal; ZA_RETURN makes a jump/branch a return to the routine's own caller;
+// ZA_RETURNTO reroutes a call's continuation to its declared resumption points, the inline-data idiom's
+// caller side); `labels` maps each label's identity to its (section, pc) so a control transfer that named
 // a label resolves across sections; `entries` lists the declared ZA_ENTRY / ZA_INTERRUPT markers, whose
 // addresses are marked as leaders so a mid-run entry starts its own block. Blocks + successors live in
 // `arena`; `scratch` (by value) backs the transient leader set. An empty instruction list gives an empty CFG.

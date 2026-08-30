@@ -132,7 +132,7 @@ Only the final pass records anything - earlier passes exist to let the layout se
   position of the `ZA_AUTO` statement).
 - `zp_insn` - one per *instruction*: pc, size, control-flow class (`zp_flow`), which variable it touches
   and how (`rw` read/write flags, constant offset, indexed/indirect flags), and its transfer target.
-- `zp_cflow` - the annotations: `ZA_UNREACHABLE`, `ZA_CANCALL`, `ZA_CANJUMP`.
+- `zp_cflow` - the annotations: `ZA_UNREACHABLE`, `ZA_CANCALL`, `ZA_CANJUMP`, `ZA_RETURN`, `ZA_RETURNTO`.
 - `zp_label` - each label's identity mapped to its physical `(section, pc)`.
 
 Two details worth knowing:
@@ -178,8 +178,13 @@ blocks.
 
 1. **Find the leaders** - every instruction where a block must start: the first instruction, every
    branch/jump/call target, the instruction after any branch, jump or return, every section boundary,
-   and every `ZA_CANCALL`/`ZA_CANJUMP`-declared target.
-2. **Cut the stream** at the leaders.
+   and every annotation-declared target (`ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO`).
+2. **Cut the stream** at the leaders - and after every branch, jump or return, so a terminator is
+   always the last instruction of its block. The two rules coincide except across a data gap: inline
+   data (`EQUS` after a `JSR`) records nothing, so the after-address leader from pass 1 can mark a pc
+   no instruction sits on, and only the terminator cut keeps the `JMP`'s edges real. A call cuts too
+   when an annotation reroutes its continuation (`ZA_RETURNTO`) or severs it (`ZA_UNREACHABLE` just
+   past it), so pass 3 can express either as edge omission.
 3. **Wire the edges** from each block's last instruction.
 
 A tiny loop, and its graph:
@@ -221,11 +226,23 @@ The details that make the CFG honest:
   computed flow wanting `ZA_CANJUMP`, never mistaken for a constant OS cell. The taint later forces
   "everything live" out of that block - and Guard 1 refuses the program if any variables are in play at
   all.
-- **Annotations adjust the graph**: `ZA_UNREACHABLE` prunes a branch's fall-through edge; `ZA_CANJUMP` wires a
-  computed jump's declared targets as real successors (external arms contributing nothing). An `RTS`
-  carrying a `ZA_CANJUMP` is the dispatch trick - push a target address, "return" into it - and is wired
-  exactly like an annotated jump. An *unannotated* dispatch is indistinguishable from a real return, so
-  it remains a trusted precondition, never a taint.
+- **A call/normal fall-through skips a data gap.** The fall-through pc is `pc + size`; when inline
+  data displaced the next instruction there is no block there, and the edge goes to the next recorded
+  same-section instruction instead - the adjacency the in-block walk already assumes, expressed as an
+  edge. This is what makes `JSR pstring : EQUS "text", 0 : ...` sound with no annotation: the
+  data-consuming callee resumes exactly there. Nothing found at all is the end of the stream, a clean
+  dead end. (A *branch's* not-taken edge stays pure pc arithmetic - a not-taken branch into data is a
+  broken program, not a continuation.)
+- **Annotations adjust the graph**: `ZA_UNREACHABLE` prunes a dead fall-through edge - a branch's
+  not-taken arm, or the continuation of a never-returning `JSR`; `ZA_CANJUMP` wires a computed jump's or
+  self-modified branch's declared targets as real successors **in place of** any literal edge (external
+  arms contributing nothing - the programmer's word beats a placeholder operand, as it already did for
+  calls); `ZA_RETURN` declares a jump/branch a return to the routine's own caller (no edge - the return
+  machinery in liveness supplies the semantics); `ZA_RETURNTO` reroutes a call's continuation to its
+  declared resumption points (an arm with no block is off the stream: no edge, and finalize warns). An
+  `RTS` carrying a `ZA_CANJUMP` is the dispatch trick - push a target address, "return" into it - and is
+  wired exactly like an annotated jump. An *unannotated* dispatch is indistinguishable from a real
+  return, so it remains a trusted precondition, never a taint.
 
 ## Liveness: walking backward ##
 
@@ -341,9 +358,10 @@ proof is genuine: make the store conditional -
 ```
 
 - and `res` is no longer must-written, so it is preserved across the whole journey on its own byte
-(test `za_auto_conditional_result_is_preserved`). A "returning exit" (`block_returns`) is an RTS/RTI *or*
-a transfer out of the program - the OS routine's own RTS returns to our caller, the tail-call idiom -
-but *not* an RTS wearing a `ZA_CANJUMP`, whose control continues at its declared targets.
+(test `za_auto_conditional_result_is_preserved`). A "returning exit" (`block_returns`) is an RTS/RTI, a
+transfer out of the program - the OS routine's own RTS returns to our caller, the tail-call idiom - *or*
+a jump/branch wearing a `ZA_RETURN` (the inline-data trick's computed exit, declared to hand straight
+back); but *not* an RTS wearing a `ZA_CANJUMP`, whose control continues at its declared targets.
 
 **4. Returns see the caller.** Rule 3 creates a hazard: an escaping result's only reads are in the
 caller, so inside its producer it would look dead the moment it is stored - and the producer's *later*
@@ -471,12 +489,13 @@ The refusals (all fatal):
 (`za_discard_needs_var` - an operand that is not a whole `ZA_AUTO` variable - is a recoverable semantic
 error at the statement, like the other operand mistakes.)
 
-The warnings: `za_auto_unused` and `za_auto_unreachable` (default level) and `za_auto_indexed_access`
-(opt-in).
+The warnings: `za_auto_unused`, `za_auto_unreachable` and `za_returnto_no_code` (default level) and
+`za_auto_indexed_access` (opt-in).
 
 And the trust points - the deliberate holes in the proof, each an explicit contract with the user:
 
-- **Annotations are believed.** A wrong `ZA_UNREACHABLE`, `ZA_CANCALL` or `ZA_CANJUMP` defeats the analysis; a
+- **Annotations are believed.** A wrong `ZA_UNREACHABLE`, `ZA_CANCALL`, `ZA_CANJUMP`, `ZA_RETURN` or
+  `ZA_RETURNTO` defeats the analysis; a
   *missing* one is caught wherever possible (Guards 1 and 2) - except an unmarked RTS-dispatch, which is
   indistinguishable from a real return. A wrong `ZA_DISCARD` is the same class: it hands the variable's
   bytes away while the old value is still wanted; a missing one merely wastes bytes, never correctness.
@@ -491,9 +510,13 @@ And the trust points - the deliberate holes in the proof, each an explicit contr
 Deliberate limitations, all soundness-safe or documented trust points:
 
 - **Annotation operands resolve in their own section.** Ordinary cross-section transfers resolve by
-  label; a `ZA_CANCALL`/`ZA_CANJUMP` *operand* is still a bare number resolved in the annotating
-  instruction's section, so it cannot yet name a target in a different bank. (`ZA_ENTRY`/`ZA_INTERRUPT`
-  take no operand, so they are intrinsically in the right section.)
+  label; a `ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO` *operand* is still a bare number resolved in the
+  annotating instruction's section, so it cannot yet name a target in a different bank.
+  (`ZA_ENTRY`/`ZA_INTERRUPT` take no operand, so they are intrinsically in the right section.) In the
+  same vein a cflow *site* is a bare pc: two banks sharing an address would cross-talk on annotations,
+  and with `ZA_UNREACHABLE` now able to sever a call's fall-through that cross-talk could remove an
+  edge (the unsound direction) rather than merely add one - keep annotations and their sites in one
+  bank until sites carry a section.
 - **The reserved set is global.** One physical zero page, one pool.
 - **INCSECTION splices are byte copies.** A marker lives in its source section's coordinates; the
   spliced copy is never re-analysed, same as every annotation.

@@ -86,6 +86,7 @@ typedef enum error_type {
     error_type_za_entry_input,        // warning: a ZA_ENTRY routine reads a ZA_AUTO before writing it - an
                                       // external caller cannot know an allocator-chosen input address
     error_type_za_auto_unreachable,   // warning: ZA_AUTO-touching code unreachable from every declared/default root
+    error_type_za_returnto_no_code,   // warning: a ZA_RETURNTO target that begins no assembled instruction
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding

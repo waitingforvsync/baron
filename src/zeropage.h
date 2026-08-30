@@ -131,22 +131,28 @@ static inline bool zp_insn_write_kills(zp_insn n, uint16_t width)
 
 
 // A control-flow annotation: the programmer's assertion where static analysis cannot see the truth on its
-// own. ZA_UNREACHABLE says control cannot fall through to its own pc (an always-taken branch's dead edge, which
-// the CFG then prunes); ZA_CANCALL names the real target(s) of a JSR the analysis cannot follow (a self-modified
-// or dispatched call), so the callee footprint can still be bounded; ZA_CANJUMP names the possible targets of a
-// computed JMP (a jump table), which the CFG wires as real successor edges. All three are TRUSTED overrides -
+// own. ZA_UNREACHABLE says control cannot fall through to its own pc (an always-taken branch's dead edge, or
+// the point past a never-returning JSR - the CFG prunes that fall-through); ZA_CANCALL names the real
+// target(s) of a JSR the analysis cannot follow (a self-modified or dispatched call), so the callee footprint
+// can still be bounded; ZA_CANJUMP names the possible targets of a computed JMP or self-modified branch (a
+// jump table), which the CFG wires as real successor edges IN PLACE of the literal one; ZA_RETURN says the
+// jump/branch before it hands control back to whoever called this routine (the inline-data trick's computed
+// exit - a jump in a return's clothing); ZA_RETURNTO names where the JSR before it resumes (the caller side
+// of the same trick, when the resumption is not simply the next instruction). All are TRUSTED overrides -
 // a wrong one is the single way to defeat the certainty contract - but they sit exactly where the analysis
 // would otherwise refuse, turning a "cannot prove it" into the programmer's explicit "I promise it is these".
 // Recorded on the final pass only, like insns.
 typedef enum zp_cflow_kind {
     zp_cflow_za_unreachable = 0,   // control cannot fall through to `site`
     zp_cflow_za_cancall,           // the JSR at `site` may call `target` (overrides its literal target)
-    zp_cflow_za_canjump,           // the computed JMP at `site` may jump to `target` (a jump-table edge)
+    zp_cflow_za_canjump,           // the computed JMP/branch at `site` may go to `target` (a jump-table edge)
+    zp_cflow_za_return,            // the jump/branch at `site` hands control back to our caller (no target)
+    zp_cflow_za_returnto,          // the call at `site` resumes at `target`, not at the next instruction
 } zp_cflow_kind;
 
 typedef struct zp_cflow {
-    uint32_t site;    // pc of the annotated instruction: ZA_UNREACHABLE its own pc; ZA_CANCALL/ZA_CANJUMP the JSR/JMP pc
-    uint32_t target;  // a call/jump target address (ZA_CANCALL/ZA_CANJUMP); RC_INDEX_NONE for ZA_UNREACHABLE
+    uint32_t site;    // pc of the annotated instruction: ZA_UNREACHABLE its own pc; the others the JSR/JMP/branch pc
+    uint32_t target;  // a target address (ZA_CANCALL/ZA_CANJUMP/ZA_RETURNTO); RC_INDEX_NONE for the bare markers
     uint8_t  kind;    // zp_cflow_kind
     cursor   at;      // where the annotation sits, for diagnostics
 } zp_cflow;
@@ -195,7 +201,7 @@ typedef struct zeropage {
     rc_bitset        reserved;   // 256 bits: reserved[b] iff zero-page byte b may be auto-allocated
     rc_array_zp_var  vars;       // the declared ZA_AUTO1/ZA_AUTO2s, recorded on the final pass (see zeropage.c)
     rc_array_zp_insn insns;      // the VAR-touching instructions, recorded on the final pass
-    rc_array_zp_cflow cflows;    // ZA_UNREACHABLE / ZA_CANCALL annotations, recorded on the final pass
+    rc_array_zp_cflow cflows;    // control-flow annotations (ZA_UNREACHABLE etc.), recorded on the final pass
     rc_array_zp_label labels;    // label markers (identity -> section + pc), recorded on the final pass
     rc_array_zp_entry entries;   // ZA_ENTRY / ZA_INTERRUPT markers, recorded on the final pass
     bool             enabled;    // a ZA_POOL directive has run -> the ZA_AUTO1/ZA_AUTO2 feature is active

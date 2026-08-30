@@ -79,33 +79,47 @@ static void add_edge(rc_bitset *interfere, uint32_t a, uint32_t b)
 // Does this block hand control back to the caller of the routine containing it? True for an RTS/RTI - and
 // for a transfer OUT of the program, because the external routine's own RTS returns to OUR caller (the
 // tail-call idiom); that includes an external ZA_CANJUMP arm of a dispatch, which the CFG wires no edge for.
-// An RTS wearing a ZA_CANJUMP is the dispatch trick - control continues at the declared targets, not the
-// caller - so it does NOT return here (its targets' own exits do), unless one of its arms is external.
+// A ZA_RETURN annotation is the declared form of exactly that: the jump/branch hands straight back to our
+// caller (the inline-data trick's computed exit), no external routine in between. An RTS wearing a
+// ZA_CANJUMP is the dispatch trick - control continues at the declared targets, not the caller - so it does
+// NOT return here (its targets' own exits do), unless one of its arms is external; likewise a jump/branch
+// whose declared arms all resolved in-program. The annotations are consulted BEFORE a resolved literal
+// target, because a declared set replaces a self-modified operand's placeholder edge in the CFG too.
 static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, basic_block blk)
 {
     if (blk.num_insns == 0) {
         return false;
     }
     zp_insn last = rc_view_zp_insn_get(insns, blk.first_insn + blk.num_insns - 1);
-    bool dispatch = last.flow == zp_flow_jump || last.flow == zp_flow_branch
-                 || last.flow == zp_flow_return;
-    if (!dispatch || (last.flow != zp_flow_return && cfg_target_block(g, last) != RC_INDEX_NONE)) {
-        return false;   // normal/call flow, or a plain resolved jump/branch: not an exit of any kind
+    if (last.flow != zp_flow_jump && last.flow != zp_flow_branch && last.flow != zp_flow_return) {
+        return false;   // normal/call flow: not an exit of any kind
     }
     bool annotated = false;
     for (uint32_t j = 0; j < cflows.num; j++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
-        if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
+        if (cf.site != last.pc) {
+            continue;
+        }
+        if (cf.kind == zp_cflow_za_return) {
+            return true;   // the declared "hands back to our caller" exit
+        }
+        if (cf.kind == zp_cflow_za_canjump) {
             annotated = true;
             if (cfg_block_at(g, last.section, cf.target) == RC_INDEX_NONE) {
                 return true;   // an external arm hands back, via the external routine's RTS
             }
         }
     }
-    if (last.flow == zp_flow_return) {
-        return !annotated;   // a bare RTS/RTI returns; an annotated one continues at its targets
+    if (annotated) {
+        return false;   // every declared arm resolved in-program: control continues at them
     }
-    return !annotated && cfg_target_is_external(g, last);   // an unannotated external jump/branch out
+    if (last.flow == zp_flow_return) {
+        return true;   // a bare RTS/RTI returns
+    }
+    if (cfg_target_block(g, last) != RC_INDEX_NONE) {
+        return false;   // a plain resolved jump/branch: an ordinary edge, not an exit
+    }
+    return cfg_target_is_external(g, last);   // an unannotated external jump/branch out
 }
 
 // The bytes a call definitely writes whichever arm it takes: the intersection of its callees' current
@@ -1137,6 +1151,74 @@ RC_TEST(liveness, za_discard_covers_every_byte_and_feeds_must_write)
     RC_CHECK_TRUE(callee != RC_INDEX_NONE);
     RC_CHECK_TRUE(rc_bitset_is_set(&lv.must_write[callee], 0));   // the ZA_DISCARD is a definite full rewrite
     RC_CHECK_FALSE(liveness_is_live_in(&lv, 0, 0));               // so p's range starts AT the call, not before
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(liveness, za_return_block_is_returning_exit)
+{
+    // A callee that exits via an annotated computed jump (the inline-data idiom: pop the return address,
+    // consume the data, JMP past it) must behave exactly like one ending in RTS: its writes count for
+    // must-write (the caller's pre-call value dies at the JSR) and the caller's live-after set flows into
+    // the annotated block through the return edges (an escaping result stays live to the exit).
+    //   caller 2000: STA keep ; JSR 3000 ; LDA keep ; LDA res ; RTS      (keep = v0, res = v1)
+    //   callee 3000: STA res ; JMP (ind)  <- ZA_RETURN
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+    uint32_t pc = 0x2000;
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_write, &arena);   // STA keep
+    pc = touch(&insns, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena); // JSR 3000
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read,  &arena);   // LDA keep
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 1, vref_read,  &arena);   // LDA res
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    pc = 0x3000;
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 1, vref_write, &arena);   // STA res
+    pc = touch(&insns, pc, 3, zp_flow_jump, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);   // JMP (ind)
+    (void) pc;
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(1, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x3002, .target = RC_INDEX_NONE,
+                                                .kind = zp_cflow_za_return}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, cflows.view, width1_vars(2, &arena), RC_INDEX_NONE, &arena, scratch);
+    uint32_t callee = cfg_block_at(g, 0, 0x3000);
+    RC_CHECK_TRUE(callee != RC_INDEX_NONE);
+    RC_CHECK_TRUE(rc_bitset_is_set(&lv.must_write[callee], 1));   // the exit counts as a returning path
+    RC_CHECK_TRUE(liveness_is_live_out(&lv, callee, 1));          // res rides the return edge to the caller
+    RC_CHECK_TRUE(liveness_is_live_out(&lv, callee, 0));          // keep is live after the call, so here too
+
+    // Without the annotation the computed exit taints: must-write forfeits the lot (the contrast that
+    // proves ZA_RETURN is doing the work).
+    cfg gu = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    liveness lt = liveness_analyze(gu, insns.view, (rc_view_zp_cflow) {0}, width1_vars(2, &arena), RC_INDEX_NONE, &arena, scratch);
+    RC_CHECK_FALSE(rc_bitset_is_set(&lt.must_write[cfg_block_at(gu, 0, 0x3000)], 1));
+
+    // The branch flavour: a CONDITIONAL return past the data. The annotated block is a returning exit AND
+    // keeps its fall-through successor; both paths definitely write res, so the must-write intersection
+    // still holds it.
+    //   callee 3000: STA res ; BNE <self-modified> <- ZA_RETURN ; RTS
+    rc_array_zp_insn cond = rc_array_zp_insn_make(8, &arena);
+    pc = 0x2000;
+    pc = touch(&cond, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_write, &arena);   // STA keep
+    pc = touch(&cond, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena); // JSR 3000
+    pc = touch(&cond, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read,  &arena);   // LDA keep
+    pc = touch(&cond, pc, 2, zp_flow_normal, RC_INDEX_NONE, 1, vref_read,  &arena);   // LDA res
+    pc = touch(&cond, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    pc = 0x3000;
+    pc = touch(&cond, pc, 2, zp_flow_normal, RC_INDEX_NONE, 1, vref_write, &arena);   // STA res
+    pc = touch(&cond, pc, 2, zp_flow_branch, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);   // BNE (self-mod)
+    pc = touch(&cond, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);   // RTS
+    (void) pc;
+    cfg gc = cfg_build(cond.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    liveness lc = liveness_analyze(gc, cond.view, cflows.view, width1_vars(2, &arena), RC_INDEX_NONE, &arena, scratch);
+    uint32_t centry = cfg_block_at(gc, 0, 0x3000);
+    basic_block cb = rc_array_basic_block_get(&gc.blocks, centry);
+    RC_CHECK(cb.succ_count, ==, 1u);   // the not-taken edge to the RTS block survives...
+    RC_CHECK_FALSE(cb.unknown_succ);   // ...and the self-modified operand does not taint
+    RC_CHECK_TRUE(rc_bitset_is_set(&lc.must_write[centry], 1));
+    RC_CHECK_TRUE(liveness_is_live_out(&lc, centry, 1));   // res live at the conditional exit too
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

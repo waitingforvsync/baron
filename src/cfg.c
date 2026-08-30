@@ -255,16 +255,21 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
             default:
                 break;
         }
-        // A declared ZA_CANJUMP / ZA_CANCALL target is a code entry just as a literal target is: mark it a leader,
-        // so an in-program declared target always gets its own block (even mid-run). That is what lets a
-        // declared target with NO block reliably mean "off the assembled stream" - an external arm - in the
-        // edge wiring and the footprint walk, rather than an address we merely failed to split at. A RETURN
-        // takes ZA_CANJUMP too: the RTS-dispatch trick jumps to a pushed address, and the annotation names it.
-        if (insn.flow == zp_flow_jump || insn.flow == zp_flow_call || insn.flow == zp_flow_return) {
-            zp_cflow_kind want = (insn.flow == zp_flow_call) ? zp_cflow_za_cancall : zp_cflow_za_canjump;
+        // A declared annotation target is a code entry just as a literal target is: mark it a leader, so an
+        // in-program declared target always gets its own block (even mid-run). That is what lets a declared
+        // target with NO block reliably mean "off the assembled stream" - an external arm - in the edge
+        // wiring and the footprint walk, rather than an address we merely failed to split at. A call takes
+        // ZA_CANCALL (its callee arms) and ZA_RETURNTO (its resumption points); a jump, branch or return
+        // takes ZA_CANJUMP - the return being the RTS-dispatch trick (jump to a pushed address), the branch
+        // a self-modified operand. ZA_RETURN and ZA_UNREACHABLE carry no target; the RC_INDEX_NONE guard
+        // skips them.
+        if (insn.flow != zp_flow_normal) {
             for (uint32_t j = 0; j < cflows.num; j++) {
                 zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
-                if (cf.kind == (uint8_t) want && cf.site == insn.pc) {
+                bool fits = (insn.flow == zp_flow_call)
+                                ? cf.kind == zp_cflow_za_cancall || cf.kind == zp_cflow_za_returnto
+                                : cf.kind == zp_cflow_za_canjump;
+                if (fits && cf.site == insn.pc && cf.target != RC_INDEX_NONE) {
                     mark_leader(&leaders, insn.section, cf.target);
                 }
             }
@@ -283,22 +288,28 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
 
     // Pass 2: cut the instruction stream into blocks. A new block starts at the first instruction, at every
     // SECTION change (which keeps each block single-section and its pc monotonic even as sections interleave),
-    // and at any instruction that is a leader in its section; the block runs until the next such start.
+    // at any instruction that is a leader in its section, and after any block TERMINATOR - a branch, jump or
+    // return, or a call whose continuation an annotation reroutes (ZA_RETURNTO) or severs (ZA_UNREACHABLE
+    // sited just past it). The terminator cut matters where inline data displaces the next instruction: the
+    // after-address leader from pass 1 then marks a pc no instruction sits on, and without the cut the
+    // terminator would sit mid-block, losing its edges. The block runs until the next such start.
     uint32_t current  = RC_INDEX_NONE;
     uint32_t prev_sec = 0;
     uint32_t prev_pc  = 0;
+    bool prev_cuts    = false;
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn insn = rc_view_zp_insn_get(insns, i);
         // Within one section pc must never step backward - the property that keeps (section, pc) an
         // unambiguous block identity. It holds by construction (a section's org is fixed at open and its
         // cursor only advances), so this asserts the invariant rather than handling a violation. Equal pcs
         // DO occur: a size-0 ZA_DISCARD marker shares its address with the instruction after it, which is also
-        // why a leader starts a new block only when the address CHANGES - both same-pc records belong to
-        // one block, marker first.
+        // why a leader (or a terminator cut) starts a new block only when the address CHANGES - both same-pc
+        // records belong to one block, marker first. A real terminator always advances the pc, so its cut is
+        // never lost to that guard.
         RC_ASSERT(i == 0 || insn.section != prev_sec || insn.pc >= prev_pc);
         bool new_addr = i == 0 || insn.section != prev_sec || insn.pc != prev_pc;
         if (i == 0 || insn.section != prev_sec
-            || (new_addr && addr_is_leader(&leaders, insn.section, insn.pc))) {
+            || (new_addr && (addr_is_leader(&leaders, insn.section, insn.pc) || prev_cuts))) {
             current = rc_array_basic_block_push(
                 &result.blocks,
                 (basic_block) {
@@ -313,6 +324,17 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 arena);
         }
         rc_array_basic_block_at(&result.blocks, current)->num_insns++;
+        // Does THIS instruction force a cut before the next record? A branch/jump/return always ends its
+        // block; a call does too when an annotation reroutes its continuation or declares there is none.
+        // ZA_UNREACHABLE just past a NORMAL instruction cuts as well (pass 3 severs that fall-through the
+        // same way); its size > 0 guard keeps a size-0 ZA_DISCARD marker - which shares its neighbour's
+        // pc - from matching an annotation meant for the neighbour.
+        prev_cuts = insn.flow == zp_flow_branch || insn.flow == zp_flow_jump || insn.flow == zp_flow_return
+                 || (insn.flow == zp_flow_call
+                     && (cflow_at(cflows, zp_cflow_za_returnto, insn.pc)
+                      || cflow_at(cflows, zp_cflow_za_unreachable, insn.pc + insn.size)))
+                 || (insn.flow == zp_flow_normal && insn.size > 0
+                     && cflow_at(cflows, zp_cflow_za_unreachable, insn.pc + insn.size));
         prev_sec = insn.section;
         prev_pc  = insn.pc;
     }
@@ -320,11 +342,14 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // Pass 3: wire successor edges from each block's LAST instruction's control-flow class into the shared
     // pool. A branch has two (fall-through + target), a jump one (target), a return none, and a call / normal
     // terminator falls through to the next block. Fall-through stays in the block's own section; the target is
-    // resolved by resolve_target_loc (a named label may cross sections). Annotations adjust this: an
-    // ZA_UNREACHABLE at a branch's fall-through prunes that edge; a ZA_CANJUMP at a computed JMP supplies its
-    // (same-section) targets. A target that names no block and is not annotated yields the unknown_succ taint -
-    // UNLESS it is external (a constant destination off the stream, or a constant OS vector), which is a clean
-    // exit out of the program (see target_is_external).
+    // resolved by resolve_target_loc (a named label may cross sections). Annotations adjust this: declared
+    // ZA_CANJUMP targets REPLACE a jump's or branch's taken edge (a self-modified operand's placeholder must
+    // not wire a wrong edge, so the programmer's word beats the literal - as it already does for calls);
+    // ZA_RETURN says the transfer hands control back to whoever called this routine (no edge - liveness's
+    // return machinery supplies the semantics); ZA_UNREACHABLE prunes a fall-through edge; ZA_RETURNTO
+    // reroutes a call's continuation to its declared resumption points. A target that names no block and is
+    // not annotated yields the unknown_succ taint - UNLESS it is external (a constant destination off the
+    // stream, or a constant OS vector), which is a clean exit out of the program (see target_is_external).
     for (uint32_t bi = 0; bi < result.blocks.num; bi++) {
         basic_block *block = rc_array_basic_block_at(&result.blocks, bi);
         zp_insn last = rc_view_zp_insn_get(insns, block->first_insn + block->num_insns - 1);
@@ -332,50 +357,47 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         target_loc tl  = resolve_target_loc(labels, last);
         block->succ_first = result.succs.num;
         switch (last.flow) {
-            case zp_flow_branch: {
-                // Not-taken (in-stream) fall-through, unless ZA_UNREACHABLE asserts control cannot reach it.
-                uint32_t ft = block_at(result.blocks.view, last.section, after);
-                if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
-                    add_succ(&result, block, ft, arena);
-                }
-                uint32_t taken = tl.found ? block_at(result.blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
-                if (taken != RC_INDEX_NONE) {
-                    add_succ(&result, block, taken, arena);
-                }
-                else if (!target_is_external(labels, last)) {
-                    block->unknown_succ = true;   // taken target we cannot place -> conservative
-                }
-                // else: a branch out of the program (a constant destination off the stream) - that arm
-                // leaves for external code, so only the fall-through edge remains and there is no taint.
-                break;
-            }
+            case zp_flow_branch:
             case zp_flow_jump: {
-                uint32_t t = tl.found ? block_at(result.blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
-                if (t != RC_INDEX_NONE) {
-                    add_succ(&result, block, t, arena);   // a plain, resolved JMP
+                if (last.flow == zp_flow_branch) {
+                    // Not-taken (in-stream) fall-through, unless ZA_UNREACHABLE asserts control cannot reach
+                    // it. Pure pc arithmetic, deliberately without the call/normal arm's data-gap skip: a
+                    // not-taken branch landing in inline data is a broken program, not a continuation.
+                    uint32_t ft = block_at(result.blocks.view, last.section, after);
+                    if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
+                        add_succ(&result, block, ft, arena);
+                    }
                 }
-                else {
-                    // Computed / indirect JMP. If ZA_CANJUMP names its targets, wire each as a real edge (resolved
-                    // in the jump's own section). A declared target with no block is an EXTERNAL arm of the
-                    // dispatch - the pass-1 leader marking guarantees every in-program declared target has its
-                    // own block, so "no block" reliably means off the assembled stream: a clean exit,
-                    // contributing no edge and no taint (same policy as an unannotated JSR to a constant).
-                    bool annotated = false;
-                    for (uint32_t i = 0; i < cflows.num; i++) {
-                        zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-                        if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
-                            annotated = true;
-                            uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
-                            if (tb != RC_INDEX_NONE) {
-                                add_succ(&result, block, tb, arena);
-                            }
+                // The taken edge. Declared ZA_CANJUMP targets replace the literal outright (resolved in the
+                // transfer's own section) - the pass-1 leader marking guarantees every in-program declared
+                // target has its own block, so "no block" reliably means off the assembled stream: an
+                // EXTERNAL arm, contributing no edge and no taint (same policy as an unannotated JSR to a
+                // constant). ZA_RETURN also contributes no edge: control hands back to whoever called us,
+                // which block_returns turns into the routine's exit. Only an unannotated transfer falls
+                // back to the literal, and taints when the destination is computed and possibly ours.
+                bool returns   = cflow_at(cflows, zp_cflow_za_return, last.pc);
+                bool annotated = false;
+                for (uint32_t i = 0; i < cflows.num; i++) {
+                    zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
+                    if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
+                        annotated = true;
+                        uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
+                        if (tb != RC_INDEX_NONE) {
+                            add_succ(&result, block, tb, arena);
                         }
                     }
-                    if (!annotated && !target_is_external(labels, last)) {
-                        block->unknown_succ = true;   // computed JMP into code we might own
+                }
+                if (!annotated && !returns) {
+                    uint32_t taken = tl.found ? block_at(result.blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
+                    if (taken != RC_INDEX_NONE) {
+                        add_succ(&result, block, taken, arena);
                     }
-                    // An external jump (JMP &FFEE, or JMP (&FFFC) through an OS vector) is a clean exit,
-                    // exactly like a return: control leaves for code that touches none of our variables.
+                    else if (!target_is_external(labels, last)) {
+                        block->unknown_succ = true;   // a destination we cannot place -> conservative
+                    }
+                    // else: a transfer out of the program (a constant destination off the stream, or a
+                    // constant OS vector) - a clean exit, exactly like a return: control leaves for code
+                    // that touches none of our variables. No edge, no taint.
                 }
                 break;
             }
@@ -398,11 +420,45 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
             case zp_flow_call:
             case zp_flow_normal:
             default: {
-                // A call/normal terminator falls through in-stream (same section); a fall-through with no block
-                // is the end of the program (or a routine falling off its end) - a clean end, not an unknown.
-                uint32_t ft = block_at(result.blocks.view, last.section, after);
-                if (ft != RC_INDEX_NONE) {
-                    add_succ(&result, block, ft, arena);
+                // A call/normal terminator falls through in-stream (same section) - unless ZA_RETURNTO
+                // reroutes the call's continuation to its declared resumption points (the caller side of the
+                // inline-data idiom: the callee pops its return address and resumes the caller where the
+                // annotation says), or ZA_UNREACHABLE - sited just past a never-returning call - severs it.
+                // A rerouted arm with no block is off the assembled stream: no edge, no taint (finalize
+                // warns, since a resumption point we did not assemble is almost always a mistyped label).
+                bool redirected = false;
+                if (last.flow == zp_flow_call) {
+                    for (uint32_t i = 0; i < cflows.num; i++) {
+                        zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
+                        if (cf.kind == zp_cflow_za_returnto && cf.site == last.pc) {
+                            redirected = true;
+                            uint32_t tb = block_at(result.blocks.view, last.section, cf.target);
+                            if (tb != RC_INDEX_NONE) {
+                                add_succ(&result, block, tb, arena);
+                            }
+                        }
+                    }
+                }
+                if (!redirected && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
+                    uint32_t ft = block_at(result.blocks.view, last.section, after);
+                    if (ft != RC_INDEX_NONE) {
+                        add_succ(&result, block, ft, arena);
+                    }
+                    else {
+                        // The fall-through pc has no block: inline data displaced the next instruction
+                        // (JSR printstring : EQUS "text", 0 : ... - the callee consumes the data and
+                        // resumes past it). Control carries on at the next recorded same-section
+                        // instruction - the adjacency the in-block walkers already assume, expressed as an
+                        // edge. Blocks tile the instruction list in order, so the first later block in our
+                        // section starts at exactly that instruction; nothing found is the end of the
+                        // program (or a routine falling off its end) - a clean end, not an unknown.
+                        for (uint32_t j = bi + 1; j < result.blocks.num; j++) {
+                            if (rc_array_basic_block_get(&result.blocks, j).section == last.section) {
+                                add_succ(&result, block, j, arena);
+                                break;
+                            }
+                        }
+                    }
                 }
                 break;
             }
@@ -770,6 +826,309 @@ RC_TEST(cfg, size0_marker_shares_its_address)
     RC_CHECK(blk.num_insns, ==, 3u);                      // ...and the branch closes it
     RC_CHECK(blk.succ_count, ==, 2u);                     // fall-through first, then the taken edge
     RC_CHECK(cfg_succ(g, blk, 1), ==, bi);                // the loop edge resolves to the marker's block
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, terminator_cut_across_data_gap)
+{
+    // Inline data after a JMP/RTS displaces the next instruction, so the after-address leader from pass 1
+    // marks a pc no instruction sits on. The terminator cut must still end the block at the JMP - else it
+    // sits mid-block and its taken edge is silently dropped (a MISSING edge, the unsound direction).
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  LDA #    (normal)          <- loop top, the JMP's target
+    //   2002  JMP 2000 (jump back)
+    //   2005  EQUS ... (5 data bytes - recorded as nothing, just a pc gap)
+    //   200A  LDA #    (normal, NOT a leader by any other rule)
+    //   200C  RTS
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    pc = push_insn(&insns, pc, 3, zp_flow_jump, 0x2000, &arena);           // JMP 2000 @2002
+    pc += 5;                                                               // the data gap
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @200A
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @200C
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 2u);   // [2000,2002(JMP)] and [200A,200C] - the gap must not glue them
+    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b0.num_insns, ==, 2u);
+    RC_CHECK(b0.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, b0, 0), ==, 0u);   // the loop edge survives the gap
+    RC_CHECK_FALSE(b0.unknown_succ);
+    basic_block b1 = rc_array_basic_block_get(&g.blocks, 1);
+    RC_CHECK(b1.pc, ==, 0x200Au);
+    RC_CHECK(b1.succ_count, ==, 0u);        // ends in RTS; nothing (modelled) reaches it either
+
+    // The RTS flavour: a routine's return followed by a data table and more (separately-entered) code.
+    rc_array_zp_insn ret = rc_array_zp_insn_make(4, &arena);
+    pc = 0x2000;
+    pc = push_insn(&ret, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2000
+    pc += 6;                                                             // the data gap
+    pc = push_insn(&ret, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2007
+    pc = push_insn(&ret, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2009
+    (void) pc;
+    cfg gr = cfg_build(ret.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(gr.blocks.num, ==, 2u);   // the RTS keeps its return semantics; the tail code is its own block
+    RC_CHECK(rc_array_basic_block_get(&gr.blocks, 0).succ_count, ==, 0u);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, gap_skip_call_fall_through)
+{
+    // The caller side of the inline-data idiom, at a block seam: the JSR ends its block (the post-data
+    // instruction is a leader), so its fall-through is computed by pc arithmetic - which lands mid-data,
+    // where no block exists. Control must skip the gap to the next recorded instruction, not dead-end
+    // (a dead end empties the live-after set the callee's return edges inject - the unsound direction).
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  JSR 2010 (call)
+    //   2003  EQUS ... (5 data bytes)
+    //   2008  LDA #    (normal)  <- a branch target, so a LEADER: the JSR terminates its block
+    //   200A  BNE 2008 (branch)
+    //   200C  RTS
+    //   2010  LDA #    (the callee)
+    //   2012  RTS
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 3, zp_flow_call, 0x2010, &arena);           // JSR 2010 @2000
+    pc += 5;                                                               // the data gap
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2008
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2008, &arena);         // BNE 2008 @200A
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @200C
+    pc = 0x2010;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2010
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2012
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    uint32_t caller = cfg_block_at(g, 0, 0x2000);
+    uint32_t resume = cfg_block_at(g, 0, 0x2008);
+    RC_CHECK_TRUE(caller != RC_INDEX_NONE && resume != RC_INDEX_NONE);
+    basic_block b = rc_array_basic_block_get(&g.blocks, caller);
+    RC_CHECK(b.num_insns, ==, 1u);          // the JSR alone (the leader at 2008 cut it)
+    RC_CHECK(b.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, b, 0), ==, resume);   // the gap-skip edge to the post-data instruction
+    RC_CHECK_FALSE(b.unknown_succ);
+
+    // Trailing data at the end of the stream: nothing to resume at, so a clean dead end - no edge, no taint.
+    rc_array_zp_insn tail = rc_array_zp_insn_make(2, &arena);
+    push_insn(&tail, 0x2000, 3, zp_flow_call, 0xFFEE, &arena);   // JSR &FFEE, then only data to the end
+    cfg gt = cfg_build(tail.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block bt = rc_array_basic_block_get(&gt.blocks, 0);
+    RC_CHECK(bt.succ_count, ==, 0u);
+    RC_CHECK_FALSE(bt.unknown_succ);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, za_unreachable_severs_call_fall_through)
+{
+    // ZA_UNREACHABLE sited just past a JSR declares the call never returns: the fall-through edge must be
+    // severed - both mid-block (the annotation forces a cut so the severing is expressible) and across a
+    // data gap (where it suppresses the gap-skip edge).
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+
+    //   2000  JSR FFEE (a never-returning external routine)
+    //   2003  <- ZA_UNREACHABLE sited here
+    //   2003  LDA #    (would otherwise share the JSR's block)
+    //   2005  RTS
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 3, zp_flow_call, 0xFFEE, &arena);           // JSR &FFEE @2000
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2003
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2005
+    (void) pc;
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(1, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2003, .target = RC_INDEX_NONE,
+                                                .kind = zp_cflow_za_unreachable}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 2u);   // the annotation cuts after the JSR...
+    basic_block b0 = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b0.num_insns, ==, 1u);
+    RC_CHECK(b0.succ_count, ==, 0u);   // ...and severs the edge
+    RC_CHECK_FALSE(b0.unknown_succ);
+
+    // The data-gap flavour: JSR + declared-dead data tail, then separately-entered code. The gap-skip edge
+    // must be suppressed too.
+    rc_array_zp_insn gapped = rc_array_zp_insn_make(4, &arena);
+    pc = 0x2000;
+    pc = push_insn(&gapped, pc, 3, zp_flow_call, 0xFFEE, &arena);           // JSR &FFEE @2000
+    pc += 5;                                                               // the (never-consumed) data
+    pc = push_insn(&gapped, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2008
+    pc = push_insn(&gapped, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @200A
+    (void) pc;
+    cfg gg = cfg_build(gapped.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block bg = rc_array_basic_block_get(&gg.blocks, 0);
+    RC_CHECK(bg.num_insns, ==, 1u);
+    RC_CHECK(bg.succ_count, ==, 0u);   // no gap-skip past a declared-dead continuation
+    RC_CHECK_FALSE(bg.unknown_succ);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, za_return_on_jump)
+{
+    // ZA_RETURN declares a jump the routine's exit back to its own caller: no edge, no taint - whether the
+    // jump is computed (JMP (ptr), which would otherwise taint) or a self-modified DIRECT jump whose
+    // placeholder happens to name real code (which would otherwise wire a WRONG edge).
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+
+    //   2000  LDA #     (normal)
+    //   2002  JMP (ind) (computed - target NONE)
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    pc = push_insn(&insns, pc, 3, zp_flow_jump, RC_INDEX_NONE, &arena);     // JMP (ind) @2002
+    (void) pc;
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(1, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2002, .target = RC_INDEX_NONE,
+                                                .kind = zp_cflow_za_return}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b.succ_count, ==, 0u);
+    RC_CHECK_FALSE(b.unknown_succ);   // declared a return - the taint the unannotated twin gets is gone
+
+    // The self-modified direct flavour: JMP 2000 would wire a (wrong) loop edge; ZA_RETURN overrides the
+    // resolved literal, exactly as a declared ZA_CANJUMP set would.
+    rc_array_zp_insn direct = rc_array_zp_insn_make(4, &arena);
+    pc = 0x2000;
+    pc = push_insn(&direct, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    pc = push_insn(&direct, pc, 3, zp_flow_jump, 0x2000, &arena);           // JMP 2000 @2002 (placeholder)
+    (void) pc;
+    cfg gd = cfg_build(direct.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block bd = rc_array_basic_block_get(&gd.blocks, 0);
+    RC_CHECK(bd.succ_count, ==, 0u);   // the literal edge is NOT wired
+    RC_CHECK_FALSE(bd.unknown_succ);
+    // And without the annotation the same placeholder DOES wire its edge - the contrast that proves the override.
+    cfg gu = cfg_build(direct.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(rc_array_basic_block_get(&gu.blocks, 0).succ_count, ==, 1u);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, za_return_composes_with_canjump)
+{
+    // A dispatch-or-return: the jump may go to a declared in-program target OR hand back to the caller.
+    // Both annotations sit on one site; the CANJUMP arm is an edge, the RETURN arm is not, and no taint.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(4, &arena);
+
+    //   2000  LDA #     (a declared target)
+    //   2002  RTS
+    //   2003  JMP (ind) (the dispatcher)
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2002
+    pc = push_insn(&insns, pc, 3, zp_flow_jump, RC_INDEX_NONE, &arena);     // JMP (ind) @2003
+    (void) pc;
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(2, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2003, .target = 0x2000, .kind = zp_cflow_za_canjump}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2003, .target = RC_INDEX_NONE, .kind = zp_cflow_za_return}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block b = rc_array_basic_block_get(&g.blocks, cfg_block_at(g, 0, 0x2003));
+    RC_CHECK(b.succ_count, ==, 1u);
+    RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2000));
+    RC_CHECK_FALSE(b.unknown_succ);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, za_returnto_redirects_call)
+{
+    // The caller-side override: ZA_RETURNTO names where a data-consuming callee resumes this call, replacing
+    // the fall-through entirely. The declared target is leader-marked (a mid-run resumption point splits its
+    // block), the JSR terminates its own block, and an unresolvable arm contributes no edge and no taint.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  JSR 2010 (call)
+    //   2003  EQUS ... (5 data bytes)
+    //   2008  LDA #    (post-data code the redirect deliberately SKIPS)
+    //   200A  LDA #    <- the declared resumption point, mid-run (only the annotation makes it a leader)
+    //   200C  RTS
+    //   2010  LDA #    (the callee)
+    //   2012  RTS
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 3, zp_flow_call, 0x2010, &arena);           // JSR 2010 @2000
+    pc += 5;                                                               // the data gap
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2008
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @200A
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @200C
+    pc = 0x2010;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2010
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2012
+    (void) pc;
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(2, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2000, .target = 0x200A, .kind = zp_cflow_za_returnto}, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2000, .target = 0x5000, .kind = zp_cflow_za_returnto}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    uint32_t resume = cfg_block_at(g, 0, 0x200A);
+    RC_CHECK_TRUE(resume != RC_INDEX_NONE);   // the declared target split its block
+    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b.num_insns, ==, 1u);            // the annotated JSR terminates its block
+    RC_CHECK(b.succ_count, ==, 1u);           // the 5000 arm is off the stream - nothing wired for it
+    RC_CHECK(cfg_succ(g, b, 0), ==, resume);  // NOT the gap-skip edge to 2008
+    RC_CHECK_FALSE(b.unknown_succ);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, za_canjump_on_branch)
+{
+    // A self-modified branch: its literal operand is a placeholder, so declared ZA_CANJUMP targets must
+    // REPLACE the taken edge (not add to it) while the not-taken fall-through survives; and an unannotated
+    // branch whose target cannot be placed still taints.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  BNE 2004 (branch - 2004 is the placeholder, 2006 the declared truth)
+    //   2002  LDA #    (fall-through)
+    //   2004  LDA #    (the placeholder's block - must get NO edge)
+    //   2006  RTS      (the declared target)
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2004, &arena);         // BNE 2004 @2000
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2004
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2006
+    (void) pc;
+    rc_array_zp_cflow cflows = rc_array_zp_cflow_make(1, &arena);
+    rc_array_zp_cflow_push(&cflows, (zp_cflow) {.site = 0x2000, .target = 0x2006, .kind = zp_cflow_za_canjump}, &arena);
+
+    cfg g = cfg_build(insns.view, cflows.view, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block b = rc_array_basic_block_get(&g.blocks, 0);
+    RC_CHECK(b.succ_count, ==, 2u);
+    RC_CHECK(cfg_succ(g, b, 0), ==, cfg_block_at(g, 0, 0x2002));   // fall-through first, as ever
+    RC_CHECK(cfg_succ(g, b, 1), ==, cfg_block_at(g, 0, 0x2006));   // the declared arm, not the placeholder
+    RC_CHECK_FALSE(b.unknown_succ);
+
+    // An unannotated branch with an unplaceable, non-external target still taints (the control case).
+    rc_array_zp_insn bare = rc_array_zp_insn_make(2, &arena);
+    push_insn(&bare, 0x2000, 2, zp_flow_branch, RC_INDEX_NONE, &arena);
+    push_insn(&bare, 0x2002, 1, zp_flow_return, RC_INDEX_NONE, &arena);
+    cfg gb = cfg_build(bare.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK_TRUE(rc_array_basic_block_get(&gb.blocks, 0).unknown_succ);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

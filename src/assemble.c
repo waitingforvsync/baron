@@ -35,6 +35,8 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
 static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_returnto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_entry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_interrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -359,6 +361,8 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("za_unreachable"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_unreachable}}},   // dead fall-through
     {RC_STR_INIT("za_cancall"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_cancall}}},   // a JSR's real targets
     {RC_STR_INIT("za_canjump"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_canjump}}},   // a computed JMP's targets
+    {RC_STR_INIT("za_return"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_return}}},   // this jump returns to our caller
+    {RC_STR_INIT("za_returnto"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_returnto}}},   // where a JSR resumes
     {RC_STR_INIT("za_discard"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_discard}}},   // a variable's value dies here
     {RC_STR_INIT("za_entry"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_entry}}},   // an external entry root
     {RC_STR_INIT("za_interrupt"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_interrupt}}},   // an interrupt handler root
@@ -1068,10 +1072,11 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
     return r;
 }
 
-// ZA_UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch, that control cannot fall
-// through to this point. The allocator's CFG would otherwise wire the branch's fall-through edge and treat
-// whatever is live down that dead path as live across the branch, pinning bytes needlessly. Recording this
-// pc lets zeropage_finalize prune that one edge. It is TRUSTED - a wrong ZA_UNREACHABLE (a fall-through that
+// ZA_UNREACHABLE - a zero-byte assertion, placed right after an always-taken branch or a never-returning
+// JSR, that control cannot fall through to this point. The allocator's CFG would otherwise wire the
+// fall-through edge (a branch's not-taken arm, or a call's continuation) and treat whatever is live down
+// that dead path as live across the site, pinning bytes needlessly. Recording this pc lets
+// zeropage_finalize prune that one edge. It is TRUSTED - a wrong ZA_UNREACHABLE (a fall-through that
 // really can happen) is one of the few ways to defeat the certainty contract, but it is the programmer's
 // explicit promise. Only meaningful on the final pass, and only with the feature enabled.
 static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
@@ -1090,13 +1095,86 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
     return require_separator(b, at);
 }
 
-// The shared body of ZA_CANCALL / ZA_CANJUMP: parse a comma-separated list of target addresses and record one cflow
-// of `kind` per target, sited on the last recorded instruction (the JSR / JMP / RTS this annotation
-// qualifies) - but only when that instruction's flow fits the kind (a call for ZA_CANCALL; a jump OR a return
-// for ZA_CANJUMP, the return being the RTS-dispatch trick - push a target address, RTS into it), so a stray
-// ZA_CANCALL after a JMP (or vice versa) binds to nothing rather than mis-annotating. Only the final pass
-// records instructions, so only then is there a site; the settling passes still parse the list so the
-// statement stays well-formed. A forward target defers.
+// The instruction a trailing annotation binds to: the last recorded one, skipping ZA_DISCARD markers (a
+// marker between the instruction and its annotation is bookkeeping, not the site) - IF its flow fits the
+// annotation's kind, else RC_INDEX_NONE and the annotation binds to nothing rather than mis-annotating.
+// ZA_CANCALL and ZA_RETURNTO qualify a call; ZA_CANJUMP a jump, a branch (a self-modified operand) or a
+// return (the RTS-dispatch trick - push a target address, RTS into it); ZA_RETURN a jump or a branch only
+// (an RTS already returns, and a call resumes in-stream). Meaningful on the final pass only - that is when
+// instructions are recorded.
+static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
+{
+    uint32_t ni = zeropage_insn_count(&b->zeropage);
+    while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).var_kill) {
+        ni--;
+    }
+    if (ni == 0) {
+        return RC_INDEX_NONE;
+    }
+    zp_insn last = zeropage_insn_get(&b->zeropage, ni - 1);
+    bool fits;
+    switch (kind) {
+        case zp_cflow_za_cancall:
+        case zp_cflow_za_returnto:
+            fits = last.flow == zp_flow_call;
+            break;
+        case zp_cflow_za_canjump:
+            fits = last.flow == zp_flow_jump || last.flow == zp_flow_branch || last.flow == zp_flow_return;
+            break;
+        case zp_cflow_za_return:
+            fits = last.flow == zp_flow_jump || last.flow == zp_flow_branch;
+            break;
+        case zp_cflow_za_unreachable:
+        default:
+            fits = false;   // sited by pc, never bound to an instruction
+            break;
+    }
+    return fits ? last.pc : RC_INDEX_NONE;
+}
+
+// Record one annotation target value as cflows sited at `site`: a range is enumerated and a list descended
+// (the same flattening EQUB gives data, so a symbol bound to a whole target table - `handlers = {a, b}` -
+// annotates in one word), and any leaf goes through the int-argument path: known -> one cflow, a forward
+// reference -> ask for another pass, anything else (a ZA_AUTO address included) -> the usual diagnostics.
+static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cflow_kind kind,
+                                         parse_flags flags, cursor at, rc_arena scratch)
+{
+    if (value_is_range(v)) {
+        return record_cflow_targets(b, range_to_list(v.range, &scratch), site, kind, flags, at, scratch);
+    }
+    if (value_is_list(v)) {
+        parse_result acc = {0};
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            acc = fold(acc, record_cflow_targets(b, rc_view_value_get(v.list, i), site, kind, flags, at, scratch));
+        }
+        return acc;
+    }
+    int_argument arg = int_argument_no_za_auto(int_argument_make(v, flags.final, at.pos), at.pos);
+    switch (arg.type) {
+        case int_argument_type_known:
+            zeropage_add_cflow(&b->zeropage, (zp_cflow) {
+                .site   = site,
+                .target = (uint32_t) (arg.value & 0xFFFF),
+                .kind   = (uint8_t) kind,
+                .at     = at,
+            });
+            return (parse_result) {0};
+        case int_argument_type_unresolved:
+            return (parse_result) {.unresolved = true};   // a forward target: settle it next pass
+        case int_argument_type_error:
+        default:
+            semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+            return (parse_result) {0};
+    }
+}
+
+// The shared body of ZA_CANCALL / ZA_CANJUMP / ZA_RETURNTO: parse a comma-separated list of target values
+// (each a number, or a range/list that flattens to numbers) and record one cflow of `kind` per target,
+// sited on the last recorded instruction (the JSR / JMP / branch / RTS this annotation qualifies) - but
+// only when that instruction's flow fits the kind (see annotation_site), so a stray ZA_CANCALL after a JMP
+// (or vice versa) binds to nothing rather than mis-annotating. Only the final pass records instructions, so
+// only then is there a site; the settling passes still parse the list so the statement stays well-formed.
+// A forward target defers.
 static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
                                        zp_cflow_kind kind, rc_arena scratch)
 {
@@ -1105,22 +1183,7 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
     uint32_t pos = at.pos;
     bool unresolved = false;
 
-    uint32_t site = RC_INDEX_NONE;
-    if (flags.final) {
-        uint32_t ni = zeropage_insn_count(&b->zeropage);
-        while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).var_kill) {
-            ni--;   // a ZA_DISCARD between the instruction and its annotation is a marker, not the site
-        }
-        if (ni > 0) {
-            zp_insn last = zeropage_insn_get(&b->zeropage, ni - 1);
-            bool fits = (kind == zp_cflow_za_cancall)
-                            ? last.flow == zp_flow_call
-                            : last.flow == zp_flow_jump || last.flow == zp_flow_return;
-            if (fits) {
-                site = last.pc;
-            }
-        }
-    }
+    uint32_t site = flags.final ? annotation_site(b, kind) : RC_INDEX_NONE;
 
     while (true) {
         expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
@@ -1129,23 +1192,8 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
         }
 
         if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage) && site != RC_INDEX_NONE) {
-            int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, pos), pos);
-            switch (arg.type) {
-                case int_argument_type_known:
-                    zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-                        .site   = site,
-                        .target = (uint32_t) (arg.value & 0xFFFF),
-                        .kind   = (uint8_t) kind,
-                        .at     = cursor_at(at, pos),
-                    });
-                    break;
-                case int_argument_type_unresolved:
-                    unresolved = true;   // a forward target: settle it next pass
-                    break;
-                case int_argument_type_error:
-                    semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
-                    break;
-            }
+            parse_result rec = record_cflow_targets(b, e.value, site, kind, flags, cursor_at(at, pos), scratch);
+            unresolved |= rec.unresolved;
         }
 
         lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
@@ -1179,6 +1227,44 @@ static parse_result handle_za_cancall(baron *b, cursor stmt, cursor at, uint32_t
 static parse_result handle_za_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_za_canjump, scratch);
+}
+
+// ZA_RETURN - a bare marker declaring that the jump or branch immediately preceding it hands control back to
+// this routine's CALLER: the callee side of the inline-data idiom (pop the return address, consume the data,
+// then JMP (ptr) - or a self-modified direct JMP - straight past it). The CFG wires no edge for it (a
+// declared literal placeholder is overridden too) and liveness treats the block as a returning exit, so the
+// caller's live-after set flows through exactly as for an RTS. On a branch it declares a CONDITIONAL return
+// (the not-taken edge stays). TRUSTED, like ZA_UNREACHABLE. Binds to nothing after anything but a
+// jump/branch - an RTS already returns.
+static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) stmt;
+    (void) scope;
+    (void) section;
+    (void) scratch;
+    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+        uint32_t site = annotation_site(b, zp_cflow_za_return);
+        if (site != RC_INDEX_NONE) {
+            zeropage_add_cflow(&b->zeropage, (zp_cflow) {
+                .site   = site,
+                .target = RC_INDEX_NONE,
+                .kind   = zp_cflow_za_return,
+                .at     = cursor_at(at, at.pos),
+            });
+        }
+    }
+    return require_separator(b, at);
+}
+
+// ZA_RETURNTO <targets> - the caller side of the inline-data idiom, for when a data-consuming callee resumes
+// this call somewhere OTHER than the next instruction: the declared resumption points replace the JSR's
+// fall-through edge. Unneeded for the common shape (JSR print : EQUS "text", 0 : resume-here) - the CFG
+// falls through a data gap to the next instruction on its own. TRUSTED, like the rest; a resumption point
+// that begins no assembled instruction gets no edge, and finalize warns (it is almost always a mistyped
+// label or an address inside the data).
+static parse_result handle_za_returnto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_za_returnto, scratch);
 }
 
 // ZA_DISCARD <var>[, <var>...] - the programmer's promise that the value each named ZA_AUTO variable holds AT
@@ -3040,6 +3126,26 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
         if (!already) {
             baron_warning_payload(b, error_type_za_auto_unused, var.def, severity_warning, var.name);
+        }
+    }
+
+    // A ZA_RETURNTO resumption point that begins no assembled instruction got no edge (the CFG reads it as
+    // off the stream) - almost always a mistyped label, or an address inside the very data the callee
+    // consumes. Warn rather than refuse: resuming into the OS is exotic but expressible. The site's own
+    // section resolves the target, matching the edge wiring; one warning per declared target.
+    for (uint32_t i = 0; i < cflows.num; i++) {
+        zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
+        if (cf.kind != zp_cflow_za_returnto) {
+            continue;
+        }
+        for (uint32_t j = 0; j < insns.num; j++) {
+            zp_insn n = rc_view_zp_insn_get(insns, j);
+            if (n.flow == zp_flow_call && n.pc == cf.site) {
+                if (cfg_block_at(g, n.section, cf.target) == RC_INDEX_NONE) {
+                    baron_warning(b, error_type_za_returnto_no_code, cf.at, severity_warning);
+                }
+                break;
+            }
         }
     }
 
@@ -4955,6 +5061,264 @@ RC_TEST_STEP(assemble, za_auto_rts_dispatch_za_canjump, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
+}
+
+RC_TEST_STEP(assemble, za_auto_jsr_inline_data_munged_rts, fix)
+{
+    // The headline inline-data idiom, munged-RTS flavour: JSR printstring : EQUS "text", 0 : carry on. The
+    // callee pulls the return address, scans past the terminator, pushes the adjusted address back and RTS.
+    // No annotation needed anywhere: the CFG falls through the data gap to the next instruction, and the
+    // ordinary return machinery keeps `keep` live across the call and off the callee's pointer.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                          "STA keep : JSR pstr : EQUS \"HELLO\", 0\n"
+                          "LDA keep : RTS\n"
+                          ".pstr {\n"
+                          "  ZA_AUTO2 ptr\n"
+                          "  PLA : STA ptr : PLA : STA ptr+1\n"
+                          "  LDY #0\n"
+                          "  .lp INY : LDA (ptr),Y : BNE lp\n"
+                          "  TYA : CLC : ADC ptr : STA ptr\n"
+                          "  LDA ptr+1 : ADC #0 : STA ptr+1\n"
+                          "  LDA ptr+1 : PHA : LDA ptr : PHA\n"
+                          "  RTS\n"
+                          "}");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "pstr.ptr"), ==, 0x70);   // widest first: the pointer takes the low pair
+    RC_CHECK(zp_addr(&fix->r, "keep"),     ==, 0x72);   // keep is live across the call: no sharing
+}
+
+RC_TEST_STEP(assemble, za_auto_za_return_indirect_and_direct, fix)
+{
+    // The same callee exiting via a computed jump instead: it never pushes a return address back, it JMPs
+    // straight past the data through its pointer. ZA_RETURN declares that jump the routine's return.
+    #define ZA_RETURN_PSTR(annot) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 keep\n" \
+        "STA keep : JSR pstr : EQUS \"HI\", 0\n" \
+        "LDA keep : RTS\n" \
+        ".pstr {\n" \
+        "  ZA_AUTO2 ptr\n" \
+        "  PLA : STA ptr : PLA : STA ptr+1\n" \
+        "  LDY #0\n" \
+        "  .lp INY : LDA (ptr),Y : BNE lp\n" \
+        "  TYA : SEC : ADC ptr : STA ptr\n" \
+        "  LDA ptr+1 : ADC #0 : STA ptr+1\n" \
+        "  JMP (ptr)" annot "\n" \
+        "}"
+    uint32_t passes = ASM(ZA_RETURN_PSTR(" : ZA_RETURN"));
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "pstr.ptr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "keep"),     ==, 0x72);   // rides the return edge home - off ptr's pair
+
+    // Unannotated, the same jump is computed flow into code we might own - refused, as ever.
+    RC_CHECK_TRUE(ERR(ZA_RETURN_PSTR("")) == error_type_za_auto_computed_flow);
+    #undef ZA_RETURN_PSTR
+
+    // The self-modified DIRECT flavour: the placeholder operand names real code (.tgt), which would wire a
+    // wrong loop edge - u would read as live around it, refusing the u/w reuse. ZA_RETURN overrides the
+    // resolved literal, so u dies at its read and w shares its byte.
+    uint32_t q = ASM("ZA_POOL &70..&7F : ZA_AUTO1 u, w\n"
+                     "STA u\n"
+                     ".tgt LDA u\n"
+                     "STA w : LDA w\n"
+                     "JMP tgt : ZA_RETURN");
+    RC_CHECK_TRUE(q != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "u"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x70);   // the placeholder edge is NOT wired
+    // The contrast: without the annotation the literal edge IS real (a genuine loop), and u stays live
+    // around it - w moves off its byte.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 u, w\n"
+                      "STA u\n"
+                      ".tgt LDA u\n"
+                      "STA w : LDA w\n"
+                      "JMP tgt") != 0);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
+}
+
+RC_TEST_STEP(assemble, za_auto_za_return_with_canjump, fix)
+{
+    // Dispatch-or-return: the exit jump may go to a declared in-program handler OR straight back to the
+    // caller. Both annotations sit on the one jump; the result flows through every analysis - res reaches
+    // the caller whichever way control leaves, and keep survives the whole excursion.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, res\n"
+                          "STA keep : JSR sub : LDA keep : LDA res : RTS\n"
+                          ".sub {\n"
+                          "  ZA_AUTO2 vec\n"
+                          "  LDA #LO(alt) : STA vec : LDA #HI(alt) : STA vec+1\n"
+                          "  STA res\n"
+                          "  JMP (vec) : ZA_RETURN : ZA_CANJUMP alt\n"
+                          "}\n"
+                          ".alt LDA res : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "sub.vec"), ==, 0x70);   // vec live to the jump (the vector read pins it)
+    RC_CHECK(zp_addr(&fix->r, "keep"),    ==, 0x72);
+    RC_CHECK(zp_addr(&fix->r, "res"),     ==, 0x73);
+}
+
+RC_TEST_STEP(assemble, za_auto_za_returnto_redirects, fix)
+{
+    // The caller-side override: the callee resumes this call at .after, NOT at the next instruction - so
+    // keep must be live from the store to .after's read, across the call, and off the callee's pointer.
+    // (Without the redirect the fall-through's live set - empty here - is what the return edges would
+    // inject, and keep would look dead at the JSR.)
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                          "STA keep\n"
+                          "JSR sub : ZA_RETURNTO after : EQUS \"DATA\", 0\n"
+                          "LDA #0 : RTS\n"
+                          ".after LDA keep : RTS\n"
+                          ".sub {\n"
+                          "  ZA_AUTO2 p\n"
+                          "  PLA : STA p : PLA : STA p+1\n"
+                          "  LDA #LO(after) : STA p : LDA #HI(after) : STA p+1\n"
+                          "  JMP (p) : ZA_RETURN\n"
+                          "}");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_returnto_no_code));
+    RC_CHECK(zp_addr(&fix->r, "sub.p"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "keep"),  ==, 0x72);   // keep is live across the call: no sharing
+
+    // A resumption point that begins no assembled instruction - here, the data itself - is almost always a
+    // mistyped label: warned (default-visible), not refused.
+    uint32_t q = ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
+                     "JSR sub : ZA_RETURNTO dat\n"
+                     ".dat EQUS \"X\", 0\n"
+                     "RTS\n"
+                     ".sub { PLA : PLA : RTS }");
+    RC_CHECK_TRUE(q != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_returnto_no_code));
+}
+
+RC_TEST_STEP(assemble, za_auto_za_unreachable_after_jsr, fix)
+{
+    // ZA_UNREACHABLE now also severs a CALL's continuation: quit never returns, so x's read past the JSR is
+    // declared dead and x is NOT live across the call - quit's local shares its byte. The severed code
+    // still touches x, so the reachability warning (rightly) points out it is entered by nothing we model.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 x\n"
+                          "STA x\n"
+                          "JSR quit : ZA_UNREACHABLE\n"
+                          "LDA x : RTS\n"
+                          ".quit { ZA_AUTO1 q : STA q : LDA q : JMP &FFEE }");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_unreachable));
+    RC_CHECK(zp_addr(&fix->r, "x"),      ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "quit.q"), ==, 0x70);   // nothing live across the severed call
+
+    // The control: without the annotation x IS live across the JSR, and q must dodge it.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 x\n"
+                      "STA x\n"
+                      "JSR quit\n"
+                      "LDA x : RTS\n"
+                      ".quit { ZA_AUTO1 q : STA q : LDA q : JMP &FFEE }") != 0);
+    RC_CHECK(zp_addr(&fix->r, "quit.q"), ==, 0x71);
+}
+
+RC_TEST_STEP(assemble, za_auto_jsr_data_end_of_section, fix)
+{
+    // Trailing data after the last instruction: there is nothing to resume at, which is a clean end of the
+    // stream - no edge, no taint, no complaint.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 t : STA t : LDA t\n"
+                          "JSR &FFEE : EQUS \"TRAILING\", 0");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "t"), ==, 0x70);
+}
+
+RC_TEST_STEP(assemble, za_auto_terminator_cut, fix)
+{
+    // Data between a JMP and untargeted code once glued them into one block, dropping the JMP's back edge -
+    // and with it x's loop-carried live range, letting w take its byte unsoundly. The terminator cut keeps
+    // the loop real: x is live around it and w must sit elsewhere. (The NOP tail after the data is
+    // unreachable, but touches no variable, so nothing warns.)
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, w\n"
+                          "LDA #1 : STA x\n"
+                          ".top LDA x : STA w : LDA w : JMP top\n"
+                          "EQUS \"TABLE\"\n"
+                          "NOP : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "x"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);   // the back edge survives the data gap
+}
+
+RC_TEST_STEP(assemble, za_auto_canjump_on_branch, fix)
+{
+    // A self-modified BRANCH: the literal operand is a placeholder (.ph, which touches nothing), the real
+    // arm is declared. The declared edge must REPLACE the placeholder's: .rd reads x, so x stays live
+    // through w's range and they get distinct bytes - which only happens if the annotation wins.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, w\n"
+                          "STA x\n"
+                          "STA w : LDA w\n"
+                          "BNE ph : ZA_CANJUMP rd\n"
+                          "LDA #0 : RTS\n"
+                          ".ph RTS\n"
+                          ".rd LDA x : RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "x"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);   // x live into the declared arm - no sharing
+
+    // ZA_RETURN on a branch: a CONDITIONAL return past the data (the not-taken path carries on to the RTS).
+    // res must-writes on both paths and reaches the caller through the return edges of both exits.
+    uint32_t q = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, res\n"
+                     "STA keep : JSR sub : LDA keep : LDA res : RTS\n"
+                     ".sub { STA res : BNE sub : ZA_RETURN : RTS }");
+    RC_CHECK_TRUE(q != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "res"),  ==, 0x71);
+}
+
+RC_TEST_STEP(assemble, za_auto_annotation_list_targets, fix)
+{
+    // Annotation targets flatten like EQUB data: a symbol bound to a list names every arm in one word -
+    // and a FORWARD-referenced one settles over the passes (handlers is bound two lines below its use).
+    // .hA reads x, so the declared edges are provably wired: x stays live through w's range.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, w\n"
+                          "STA x\n"
+                          "STA w : LDA w\n"
+                          "JMP (vec) : ZA_CANJUMP handlers\n"
+                          ".vec EQUW hA\n"
+                          "handlers = {hA, hB}\n"
+                          ".hA LDA x : RTS\n"
+                          ".hB RTS");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "x"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
+
+    // A nested list with a range inside flattens the same way (hB..<hB+1 enumerates to just hB).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, w\n"
+                      "STA x\n"
+                      "STA w : LDA w\n"
+                      "JMP (vec) : ZA_CANJUMP {hA, {hB..<hB+1}}\n"
+                      ".vec EQUW hA\n"
+                      ".hA LDA x : RTS\n"
+                      ".hB RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
+
+    // The ZA_CANCALL twin: a self-modified JSR's declared arms as one list symbol; keep interferes with
+    // the UNION of the arms' footprints, and the arms (never live together) share a byte.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      "subs = {s1, s2}\n"
+                      "STA keep : JSR s1 : ZA_CANCALL subs : LDA keep : RTS\n"
+                      ".s1 { ZA_AUTO1 l1 : STA l1 : LDA l1 : RTS }\n"
+                      ".s2 { ZA_AUTO1 l2 : STA l2 : LDA l2 : RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "keep"),  ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "s1.l1"), ==, 0x71);
+    RC_CHECK(zp_addr(&fix->r, "s2.l2"), ==, 0x71);
+
+    // A ZA_AUTO address inside the list is refused like any other now-needed number.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
+                      "JMP (t) : ZA_CANJUMP {v}\n"
+                      ".t EQUW 0") == error_type_za_auto_address);
 }
 
 RC_TEST_STEP(assemble, za_auto_partial_write_tracks_bytes, fix)
