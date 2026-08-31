@@ -167,6 +167,15 @@ From outside, a named scope's symbols are reachable by their dotted path: `JSR w
 good for when you want to provide additional entry points to a subroutine, or access a scoped symbol.
 Anonymous `{ }` scopes work too, and are genuinely private - there is no path to name them by.
 
+Braces also count as statement separators, so a compact scope fits on one line with no extra colons:
+
+```
+    LDX #8 {.loop STA &70,X : DEX : BNE loop } RTS
+```
+
+(One thing braces are *not* is an `IF` body: `IF flag { ... }` parses, but the braces open a real
+scope - its labels stay private, unlike a plain `IF` branch - and the `ENDIF` is still required.)
+
 For tiny hops there are local labels: `.@` binds an anonymous label, and `@-` / `@+` refer to the nearest
 one behind / ahead:
 

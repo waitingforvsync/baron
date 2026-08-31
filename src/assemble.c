@@ -440,8 +440,19 @@ static const token assign_token_entries[] = {
 };
 static const token_table assign_tokens = RC_VIEW(assign_token_entries);
 
+// '{' is a keyword token, so it is recognised by the handler it carries.
+static bool is_open_brace(lexeme lx)
+{
+    return lx.type == lexeme_type_keyword && lx.keyword.handle == handle_open_brace;
+}
+
+
 // require_separator is shared with opcodes.c (declared in assemble.h); it reads the statement
-// table to recognise the '}' that implicitly closes a one-liner, so it lives here with it.
+// table to recognise the braces that implicitly end a statement, so it lives here with it.
+// Both braces separate: '}' closes a one-liner scope, and '{' ends the statement before it so a
+// scope can open mid-line (LDX #8 {.loop ... }). Only a COMPLETED statement gets here - a '{' in
+// operand position is a list literal, consumed greedily by the expression parser first - so the
+// two readings never compete.
 parse_result require_separator(baron *b, cursor at)
 {
     rc_str source = source_files_text(&b->source_files, at.source);
@@ -453,6 +464,10 @@ parse_result require_separator(baron *b, cursor at)
 
     if (r.token.type == lexeme_type_closer && r.token.closer.id == closer_brace) {
         return (parse_result) { .next = at.pos };   // '}' closes the statement; parse_block consumes it
+    }
+
+    if (is_open_brace(r.token)) {
+        return (parse_result) { .next = at.pos };   // '{' starts the next statement; parse_block reads it
     }
 
     return syntax_error(b, error_type_expected_separator, at);
@@ -484,13 +499,6 @@ expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena
 static bool is_dotted(rc_str name)
 {
     return rc_str_find_first(name, RC_STR(".")) != RC_INDEX_NONE;
-}
-
-
-// '{' is a keyword token, so it is recognised by the handler it carries.
-static bool is_open_brace(lexeme lx)
-{
-    return lx.type == lexeme_type_keyword && lx.keyword.handle == handle_open_brace;
 }
 
 
@@ -6576,6 +6584,17 @@ RC_TEST_STEP(assemble, listing_assignments_and_braces, fix)
              RC_STR("{\n"
                     "  0000  EA              nop\n"
                     "}\n"));
+
+    // A mid-line '{' gets its own margin line, and the statement before it echoes without the brace
+    // (its slice ends where the separator was found).
+    RC_CHECK_TRUE(ASM("LDX #8 {.loop DEX:BNE loop }") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000  A2 08           LDX #8\n"
+                    "{\n"
+                    ".loop\n"
+                    "  0002  CA              DEX\n"
+                    "  0003  D0 FD           BNE loop\n"
+                    "}\n"));
 }
 
 RC_TEST_STEP(assemble, error_statement, fix)
@@ -6815,6 +6834,31 @@ RC_TEST_STEP(assemble, label_does_not_own_following_statement, fix)
     // no longer swallows what follows), and the inner label still binds to the current pc.
     RC_CHECK_TRUE(ASM(".r { .e }") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r.e")), value_make_numeric(0)));
+}
+
+RC_TEST_STEP(assemble, brace_separates_statements, fix)
+{
+    // A '{' ends the statement before it, so a scope can open mid-line - and the '}' already closed
+    // one - giving the whole one-liner idiom: LDX #8 {.loop ... }. The scope is a real one: loop
+    // stays private to it.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("LDX #8 {.loop STA &70:DEX:BNE loop }"),
+                          (uint8_t[]) {0xA2, 0x08, 0x85, 0x70, 0xCA, 0xD0, 0xFB}, 7));
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("loop"))));
+
+    // An assignment separates the same way; the '{' here is a scope, not a list, because the
+    // expression parser had already finished - a list '{' only ever begins in operand position.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("x = 5 { EQUB x }"), (uint8_t[]) {0x05}, 1));
+
+    // IF cond { ... } ENDIF: legal, but NOT a C-style IF body - the braces open a genuine scope, so
+    // unlike a bare IF branch (if_does_not_introduce_scope) its bindings do not leak. A dead branch's
+    // scope emits nothing, as ever.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 1 { .in LDA #5 } ENDIF"), (uint8_t[]) {0xA9, 0x05}, 2));
+    RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("in"))));
+    RC_CHECK(((void) ASM("IF 0 { LDA #5 } ENDIF"), baron_result_code(&fix->r).num), ==, 0u);
+
+    // The missing-comma typo EQUB 1 {2,3} now reads the '{' as a scope, so the complaint moves from
+    // the gap to the stray '2' inside - pinned so a diagnostics regression here is a deliberate one.
+    RC_CHECK_TRUE(ERR("EQUB 1 {2,3}") == error_type_unexpected_token);
 }
 
 RC_TEST_STEP(assemble, errors, fix)

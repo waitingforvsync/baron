@@ -56,7 +56,7 @@ to the end of the line.
 |--------|---------|
 | `.name` | Bind a label at the current address. |
 | `name = expr` | Bind a symbol to a value. Symbols are immutable: one name, one value, per scope. |
-| `{` ... `}` | A scope. A label immediately before the brace names it; its symbols are reachable from outside as `name.symbol`. Anonymous scopes are truly private. |
+| `{` ... `}` | A scope. A label immediately before the brace names it; its symbols are reachable from outside as `name.symbol`. Anonymous scopes are truly private. Both braces double as statement separators, so `LDX #8 {.loop DEX : BNE loop } RTS` needs no extra colons. |
 | `.@` | Bind an anonymous local label here. Referenced by `@-` / `@+` (nearest behind / ahead, within the current scope). |
 
 ### Data ###
