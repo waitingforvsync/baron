@@ -358,12 +358,6 @@ static const token operand_token_entries[] = {
     {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
     {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
     {RC_STR_INIT(")"), {.type = lexeme_type_close_paren}},
-
-    // '}' closes a scope and so ends a statement: an implied/accumulator opcode may sit right before it
-    // (.routine { RTS }). We must recognise it here rather than let it fall through as an unexpected char
-    // that the no-operand peek would try to evaluate as an operand. It stays a closer in the statement
-    // table (parse_block's brace handling relies on that); this operand-table row only lets the peek see it.
-    {RC_STR_INIT("}"), {.type = lexeme_type_close_brace}},
 };
 static const token_table operand_tokens = RC_VIEW(operand_token_entries);
 
@@ -375,7 +369,6 @@ static const token operand_reg_token_entries[] = {
     {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
     {RC_STR_INIT("("), {.type = lexeme_type_open_paren}},
     {RC_STR_INIT(")"), {.type = lexeme_type_close_paren}},
-    {RC_STR_INIT("}"), {.type = lexeme_type_close_brace}},
     {RC_STR_INIT("A"), {.type = lexeme_type_register, .reg = {.which = reg_a}}},
     {RC_STR_INIT("X"), {.type = lexeme_type_register, .reg = {.which = reg_x}}},
     {RC_STR_INIT("Y"), {.type = lexeme_type_register, .reg = {.which = reg_y}}},
@@ -627,12 +620,10 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     uint32_t operand_base = RC_INDEX_NONE;   // where a memory operand's expression begins (for VAR observation)
     uint32_t  after;                       // past the operand shell, before the separator
 
-    lexer_result peek = lexer_next(src, start, operand_tokens);
+    lexer_result peek = lexer_next(src, start, operand_tokens);   // dispatches '#' / '(' / plain below
 
-    if (peek.token.type == lexeme_type_terminator || peek.token.type == lexeme_type_close_brace) {
-        // No operand: implied, or accumulator for the shift / read-modify-write mnemonics. A '}' immediately
-        // after the mnemonic counts as end-of-statement here (it closes the enclosing scope); we leave it for
-        // require_separator, which recognises it as closing the statement.
+    if (peek_separator(b, cursor_at(at, start)).ends) {
+        // No operand: implied, or accumulator for the shift / read-modify-write mnemonics.
         if (opcode_def(m, addr_mode_imp) != 0) {
             mode = addr_mode_imp;
         }
@@ -702,14 +693,12 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
         // Plain operand. First, a bare accumulator 'A' on a shift / rmw mnemonic - consulted with the
         // register-aware table, so ASL A reads as accumulator mode even when a symbol a exists, yet a
         // real symbol operand (ASL data) falls straight through to the expression parser below. It counts
-        // as the accumulator only when nothing but a statement terminator (or a scope-closing '}') follows.
+        // as the accumulator only when the statement ends right after the A.
         bool handled = false;
         if (opcode_def(m, addr_mode_acc) != 0) {
             lexer_result areg = lexer_next(src, start, operand_reg_tokens);
             if (is_register(areg.token, reg_a)) {
-                lexer_result after_a = lexer_next(src, areg.next, operand_tokens);
-                if (after_a.token.type == lexeme_type_terminator
-                    || after_a.token.type == lexeme_type_close_brace) {
+                if (peek_separator(b, cursor_at(at, areg.next)).ends) {
                     mode = addr_mode_acc;
                     after = areg.next;
                     handled = true;

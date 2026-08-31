@@ -19,11 +19,7 @@
 #define ASSEMBLE_MAX_MACRO_DEPTH 64u     // a runaway macro expansion (a missing recursion base case) is caught here
 
 
-// Mutual recursion: a label or a scope reopens the statement loop, and the loop reaches the
-// handlers that may do so. The directive handlers are referenced by the statement table.
-// All the parse functions take the same head: the baron (its scopes / sections / source files, and
-// the current section), then the cursor at (source file index plus offset), the scope index, and
-// the parse flags, then scratch by value. Each fetches its source rc_str from b->source_files at the top.
+// Declare handlers for all the statements understood by baron.
 static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -66,8 +62,6 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t se
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 
 
-// int_argument_make is shared with opcodes.c (both declared in assemble.h); it needs no token
-// table, so it sits on its own. Pure: it reads v and returns the reduction.
 int_argument int_argument_make(value v, bool final_pass, uint32_t at)
 {
     if (value_is_number(v)) {   // a boolean coerces: TRUE / FALSE are 1 / 0 here
@@ -78,9 +72,8 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
     }
 
     if (value_is_za_auto(v)) {
-        // A ZA_AUTO address: known as far as sizing goes (the offset stands in, and the real base
-        // cannot leave the zero page), with the identity riding along for the caller to accept -
-        // an instruction operand, a data byte - or refuse - a count, a condition, a layout address.
+        // Known as far as sizing goes (the offset stands in, and the real base cannot leave the
+        // zero page); the identity rides along for the caller to accept or refuse.
         return (int_argument) {
             .type     = int_argument_type_known,
             .value    = v.za_auto.offset,
@@ -103,8 +96,7 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
         return (int_argument) { .type = int_argument_type_unresolved };   // a forward reference; settles later
     }
 
-    // Any other error value carries its specific cause through unchanged (value and the assembler share
-    // one error_type space); a non-error non-number (a string, a list) is simply not an address.
+    // Any other error carries its cause through; a non-number (a string, a list) is not an address.
     return (int_argument) {
         .type = int_argument_type_error,
         .error = value_is_error(v) ? v.error.code : error_type_operand_not_numeric,
@@ -114,10 +106,8 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
 }
 
 
-// Refuse a ZA_AUTO address in a context that needs a real number NOW - a count, a condition, a layout
-// address: the address exists only after allocation, long after this decision must be made. Demotes the
-// argument to the dedicated error, which the caller's ordinary error path then reports (self-gated on
-// the final pass, at the use site, naming the variable).
+// Refuse a ZA_AUTO address in a context that needs a real number NOW (a count, a condition, a
+// layout address): the address exists only after allocation, long after this decision must be made.
 static int_argument int_argument_no_za_auto(int_argument arg, uint32_t at)
 {
     if (arg.za_auto) {
@@ -133,9 +123,7 @@ static int_argument int_argument_no_za_auto(int_argument arg, uint32_t at)
 }
 
 
-// The two ways a parse reports an error - both record straight into b->diagnostics, so the code and
-// location never travel in the parse_result. syntax_error unwinds (the stream is broken); semantic_error
-// carries on (only recording on the settling pass of a live branch). Shared with opcodes.c.
+// The two ways a parse reports an error: syntax_error unwinds, semantic_error carries on.
 parse_result syntax_error_payload(baron *b, error_type code, cursor at, rc_str payload)
 {
     baron_error_payload(b, code, at, payload);
@@ -173,19 +161,14 @@ void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, u
 
 // ---- the verbose listing ----
 
-// Column layout: "  0900  AD 34 12        LDA magic" - a two-space margin, four hex digits of address,
-// two spaces, a byte field wide enough for four "XX " triplets plus a truncation ellipsis, then the
-// statement's source text. Everything hangs off these two numbers.
+// Column layout: "  0900  AD 34 12        LDA magic" - everything hangs off these two numbers.
 enum {
     verbose_max_bytes  = 4,    // hex bytes shown before the dump is truncated with "..."
     verbose_byte_field = 16,   // the byte field's total width including the gap before the source text
 };
 
-// Echo the statement's source [stmt.pos, end_pos) into the listing. Leading blanks are trimmed (a
-// statement after a same-line label starts on the space that followed the name); everything else is
-// kept verbatim, because relating what was WRITTEN to what assembled is the listing's whole point.
-// Only a list literal may legally span lines, so a span containing a newline is cut at the first one
-// and finished with an ellipsis.
+// Echo the statement's source [stmt.pos, end_pos) verbatim, leading blanks trimmed; a span
+// containing a newline (only a list literal legally can) is cut at the first one with an ellipsis.
 static void verbose_source(baron *b, cursor stmt, uint32_t end_pos)
 {
     rc_str text = source_files_text(&b->source_files, stmt.source);
@@ -235,8 +218,7 @@ void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
     rc_mstr_append_hex16(&b->channels[0], (uint16_t) pc, b->per_pass);
     rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
 
-    // The bytes are read back from the section rather than passed in: this runs on the listing pass,
-    // after zero-page allocation, so what sits there IS the final output.
+    // Read back from the section: this runs post-allocation, so what sits there IS the final output.
     rc_view_bytes code = sections_code(&b->sections, section);
     uint32_t num = code.num - code_begin;
     uint32_t shown = num > verbose_max_bytes ? verbose_max_bytes : num;
@@ -267,8 +249,7 @@ void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
     }
 
     if (kind == verbose_text_address) {
-        // An address but no bytes: the line marks where something lands (a macro expansion, an
-        // included file) - the bytes belong to the statements that follow.
+        // An address but no bytes: the line marks where something lands; its bytes follow.
         rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
         rc_mstr_append_hex16(&b->channels[0], (uint16_t) pc, b->per_pass);
         rc_mstr_append_n(&b->channels[0], ' ', 2 + verbose_byte_field, b->per_pass);
@@ -280,9 +261,8 @@ void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
 
 // ---- the statement token table and the framing it drives ----
 
-// Which block closer a lexeme_type_closer is. '}' ends a '{ }' scope, ELIF/ELSE/ENDIF the IF chain,
-// NEXT a FOR body. parse_block stops at any of them; the handler that owns the block (parse_scope,
-// handle_if, handle_for) dispatches on the id, and reports closer.unexpected for one it did not want.
+// Which block closer a lexeme_type_closer is. parse_block stops at any of them; the handler that
+// owns the block dispatches on the id, and reports closer.unexpected for one it did not want.
 typedef enum closer_kind {
     closer_brace,
     closer_elif,
@@ -294,10 +274,8 @@ typedef enum closer_kind {
     closer_endbasic,
 } closer_kind;
 
-// Pre-combined: every mnemonic (its own lexeme type, carrying the id) plus the statement
-// directives (ORG, the '.' label introducer, the '{' scope opener) and the block closers. '#' and
-// '=' never start a statement, so they live in the operand / assignment tables instead
-// (operand_tokens is in opcodes.c, next to the operand parser).
+// Every mnemonic plus the statement directives and block closers. '#' and '=' never start a
+// statement, so they live in the operand / assignment tables instead.
 static const token statement_token_entries[] = {
     {RC_STR_INIT("adc"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_adc}}},
     {RC_STR_INIT("and"), {.type = lexeme_type_opcode, .opcode = {.id = mnemonic_and}}},
@@ -418,23 +396,18 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("}"),       {.type = lexeme_type_closer, .closer = {closer_brace,    error_type_unexpected_close_brace}}},
 };
 
-// The STATIC base: mnemonics, directives and closers. Macro-name tokens are appended to a per-pass COPY of
-// this (macros.statement_tokens), so a name defined earlier this pass is recognised as a call; statement_tokens(b)
-// returns that live table. handle_macro lexes the macro NAME from the base instead, so an already-defined name
-// still reads as a plain identifier there (and overloads reuse one name entry).
+// The STATIC base; macro-name tokens are appended to a per-pass copy (macros.statement_tokens).
+// handle_macro lexes the macro NAME from here, so a defined name still reads as an identifier there.
 static const token_table base_statement_tokens = RC_VIEW(statement_token_entries);
 
-// The statement table THIS pass - the base plus one token per macro name seen so far. Every statement-start
-// lex goes through it, so a label / for-var / symbol spelled like a macro reads as a call (and errors), the
-// same acceptable collision a mnemonic-named label already has.
+// The live statement table this pass: the base plus one token per macro name seen so far.
 static token_table statement_tokens(const baron *b)
 {
     return macros_statement_tokens(&b->macros);
 }
 
 
-// '=' is its own tiny table, lexed after an identifier at statement start (an assignment) and after an
-// attribute name on a SECTION line. Defined here so both the assignment handler and handle_section can reach it.
+// '=' alone: lexed after an identifier at statement start and after a SECTION attribute name.
 static const token assign_token_entries[] = {
     {RC_STR_INIT("="), {.type = lexeme_type_assign}},
 };
@@ -447,37 +420,38 @@ static bool is_open_brace(lexeme lx)
 }
 
 
-// require_separator is shared with opcodes.c (declared in assemble.h); it reads the statement
-// table to recognise the braces that implicitly end a statement, so it lives here with it.
-// Both braces separate: '}' closes a one-liner scope, and '{' ends the statement before it so a
-// scope can open mid-line (LDX #8 {.loop ... }). Only a COMPLETED statement gets here - a '{' in
-// operand position is a list literal, consumed greedily by the expression parser first - so the
-// two readings never compete.
-parse_result require_separator(baron *b, cursor at)
+// The one statement-boundary test: a terminator or either brace ends a statement (braces stay
+// put for their readers). Shared with opcodes.c; contract in assemble_internal.h.
+separator_result peek_separator(baron *b, cursor at)
 {
     rc_str source = source_files_text(&b->source_files, at.source);
     lexer_result r = lexer_next(source, at.pos, statement_tokens(b));
 
     if (r.token.type == lexeme_type_terminator) {
-        return (parse_result) { .next = r.next };
+        return (separator_result) {.ends = true, .next = r.next};
     }
 
-    if (r.token.type == lexeme_type_closer && r.token.closer.id == closer_brace) {
-        return (parse_result) { .next = at.pos };   // '}' closes the statement; parse_block consumes it
+    if ((r.token.type == lexeme_type_closer && r.token.closer.id == closer_brace)
+        || is_open_brace(r.token)) {
+        return (separator_result) {.ends = true, .next = at.pos};
     }
 
-    if (is_open_brace(r.token)) {
-        return (parse_result) { .next = at.pos };   // '{' starts the next statement; parse_block reads it
+    return (separator_result) {.next = at.pos};
+}
+
+parse_result require_separator(baron *b, cursor at)
+{
+    separator_result s = peek_separator(b, at);
+    if (s.ends) {
+        return (parse_result) {.next = s.next};
     }
 
     return syntax_error(b, error_type_expected_separator, at);
 }
 
 
-// The one place that projects baron into an expr_env: symbols from scope, the live PC of the current
-// section, and the reference's own position (at) for the impure @- / @+ locals. Every directive / operand
-// evaluates through here, so no call site rebuilds the environment and the expression parser never sees
-// baron. The cursor's source+pos double as the parse start and the use site. Shared with opcodes.c.
+// The one place that projects baron into an expr_env; the cursor's source+pos double as the parse
+// start and the use site (for the impure @- / @+ locals).
 expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -502,17 +476,14 @@ static bool is_dotted(rc_str name)
 }
 
 
-// parse_block stops at any block closer and leaves it for its caller (a scope, the file, handle_if, or
-// handle_for) to read.
+// parse_block stops at any block closer and leaves it for its caller to read.
 static bool is_block_terminator(lexeme lx)
 {
     return lx.type == lexeme_type_closer;
 }
 
 
-// Fold a sub-parse's outcome into r: take its pos and OR its flags. Errors were already recorded
-// into b->diagnostics at the failure site, so there is nothing to carry but fatal - which, once
-// set, tells the statement loop to unwind.
+// Fold a sub-parse into r: take its pos, OR its flags (errors are already in b->diagnostics).
 static parse_result fold(parse_result r, parse_result sub)
 {
     r.next        = sub.next;
@@ -657,26 +628,20 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// SECTION name, key = expr, ... / ENDSECTION - a lexically scoped region of object code with its own
-// address space (two sections at one address is fine: only a control transfer that names a label
-// crosses between them). The name is UNIQUE - one output blob, no concatenation. The assembler acts
-// on the org, cmos and guard attributes and stores the whole bag for the output utility. A SECTION
-// does NOT open a naming scope; a dead branch parses the block for its extent but creates nothing.
+// SECTION name, key = expr, ... / ENDSECTION - a uniquely-named region of object code with its own
+// address space. The assembler consumes the org, cmos and guard attributes and stores the whole bag
+// for the output stage; a SECTION does NOT open a naming scope.
 static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    // The name is a bare identifier (a mnemonic-spelled name would lex as that opcode - the same limitation
-    // labels have, and not worth a private name table).
+    // A bare identifier (a mnemonic-spelled name would lex as that opcode, as with labels).
     lexer_result nm = lexer_next(src, at.pos, statement_tokens(b));
     if (nm.token.type != lexeme_type_identifier) {
         return syntax_error(b, error_type_expected_section_name, cursor_at(at, at.pos));
     }
 
-    // Create the section (only when live). The parent section arrives as the threaded section parameter;
-    // the child is passed on to the body's parse_block rather than stashed in a field. The cursor flows: the
-    // child starts where the parent's pc sits (unless an org attribute jumps it), and on close the parent
-    // resumes from the child's end.
+    // Create the section (only when live); the child is threaded to the body's parse_block.
     uint32_t child = RC_INDEX_NONE;
     if (flags.active) {
         child = sections_make(&b->sections, nm.token.identifier.name);
@@ -685,11 +650,9 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                                         nm.token.identifier.name);   // names are unique
         }
 
-        // Inherit the parent's whole attribute bag - the consumed keys included. org is just an inherited
-        // attribute: a child with no org of its own starts at the parent's org (its BASE address), not
-        // wherever the parent has emitted to; cmos likewise carries the parent's instruction set down.
-        // Explicit attributes below override. A section's emission never moves its parent's cursor - the
-        // two are separate address spaces.
+        // Inherit the parent's whole attribute bag, consumed keys included: a child with no org of
+        // its own starts at the parent's BASE address, not where the parent has emitted to.
+        // Explicit attributes below override.
         uint32_t parent_org   = 0;
         bool     parent_cmos  = false;
         uint32_t parent_guard = RC_INDEX_NONE;
@@ -772,20 +735,17 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         return sep;
     }
 
-    // The header line, at the margin like a label: a section frames what follows rather than landing
-    // anywhere itself (its statements carry the addresses).
+    // The header line at the margin: a section frames what follows rather than landing anywhere.
     if (child != RC_INDEX_NONE) {
         verbose_text_line(b, flags, stmt, pos, 0, verbose_text_margin);
     }
 
-    // A dead branch has no child section: the body parses (for its extent) in the parent section, emitting
-    // nothing.
+    // A dead branch has no child section: the body parses for extent in the parent, emitting nothing.
     uint32_t body_section = (child != RC_INDEX_NONE) ? child : section;
     parse_result body = parse_block(b, cursor_at(at, sep.next), scope, body_section, flags, scratch);
     body.unresolved |= unresolved;
 
-    // The parent's cursor is NOT touched by the child: sections are separate address spaces, so the parent
-    // resumes exactly where it was before the SECTION, and the child's bytes never displace it.
+    // The parent's cursor is untouched by the child: sections are separate address spaces.
 
     if (body.fatal) {
         return body;
@@ -794,9 +754,8 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
     if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
         if (child != RC_INDEX_NONE) {
-            // The guard check: the section is complete (INCSECTION reservations included), so its pc
-            // is the address just past the last byte - past the guard means the guarded address was
-            // written. Recoverable: the report names the overshoot and assembly carries on.
+            // The guard check, once the section is complete (INCSECTION reservations included):
+            // pc past the guard means the guarded address was written. Recoverable.
             uint32_t guard = sections_guard(&b->sections, child);
             uint32_t pc    = sections_pc(&b->sections, child);
             if (guard != RC_INDEX_NONE && pc > guard) {
@@ -806,8 +765,8 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                 semantic_error_payload(b, flags, error_type_guard_exceeded, stmt, over.view);
             }
 
-            // The ENDSECTION line at the margin too, and a blank line sets sections apart. Note the start
-            // cursor is built here: stmt is the SECTION statement, not this closer.
+            // The ENDSECTION line at the margin (its own start cursor: stmt is the SECTION
+            // statement), then a blank line to set sections apart.
             verbose_text_line(b, flags, cursor_at(at, body.next), cl.next, 0, verbose_text_margin);
             if (verbose_on(flags)) {
                 rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
@@ -821,18 +780,15 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 }
 
 
-// BASIC ... ENDBASIC - an inline BBC BASIC program, each numbered line tokenised byte-for-byte as
-// the BASIC 4 ROM would store it (basic.h) and emitted into the current section; ENDBASIC finishes
-// with the 0D FF terminator. A numbered line belongs WHOLE to the tokeniser, bypassing the lexer, so
-// ':' and ';' are BASIC text there; blanks, comment lines and ENDBASIC are the only other statements
-// allowed. The bytes are pure text, identical every pass, so the block never disturbs convergence;
-// a dead branch walks the lines to find its ENDBASIC and emits nothing.
+// BASIC ... ENDBASIC - inline BBC BASIC, each numbered line tokenised byte-for-byte as the BASIC 4
+// ROM would store it (basic.h). A numbered line belongs WHOLE to the tokeniser, bypassing the lexer
+// (':' and ';' are BASIC text); the bytes are pure text, so the block never disturbs convergence.
 static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scope;
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    // BASIC takes no operands. The BASIC line at the margin, framing what follows like a SECTION.
+    // BASIC takes no operands; its line frames the listing like a SECTION.
     parse_result acc = require_separator(b, at);
     if (acc.fatal) {
         return acc;
@@ -841,10 +797,8 @@ static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scop
     verbose_text_line(b, flags, stmt, at.pos, 0, verbose_text_margin);
 
     while (true) {
-        // A statement starting with a digit (past any indent or comment, the lexer's own notion of
-        // blank space) is a BASIC line; nothing else in Baron begins with one, so the peek cannot
-        // misfire. The peek comes before any lexing because the lexer must not see the line itself -
-        // "10PRINT "A:B"" is one opaque span to Baron.
+        // A statement starting with a digit is a BASIC line - nothing else in Baron begins with
+        // one. The peek comes before any lexing: the line is one opaque span to Baron.
         uint32_t start = lexer_skip_whitespace(src, acc.next);
         if (start < src.len && src.data[start] >= '0' && src.data[start] <= '9') {
             uint32_t line_end   = lexer_line_end(src, start);
@@ -854,8 +808,7 @@ static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scop
             if (flags.active) {
                 basic_line_result line = basic_tokenise_line(rc_str_substr(src, start, line_end - start), &scratch);
                 if (line.error != error_type_none) {
-                    // A bad line number / overlong line: recoverable, and skipping the record is
-                    // pass-stable because the text never depends on a symbol.
+                    // Recoverable; dropping the record is pass-stable (text never depends on a symbol).
                     semantic_error(b, flags, line.error, line_stmt);
                 }
                 for (uint32_t i = 0; i < line.bytes.num; i++) {
@@ -863,8 +816,7 @@ static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scop
                 }
             }
 
-            // The listing dumps the whole record from its 0D (a dropped erroring line shows an
-            // empty byte field).
+            // The listing dumps the whole record from its 0D (a dropped line: empty byte field).
             verbose_code_line(b, flags, line_stmt, line_end, section, pc0, code0);
             acc.next = line_end;   // the newline is the next iteration's terminator lexeme
             continue;
@@ -897,10 +849,8 @@ static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// Add one ZA_POOL value's zero-page bytes to the reserve set. Mirrors emit_data's descent: a range is
-// enumerated, a list is flattened, and a scalar is one byte - but it must land in the zero page ($00-$FF).
-// A forward reference defers (marks unresolved, reserves nothing this pass); a non-numeric or out-of-page
-// value is a semantic error. A dead branch reserves nothing.
+// Add one ZA_POOL value's bytes to the reserve set, mirroring emit_data's descent (range
+// enumerated, list flattened, scalar one byte); each must land in the zero page.
 static parse_result za_pool_add(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
 {
     if (!flags.active) {
@@ -940,10 +890,8 @@ static parse_result za_pool_add(baron *b, value v, parse_flags flags, cursor at,
 }
 
 
-// ZA_POOL <list> - declare the zero-page bytes the ZA_AUTO1/ZA_AUTO2 allocator may draw from, and (by its mere
-// presence) ENABLE the whole feature. A comma-separated list of values, each a zero-page address or a range
-// of them (the same operand shape as EQUB); every value must fall within $00-$FF. The set is global and
-// rebuilt each pass. A dead branch parses the operand but reserves nothing and does not enable.
+// ZA_POOL <list> - the zero-page bytes the allocator may draw from; its mere presence ENABLES the
+// whole feature. The set is global and rebuilt each pass.
 static parse_result handle_za_pool(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -977,11 +925,10 @@ static parse_result handle_za_pool(baron *b, cursor stmt, cursor at, uint32_t sc
 }
 
 
-// The ZA_AUTO name-binding worker, shared by ZA_AUTO1 / ZA_AUTO2 / ZA_AUTO <n>. Each name binds an
-// ordinary scoped symbol (so LDA foo sizes as zero page and routine.foo resolves from outside) to a
-// PLACEHOLDER address; the real byte arrives at allocation, and the width + identity enter the var
-// registry on the final pass only. ZA_AUTO without a ZA_POOL is flagged but still binds, so
-// references do not cascade into undefined-symbol errors; a dead branch removes only its own binding.
+// The ZA_AUTO name-binding worker (ZA_AUTO1 / ZA_AUTO2 / ZA_AUTO <n>). Each name binds an ordinary
+// scoped symbol to a PLACEHOLDER address; the real byte arrives at allocation, and width + identity
+// enter the var registry on the final pass only. Without a ZA_POOL it is flagged but still binds,
+// so references do not cascade into undefined-symbol errors.
 static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint16_t width, rc_arena scratch)
 {
     (void) stmt;      // the listing line is built from the allocated symbol, not the source echo
@@ -1007,16 +954,13 @@ static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t sc
             semantic_error(b, flags, error_type_expected_var_name, def);
         }
         else if (rc_str_is_equal_insensitive(name, RC_STR("a"))) {
-            // a alone stays forbidden: it collides with accumulator addressing, so ASL a would read as
-            // ASL A (accumulator) and silently drop the variable - and it even changes size (1 byte, not 2),
-            // so no patch could rescue it. X and Y are safe now: they are registers only after a comma (an
-            // index position a base operand never occupies), so STA x / LDA (y),Y attribute correctly.
+            // a collides with accumulator addressing: ASL a would read as ASL A and silently change
+            // size. X and Y are registers only after a comma, so they are safe as names.
             semantic_error(b, flags, error_type_za_auto_register_name, def);
         }
         else if (flags.active) {
-            // The output pass leaves the binding ALONE: zeropage_finalize has already rewritten it to the
-            // allocated address, which is exactly what re-emission must see. Re-binding the placeholder here
-            // would put the un-allocated values back into the output.
+            // The output pass leaves the binding ALONE: finalize has rewritten it to the allocated
+            // address, which is exactly what re-emission must see.
             if (!flags.output) {
                 symbol_status st = scopes_set_symbol(
                     &b->scopes, scope, name,
@@ -1030,18 +974,15 @@ static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t sc
                     }
                 }
                 else if (flags.final) {
-                    // Record the vreg. Its identity is the (scope, def) pair: a macro / FOR body shares one def
-                    // across every instantiation, but each runs in its own child scope, so each instance becomes
-                    // a distinct variable here - exactly as two sibling blocks declaring the same name would.
+                    // The vreg's identity is the (scope, def) pair: a macro / FOR body shares one
+                    // def, but each instantiation's own child scope makes it a distinct variable.
                     zeropage_add_var(&b->zeropage, name, scope, width, def);
                 }
             }
             else if (flags.listing && cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
-                // ...and instead lists the assignment the declaration BECAME: the symbol now holds the
-                // allocated byte, so za_auto1 tmp reads back as tmp = &70 [auto] - echoing the source
-                // would only show a name with no address, and the address is the interesting part. The
-                // binding must still be OURS, scope-locally: the allocator UNDEFINES an unused variable,
-                // and without this check the lookup would walk up and print some outer namesake instead.
+                // ...and instead lists the assignment the declaration BECAME: tmp = &70 [auto]. The
+                // binding must still be OURS scope-locally - the allocator UNDEFINES an unused
+                // variable, and the lookup would otherwise walk up to an outer namesake.
                 value v = scopes_get_symbol(&b->scopes, scope, name);
                 if (v.type == value_type_numeric) {
                     rc_mstr *out = &b->channels[0];
@@ -1076,10 +1017,8 @@ static parse_result handle_za_auto2(baron *b, cursor stmt, cursor at, uint32_t s
 }
 
 
-// ZA_AUTO <count>, <names> - the generic form: variables <count> bytes wide (a table or struct), of which
-// ZA_AUTO1 / ZA_AUTO2 are the 1- and 2-byte sugar. The count is a constant expression, evaluated here (a
-// forward reference defers a pass, like any operand); it must land in 1..256 (the zero page). Then the
-// name list is parsed by the shared worker, exactly as the fixed-width forms do.
+// ZA_AUTO <count>, <names> - variables <count> bytes wide, of which ZA_AUTO1 / ZA_AUTO2 are the
+// sugar. The count must land in 1..256; the name list goes through the shared worker.
 static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -1095,9 +1034,8 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
         return syntax_error(b, error_type_expected_var_name, cursor_at(at, e.next));
     }
 
-    // Reduce the count. Unknown defers to a later pass; a known count must be a legal width; anything else is a
-    // recoverable error. On any non-known outcome we fall back to width 1 so the names still bind (references
-    // do not cascade), exactly as the feature-off / bad-name paths do.
+    // Reduce the count. On any non-known outcome we fall back to width 1 so the names still bind
+    // (references do not cascade); an unknown count also defers a pass.
     uint16_t width = 1;
     bool     unresolved = false;
     int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
@@ -1120,10 +1058,8 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
 }
 
 
-// ZA_UNREACHABLE - a zero-byte assertion that control cannot fall through to this point (an
-// always-taken branch's dead arm, a never-returning JSR's continuation), letting the CFG prune that
-// one edge instead of pinning bytes on a dead path. TRUSTED: a wrong one defeats the certainty
-// contract, but it is the programmer's explicit promise. Final pass + feature enabled only.
+// ZA_UNREACHABLE - a zero-byte assertion that control cannot fall through here, letting the CFG
+// prune that edge. TRUSTED: the programmer's explicit promise.
 static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -1142,11 +1078,9 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
 }
 
 
-// The instruction a trailing annotation binds to: the last recorded one, skipping ZA_DISCARD markers -
-// IF its flow fits the annotation's kind, else RC_INDEX_NONE (binding to nothing beats mis-annotating).
-// ZA_CANCALL and ZA_RETURNTO qualify a call; ZA_CANJUMP a jump, branch or return (the RTS-dispatch
-// trick); ZA_RETURN a jump or branch only. A BITZP/BITABS skip fits nothing, deliberately: it is a
-// real emitted byte, so an annotation separated from its transfer by one detaches.
+// The instruction a trailing annotation binds to: the last recorded one, skipping ZA_DISCARD
+// markers, IF its flow fits the annotation's kind (binding to nothing beats mis-annotating).
+// A BITZP/BITABS skip fits nothing: a real emitted byte detaches a trailing annotation.
 static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 {
     uint32_t ni = zeropage_insn_count(&b->zeropage);
@@ -1181,10 +1115,8 @@ static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 }
 
 
-// Record one annotation target value as cflows sited at site: a range is enumerated and a list descended
-// (the same flattening EQUB gives data, so a symbol bound to a whole target table - handlers = {a, b} -
-// annotates in one word), and any leaf goes through the int-argument path: known -> one cflow, a forward
-// reference -> ask for another pass, anything else (a ZA_AUTO address included) -> the usual diagnostics.
+// Record one annotation target value as cflows sited at site: ranges and lists flatten like EQUB's
+// data, so a symbol bound to a whole target table (handlers = {a, b}) annotates in one word.
 static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cflow_kind kind,
                                          parse_flags flags, cursor at, rc_arena scratch)
 {
@@ -1220,10 +1152,9 @@ static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cf
 }
 
 
-// The shared body of ZA_CANCALL / ZA_CANJUMP / ZA_RETURNTO: parse a comma-separated list of targets
-// (numbers, or ranges/lists that flatten to numbers) and record one cflow of kind per target, sited
-// via annotation_site. Only the final pass records instructions, so only then is there a site; the
-// settling passes still parse the list so the statement stays well-formed. A forward target defers.
+// The shared body of ZA_CANCALL / ZA_CANJUMP / ZA_RETURNTO: a comma-separated target list, one
+// cflow per target, sited via annotation_site (only the final pass records, so only then is there
+// a site; settling passes still parse the list).
 static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
                                        zp_cflow_kind kind, rc_arena scratch)
 {
@@ -1257,34 +1188,26 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
 }
 
 
-// ZA_CANCALL <targets> - the programmer declares the real destination(s) of the JSR immediately preceding it (a
-// self-modified operand, or a dispatch the analysis cannot follow); with it, the callee footprint is bounded
-// by the union of the named routines. TRUSTED, like ZA_UNREACHABLE. Note that a constant target off the
-// assembled stream reads as a call OUT of the program (an external OS/ROM entry, empty footprint) - so a
-// self-modified JSR whose placeholder operand is such a constant is NOT caught by the analysis, and the
-// annotation is what makes it sound.
+// ZA_CANCALL <targets> - declares the real destination(s) of the JSR preceding it; the callee
+// footprint becomes the union of the named routines. TRUSTED. A self-modified JSR whose
+// placeholder operand looks external is NOT caught, so the annotation is what makes it sound.
 static parse_result handle_za_cancall(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_za_cancall, scratch);
 }
 
 
-// ZA_CANJUMP <targets> - the programmer declares the possible destinations of the computed / indirect JMP
-// immediately preceding it (a jump table). Without it, the jump reaches code the CFG cannot follow and, with
-// variables live, is refused (error_type_za_auto_computed_flow); with it, the CFG wires every named target as a
-// real successor edge, so liveness follows control to each one. TRUSTED, like ZA_UNREACHABLE. Also legal after
-// an RTS, for the dispatch trick (push a target address minus one, RTS into it): the annotated RTS is a jump
-// in a return's clothing, and gets the declared edges instead of ending the routine.
+// ZA_CANJUMP <targets> - declares the destinations of the computed / indirect JMP preceding it;
+// the CFG wires every named target as a real successor edge. TRUSTED. Also legal after an RTS, for
+// the dispatch trick: the annotated RTS gets the declared edges instead of ending the routine.
 static parse_result handle_za_canjump(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_za_canjump, scratch);
 }
 
 
-// ZA_RETURN - a bare marker declaring that the jump or branch immediately preceding it hands control
-// back to this routine's CALLER (the callee side of the inline-data idiom). The CFG wires no edge for
-// it and liveness treats the block as a returning exit, exactly as for an RTS; on a branch it is a
-// CONDITIONAL return (the not-taken edge stays). TRUSTED, like ZA_UNREACHABLE.
+// ZA_RETURN - the jump or branch preceding it hands control back to this routine's CALLER. No edge
+// is wired; liveness treats the block as a returning exit (a branch: a CONDITIONAL return). TRUSTED.
 static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -1307,23 +1230,18 @@ static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t 
 }
 
 
-// ZA_RETURNTO <targets> - the caller side of the inline-data idiom, for when a data-consuming callee resumes
-// this call somewhere OTHER than the next instruction: the declared resumption points replace the JSR's
-// fall-through edge. Unneeded for the common shape (JSR print : EQUS "text", 0 : resume-here) - the CFG
-// falls through a data gap to the next instruction on its own. TRUSTED, like the rest; a resumption point
-// that begins no assembled instruction gets no edge, and finalize warns (it is almost always a mistyped
-// label or an address inside the data).
+// ZA_RETURNTO <targets> - a data-consuming callee resumes this JSR somewhere OTHER than the next
+// instruction: the declared points replace the fall-through edge. Unneeded for the common shape
+// (the CFG falls through a data gap on its own). TRUSTED; an off-stream point makes finalize warn.
 static parse_result handle_za_returnto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_can_targets(b, stmt, at, scope, section, flags, zp_cflow_za_returnto, scratch);
 }
 
 
-// ZA_DISCARD <var>[, <var>...] - the programmer's promise that the value each named ZA_AUTO variable
-// holds AT THIS POINT is never read again. Recorded as a size-0 marker; liveness treats it as a
-// full-width kill that stores nothing, which lets an array rebuilt through indexed stores (no
-// provable byte written) start its live range at the rebuild instead of leaking to the routine entry.
-// TRUSTED, like ZA_UNREACHABLE. Whole variables only - the promise is hard enough to audit already.
+// ZA_DISCARD <var>[, ...] - the value each named ZA_AUTO variable holds HERE is never read again.
+// A size-0 marker; liveness treats it as a full-width kill that stores nothing, so an array rebuilt
+// through indexed stores starts its live range at the rebuild. TRUSTED; whole variables only.
 static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -1382,10 +1300,8 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
 }
 
 
-// The shared body of ZA_ENTRY / ZA_INTERRUPT: a bare marker, like ZA_UNREACHABLE, recording the pc it stands at
-// as a declared program entry. Nothing is emitted, so a marker just inside a routine records the same pc as
-// its label - place it as the routine's first statement. zeropage_finalize turns the records into the
-// reachability roots (and, for ZA_INTERRUPT, the pinning of the handler's communication vars and footprint).
+// The shared body of ZA_ENTRY / ZA_INTERRUPT: a bare marker recording the pc it stands at as a
+// declared program entry (place it as the routine's first statement); finalize makes it a root.
 static parse_result handle_entry_mark(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags,
                                       bool interrupt, rc_arena scratch)
 {
@@ -1405,20 +1321,17 @@ static parse_result handle_entry_mark(baron *b, cursor stmt, cursor at, uint32_t
 }
 
 
-// ZA_ENTRY - marks the routine it opens as an external entry point (called from outside the program: a BASIC
-// framework, another executable). Declared entries become the ONLY sync roots for the allocator's
-// reachability check - one ZA_ENTRY anywhere replaces the default "each section's first instruction"
-// presumption. Deliberately NOT an interface contract: an external API whose inputs/outputs matter should
-// fix them to concrete addresses, not ZA_AUTO them.
+// ZA_ENTRY - marks the routine it opens as an external entry point. Declared entries become the
+// ONLY sync roots (one anywhere replaces the per-section default). Deliberately NOT an interface
+// contract: an external API should fix its inputs/outputs to concrete addresses, not ZA_AUTO them.
 static parse_result handle_za_entry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_entry_mark(b, stmt, at, scope, section, flags, false, scratch);
 }
 
 
-// ZA_INTERRUPT - marks the routine it opens as an interrupt handler. An async root: besides feeding the
-// reachability check, its communication vars (live-in at the handler) and its whole transitive footprint are
-// pinned against the rest of the program, because the handler can preempt at any instruction.
+// ZA_INTERRUPT - an async root: its communication vars and whole transitive footprint are pinned
+// against the rest of the program, because the handler can preempt at any instruction.
 static parse_result handle_za_interrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     return handle_entry_mark(b, stmt, at, scope, section, flags, true, scratch);
@@ -1434,12 +1347,9 @@ static void emit_le(baron *b, uint32_t section, uint64_t bits, uint32_t width)
 }
 
 
-// Emit one value into the current section as width-byte little-endian units, for EQUB/EQUW/EQUD (width
-// 1/2/4). A string goes character by character (each char widened to width bytes); a range is enumerated;
-// a list is descended (so nested lists and ranges flatten out); anything else is one width-byte unit via
-// int_argument_make, where a forward reference emits a zero placeholder of the right size and asks for
-// another pass. Returns .error/.error_at on failure and .unresolved when a value defers (its .next is
-// unused). A dead branch emits nothing and raises nothing - mirroring inactive statements.
+// Emit one value as width-byte little-endian units (EQUB/EQUW/EQUD = 1/2/4): a string character by
+// character, a range enumerated, a list descended; anything else is one unit, where a forward
+// reference emits a zero placeholder of the right size and asks for another pass.
 static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags flags, cursor at, uint32_t width, rc_arena scratch)
 {
     if (!flags.active) {
@@ -1541,11 +1451,9 @@ static parse_result handle_equd(baron *b, cursor stmt, cursor at, uint32_t scope
 }
 
 
-// BITZP / BITABS - the classic overlapping-streams trick: emit a lone BIT opcode (&24 / &2C) whose
-// operand fetch swallows the next 1 / 2 bytes; a branch straight past us executes the swallowed
-// instruction instead. The byte is emitted on every pass (the pc must not wobble) and recorded on the
-// final pass, so the CFG knows fall-through resumes at pc + 1 + swallow and the record at pc + 1 is
-// reached only by an explicit branch - a swallowed store must not read as a write on the hopping path.
+// BITZP / BITABS - the overlapping-streams trick: a lone BIT opcode (&24 / &2C) whose operand fetch
+// swallows the next 1 / 2 bytes. Emitted every pass (the pc must not wobble), recorded on the final
+// one so the CFG knows fall-through resumes at pc + 1 + swallow, hopping the swallowed instruction.
 static parse_result handle_bit_skip(baron *b, cursor stmt, cursor at, uint32_t section, parse_flags flags, uint8_t swallow)
 {
     if (flags.active) {
@@ -1591,17 +1499,14 @@ static parse_result handle_bitabs(baron *b, cursor stmt, cursor at, uint32_t sco
 }
 
 
-// The '#' that may introduce a PRINT channel. It is not a statement token ('#' never starts a
-// statement), so PRINT peeks with its own tiny table - the same trick as assign_tokens.
+// The '#' introducing a PRINT channel ('#' is not a statement token, so PRINT peeks here).
 static const token print_token_entries[] = {
     {RC_STR_INIT("#"), {.type = lexeme_type_hash}},
 };
 static const token_table print_tokens = RC_VIEW(print_token_entries);
 
-// True on the one pass whose PRINT output the caller receives: the output pass when one runs (under
-// -v the text lands in channel 0 between the listing lines being built there, and a ZA_AUTO symbol
-// prints its ALLOCATED address - during the settling passes it is not a number at all), the final
-// pass otherwise. Everything has settled by either, so each PRINT speaks exactly once.
+// True on the one pass whose PRINT output the caller receives: the output pass when one runs, the
+// final pass otherwise. Everything has settled by either, so each PRINT speaks exactly once.
 static bool print_on(const baron *b, parse_flags flags)
 {
     bool extra_pass = b->want_verbose || zeropage_is_enabled(&b->zeropage);
@@ -1609,9 +1514,7 @@ static bool print_on(const baron *b, parse_flags flags)
 }
 
 
-// Append one PRINT value to its channel: strings raw (concatenation is the point - spacing belongs to
-// the writer), everything else in value_format's diagnostic form (decimal numbers, {..} lists with
-// nested strings quoted - just what a debug dump wants).
+// Strings append raw (spacing belongs to the writer); everything else in value_format's shape.
 static void print_value(baron *b, uint32_t channel, value v)
 {
     if (value_is_string(v)) {
@@ -1623,11 +1526,9 @@ static void print_value(baron *b, uint32_t channel, value v)
 }
 
 
-// PRINT [#n,] value [, value...] - write the values, concatenated, to output channel n (a single digit;
-// 0 when no #n is given), one newline at the end. Channel 0 reaches stdout by default and the CLI can
-// redirect any channel to a file (-logN). A PRINT with no values is a blank line. Output happens on one
-// pass only (see print_on); a PRINT is not echoed in the -v listing - like an assignment it emits no
-// bytes, and its output is its own trace.
+// PRINT [#n,] value [, value...] - the values concatenated to channel n (0 by default), one newline
+// at the end; no values is a blank line. Output happens on one pass only (print_on); a PRINT is not
+// echoed in the -v listing - its output is its own trace.
 static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -1673,8 +1574,7 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
                 unresolved = true;   // a forward reference; it prints once everything settles
             }
             else {
-                // The undefined-on-final promotion, matching int_argument_make; any other error value
-                // carries its own cause through. semantic_error self-gates on the settling pass.
+                // The undefined-on-final promotion (matching int_argument_make); other errors carry through.
                 error_type code = e.value.error.code == error_type_unknown_symbol
                                 ? error_type_undefined_symbol : e.value.error.code;
                 semantic_error_payload(b, flags, code, cursor_at(at, pos), e.value.error.detail);
@@ -1700,12 +1600,9 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// ERROR [value[, value...]] - the user's own diagnostic: the values format exactly as PRINT would
-// show them and record as a RECOVERABLE error at the statement (the syntax is fine, so parsing
-// carries on and further errors still accumulate). The message renders whole through the bare "%"
-// template, so a '%' inside it is inert. A forward reference defers like PRINT's; still unknown on
-// the final pass it is the usual undefined symbol and the ERROR stays silent. A dead branch records
-// nothing.
+// ERROR [value[, value...]] - the user's own diagnostic: PRINT-formatted, recorded as a RECOVERABLE
+// error at the statement (parsing carries on). A forward reference defers like PRINT's; still
+// unknown on the final pass, the usual undefined symbol is reported and the ERROR stays silent.
 static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -1791,10 +1688,8 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         return r;
     }
 
-    // Bind name = current pc in the current scope; a moved label drives another pass, and a second
-    // definition of the same name here (a different source position) is a duplicate - recorded, but the
-    // first binding stands and we press on. In a dead branch we instead REMOVE the name, clearing any
-    // binding a live earlier pass left behind.
+    // Bind name = current pc; a moved label drives another pass, and a second definition (a
+    // different source position) is a duplicate. A dead branch instead REMOVES the name.
     if (flags.active) {
         symbol_status st = scopes_set_symbol(
             &b->scopes,
@@ -1813,9 +1708,8 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         }
         r.changed = (st == symbol_status_changed);
 
-        // Record a marker tying this label's identity (scope, def=at - the pair a reference resolves to) to
-        // its placement, so a JSR/JMP/branch that names it finds the right block even where banks share the
-        // address. Final pass only, feature on - like the insn / annotation streams.
+        // Tie the label's identity (scope, def) to its placement, so a transfer that names it finds
+        // the right block even where banks share the address.
         if (flags.final && zeropage_is_enabled(&b->zeropage)) {
             zeropage_add_label(&b->zeropage, scope, at, section, sections_pc(&b->sections, section));
         }
@@ -1828,10 +1722,8 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
 
     verbose_text_line(b, flags, stmt, nm.next, 0, verbose_text_margin);   // ".name" at the margin (never its scope's braces)
 
-    // What follows decides the label's shape. A '{' - optionally one separator away, so it may sit
-    // on the next line - makes the label name a scope. Anything else is not the label's to parse: we
-    // drop back to the parent loop, which takes the next token as its own statement (or, on a '}',
-    // closes the block). The label never owns the statement that follows it.
+    // A following '{' - optionally one separator away - makes the label name a scope. Anything
+    // else is not the label's to parse: it never owns the statement that follows it.
     lexer_result nb = lexer_next(src, r.next, statement_tokens(b));
     uint32_t brace_start = r.next;
 
@@ -1854,10 +1746,8 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// Build a scope key no user identifier can spell - '@' source ':' pos - into the caller's fixed buffer.
-// '@' and ':' are not identifier characters, so the key never collides with a real name. FOR appends a
-// further ':' iteration; the brace handler uses it as-is. Each u32 is at most ten digits, so the buffer
-// never needs to grow (hence the NULL arena); scopes_get_or_make_child owns a copy on first sighting.
+// Build a scope key no user identifier can spell - '@' source ':' pos - into the caller's fixed
+// buffer (each u32 is at most ten digits, so it never grows: hence the NULL arena).
 static rc_mstr anon_scope_key(char *storage, uint32_t cap, cursor at)
 {
     rc_mstr m = {.data = storage, .cap = cap};
@@ -1880,11 +1770,9 @@ static rc_mstr anon_for_scope_key(char *storage, uint32_t cap, cursor at, uint32
 }
 
 
-// A local label '.@': an anonymous marker at the current PC that @- / @+ branch to. We reuse anon_scope_key
-// to give it an unspellable per-position key in the ordinary symbol table, so it converges, clears on a dead
-// branch, and defers a forward @+ exactly as a named label would. Its cursor is unique per '.@', so it can
-// never be a duplicate. A '.@' is a whole statement with nothing following it, so we consume just the token
-// and leave the rest of the line to the statement loop.
+// A local label '.@': an anonymous marker at the current PC that @- / @+ branch to. anon_scope_key
+// gives it an unspellable per-position key in the ordinary symbol table, so it converges, clears on
+// a dead branch and defers a forward @+ exactly as a named label would.
 static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scratch;
@@ -1902,8 +1790,7 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
         r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
     }
     else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, key.view), at)) {
-        // Dead branch: clear only the binding this local label owns. Its @source:pos key is unique per
-        // position, so the guard is a no-op here, but we keep it uniform with the named-label / assignment cases.
+        // The @source:pos key is unique per position, but keep the guard uniform with named labels.
         r.changed = scopes_remove_symbol(&b->scopes, scope, key.view);
     }
 
@@ -1925,11 +1812,9 @@ static parse_result handle_open_brace(baron *b, cursor stmt, cursor at, uint32_t
 }
 
 
-// IF cond ... ELIF cond ... ELSE ... ENDIF, evaluated each pass. IF opens no scope: labels in the
-// live branch leak to the enclosing one. ELIF is just an IF in the else position, so this reads that
-// way: one condition picks between a true body and an else body, at most one live - and neither when
-// the condition cannot yet be evaluated, which owes another pass (a hard error on the final pass).
-// Entered just past the IF - or, via the recursion, the ELIF - at the condition.
+// IF cond ... ELIF cond ... ELSE ... ENDIF, evaluated each pass. IF opens no scope (a live branch's
+// labels leak to the enclosing one); an ELIF recurses here as an IF in the else position. An
+// unevaluable condition leaves both branches dead and owes another pass.
 static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -2011,8 +1896,8 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
         );
     }
 
-    // If it was an ELSE, parse a black with the else_cond. This is not necessarily the inverse of the if_cond,
-    // because the condition may be unevaluable, in which case both branches are dead.
+    // An ELSE body runs on else_cond - not necessarily the inverse of if_cond, because an
+    // unevaluable condition leaves both branches dead.
     if (t.token.type == lexeme_type_closer && t.token.closer.id == closer_else) {
         // ELSE insists on a separator after it, like the IF condition and ENDIF do.
         parse_result sep = require_separator(b, cursor_at(at, t.next));
@@ -2041,7 +1926,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
             return acc;
         }
 
-        // Now read the token after the ELSE block, which must be ENDIF. The ELSE body is always the last
+        // The token after the ELSE body must be ENDIF - the ELSE is always last.
         t = lexer_next(src, acc.next, statement_tokens(b));
     }
 
@@ -2051,9 +1936,8 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
         return fold(acc, require_separator(b, cursor_at(at, acc.next)));
     }
 
-    // A chain keyword out of place (a second ELSE, an ELIF after ELSE) is unexpected - raise its own
-    // error; any other closer ('}', NEXT) or end of input means there was no ENDIF at all. Either way
-    // the block structure is broken, so this is fatal.
+    // A chain keyword out of place raises its own error; any other closer or end of input means
+    // there was no ENDIF. Either way the block structure is broken: fatal.
     error_type code = t.token.type == lexeme_type_closer
                               && (t.token.closer.id == closer_elif || t.token.closer.id == closer_else)
                           ? (error_type) t.token.closer.unexpected
@@ -2080,11 +1964,9 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
 
-    // The statement is fully consumed now, so any problem with it is recoverable. A dotted target is a
-    // legal token but not a legal binding name: record it and bind nothing. Otherwise bind name = value;
-    // a second definition of the same name (a different source position) is a duplicate - recorded, first
-    // binding stands. In a dead branch we instead REMOVE the name, clearing a binding a live earlier pass
-    // left behind, and raise none of the value-dependent errors.
+    // The statement is fully consumed, so any problem now is recoverable. A dotted target binds
+    // nothing; a second definition is a duplicate (the first binding stands); a dead branch
+    // instead REMOVES the name.
     parse_result r = {.next = e.next};
     if (is_dotted(name)) {
         semantic_error(b, flags, error_type_invalid_assignment, cursor_at(at, at.pos));
@@ -2120,8 +2002,7 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
     }
 
-    // An assignment binds a symbol and emits nothing, so it echoes at the margin like a label - the
-    // reader can follow the symbols without mistaking them for code.
+    // An assignment emits nothing, so it echoes at the margin like a label.
     verbose_text_line(b, flags, stmt, e.next, 0, verbose_text_margin);
 
     return fold(r, require_separator(b, cursor_at(at, e.next)));
@@ -2130,12 +2011,9 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
 
 // ---- the FOR loop ----
 
-// FOR <var> = <range-or-list> : ... : NEXT, evaluated each pass. Each iteration runs the body once with
-// <var> bound to that element in its own per-iteration child scope, so body labels never collide across
-// iterations. An empty sequence (e.g. {} or 5..<5) runs the body once inactive - zero bytes, no error.
-// A sequence whose count is not yet known (a forward reference) does the same and forces another pass;
-// on the final pass that is a hard undefined_symbol. Like IF, FOR opens no scope of its own for the loop
-// control (only the per-iteration body scopes) and must close (NEXT) inside the scope it began in.
+// FOR <var> = <range-or-list> : ... : NEXT, evaluated each pass. Each iteration runs the body once
+// with <var> bound in its own per-iteration child scope, so body labels never collide. Empty /
+// unresolved / dead sequences all run the body once inactive (unresolved also owes a pass).
 static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -2167,10 +2045,8 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
 
     uint32_t body_start = sep.next;
 
-    // Reduce the sequence to its element list, but only when the parent is live (a dead FOR evaluates
-    // nothing, like IF). iterate stays false for an empty list, an unresolved count, a bad sequence, or a
-    // dead parent - all of which run the body once inactive (which is also how we locate NEXT). A bad
-    // sequence (not a list or range) is recorded but recoverable: we press on and close the loop.
+    // Reduce the sequence to its element list (only when live). iterate stays false for an empty
+    // list, an unresolved count, a bad sequence or a dead parent - all run the body once inactive.
     bool iterate = false;
     bool unresolved = false;
     rc_view_value items = {0};
@@ -2239,22 +2115,19 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
 
 // ---- INCLUDE ----
 
-// INCLUDE "file" splices another source in at this point - textually, so its code emits into the current
-// section at the current pc and its symbols bind into the current scope (no scope of its own). We re-parse
-// the included file every pass, exactly like the rest of the statement stream, so forward references cross
-// the boundary freely. The filename is resolved relative to THIS file's directory (see file_path_resolve).
+// INCLUDE "file" splices another source in TEXTUALLY: its code emits at the current pc, its symbols
+// bind into the current scope, and it re-parses every pass so forward references cross the
+// boundary. The filename resolves relative to THIS file's directory.
 static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
-    // The filename is a string operand, evaluated on the spot - we load the file this very pass, so a
-    // forward-referenced name is no use to us (it stays an error value, and we grumble about it below).
+    // A string operand, needed on the spot: the file loads this very pass.
     expr_result e = eval(b, at, scope, section, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
 
-    // The pull-in's own outcome: it stays empty unless we actually load a file. A dead branch swallows the
-    // filename and the separator but pulls in nothing at all.
+    // Stays empty unless we actually load a file; a dead branch pulls in nothing.
     parse_result pulled = {0};
     if (flags.active) {
         if (value_is_string(e.value)) {
@@ -2276,9 +2149,8 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
                     pulled = parse_file(b, (cursor) {.source = inc_source}, scope, section, flags, scratch);
                     b->include_depth--;
                     if (pulled.fatal) {
-                        // A broken statement stream in the included file aborts the whole assemble - but it
-                        // still owes the trail. Recorded UNGATED (baron_error, not semantic_error): a fatal
-                        // fires on any pass, so its breadcrumb must too.
+                        // A fatal in the file still owes the trail, recorded UNGATED (baron_error):
+                        // a fatal fires on any pass, so its breadcrumb must too.
                         baron_error(b, error_type_included_from, cursor_at(at, at.pos));
                         return pulled;
                     }
@@ -2292,10 +2164,8 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
             }
         }
         else if (value_is_error(e.value) && e.value.error.code == error_type_unknown_symbol) {
-            // A forward-referenced filename: defer, exactly like a forward address. We pull in nothing this
-            // pass; once the name binds on a later pass the string resolves and the file loads. Still unknown
-            // on the final pass means it never will be (a name defined only inside the file it would name), so
-            // we call it out then.
+            // A forward-referenced filename defers exactly like a forward address: nothing loads
+            // this pass; still unknown on the final one, it never will be.
             if (flags.final) {
                 semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
                                        e.value.error.detail);
@@ -2310,17 +2180,14 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
         }
     }
 
-    // Carry the pull-in's unresolved/changed up so the driver runs another pass if it must, and carry on in
-    // THIS file at the separator just past the filename.
+    // Carry the pull-in's flags up, and carry on in THIS file just past the filename.
     return fold(pulled, require_separator(b, cursor_at(at, e.next)));
 }
 
 
-// INCBIN "file" - splice a binary file's bytes into the current section. Its size never changes
-// across passes, so the settling passes never read it: rc_file_size reserves the span (zero-padded)
-// and only the FINAL pass loads and emits the real bytes. The filename resolves like INCLUDE's; a
-// forward-referenced name defers. A missing / unreadable file is FATAL - the output would be the
-// wrong size, so there is no sensible recovery.
+// INCBIN "file" - splice a binary file's bytes in. Its size never changes across passes, so the
+// settling passes only reserve the span (rc_file_size); the FINAL pass loads and emits the real
+// bytes. A missing / unreadable file is FATAL: the output would be the wrong size.
 static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     expr_result e = eval(b, at, scope, section, scratch);
@@ -2337,9 +2204,8 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
             rc_str base = source_files_name(&b->source_files, at.source);
             rc_str path = file_path_resolve(base, e.value.string, &scratch);
             if (flags.final || flags.output) {
-                // Final pass: load the file and emit its bytes for real (one byte at a time, via emit_data).
-                // The listing pass repeats this - its sections are the ones the result carries, so it must
-                // hold the real bytes too (and the listing's hex dump reads them back).
+                // Load and emit for real. The output pass repeats this - its sections are the ones
+                // the result carries, so it must hold the real bytes too.
                 rc_file_load_binary_result f = rc_file_load_binary(path, 0, &scratch);
                 if (f.error != RC_FILE_OK) {
                     return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
@@ -2357,8 +2223,7 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
             }
         }
         else if (value_is_error(e.value) && e.value.error.code == error_type_unknown_symbol) {
-            // A forward-referenced filename: defer, like INCLUDE. Still unknown on the final pass means it never
-            // binds (a name defined only where it cannot be seen in time), so we call it out then.
+            // A forward-referenced filename defers, like INCLUDE's.
             if (flags.final) {
                 semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
                                        e.value.error.detail);
@@ -2378,12 +2243,9 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
 }
 
 
-// INCSECTION <name> - splice the assembled bytes of the named section here. Only SPACE is reserved
-// during the passes (the source's best-known size, so the layout settles whatever the definition
-// order); the bytes land in one final, dependency-ordered fixup AFTER the allocator has done its
-// work (splices_resolve). So: the source may be defined later; a missing one is judged only on the
-// final settled state; a cycle is refused; the -v listing shows an address-only line. The copy is
-// literal - the bytes are meant to run at the SOURCE section's addresses once the program moves them.
+// INCSECTION <name> - splice the named section's assembled bytes here. The passes only RESERVE the
+// source's best-known size; the bytes land in one final, dependency-ordered fixup after allocation
+// (splices_resolve). The copy is literal: the bytes run at the SOURCE section's addresses.
 static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) scope;
@@ -2406,19 +2268,17 @@ static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t
 
 // ---- MACRO ----
 
-// MACRO name [signature] : ...body... : ENDMACRO, evaluated each pass. The name/token is registered BEFORE
-// the body is scanned, so the body may call the macro itself (self-recursion); mutual recursion needs a
-// forward declaration - an empty body - so the partner's name is a token in time. The body is captured as a
-// cursor and only ever PARSED at invocation; here we scan it inactively (the trick FOR uses to locate NEXT),
-// which finds ENDMACRO through the real parser - handling multi-line list literals and nested IF/FOR/{} -
-// without expanding anything. The definition emits nothing itself.
+// MACRO name [signature] : ...body... : ENDMACRO. The name registers BEFORE the body is scanned, so
+// a self-call inside lexes as a macro (mutual recursion needs a forward declaration - an empty
+// body). The body is captured as a cursor and only ever PARSED at invocation; here it is scanned
+// inactively (FOR's trick) to locate ENDMACRO without expanding anything.
 static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    // The name, from the STATIC base table (so an already-defined macro name reads as a plain identifier
-    // here, not a call - which is what lets an overload or a fill-in reuse the one name entry).
+    // From the STATIC base table, so an already-defined name reads as an identifier here, not a
+    // call (which is what lets an overload or a fill-in reuse the one name entry).
     lexer_result nm = lexer_next(src, at.pos, base_statement_tokens);
     if (nm.token.type != lexeme_type_identifier) {
         error_type code = (nm.token.type == lexeme_type_terminator)
@@ -2516,18 +2376,15 @@ static const token func_paren_entries[] = {
 };
 static const token_table func_paren_tokens = RC_VIEW(func_paren_entries);
 
-// FUNCTION name(params) [ : body ] = return-expr, evaluated each pass. The name/token is registered BEFORE
-// the body is scanned, so the body may call the function itself (self-recursion). The definition is a
-// STATEMENT (it emits nothing); the body's value semantics live in the evaluator (expression.c), which we
-// call here only to locate the top-level '=' return and learn whether this is a real body or a forward
-// declaration (an empty body plus an empty return expression).
+// FUNCTION name(params) [ : body ] = return-expr. The name registers BEFORE the body is scanned
+// (self-recursion works); the body's value semantics live in the evaluator (expression.c), called
+// here only to locate the top-level '=' return and spot a forward declaration.
 static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    // The name, from the STATIC base table (so an already-defined function name reads as a plain identifier
-    // here, not a call - which is what lets an overload or a fill-in reuse the one name entry).
+    // From the STATIC base table, so an already-defined name reads as an identifier here, not a call.
     lexer_result nm = lexer_next(src, at.pos, base_statement_tokens);
     if (nm.token.type != lexeme_type_identifier) {
         error_type code = (nm.token.type == lexeme_type_terminator)
@@ -2541,10 +2398,9 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
         return syntax_error(b, error_type_function_name_reserved, cursor_at(at, at.pos));
     }
 
-    // A builtin operand call (abs(, lo(, shape() bakes its '(' into its token, so lexing the name here -
-    // where the header's '(' follows it - matches such a builtin and rejects the collision. Use the STATIC
-    // base operand table, not the dynamic one: reusing a prior USER function's name is fine (overload /
-    // forward-decl fill-in), only a builtin clash is reserved.
+    // A builtin operand call (abs(, lo() bakes its '(' into its token, so lexing the name here -
+    // where the header's '(' follows it - spots the collision. The STATIC base operand table:
+    // reusing a prior USER function's name is fine, only a builtin clash is reserved.
     lexer_result op = lexer_next(src, at.pos, expression_operand_base());
     if (op.token.type == lexeme_type_unary_op || op.token.type == lexeme_type_function) {
         return syntax_error(b, error_type_function_name_reserved, cursor_at(at, at.pos));
@@ -2583,9 +2439,8 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
 
     cursor body = cursor_at(at, t.next);   // just past ')'
 
-    // Scan the body (in the evaluator) to find the top-level '=' return and its extent. The scan is inactive
-    // and side-effect-free (nested calls do not execute), and self-calls find no signature yet, so it always
-    // terminates. It also reports whether this is a real body or a forward declaration (empty body + return).
+    // Scan the body (in the evaluator) to find the top-level '=' return and its extent. Inactive
+    // and side-effect-free; it also reports whether this is a forward declaration.
     expr_env env = {
         .scopes         = &b->scopes,
         .scope_index    = scope,
@@ -2616,11 +2471,9 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
 }
 
 
-// Try to match one overload against the call text at at. matched is true (and end is the cursor at
-// the trailing separator) when every slot matches and the statement then ends. Literal slots are recognised via
-// the macro's OWN literal table; parameter slots consume one expression in scope - its value is ignored
-// here, so matching is purely structural and a forward-referenced argument matches like any other (the choice
-// of overload is thus identical every pass). A parse failure (no operand where one is needed) fails the fit.
+// Try one overload against the call text. A parameter slot consumes one expression whose VALUE is
+// ignored - matching is purely structural, so a forward-referenced argument matches like any other
+// and the choice of overload is identical every pass.
 typedef struct macro_match {
     bool     matched;
     uint32_t end;
@@ -2655,9 +2508,7 @@ static macro_match macro_try_match(baron *b, rc_str src, cursor at, macro *m, ma
         }
     }
 
-    lexer_result term = lexer_next(src, pos, statement_tokens(b));
-    if (term.token.type == lexeme_type_terminator
-        || (term.token.type == lexeme_type_closer && term.token.closer.id == closer_brace)) {
+    if (peek_separator(b, cursor_at(at, pos)).ends) {
         return (macro_match) {.matched = true, .end = pos};
     }
 
@@ -2665,10 +2516,9 @@ static macro_match macro_try_match(baron *b, rc_str src, cursor at, macro *m, ma
 }
 
 
-// name arg1, arg2 - a macro call. Match an overload, then (when live) stamp its body out into a fresh child
-// scope with the arguments bound as symbols. Mirrors handle_for's body re-walk and handle_include's error
-// breadcrumb. An inactive call consumes its arguments but expands nothing - which is what makes a recursive
-// call terminate once its base-case branch goes inactive.
+// name arg1, arg2 - a macro call: match an overload, then (when live) stamp the body out into a
+// fresh child scope with the arguments bound. An inactive call consumes its arguments but expands
+// nothing - which is what terminates a recursion once its base case goes inactive.
 static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -2753,8 +2603,8 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
     b->macro_depth--;
 
     if (bodyr.fatal) {
-        // A broken body aborts the whole assemble - but it still owes the trail. Recorded UNGATED
-        // (baron_error, not semantic_error): a fatal fires on any pass, so its breadcrumb must too.
+        // A fatal body still owes the trail, recorded UNGATED (baron_error): a fatal fires on any
+        // pass, so its breadcrumb must too.
         baron_error(b, error_type_expanded_from, cursor_at(at, at.pos));
         return bodyr;
     }
@@ -2780,9 +2630,8 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
 }
 
 
-// TRUE / FALSE / PI are expression constants, reserved so that a name always resolves to the constant.
-// Meeting one at statement start is someone assigning to it (pi = 5) or otherwise misusing it as a name -
-// a fatal error, the same way a name that clashes with a mnemonic is rejected.
+// TRUE / FALSE / PI are reserved: meeting one at statement start is someone assigning to it
+// (pi = 5), rejected the same way a mnemonic-named label is.
 static parse_result handle_reserved_constant(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
@@ -2818,9 +2667,8 @@ static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uin
 }
 
 
-// Parse statements until the block's closer: a '}' or end of input. It stops AT the closer -
-// leaving a '}' unconsumed - and treats neither as an error, because which closer is required
-// depends on the caller: parse_scope wants the '}', run_pass wants end of input.
+// Parse statements up to a block closer or end of input, stopping AT it (the closer unconsumed):
+// which one is required depends on the caller.
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -2875,11 +2723,8 @@ static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t se
 }
 
 
-// A whole source file - the largest parsable item: parse its statements and require they run right
-// out at end of input. parse_block stops only at a block closer or at end of input, so a leftover
-// closer here has nothing to close: a stray '}', an IF-chain keyword with no IF, or a NEXT with no
-// FOR. With those ruled out, end of input is the only thing left (asserted). (parse_scope is a braced
-// block within a file; parse_block is the shared statement loop both rest on.)
+// A whole source file: parse its statements and require they run right out at end of input - a
+// leftover closer here has nothing to close.
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     parse_result r = parse_block(b, at, scope, section, flags, scratch);
@@ -2903,10 +2748,9 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t sec
 // ---- the multi-pass driver ----
 
 // The INCSECTION dependency walk, shared by the per-pass cycle check and the final fixup. Splices
-// release in "everything spliced INTO my source has landed first" order - exactly the copy order, so
-// a chain carries C's bytes through B into A - and one that never releases sits on a cycle. With
-// apply set this is the real fixup (an unknown source is an error: absence is final by now); without
-// it, the walk only proves acyclicity. Returns false with diagnostics recorded when anything refused.
+// release in "everything spliced INTO my source has landed first" order - exactly the copy order -
+// and one that never releases sits on a cycle. With apply set this is the real fixup (an unknown
+// source is an error: absence is final by now); without it, the walk only proves acyclicity.
 static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
 {
     rc_view_splice all = sections_splices(&b->sections);
@@ -2973,11 +2817,9 @@ static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
 
 // ---- command-line predefines ----
 
-// Apply one -D "name=expression" definition into the root scope. The string registers as a tiny
-// synthetic source named after the switch (so diagnostics point somewhere readable; keyed by name,
-// so every pass lands on the same source index and the binding's identity holds). The name lexes
-// through the base statement table (the source's collision rules), and the expression evaluates like
-// an assignment's, so it may forward-reference. Anything left after the expression is a mistake.
+// Apply one -D "name=expression" into the root scope. The string registers as a synthetic source
+// named after the switch, keyed by name so every pass lands on the same source index (the
+// binding's identity); the expression evaluates like an assignment's, so it may forward-reference.
 static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_arena scratch)
 {
     rc_mstr name = rc_mstr_make(define.len + 4, &scratch);
@@ -3011,9 +2853,8 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
         return syntax_error(b, error_type_expected_end_of_expression, (cursor) {.source = src, .pos = e.next});
     }
 
-    // Bind it, mirroring handle_assignment: a duplicate here is a second -D of the same name (a
-    // source assignment to it collides at ITS site instead - we bound first), a forward reference
-    // defers to the next pass, and a moved value is the convergence signal.
+    // Bind it, mirroring handle_assignment: a duplicate is a second -D of the same name (a source
+    // assignment to it collides at ITS site instead - we bound first).
     parse_result r = {.next = e.next};
     symbol_status st = scopes_set_symbol(&b->scopes, 0, nm.token.identifier.name, e.value, def);
 
@@ -3061,15 +2902,12 @@ static parse_result apply_defines(baron *b, parse_flags flags, rc_arena scratch)
 
 static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_arena scratch)
 {
-    // The per-pass arena backs sections, macros and functions - a fresh projection of the source each pass.
-    // Reset it once, then rebuild all three stores into it (sections gets a fresh default section; the two
-    // token tables are reseeded from their static bases, with room for per-name tokens).
+    // The per-pass arena backs sections, macros and functions: reset it once, rebuild all three.
     rc_arena_reset(b->per_pass);
     sections_reset(&b->sections);
     if (!flags.output) {
-        // ZA_POOL re-runs this pass and refills the (permanent) set. The OUTPUT pass leaves the whole
-        // zeropage subsystem alone: allocation already ran, and the final pass's IR/vars stay readable
-        // (everything that appends to them is final-gated; ZA_POOL re-marking its bits is idempotent).
+        // The OUTPUT pass leaves the whole zeropage subsystem alone: allocation already ran, and
+        // the final pass's IR/vars must stay readable.
         zeropage_reset(&b->zeropage);
     }
 
@@ -3081,9 +2919,8 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     macros_reset(&b->macros, base_statement_tokens, 128);
     functions_reset(&b->functions, expression_operand_base(), 128);
 
-    // Fresh channel buffers each pass (the previous pass's died with the arena reset above). They fill
-    // lazily on first append - only the output pass writes them at all - except channel 0 on the listing
-    // pass, which is certain to grow and gets its buffer up front.
+    // Fresh channel buffers each pass (the previous pass's died with the arena reset); channel 0 on
+    // the listing pass is certain to grow, so it alone is made up front.
     for (uint32_t i = 0; i < baron_num_channels; i++) {
         b->channels[i] = (rc_mstr) {0};
     }
@@ -3111,10 +2948,9 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
         scratch
     ));
 
-    // INCSECTION bookkeeping. A reservation that missed its source's settled size reshapes the layout,
-    // so it forces another pass; a dependency cycle can never settle, so it fails RIGHT NOW (on the first
-    // pass that sees it, not after the pass cap); and every named section's size rolls into the
-    // cross-pass map, ready for next pass's reservations.
+    // INCSECTION bookkeeping: a reservation that missed its source's settled size forces another
+    // pass; a dependency cycle can never settle, so it fails RIGHT NOW; and every named section's
+    // size rolls into the cross-pass map, ready for next pass's reservations.
     if (!r.fatal) {
         r.changed |= sections_splices_changed(&b->sections);
         if (!splices_resolve(b, false, scratch)) {
@@ -3122,9 +2958,8 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
         }
         sections_note_sizes(&b->sections);
 
-        // Convergence hardening: emission that shifted with no symbol moving still owes another pass
-        // (an RND draw set displaced by a settling structure, say). Settling passes only - the final
-        // pass differs legitimately at INCBIN spans, the output pass at every ZA_AUTO address.
+        // Convergence hardening: emission that shifted with no symbol moving still owes another
+        // pass. Settling passes only - final and output differ legitimately (INCBIN, ZA_AUTO).
         if (!flags.final && !flags.output) {
             r.changed |= sections_emission_changed(&b->sections);
         }
@@ -3134,9 +2969,8 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
 }
 
 
-// Does this call definitely rewrite variable v whichever arm it takes? True only when every arm is an
-// in-program routine whose must-write set covers the whole variable - an external arm returns having
-// written nothing, and an untrackable one could do anything, so both forfeit the kill.
+// Does this call definitely rewrite variable v whichever arm it takes? Only when every arm is an
+// in-program routine whose must-write covers the whole variable - external / unknown arms forfeit.
 static bool call_rewrites(const liveness *lv, call_targets ct, uint32_t v)
 {
     if (ct.unknown || ct.external || ct.blocks.num == 0) {
@@ -3164,10 +2998,8 @@ typedef struct zp_handler {
 #define RC_ARRAY_NAME zp_handler
 #include "richc/template/array.h"
 
-// Mark into reach every block reachable from seed, following the same edges control can take: the
-// CFG's successor slices plus each call's resolved callee entries (unknown / external arms contribute
-// nothing, so an unannotated computed call cannot extend reachability). within, when non-NULL,
-// restricts the walk to blocks inside that set.
+// Mark into reach every block reachable from seed, following the same edges control can take
+// (successors + resolved callee entries); within, when non-NULL, restricts the walk to that set.
 static void reach_from(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t seed,
                        const rc_bitset *within, rc_bitset *reach, rc_arena scratch)
 {
@@ -3219,23 +3051,13 @@ static void pin_var(liveness *lv, uint32_t v, uint32_t nv)
 }
 
 
-// Post-convergence zero-page allocation. Layout has settled with every ZA_AUTO reference sized as a
-// placeholder zero-page access, so assigning a real byte cannot perturb size. The governing rule is
-// CERTAINTY: this only accepts a program it can prove correct, and turns anything it cannot into a
-// clear diagnostic pointing the user at a fix or an annotation - the guards below each explain their
-// own refusal. On any refusal it records the error(s) and rewrites nothing; run_passes then fails the
-// assemble. Only a fully analysable, colourable program has its symbols rewritten to real addresses
-// (the output pass re-emits from them).
-//
-// One deliberate leniency: a transfer to a CONSTANT destination matching nothing we assembled - JSR
-// &FFEE, a tail JMP &FFEE, or JMP (&FFFC) through a fixed OS vector - is a transfer OUT of the
-// program. External code touches none of our variables (ZA_POOL names exactly the bytes nothing
-// outside the program uses), so such a call has an empty footprint and such a jump is a clean exit;
-// neither needs an annotation.
-//
-// work (cfg + liveness results) and scratch (their by-value scratch) are two working arenas the
-// caller hands in BY VALUE; nothing here outlives the call, so both are reclaimed by the caller. They
-// must have distinct backing (the scratch-aliasing lesson), which the caller guarantees.
+// Post-convergence zero-page allocation. Layout has settled with every ZA_AUTO reference sized as
+// a placeholder zero-page access, so assigning a real byte cannot perturb size. The governing rule
+// is CERTAINTY: only a program it can prove correct is accepted - anything else becomes a clear
+// diagnostic and nothing is rewritten. One deliberate leniency: a transfer to a CONSTANT
+// destination matching nothing we assembled (JSR &FFEE, JMP (&FFFC)) is a transfer OUT of the
+// program - external code touches none of our variables, so it needs no annotation.
+// work and scratch are by-value working arenas and must have distinct backing.
 static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 {
     if (!zeropage_is_enabled(&b->zeropage)) {
@@ -3248,23 +3070,15 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 
     bool refused = false;
 
-    // A note on layout soundness: the CFG identifies a block by (section, pc), so two sections sharing an
-    // address (paged banks) are distinct - fall-through and in-section branches stay within a section, and a
-    // control transfer that crosses one does so by naming a label, which picks the section. The one thing that
-    // would break WITHIN a section - two instructions at one address - cannot happen: a section's org is fixed
-    // at open and its cursor only advances (emission, or a forward SKIP/SKIPTO/ALIGN), so its pc is strictly
-    // monotonic. cfg_build asserts that invariant in debug builds; there is nothing to refuse here.
+    // Layout soundness: the CFG identifies a block by (section, pc), so banks sharing an address
+    // are distinct, and within a section the pc is strictly monotonic (org fixed at open, cursor
+    // only advances) - two instructions at one address cannot happen.
 
-    // Guard 0 (indexed access is the user's responsibility): an indexed / indexed-indirect mode
-    // touches var+index at run time - the intended way to walk a ZA_AUTO table. The WHOLE variable is
-    // reserved and liveness marks it all live, so an in-width index is sound; the run-time index
-    // itself is unprovable, so an overrun into a neighbour is on the user - hence an OPT-IN warning
-    // (severity_optional), the same trust we place in ZA_CANCALL.
-    //
-    // Guard 0b (bounds): a var+offset access (1 byte direct, 2 for a pointer deref) must lie WITHIN
-    // the declared width - a stray byte is one the allocator never reserved for this variable. A
-    // 1-byte ZA_AUTO1 used as a pointer gets the pointed "declare it ZA_AUTO2" message, any other
-    // overrun the general one. (Needs the resolved vreg for the width; an unknown offset is skipped.)
+    // Guard 0 (indexed access): the WHOLE variable is reserved and all live, so an in-width index
+    // is sound; the run-time index is unprovable, so an overrun is on the user - an OPT-IN warning,
+    // the same trust as ZA_CANCALL.
+    // Guard 0b (bounds): a var+offset access (2 bytes for a pointer deref) must lie WITHIN the
+    // declared width; a 1-byte var used as a pointer gets the pointed "declare it ZA_AUTO2" message.
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.vreg == RC_INDEX_NONE) {
@@ -3287,8 +3101,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // A broken layout or an out-of-envelope access is decided from the instruction stream alone - and building
-    // a CFG over a stream we have just judged unanalysable would be meaningless. Bail before we do.
+    // Building a CFG over a stream just judged unanalysable would be meaningless: bail first.
     if (refused) {
         return;
     }
@@ -3300,16 +3113,14 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     cfg g       = cfg_build(insns, cflows, zeropage_labels(&b->zeropage), zeropage_entries(&b->zeropage),
                             &work, scratch);
 
-    // No entry block: the old "block 0 is the program entry" presumption is retired (roots are handled
-    // below), so the synthetic pairwise-input rule and the input classification stay dormant here. A var
-    // read before any write from an entry has no defined value, and gets no protection - by design.
+    // No entry block: roots are handled below. A var read before any write from an entry has no
+    // defined value, and gets no protection - by design.
     liveness lv = liveness_analyze(g, insns, cflows, zeropage_vars(&b->zeropage), RC_INDEX_NONE,
                                    &work, scratch);
 
-    // A variable no instruction touches gets a WARNING, no address, and no definition (the rewrite below
-    // removes its binding): a declaration costing a byte of the pool for nothing is more likely a leftover
-    // than intentional. One warning per declaration site - a macro / FOR body's instantiations share one
-    // def cursor, so an unused declaration inside a 2000-iteration loop speaks once, not 2000 times.
+    // A variable no instruction touches: a WARNING, no address, no binding (the rewrite below
+    // removes it). One warning per declaration site - a macro / FOR body's instantiations share one
+    // def cursor, so an unused declaration in a 2000-iteration loop speaks once.
     for (uint32_t v = 0; v < nv; v++) {
         if (liveness_class_of(&lv, v) != vreg_class_unused) {
             continue;
@@ -3325,10 +3136,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // A ZA_RETURNTO resumption point that begins no assembled instruction got no edge (the CFG reads it as
-    // off the stream) - almost always a mistyped label, or an address inside the very data the callee
-    // consumes. Warn rather than refuse: resuming into the OS is exotic but expressible. The site's own
-    // section resolves the target, matching the edge wiring; one warning per declared target.
+    // A ZA_RETURNTO point that begins no assembled instruction got no edge - almost always a
+    // mistyped label. Warn rather than refuse: resuming into the OS is exotic but expressible.
     for (uint32_t i = 0; i < cflows.num; i++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
         if (cf.kind != zp_cflow_za_returnto) {
@@ -3345,10 +3154,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // A BITZP/BITABS whose resume address lands INSIDE a recorded instruction (a 3-byte instruction
-    // straight after BITABS, say) means the two streams interleave mid-instruction - beyond what blocks
-    // can express, so the analysis would be wrong and any allocation unsound. Refuse. Two 1-byte
-    // instructions under a BITABS, or data in the swallowed bytes, straddle nothing and are fine.
+    // A BITZP/BITABS whose resume address lands INSIDE a recorded instruction interleaves the two
+    // streams mid-instruction - beyond what blocks can express, so refuse. Two 1-byte instructions,
+    // or data in the swallowed bytes, straddle nothing and are fine.
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.flow != zp_flow_skip) {
@@ -3365,11 +3173,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // The root set: where control can enter the program from outside. Declared markers resolve to
-    // their blocks (each was leader-marked, so "no block" reliably means the marker sits on data - a
-    // static mistake we refuse). Any ZA_ENTRY replaces the default sync roots; without one, each
-    // section's first recorded block roots itself (kind to the relocation workflow, where a spliced
-    // section is entered at its own org). ZA_INTERRUPT alone leaves the defaults in place.
+    // The root set: where control can enter from outside. Declared markers resolve to their blocks
+    // ("no block" means the marker sits on data - refused). Any ZA_ENTRY replaces the default sync
+    // roots (each section's first recorded block); ZA_INTERRUPT alone leaves the defaults in place.
     rc_view_zp_entry entries = zeropage_entries(&b->zeropage);
     uint32_t  nb           = g.blocks.num;
     rc_bitset roots        = rc_bitset_make(nb ? nb : 1, &scratch);
@@ -3396,9 +3202,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     }
 
     if (!any_sync) {
-        // Blocks are recorded in stream order and a section's pc only advances, so the first block seen
-        // carrying each section index is that section's earliest code. A data-only section has no blocks,
-        // hence no root - correctly nothing to reach.
+        // Blocks are in stream order and pc only advances, so the first block per section is its
+        // earliest code; a data-only section has no blocks, hence no root.
         uint32_t max_section = 0;
         for (uint32_t bi = 0; bi < nb; bi++) {
             uint32_t sec = rc_view_basic_block_get(g.blocks, bi).section;
@@ -3416,11 +3221,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // The reachability warning: code touching a ZA_AUTO variable that no root can reach is either an
-    // undeclared handler (the silently-unsound shape this whole feature exists to catch) or dead code.
-    // One warning per REGION, at its head (the natural "put your marker here" spot), not per block.
-    // Skipped when a marker failed to resolve - an under-approximate root set would spray false alarms,
-    // and the error above already fails the assemble.
+    // The reachability warning: var-touching code no root can reach is an undeclared handler (the
+    // silently-unsound shape this exists to catch) or dead code. One warning per REGION, at its
+    // head; skipped when a marker failed to resolve (an under-approximate root set sprays alarms).
     if (!entry_unknown && nv > 0 && nb > 0) {
         rc_bitset reach = rc_bitset_make(nb, &scratch);
         for (uint32_t r = rc_bitset_get_first_set(&roots); r != RC_INDEX_NONE;
@@ -3441,9 +3244,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             }
         }
         if (any_offending) {
-            // A region head is an unreachable block with no unreachable predecessor - over the same edge
-            // set the walk follows. Warn once per head whose closure holds an uncovered offender; a pure
-            // cycle has no head, so a mop-up sweep catches anything the heads did not claim.
+            // A region head is an unreachable block with no unreachable predecessor. Warn once per
+            // head whose closure holds an uncovered offender; a pure cycle has no head, so a mop-up
+            // sweep catches anything the heads did not claim.
             rc_bitset unreached = rc_bitset_make(nb, &scratch);
             rc_bitset upred = rc_bitset_make(nb, &scratch);   // "has an unreached predecessor" - a set, so a bitset
             for (uint32_t bi = 0; bi < nb; bi++) {
@@ -3509,12 +3312,10 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // Guard 2 / interprocedural interference: a variable live ACROSS a JSR is clobbered by the callee's whole
-    // zero-page footprint, so it must interfere with every vreg the callee touches (transitively). Sweep each
-    // block backward; at a call, the current live set is exactly what is live across it (a JSR touches no
-    // variable of its own, so live-out at the call equals live-across). For each such call we compute the
-    // callee footprint and add the edges - UNLESS it cannot be bounded (an untrackable target -> across_call)
-    // or the call recurses (-> recursion): a value live across either cannot be statically placed, so refuse.
+    // Guard 2 / interprocedural interference: a variable live ACROSS a JSR must interfere with
+    // every vreg the callee (transitively) touches. Sweep each block backward; at a call the
+    // current live set is exactly what is live across it. An unboundable or recursive callee
+    // refuses - a value live across either cannot be statically placed.
     rc_bitset live = rc_bitset_make(nv, &scratch);
     for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
         basic_block blk = rc_view_basic_block_get(g.blocks, bi);
@@ -3536,20 +3337,17 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         refused = true;
                     }
                     else if (fp.recursive && rc_bitset_intersects(&live, &fp.killed)) {
-                        // Recursion is fatal only for a value the cycle FRESHLY writes (a write-only def) and
-                        // carries live across itself: each level would want its own byte. A value merely read or
-                        // accumulated (DEC/INC) across the recursion shares one byte safely, so it falls through
-                        // to interference. Judged on the UNREDUCED live set, deliberately: reading a value back
-                        // after a recursive call that rewrites it IS the per-level pattern, however definite the
-                        // cycle's write - the must-write kill below must not hide it.
+                        // Recursion is fatal only for a value the cycle FRESHLY writes and carries
+                        // live across itself (each level would want its own byte); a value merely
+                        // read or accumulated (DEC/INC) shares one byte safely. Judged on the
+                        // UNREDUCED live set: read-after-recursive-rewrite IS the per-level pattern.
                         baron_error(b, error_type_za_auto_recursion, n.at);
                         refused = true;
                     }
                     else {
-                        // Every var live across this call interferes with every vreg the callee touches - except
-                        // one the call definitely REWRITES: its post-call value is born inside the callee (where
-                        // ordinary liveness already fences it), not carried across, so fencing it off the
-                        // callee's whole workspace would forbid exactly the reuse must-write proves safe.
+                        // Every var live across this call interferes with every vreg the callee
+                        // touches - except one the call definitely REWRITES: its post-call value is
+                        // born inside the callee, not carried across.
                         for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
                              c = rc_bitset_get_next_set(&live, c + 1)) {
                             if (call_rewrites(&lv, ct, c)) {
@@ -3566,10 +3364,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     }
                 }
 
-                // Step backward over the call, mirroring the dataflow's transfer at this sweep's variable
-                // granularity: the callees' definite writes end the pre-call values, and their inputs are the
-                // arguments the call consumes - live from here back to their stores, so an argument counts as
-                // live across any EARLIER call it must survive (but never across its own).
+                // Step backward over the call: the callees' definite writes end the pre-call
+                // values, and their live-in inputs count as live back to their stores - so an
+                // argument survives any EARLIER call, but never its own.
                 for (uint32_t v = 0; v < nv; v++) {
                     if (call_rewrites(&lv, ct, v)) {
                         rc_bitset_clear(&live, v);
@@ -3585,11 +3382,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 }
             }
             if (n.vreg != RC_INDEX_NONE) {
-                // A write ends the variable's range only when it covers the whole variable on its own
-                // (zp_insn_write_kills): a partial write - the LSB store of a pointer - preserves the
-                // bytes it does not touch, so the old value stays live through it. This sweep runs at
-                // variable granularity, so a store PAIR that fully rewrites a pointer conservatively
-                // keeps it live too - a too-live set only adds interference edges, never misses any.
+                // A write ends the range only when it covers the whole variable on its own
+                // (zp_insn_write_kills). At this sweep's variable granularity a fully-rewriting
+                // store PAIR conservatively stays live - extra edges only, never missed ones.
                 if (n.var_kill) {
                     rc_bitset_clear(&live, n.vreg);   // a ZA_DISCARD ends the whole variable's range, pinning nothing
                 }
@@ -3604,12 +3399,10 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // Guard 3 / interrupt pinning: a ZA_INTERRUPT handler preempts at ARBITRARY instructions, so no
-    // instant of "dead" can be assumed around it. Two rules: (i) its communication vars - live-in at
-    // the handler's entry - are pinned against everything, its own temps included; (ii) every var in
-    // its transitive footprint interferes with every var outside it. Among the handler's own temps
-    // ordinary liveness still governs, so intra-handler reuse survives. An unboundable footprint is
-    // refused, with the same remedy as ever: ZA_CANCALL.
+    // Guard 3 / interrupt pinning: a handler preempts at ARBITRARY instructions, so nothing is
+    // provably dead around it. (i) its communication vars (live-in at entry) pin against
+    // everything; (ii) its transitive footprint interferes with every var outside it. Among its
+    // own temps ordinary liveness still governs, so intra-handler reuse survives.
     for (uint32_t h = 0; h < handlers.num; h++) {
         zp_handler hd = rc_array_zp_handler_get(&handlers, h);
         footprint fp = footprint_compute(g, insns, cflows, hd.block, nv, &work, scratch);
@@ -3634,12 +3427,10 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         }
     }
 
-    // The ZA_ENTRY input warning: an externally-called routine that reads a ZA_AUTO before writing it
-    // expects its caller to have poked a value - but an outside caller cannot know an allocator-chosen
-    // address (an external interface wants fixed bytes: ZA_POOL them). The test is the read-before-
-    // write walk, not live-in, whose shared return edges smear one call site's live-after into
-    // another. Handler blocks are excluded: a stacked ZA_ENTRY+ZA_INTERRUPT takes the stricter
-    // treatment, and Guard 3's pinned comm vars ARE the supported live-in pattern there.
+    // The ZA_ENTRY input warning: a routine that reads a ZA_AUTO before writing it expects its
+    // outside caller to have poked an allocator-chosen address - impossible (external interfaces
+    // want fixed bytes). The test is the read-before-write walk, not live-in (whose shared return
+    // edges smear call sites into each other); handler blocks take Guard 3's treatment instead.
     rc_bitset sync_seen = rc_bitset_make(nb ? nb : 1, &scratch);
     for (uint32_t i = 0; nv > 0 && i < entries.num; i++) {
         zp_entry e = rc_view_zp_entry_get(entries, i);
@@ -3673,12 +3464,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             }
         }
         else {
-            // Rewrite each variable's symbol from the typed placeholder to its real zero-page address;
-            // the OUTPUT pass then re-emits every operand and data byte against the real values (there
-            // is no operand patching - a settling pass's bytes hold only intra-variable offsets). An
-            // unused variable's binding is REMOVED instead: it has no address to give. Gone from the
-            // symbol table (and so from the -v listing's var = &xx [auto] lines), it is exactly as
-            // if the declaration were not there.
+            // Rewrite each symbol from the typed placeholder to its real address; the OUTPUT pass
+            // re-emits against them (no operand patching). An unused variable's binding is REMOVED
+            // instead - exactly as if the declaration were not there.
             for (uint32_t v = 0; v < nv; v++) {
                 zp_var var = zeropage_var_get(&b->zeropage, v);
                 if (rc_view_u32_get(col.base, v) == RC_INDEX_NONE) {
@@ -3694,9 +3482,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 }
 
 
-// Discard the half-built outputs - object code, symbols and the listing - so a failed assemble hands
-// back nothing to consume; only the diagnostics remain. Returns 0, the failure signal the entry points
-// hand back.
+// Discard the half-built outputs so a failed assemble hands back nothing but diagnostics; returns
+// the 0 the entry points hand back.
 static uint32_t assemble_failed(baron *b)
 {
     sections_reset(&b->sections);   // a fresh, empty default section - so a failed read hands back no code
@@ -3709,11 +3496,9 @@ static uint32_t assemble_failed(baron *b)
 }
 
 
-// The shared core: run passes over the source already cached at index source in b, until the labels
-// and forward references settle (or non-convergence). Returns the pass count, or 0 on failure (which
-// clears the outputs). Diagnostics were reset by the entry point; only the single settling / diagnostic
-// pass (flags.final) records recoverable errors and warnings, so the array holds the complete final set.
-// assemble_string / assemble_file are thin wrappers that establish the source entry, then call this.
+// The shared core: run passes over the cached source until everything settles (or fails). Only the
+// final pass records recoverable errors and warnings, so the diagnostics array holds the complete
+// set. Returns the pass count, 0 on failure.
 static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
 {
     for (uint32_t pass = 1; pass <= ASSEMBLE_MAX_PASSES; pass++) {
@@ -3732,21 +3517,17 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
                 return assemble_failed(b);
             }
 
-            // Layout has settled: now assign real zero-page bytes to the ZA_AUTO variables and rewrite
-            // their symbols to the chosen addresses. This refuses (records errors, assigns nothing) on
-            // anything it cannot prove correct, so a fresh error here fails the assemble just like a
-            // pass error would.
+            // Layout has settled: assign real zero-page bytes and rewrite the ZA_AUTO symbols.
+            // Refuses (records errors, assigns nothing) on anything it cannot prove correct.
             zeropage_finalize(b, *b->per_pass, scratch);
             if (baron_has_errors(b)) {
                 return assemble_failed(b);
             }
 
             // The OUTPUT pass: one re-emission with the ZA_AUTO symbols holding their allocated
-            // addresses, whose sections ARE the result (no operand patching - a settling pass's
-            // operands hold meaningless intra-variable offsets). It runs whenever the zp feature is
-            // on; -v rides it to build the listing with the true bytes. Re-emission cannot move
-            // anything: a ZA_AUTO address is typed, every layout-affecting context refuses it, and
-            // the accepting contexts are width-stable. final=false, so nothing records twice.
+            // addresses, whose sections ARE the result; -v rides it for the listing. Re-emission
+            // cannot move anything (a ZA_AUTO address is typed and the accepting contexts are
+            // width-stable); final=false, so nothing records twice.
             if (b->want_verbose || zeropage_is_enabled(&b->zeropage)) {
                 parse_result out = run_pass(b, source,
                     (parse_flags) {
@@ -3759,10 +3540,8 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
                 }
             }
 
-            // The INCSECTION fixup, absolutely last: after the output pass (so a spliced copy carries
-            // the allocated addresses, and the rebuilt sections are the ones the result snapshots).
-            // splices_resolve copies in dependency order; an unknown source is judged - and refused -
-            // only here, once every IF arm has settled.
+            // The INCSECTION fixup, absolutely last, so a spliced copy carries the allocated
+            // addresses; an unknown source is judged only here, once every IF arm has settled.
             if (!splices_resolve(b, true, scratch)) {
                 return assemble_failed(b);
             }
@@ -3781,10 +3560,8 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
 }
 
 
-// Turn a finished baron into the read-only snapshot the caller keeps. The section list (each section's pc +
-// object code) lives in the per_pass arena from the final pass; diagnostics, the source cache and the scope
-// tree's backing (nodes + trie pools) are in permanent. All are handed back as cheap views/projections that
-// outlive b (which dies the moment we return) - nothing is flattened up front; the caller queries on demand.
+// Turn a finished baron into the read-only snapshot the caller keeps: cheap views that outlive b
+// (sections in per_pass from the final pass; diagnostics, sources and scopes in permanent).
 static baron_result baron_result_make(baron *b, uint32_t passes)
 {
     baron_result r = {
@@ -3869,9 +3646,8 @@ RC_TEST_GROUP_DEINIT(assemble, fix)
     rc_arena_deinit(&fix->desc.scratch);
 }
 
-// Assemble a snippet, stash its result in fix->r, and yield the pass count (0 on failure). Each call is an
-// independent assemble on the shared desc, so distinct snippets need no distinct names. Object code,
-// symbols and diagnostics are then read back from fix->r via the helpers.
+// Assemble a snippet, stash its result in fix->r, and yield the pass count (0 on failure); the
+// helpers below read the result back. Each call is an independent assemble on the shared desc.
 #define ASM(src) (fix->r = assemble_string(&fix->desc, RC_STR(src), RC_STR(src)), fix->r.passes)
 
 // The verbose listing of the last ASM - channel 0, built on the listing pass, so it shows the final
@@ -4028,10 +3804,8 @@ RC_TEST_STEP(assemble, branch_offsets, fix)
 
 RC_TEST_STEP(assemble, branch_to_shadowed_forward_label, fix)
 {
-    // .label names the scope, and an inner .label shadows it. On the first pass the inner label
-    // is not yet bound, so BEQ transiently resolves to the FAR outer label (256+ bytes back) - a
-    // branch that would be out of range. That error must be withheld on non-final passes; by the
-    // time the layout settles the near inner label is bound and the branch is in range (offset 0).
+    // On the first pass the inner label is unbound, so BEQ transiently resolves to the FAR outer
+    // one - out of range. The error must be withheld until the near label binds.
     uint32_t passes = ASM(".label { SKIP 256 : BEQ label : .label }");
     RC_CHECK_TRUE(passes != 0);
     rc_view_bytes code = baron_result_code(&fix->r);
@@ -4108,10 +3882,8 @@ RC_TEST_STEP(assemble, section_cursor_is_independent, fix)
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x2000)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x0000)));
 
-    // A NESTED section with no org starts at its PARENT's org (base address), not wherever the parent has
-    // emitted to - and the parent's cursor is untouched by the child. outer runs at &3000, emits a byte
-    // (o at &3000, cursor now &3001); nested inner inherits outer's org &3000, so p binds at &3000
-    // (overlapping outer - they are separate spaces); back in outer, q binds at &3001, not past inner.
+    // A NESTED section with no org starts at its PARENT's org, not where the parent has emitted
+    // to, and the parent's cursor is untouched: p overlaps o at &3000, q follows o at &3001.
     RC_CHECK_TRUE(ASM("SECTION outer, org=&3000 : .o EQUB 0 : SECTION inner : .p EQUB 0,0 : ENDSECTION : .q EQUB 0 : ENDSECTION") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("o")), value_make_numeric(0x3000)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("p")), value_make_numeric(0x3000)));
@@ -4427,10 +4199,8 @@ RC_TEST_STEP(assemble, za_pool_errors, fix)
 
 RC_TEST_STEP(assemble, za_auto_declares_scoped_var, fix)
 {
-    // ZA_AUTO1/ZA_AUTO2 bind scoped symbols; after convergence the allocator gives each a real zero-page byte.
-    // foo is held live across ptr's whole range, so they interfere: FFD places the 2-byte ptr first
-    // (&70-&71), then the 1-byte foo at the next free byte, &72. (An UNUSED declaration gets no byte and
-    // no definition at all - see za_auto_unused_is_warned_and_undefined.)
+    // foo is held live across ptr's whole range, so they interfere: first-fit-decreasing places
+    // the 2-byte ptr first (&70-&71), then foo at &72.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 foo : ZA_AUTO2 ptr\n"
                           "STA foo : STA ptr : LDA #&40 : STA ptr+1 : LDA (ptr),Y : ORA foo : RTS");
     RC_CHECK_TRUE(passes != 0);
@@ -4467,10 +4237,8 @@ RC_TEST_STEP(assemble, za_auto_errors, fix)
 
 RC_TEST_STEP(assemble, za_auto_operand_is_zeropage, fix)
 {
-    // A ZA_AUTO variable in operand position assembles as a 2-byte zero-page access. Post-convergence the
-    // allocator assigns the real byte and patches the operand in place - it never changes size (the layout-
-    // independence property), so patching is sound. With one variable and a free block from &70, it lands on
-    // the first reserved byte, &70; a 2-byte pointer's hi half is &71 (its low byte + 1).
+    // A ZA_AUTO operand assembles as a 2-byte zero-page access that never changes size; the single
+    // variable lands on the first reserved byte, &70 (a pointer's hi half at &71).
     const uint8_t b0 = 0x70;   // the first reserved byte the single variable is allocated to
 
     // Declared then used: LDA zp / STA zp (read and write), operand patched to the allocated address.
@@ -4541,10 +4309,8 @@ RC_TEST_STEP(assemble, za_auto_call_without_live_var_is_allowed, fix)
 
 RC_TEST_STEP(assemble, za_auto_interprocedural_allocation, fix)
 {
-    // The interprocedural core: keep is live across a JSR to sub, which has its own local loc. The call
-    // clobbers sub's footprint, so keep must NOT share loc's byte - it interferes with the whole callee
-    // footprint and lands on a different byte. (Before this rule, both took &70 and the call would corrupt
-    // keep.) keep is placed first at &70, loc is pushed to &71.
+    // The interprocedural core: keep is live across the JSR, so it interferes with sub's whole
+    // footprint and cannot share loc's byte - keep &70, loc &71.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                           "LDA #1 : STA keep : JSR sub : LDA keep : RTS\n"
                           ".sub { ZA_AUTO1 loc : STA loc : LDA loc : RTS }");
@@ -4565,11 +4331,9 @@ RC_TEST_STEP(assemble, za_auto_interprocedural_allocation, fix)
 
 RC_TEST_STEP(assemble, za_auto_dotted_interface_variables, fix)
 {
-    // A routine's inputs and outputs declared in ITS scope, reached by the caller via the dotted path: the
-    // operands attribute (and so are patched - the byte compare is the proof), the argument written before
-    // the call is held live TO the call (a call consumes its callees' inputs), so the unrelated temp t
-    // cannot be coloured over it. The result, which sub definitely writes on every path, is KILLED at the
-    // call (must-write): its range starts inside sub, after both t and wid are dead, so it reuses t's byte.
+    // Inputs/outputs declared in the routine's scope, reached via the dotted path: the operands
+    // attribute (the byte compare proves it), the argument stays live TO the call (a call consumes
+    // its callees' inputs), and the must-write result's range starts inside sub, reusing t's byte.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 t\n"
                           "LDA #3 : STA sub.wid\n"
                           "LDA #9 : STA t\n"
@@ -4611,11 +4375,9 @@ RC_TEST_STEP(assemble, za_auto_argument_survives_intermediate_call, fix)
 
 RC_TEST_STEP(assemble, za_auto_dotted_pipeline_reuses_input_bytes, fix)
 {
-    // The reuse side of the same coin: two stages fed through their scoped interface variables, and the
-    // whole relay runs in ONE byte. Each argument dies at its read inside its stage; each result - which
-    // its stage definitely writes, so the call KILLS the pre-call value (must-write) - is born there and
-    // dies at the caller's read, just as the next argument is stored. Four variables, one byte, and a
-    // one-byte pool proves no interference exists anywhere.
+    // Two stages fed through their scoped interface variables, the whole relay in ONE byte: each
+    // argument dies at its in-stage read, each must-write result is born there - and the one-byte
+    // pool proves no interference exists anywhere.
     uint32_t passes = ASM("ZA_POOL &70\n"
                           ".stage1 { ZA_AUTO1 xin, res : LDA xin : ASL A : STA res : RTS }\n"
                           ".stage2 { ZA_AUTO1 xin, res : LDA xin : CLC : ADC #7 : STA res : RTS }\n"
@@ -4635,10 +4397,8 @@ RC_TEST_STEP(assemble, za_auto_dotted_pipeline_reuses_input_bytes, fix)
 
 RC_TEST_STEP(assemble, za_auto_result_survives_producer_tail, fix)
 {
-    // The return edge: sub's RTS sees what is live after each call to sub, so res - whose only reads are
-    // in the caller - stays live from its store to the RTS, and the LATER write to t inside sub cannot
-    // land on its byte. (Without the edge, res looks dead the moment it is stored, its reads being
-    // invisible from inside sub, and t's store would clobber the result before the caller reads it.)
+    // The return edge: sub's RTS sees what is live after each call site, so res stays live from
+    // its store to the RTS and the LATER write to t inside sub cannot land on its byte.
     uint32_t passes = ASM("ZA_POOL &70..&7F\n"
                           "JSR sub\n"
                           "LDA sub.res\n"
@@ -4933,10 +4693,8 @@ RC_TEST_STEP(assemble, za_auto_allocation_refusals, fix)
     RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : .r { ZA_AUTO1 cnt : STA cnt : JSR r : LDA cnt : RTS }")
                   == error_type_za_auto_recursion);
 
-    // A computed / indirect jump reaches code the CFG cannot follow while a variable is in play - refuse and
-    // ask for an annotation. The vector must be one of OUR labels: a cell we assembled holds a run-time value
-    // that may point back into our own code. (A CONSTANT vector - JMP (&FFFC) - is a fixed OS vector and
-    // reads as a clean exit instead; see za_auto_external_calls_and_jumps.)
+    // A computed jump with a variable in play is refused. The vector is one of OUR labels - a
+    // CONSTANT vector like JMP (&FFFC) reads as a clean exit instead.
     RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : JMP (vec) : .vec EQUW &2000")
                   == error_type_za_auto_computed_flow);
 
@@ -4947,12 +4705,9 @@ RC_TEST_STEP(assemble, za_auto_allocation_refusals, fix)
 
 RC_TEST_STEP(assemble, za_auto_recursion_shared_vs_per_level, fix)
 {
-    // Recursion is only fatal for a value the cycle FRESHLY writes and then needs back after the child returns.
-    // A value merely read or accumulated (DEC/INC) across the recursion rides on one shared byte quite happily -
-    // it is a single running counter, not a distinct value per frame. So this shape is ALLOWED: n is seeded by
-    // the caller (outside the recursion) and only ever DEC'd inside down, while keep sits live across the
-    // whole descent. Neither is freshly assigned within the cycle, so allocation proceeds; because both are live
-    // across the call they interfere with down's footprint and take distinct bytes.
+    // Recursion is only fatal for a value the cycle FRESHLY writes; a shared DEC'd counter and a
+    // merely-read value ride on one byte each, so this shape is ALLOWED (both live across the
+    // call, so they interfere with down's footprint and take distinct bytes).
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, n\n"
                       "LDA #10 : STA keep : LDA #5 : STA n : JSR down\n"
                       "LDA keep : CLC : ADC n : RTS\n"
@@ -4980,10 +4735,8 @@ RC_TEST_STEP(assemble, za_auto_recursion_shared_vs_per_level, fix)
 
 RC_TEST_STEP(assemble, za_auto_indexed_access_warns, fix)
 {
-    // Indexed / indexed-indirect access into an auto-variable (var,X / var,Y / (var,X)) touches var+index at
-    // run time - the intended way to walk a ZA_AUTO table. The allocator reserves the whole variable and marks
-    // it all live on the access, so an index within its width is sound; the run-time index itself is unprovable,
-    // so it is an OPT-IN warning (silent until the level is raised), not a refusal. The variable still allocates.
+    // Indexed access is sound within the variable's width (the whole variable is reserved and
+    // live); the run-time index is unprovable, so it is an OPT-IN warning, not a refusal.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, table : STA table : LDA table,X : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);              // it assembles: no error-severity diagnostic
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_indexed_access)); // ... but the opt-in warning is recorded
@@ -5082,11 +4835,8 @@ RC_TEST_STEP(assemble, za_auto_layout_must_not_collide, fix)
 
 RC_TEST_STEP(assemble, za_auto_var_live_across_cross_section_call, fix)
 {
-    // A variable held live across a JSR into ANOTHER section is fully supported. The call resolves by the
-    // target LABEL (sub lives in bank, so the edge crosses the section - a bare address never could), the
-    // callee's footprint is computed across the boundary, and the live-across variable is kept clear of it.
-    // keep is written, then read AFTER the call into bank; bank's routine touches tmp. So keep is live
-    // across the call, must interfere with tmp, and takes a DIFFERENT byte rather than sharing one.
+    // A JSR into ANOTHER section resolves by the target LABEL, so the footprint is computed across
+    // the boundary: keep is live across the call, interferes with tmp, and takes a different byte.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, tmp\n"
                       "SECTION main, org=&1900 : STA keep : JSR sub : LDA keep : RTS : ENDSECTION\n"
                       "SECTION bank, org=&8000 : .sub : STA tmp : LDA tmp : RTS : ENDSECTION") != 0);
@@ -5126,10 +4876,8 @@ RC_TEST_STEP(assemble, za_auto_unreachable_prunes_dead_edge, fix)
 
 RC_TEST_STEP(assemble, za_auto_multi_entry_multi_exit, fix)
 {
-    // A single braced block with TWO entry points (each its own JSR target) and several RTS exits, including
-    // the BCC over : RTS : .over early-out shape. Routines are recovered from the CFG, so this is not one
-    // routine with one entry - it is two, and both allocate cleanly. v (entry1) and w (entry2) never overlap,
-    // so they share &70.
+    // One braced block, TWO entry points: routines are recovered from the CFG, not the braces.
+    // v (entry1) and w (entry2) never overlap, so they share &70.
     uint32_t p = ASM("ZA_POOL &70..&7F\n"
                      "JSR routine.entry1 : JSR routine.entry2 : RTS\n"
                      ".routine {\n"
@@ -5145,10 +4893,8 @@ RC_TEST_STEP(assemble, za_auto_multi_entry_multi_exit, fix)
 
 RC_TEST_STEP(assemble, za_auto_control_flow_crosses_scopes, fix)
 {
-    // Scopes name; the CFG is recovered from real branches, not braces. Here n is written inside .work and is
-    // live across a BEQ that leaves the block for the shared .done label in another scope (referenced there by
-    // its dotted path - naming IS by scope). Liveness follows the edge across the brace, so the allocation is
-    // still correct and n settles on &70. A statically-known target may cross a scope boundary freely.
+    // Scopes name; the CFG is recovered from real branches. Liveness follows the BEQ out of the
+    // brace to .done, so n stays correct on &70 - a known target crosses scope boundaries freely.
     uint32_t p = ASM("ZA_POOL &70..&7F\n"
                      ".work { ZA_AUTO1 n : STA n : BEQ done : LDA n : STA n }\n"
                      ".done : LDA work.n : RTS");
@@ -5184,10 +4930,8 @@ RC_TEST_STEP(assemble, za_auto_za_cancall_bounds_dispatched_call, fix)
 
 RC_TEST_STEP(assemble, za_auto_za_canjump_bounds_computed_jump, fix)
 {
-    // An indirect JMP through a vector WE assembled is refused with a variable live across it: the cell's
-    // run-time contents may point back into our own code, so the CFG cannot prove keep survives. (Only an
-    // in-program vector is computed flow - a constant vector cell like JMP (&FFFC) lies outside the program
-    // and reads as a clean exit; see za_auto_external_calls_and_jumps.)
+    // An indirect JMP through a vector WE assembled is computed flow: its run-time contents may
+    // point back into our code, so with keep live it is refused.
     RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                       "STA keep : JMP (vector)\n"
                       ".hA : LDA keep : RTS\n"
@@ -5205,10 +4949,8 @@ RC_TEST_STEP(assemble, za_auto_za_canjump_bounds_computed_jump, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
 
-    // A declared destination may itself be EXTERNAL: here one arm of the dispatch leaves the program for the
-    // OS. That arm reads as a clean exit (external code touches none of our variables), the in-program arm is
-    // wired as usual, and keep still allocates. This is how you tell Baron a vector you own can hold an
-    // external address - no separate annotation needed.
+    // A declared destination may itself be EXTERNAL: that arm reads as a clean exit, the
+    // in-program arm wires as usual, and keep still allocates.
     uint32_t q = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                      "STA keep : JMP (vector) : ZA_CANJUMP hA, &FFEE\n"
                      ".hA : LDA keep : RTS\n"
@@ -5220,10 +4962,8 @@ RC_TEST_STEP(assemble, za_auto_za_canjump_bounds_computed_jump, fix)
 
 RC_TEST_STEP(assemble, za_auto_rts_dispatch_za_canjump, fix)
 {
-    // The RTS-dispatch trick: push a target address minus one, RTS into it. ZA_CANJUMP after the RTS marks it
-    // as the jump it really is, wiring the declared edge - so v, consumed by the dispatch target, is live
-    // through the pushes and the unrelated temp w cannot take its byte. (Unannotated, an RTS-dispatch is
-    // indistinguishable from a real return and remains a trusted precondition, like a wrong ZA_UNREACHABLE.)
+    // The RTS-dispatch trick: ZA_CANJUMP after the RTS wires the declared edge, so v (consumed by
+    // the dispatch target) is live through the pushes and w cannot take its byte.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 v, w\n"
                           "STA v\n"
                           "LDA #HI(target-1) : PHA\n"
@@ -5275,10 +5015,8 @@ RC_TEST_STEP(assemble, za_auto_rts_dispatch_za_canjump, fix)
 
 RC_TEST_STEP(assemble, za_auto_jsr_inline_data_munged_rts, fix)
 {
-    // The headline inline-data idiom, munged-RTS flavour: JSR printstring : EQUS "text", 0 : carry on. The
-    // callee pulls the return address, scans past the terminator, pushes the adjusted address back and RTS.
-    // No annotation needed anywhere: the CFG falls through the data gap to the next instruction, and the
-    // ordinary return machinery keeps keep live across the call and off the callee's pointer.
+    // The headline inline-data idiom: JSR pstr : EQUS "text", 0 : carry on. No annotation needed -
+    // the CFG falls through the data gap, and keep stays live across the call.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                           "STA keep : JSR pstr : EQUS \"HELLO\", 0\n"
                           "LDA keep : RTS\n"
@@ -5370,10 +5108,8 @@ RC_TEST_STEP(assemble, za_auto_za_return_with_canjump, fix)
 
 RC_TEST_STEP(assemble, za_auto_za_returnto_redirects, fix)
 {
-    // The caller-side override: the callee resumes this call at .after, NOT at the next instruction - so
-    // keep must be live from the store to .after's read, across the call, and off the callee's pointer.
-    // (Without the redirect the fall-through's live set - empty here - is what the return edges would
-    // inject, and keep would look dead at the JSR.)
+    // The caller-side override: the callee resumes at .after, not the next instruction, so keep
+    // must stay live from the store to .after's read (without the redirect it looks dead at the JSR).
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                           "STA keep\n"
                           "JSR sub : ZA_RETURNTO after : EQUS \"DATA\", 0\n"
@@ -5441,10 +5177,8 @@ RC_TEST_STEP(assemble, za_auto_jsr_data_end_of_section, fix)
 
 RC_TEST_STEP(assemble, za_auto_terminator_cut, fix)
 {
-    // Data between a JMP and untargeted code once glued them into one block, dropping the JMP's back edge -
-    // and with it x's loop-carried live range, letting w take its byte unsoundly. The terminator cut keeps
-    // the loop real: x is live around it and w must sit elsewhere. (The NOP tail after the data is
-    // unreachable, but touches no variable, so nothing warns.)
+    // Data between a JMP and untargeted code once glued them into one block, dropping the JMP's
+    // back edge and x's loop-carried range. The terminator cut keeps the loop real.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, w\n"
                           "LDA #1 : STA x\n"
                           ".top LDA x : STA w : LDA w : JMP top\n"
@@ -5628,10 +5362,8 @@ RC_TEST_STEP(assemble, za_auto_annotation_list_targets, fix)
 
 RC_TEST_STEP(assemble, za_auto_partial_write_tracks_bytes, fix)
 {
-    // The demo.6502 bug distilled: ptr's MSB is set once up front; the loop rewrites only the LSB before
-    // each deref. That store redefines one byte - the MSB flows through it - so ptr must stay live around
-    // the loop and the loop temp may not overlap it. (Before per-byte liveness the LSB store read as a
-    // full kill, tmp landed on ptr's bytes, and the MSB was clobbered at run time.)
+    // The demo.6502 bug distilled: the loop rewrites only ptr's LSB, so the MSB flows through the
+    // store and ptr must stay live around the loop - tmp may not overlap it.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO2 ptr : ZA_AUTO1 tmp\n"
                           "LDA #&39 : STA ptr+1\n"
                           ".loop\n"
@@ -5689,10 +5421,8 @@ RC_TEST_STEP(assemble, za_auto_unused_is_warned_and_undefined, fix)
 
 RC_TEST_STEP(assemble, za_auto_external_calls_and_jumps, fix)
 {
-    // A call or jump to a CONSTANT destination that matches nothing we assembled leaves the program - an OS
-    // or ROM entry. ZA_POOL names precisely the bytes nothing outside the program uses, so external code
-    // cannot touch a ZA_AUTO: the call contributes an EMPTY footprint and needs no ZA_CANCALL. Here keep rides
-    // straight across JSR &FFEE (OSWRCH) and still allocates.
+    // A CONSTANT destination matching nothing we assembled leaves the program: an empty footprint,
+    // no ZA_CANCALL needed - keep rides straight across JSR &FFEE.
     uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
                           "STA keep : JSR &FFEE : LDA keep : RTS");
     RC_CHECK_TRUE(passes != 0);
@@ -5804,10 +5534,8 @@ RC_TEST(assemble, za_auto_rw_observation)
 
 RC_TEST(assemble, za_auto_liveness_end_to_end)
 {
-    // The whole Stage C chain over REAL assembler output: parse the spec's mul routine, take the recorded
-    // IR straight off b.zeropage, build the CFG and run liveness, and confirm the two facts the analysis
-    // exists to establish - the in/out/temp classification, and the byte-reuse (out1 reuses in1's / tmp's
-    // range because their live ranges are disjoint). vreg ids follow declaration order: in1=0, tmp=1, out1=2.
+    // The whole chain over REAL assembler output: IR straight off b.zeropage, CFG + liveness, then
+    // the classification and the byte reuse. vreg ids follow declaration order: in1=0, tmp=1, out1=2.
     baron_desc desc = (baron_desc) {
         .permanent = rc_arena_make_default(),
         .per_pass  = rc_arena_make_default(),
@@ -6013,10 +5741,8 @@ RC_TEST_STEP(assemble, za_entry_input_ignores_threaded_liveness, fix)
 
 RC_TEST_STEP(assemble, za_entry_input_ignores_shared_helper_smear, fix)
 {
-    // The demo shape that broke the first cut of this warning: a helper called both from the entry's
-    // pre-init stretch and from inside the main loop. The loop call site's live-after (f, live around
-    // the loop) smears through the helper's shared return edge into the entry's unrelated call site,
-    // so plain live-in claims f is an input - but f is written before every real read from the entry.
+    // A helper called from two sites: the loop site's live-after smears through the shared return
+    // edge, so plain live-in claims f is an input - but f is written before every real read.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 f\n"
                       ".mainloop LDA f : JSR shared : JMP mainloop\n"
                       ".shared LDX #0 : RTS\n"
@@ -6025,10 +5751,8 @@ RC_TEST_STEP(assemble, za_entry_input_ignores_shared_helper_smear, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
 
-    // A conditional init is deliberately NOT an input: the warning gates on may-write, so a store on
-    // ANY route to the read silences it. The graph cannot see the flag correlation that guards such
-    // reads in real code (the untaken-path read never actually runs), and flagging every one of these
-    // drowned the true inputs - the whole reason the gate is "may", not "definitely".
+    // A conditional init is deliberately NOT an input: the gate is MAY-write, so a store on ANY
+    // route to the read silences it (the graph cannot see the flag correlations of real code).
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 f\n"
                       ".entry ZA_ENTRY : BEQ over : STA f : .over LDA f : STA f : RTS\n") != 0);
     RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
@@ -6036,11 +5760,8 @@ RC_TEST_STEP(assemble, za_entry_input_ignores_shared_helper_smear, fix)
 
 RC_TEST_STEP(assemble, za_entry_input_is_may_write_gated, fix)
 {
-    // The spritescale shape that drove the may-write gate, in miniature: setup writes v only on one
-    // path (real code pairs this with a "nothing to do" flag the caller checks - a correlation no
-    // analysis of the graph can see), and the entry reads v after the call. Under the old definite-
-    // assignment gate this exact program warned; the may gate is silent, because SOME route through
-    // setup supplies v, so no external caller is being asked to poke it.
+    // The spritescale shape in miniature: setup writes v on one path only, the entry reads it after
+    // the call. SOME route supplies v, so the may gate is silent (the old definite gate warned).
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
                       ".entry ZA_ENTRY : JSR setup : LDA v : STA v : RTS\n"
                       ".setup BEQ none : STA v : .none RTS\n") != 0);
@@ -6306,10 +6027,8 @@ RC_TEST_STEP(assemble, local_label_forward, fix)
 
 RC_TEST_STEP(assemble, local_label_orders_by_cursor_not_value, fix)
 {
-    // Two .@ in sections at counter-to-source-order addresses (&34 then &12). @- picks the TEXTUALLY previous
-    // .@ (the second one, value &12) - proving the scan orders by definition position, not by the address the
-    // label captured. EQUB emits that value's low byte: 0x12, not 0x34. (Sections do not scope, so both .@
-    // bind in the one enclosing scope.) The EQUB lands in section "b" (index 2).
+    // Two .@ at counter-to-source-order addresses (&34 then &12): @- picks the TEXTUALLY previous
+    // one (&12), proving the scan orders by definition position, not captured address.
     RC_CHECK_TRUE(code_in_is(&fix->r,
         ASM("SECTION a, org=&34 : .@ : ENDSECTION : SECTION b, org=&12 : .@ : EQUB @- : ENDSECTION"),
         2, (uint8_t[]){0x12}, 1));
@@ -6382,10 +6101,8 @@ RC_TEST_STEP(assemble, named_scope_dotted_access, fix)
 
 RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
 {
-    // A result carries a read-only scopes_view; scopes_view_flatten harvests the whole spellable table on
-    // demand, keyed by full dotted path (into a caller arena). The .routine label binds a top-level
-    // routine AND names the child scope, so the spellable table is exactly x, routine, routine.core (all
-    // at org 0); the anonymous machinery stays hidden.
+    // scopes_view_flatten harvests the whole spellable table on demand, keyed by dotted path: here
+    // exactly x, routine, routine.core - the anonymous machinery stays hidden.
     RC_CHECK_TRUE(ASM(".routine { .core LDA #0 } : x = routine.core") != 0);
 
     rc_arena out_arena = rc_arena_make_default();
@@ -6463,12 +6180,9 @@ RC_TEST_STEP(assemble, listing_is_opt_in, fix)
 RC_TEST_STEP(assemble, listing_full_shape, fix)
 {
     fix->desc.verbose = true;   // the listing is opt-in
-    // The whole listing format in one program: section framing at the margin (blank line after the
-    // close), labels at the margin, instructions and data with address + hex + verbatim source, EQUS
-    // truncated after four bytes, assignments and ZA_AUTO allocations echoed at the margin -
-    // and the ZA_AUTO crown jewels: the declaration lists as the assignment it became (var = &70 [auto])
-    // and sta var shows the ALLOCATED byte (&70), not the placeholder, because the listing pass runs
-    // after allocation has rewritten the symbols.
+    // The whole listing format in one program - the crown jewels being the ZA_AUTO lines: the
+    // declaration lists as the assignment it became (var = &70 [auto]) and sta var shows the
+    // ALLOCATED byte, because the listing pass runs after allocation has rewritten the symbols.
     RC_CHECK_TRUE(ASM("section main, org=&900\nza_pool &70..&7F\nza_auto1 var\n.label\nlda #&12\n"
                       "sta var\n.inner\nldx #1\nlda var\nrts\nequs \"ABCDEFGH\"\nequb 0\nendsection\nx = 5") != 0);
     RC_CHECK(VERB(), ==,
@@ -6651,10 +6365,8 @@ RC_TEST_STEP(assemble, diagnostics_carry_payloads, fix)
 
 RC_TEST_STEP(assemble, define_binds_symbol, fix)
 {
-    // The CLI's -D switch: each desc.defines entry is one "name=expression" bound into the root scope
-    // before the source parses, so the very first statement can already read it. The expression gets
-    // the full evaluator - numbers, strings, built-in constants - and a later define may read an
-    // earlier one (they apply in command-line order).
+    // Each desc.defines entry binds into the root scope before the source parses; a later define
+    // may read an earlier one (they apply in command-line order).
     static const rc_str defs[] = {RC_STR_INIT("screenwidth=64"), RC_STR_INIT("debug=TRUE"),
                                   RC_STR_INIT("version=\"1.0\""), RC_STR_INIT("half=screenwidth/2")};
     fix->desc.defines = (rc_view_str) RC_VIEW(defs);
@@ -6838,26 +6550,30 @@ RC_TEST_STEP(assemble, label_does_not_own_following_statement, fix)
 
 RC_TEST_STEP(assemble, brace_separates_statements, fix)
 {
-    // A '{' ends the statement before it, so a scope can open mid-line - and the '}' already closed
-    // one - giving the whole one-liner idiom: LDX #8 {.loop ... }. The scope is a real one: loop
-    // stays private to it.
+    // A '{' ends the statement before it, so a scope opens mid-line; loop stays private to it.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("LDX #8 {.loop STA &70:DEX:BNE loop }"),
                           (uint8_t[]) {0xA2, 0x08, 0x85, 0x70, 0xCA, 0xD0, 0xFB}, 7));
     RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("loop"))));
 
-    // An assignment separates the same way; the '{' here is a scope, not a list, because the
-    // expression parser had already finished - a list '{' only ever begins in operand position.
+    // After a completed assignment a '{' is a scope, not a list (lists only begin in operand position).
     RC_CHECK_TRUE(code_is(&fix->r, ASM("x = 5 { EQUB x }"), (uint8_t[]) {0x05}, 1));
 
-    // IF cond { ... } ENDIF: legal, but NOT a C-style IF body - the braces open a genuine scope, so
-    // unlike a bare IF branch (if_does_not_introduce_scope) its bindings do not leak. A dead branch's
-    // scope emits nothing, as ever.
+    // The opcode no-operand and bare-A peeks read the '{' as a boundary, not a list operand.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("DEX { BPL ok: INX: .ok }"),
+                          (uint8_t[]) {0xCA, 0x10, 0x01, 0xE8}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ASL A { INX }"), (uint8_t[]) {0x0A, 0xE8}, 2));
+
+    // A macro call's overload match insists the statement ends after the arguments - a '{' counts.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("MACRO put n\nEQUB n\nENDMACRO\nput 7 { EQUB 8 }"),
+                          (uint8_t[]) {0x07, 0x08}, 2));
+
+    // IF cond { ... } ENDIF is legal but not a C-style body: the braces open a genuine scope, so
+    // its bindings do not leak (unlike a bare IF branch), and a dead branch's scope emits nothing.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("IF 1 { .in LDA #5 } ENDIF"), (uint8_t[]) {0xA9, 0x05}, 2));
     RC_CHECK_TRUE(value_is_none(baron_result_symbol(&fix->r, RC_STR("in"))));
     RC_CHECK(((void) ASM("IF 0 { LDA #5 } ENDIF"), baron_result_code(&fix->r).num), ==, 0u);
 
-    // The missing-comma typo EQUB 1 {2,3} now reads the '{' as a scope, so the complaint moves from
-    // the gap to the stray '2' inside - pinned so a diagnostics regression here is a deliberate one.
+    // The typo EQUB 1 {2,3} reads the '{' as a scope: the error is the stray '2' inside (pinned).
     RC_CHECK_TRUE(ERR("EQUB 1 {2,3}") == error_type_unexpected_token);
 }
 
@@ -7013,10 +6729,8 @@ RC_TEST_STEP(assemble, nested_if_forward_ref, fix)
 
 RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
 {
-    // The "make this block end at address X" idiom: a section org computed from a label defined AFTER it, so
-    // the 8-byte block sits at &0FF8..&0FFF and progend lands exactly on &1000. The org attribute is unresolved
-    // on the first pass (progstart/progend unknown) and settles once they do; JMP progstart then carries the
-    // relocated address. (Code itself still fills the section buffer from index 0.)
+    // The "make this block end at address X" idiom: an org computed from labels defined AFTER it,
+    // unresolved on the first pass and settling once they bind - progend lands exactly on &1000.
     uint32_t passes = ASM("SECTION s, org = &1000 - (progend - progstart)\n"
                           ".progstart LDA #&41 : JSR &FFEE : JMP progstart : .progend\n"
                           "ENDSECTION");
@@ -7670,10 +7384,8 @@ RC_TEST_STEP(assemble, function_scope_is_per_invocation, fix)
 
 RC_TEST_STEP(assemble, function_scoping_is_lexical, fix)
 {
-    // A body sees the scope where it was DEFINED (a global at root), not the caller's locals. usesg reads
-    // the global g = 7; caller binds its OWN param g = 99 and calls usesg. Lexical scoping means usesg
-    // resolves g to the root global (7), NOT the caller's g (99) - so caller(99) is 0 + 7 = 7. Dynamic
-    // scoping would leak the caller's 99. This is the load-bearing check that scoping is lexical.
+    // The load-bearing check that scoping is LEXICAL: usesg resolves g to the root global (7), not
+    // the caller's like-named param (99), which dynamic scoping would leak.
     RC_CHECK_TRUE(code_is(&fix->r,
         ASM("g = 7\nFUNCTION usesg(x) = x + g\nFUNCTION caller(g) = usesg(0)\nEQUB caller(99)"),
         (uint8_t[]) {7}, 1));
@@ -7761,11 +7473,8 @@ RC_TEST_STEP(assemble, function_duplicate_local, fix)
 
 RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
 {
-    // Push the permanent arena well past its initial reserves so its scope nodes and symbol pool have to
-    // grow and relocate mid-assembly, then confirm nothing dangles: every symbol is still addressable by
-    // name once the containers have moved. This is the safety net for the whole indices-not-pointers
-    // invariant behind the arena merge - a big FOR mints one child scope per iteration (unspellable names),
-    // and hundreds of top-level labels swell the global symbol trie.
+    // Push the permanent arena past its reserves so the scope containers relocate mid-assembly,
+    // then confirm nothing dangles - the safety net for the indices-not-pointers invariant.
     rc_arena build = rc_arena_make_default();
     rc_mstr  src   = rc_mstr_make(64 * 1024, &build);
 
