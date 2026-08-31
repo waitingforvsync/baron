@@ -2268,7 +2268,11 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
                     pulled = parse_file(b, (cursor) {.source = inc_source}, scope, section, flags, scratch);
                     b->include_depth--;
                     if (pulled.fatal) {
-                        return pulled;   // a broken statement stream in the included file aborts the whole assemble
+                        // A broken statement stream in the included file aborts the whole assemble - but it
+                        // still owes the trail. Recorded UNGATED (baron_error, not semantic_error): a fatal
+                        // fires on any pass, so its breadcrumb must too.
+                        baron_error(b, error_type_included_from, cursor_at(at, at.pos));
+                        return pulled;
                     }
 
                     // If the file we just pulled in raised any errors, drop a breadcrumb pointing back at this
@@ -2741,13 +2745,18 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
     b->macro_depth--;
 
     if (bodyr.fatal) {
-        return bodyr;   // a broken body aborts the whole assemble
+        // A broken body aborts the whole assemble - but it still owes the trail. Recorded UNGATED
+        // (baron_error, not semantic_error): a fatal fires on any pass, so its breadcrumb must too.
+        baron_error(b, error_type_expanded_from, cursor_at(at, at.pos));
+        return bodyr;
     }
 
     rc_str bsrc = source_files_text(&b->source_files, body.source);
     lexer_result be = lexer_next(bsrc, bodyr.next, statement_tokens(b));
     if (!(be.token.type == lexeme_type_closer && be.token.closer.id == closer_endmacro)) {
-        return fold(bodyr, syntax_error(b, error_type_unclosed_macro, cursor_at(body, bodyr.next)));
+        parse_result err = syntax_error(b, error_type_unclosed_macro, cursor_at(body, bodyr.next));
+        baron_error(b, error_type_expanded_from, cursor_at(at, at.pos));
+        return fold(bodyr, err);
     }
 
     if (baron_error_count(b) > errors_before) {
@@ -7313,6 +7322,26 @@ RC_TEST_STEP(assemble, include_reports_included_from_frame, fix)
     RC_CHECK(INC("include \"inc_bad_child.6502\""), ==, 0u);
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_value_out_of_range));
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_included_from));
+}
+
+RC_TEST_STEP(assemble, include_fatal_error_still_leaves_the_frame, fix)
+{
+    // A FATAL (syntax) error in the included file unwinds the whole assemble - but the breadcrumb must
+    // still land, ungated, or the trail back to the INCLUDE is lost exactly when it matters most.
+    RC_CHECK(INC("include \"inc_fatal_child.6502\""), ==, 0u);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_expression));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_included_from));
+}
+
+RC_TEST_STEP(assemble, macro_fatal_error_still_leaves_the_frame, fix)
+{
+    // The invocation-time-fatal twin: the body INCLUDEs a broken file (the inactive definition scan
+    // loads nothing, so it only detonates when called). The whole trail must survive the unwind:
+    // the error, "included from" at the body's INCLUDE, "expanded from" at the call site.
+    RC_CHECK(INC("macro qux : include \"inc_fatal_child.6502\" : endmacro\nqux"), ==, 0u);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_expression));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_included_from));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_expanded_from));
 }
 
 RC_TEST_STEP(assemble, include_missing_file_is_an_error, fix)
