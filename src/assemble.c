@@ -2897,9 +2897,9 @@ static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
         return true;
     }
 
-    rc_span_u32 src = rc_span_u32_make(rc_arena_alloc_type(&scratch, uint32_t, all.num), all.num);
-    rc_bitset done = {0};   // the released set
-    rc_bitset_resize(&done, all.num, &scratch);
+    rc_array_u32 src_a = {0};
+    rc_span_u32 src = rc_array_u32_resize(&src_a, all.num, &scratch);   // every slot filled by the loop below
+    rc_bitset done = rc_bitset_make(all.num, &scratch);   // the released set
     uint32_t remaining = all.num;
     bool ok = true;
     for (uint32_t i = 0; i < all.num; i++) {
@@ -3355,10 +3355,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // section is entered at its own org). ZA_INTERRUPT alone leaves the defaults in place.
     rc_view_zp_entry entries = zeropage_entries(&b->zeropage);
     uint32_t  nb           = g.blocks.num;
-    rc_bitset roots        = {0};
-    rc_bitset handler_seen = {0};
-    rc_bitset_resize(&roots, nb ? nb : 1, &scratch);
-    rc_bitset_resize(&handler_seen, nb ? nb : 1, &scratch);
+    rc_bitset roots        = rc_bitset_make(nb ? nb : 1, &scratch);
+    rc_bitset handler_seen = rc_bitset_make(nb ? nb : 1, &scratch);
     rc_array_zp_handler handlers = rc_array_zp_handler_make(entries.num ? entries.num : 1, &scratch);
     bool any_sync      = false;
     bool entry_unknown = false;
@@ -3391,8 +3389,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 max_section = sec;
             }
         }
-        rc_bitset section_seen = {0};   // indexed by section, and data-only sections can leave gaps
-        rc_bitset_resize(&section_seen, max_section + 1, &scratch);
+        rc_bitset section_seen = rc_bitset_make(max_section + 1, &scratch);   // indexed by section, and data-only sections can leave gaps
         for (uint32_t bi = 0; bi < nb; bi++) {
             uint32_t sec = rc_view_basic_block_get(g.blocks, bi).section;
             if (!rc_bitset_is_set(&section_seen, sec)) {
@@ -3408,14 +3405,12 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // Skipped when a marker failed to resolve - an under-approximate root set would spray false alarms,
     // and the error above already fails the assemble.
     if (!entry_unknown && nv > 0 && nb > 0) {
-        rc_bitset reach = {0};
-        rc_bitset_resize(&reach, nb, &scratch);
+        rc_bitset reach = rc_bitset_make(nb, &scratch);
         for (uint32_t r = rc_bitset_get_first_set(&roots); r != RC_INDEX_NONE;
              r = rc_bitset_get_next_set(&roots, r + 1)) {
             reach_from(g, insns, cflows, r, NULL, &reach, scratch);
         }
-        rc_bitset offending = {0};
-        rc_bitset_resize(&offending, nb, &scratch);
+        rc_bitset offending = rc_bitset_make(nb, &scratch);
         bool any_offending = false;
         for (uint32_t bi = 0; bi < nb; bi++) {
             basic_block blk = rc_view_basic_block_get(g.blocks, bi);
@@ -3432,10 +3427,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             // A region head is an unreachable block with no unreachable predecessor - over the same edge
             // set the walk follows. Warn once per head whose closure holds an uncovered offender; a pure
             // cycle has no head, so a mop-up sweep catches anything the heads did not claim.
-            rc_bitset unreached = {0};
-            rc_bitset_resize(&unreached, nb, &scratch);
-            rc_bitset upred = {0};   // "has an unreached predecessor" - a set, so a bitset
-            rc_bitset_resize(&upred, nb, &scratch);
+            rc_bitset unreached = rc_bitset_make(nb, &scratch);
+            rc_bitset upred = rc_bitset_make(nb, &scratch);   // "has an unreached predecessor" - a set, so a bitset
             for (uint32_t bi = 0; bi < nb; bi++) {
                 if (!rc_bitset_is_set(&reach, bi)) {
                     rc_bitset_set(&unreached, bi);
@@ -3462,8 +3455,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     if (!rc_bitset_is_set(&reach, t)) { rc_bitset_set(&upred, t); }
                 }
             }
-            rc_bitset covered = {0};
-            rc_bitset_resize(&covered, nb, &scratch);
+            rc_bitset covered = rc_bitset_make(nb, &scratch);
             for (uint32_t pass = 0; pass < 2; pass++) {
                 for (uint32_t bi = 0; bi < nb; bi++) {
                     bool head = pass == 0 ? (!rc_bitset_is_set(&reach, bi) && !rc_bitset_is_set(&upred, bi))
@@ -3471,8 +3463,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     if (!head) {
                         continue;
                     }
-                    rc_bitset closure = {0};
-                    rc_bitset_resize(&closure, nb, &scratch);
+                    rc_bitset closure = rc_bitset_make(nb, &scratch);
                     reach_from(g, insns, cflows, bi, &unreached, &closure, scratch);
                     bool fresh = false;
                     for (uint32_t c = rc_bitset_get_first_set(&closure); !fresh && c != RC_INDEX_NONE;
@@ -3507,8 +3498,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // variable of its own, so live-out at the call equals live-across). For each such call we compute the
     // callee footprint and add the edges - UNLESS it cannot be bounded (an untrackable target -> across_call)
     // or the call recurses (-> recursion): a value live across either cannot be statically placed, so refuse.
-    rc_bitset live = {0};
-    rc_bitset_resize(&live, nv, &scratch);
+    rc_bitset live = rc_bitset_make(nv, &scratch);
     for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
         basic_block blk = rc_view_basic_block_get(g.blocks, bi);
         rc_bitset_reset(&live);
@@ -3633,8 +3623,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // write walk, not live-in, whose shared return edges smear one call site's live-after into
     // another. Handler blocks are excluded: a stacked ZA_ENTRY+ZA_INTERRUPT takes the stricter
     // treatment, and Guard 3's pinned comm vars ARE the supported live-in pattern there.
-    rc_bitset sync_seen = {0};
-    rc_bitset_resize(&sync_seen, nb ? nb : 1, &scratch);
+    rc_bitset sync_seen = rc_bitset_make(nb ? nb : 1, &scratch);
     for (uint32_t i = 0; nv > 0 && i < entries.num; i++) {
         zp_entry e = rc_view_zp_entry_get(entries, i);
         if (e.interrupt) {

@@ -49,8 +49,7 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
     rc_bitset_set(c->on_stack, entry);
 
     uint32_t nb = c->g.blocks.num;
-    rc_bitset seen = {0};
-    rc_bitset_resize(&seen, nb, &scratch);
+    rc_bitset seen = rc_bitset_make(nb, &scratch);
     rc_array_u32 stack = rc_array_u32_make(nb, &scratch);
     rc_array_u32_push(&stack, entry, &scratch);
     rc_bitset_set(&seen, entry);
@@ -95,16 +94,13 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
 footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, uint32_t entry_block,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
 {
-    rc_bitset touched = {0};
-    rc_bitset killed  = {0};
-    rc_bitset_resize(&touched, num_vars, arena);
-    rc_bitset_resize(&killed, num_vars, arena);
+    rc_bitset touched = rc_bitset_make(num_vars, arena);
+    rc_bitset killed  = rc_bitset_make(num_vars, arena);
     bool unknown   = false;
     bool recursive = false;
 
     if (entry_block < g.blocks.num && num_vars != 0) {
-        rc_bitset on_stack = {0};
-        rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
+        rc_bitset on_stack = rc_bitset_make(g.blocks.num, &scratch);
         fp_ctx c = {
             .g         = g,
             .insns     = insns,
@@ -130,16 +126,13 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
 footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, zp_insn call,
                             uint32_t num_vars, rc_arena *arena, rc_arena scratch)
 {
-    rc_bitset touched = {0};
-    rc_bitset killed  = {0};
-    rc_bitset_resize(&touched, num_vars, arena);
-    rc_bitset_resize(&killed, num_vars, arena);
+    rc_bitset touched = rc_bitset_make(num_vars, arena);
+    rc_bitset killed  = rc_bitset_make(num_vars, arena);
     bool unknown   = false;
     bool recursive = false;
 
     if (num_vars != 0) {
-        rc_bitset on_stack = {0};
-        rc_bitset_resize(&on_stack, g.blocks.num, &scratch);
+        rc_bitset on_stack = rc_bitset_make(g.blocks.num, &scratch);
         fp_ctx c = {
             .g         = g,
             .insns     = insns,

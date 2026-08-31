@@ -44,7 +44,8 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
 {
     (void) scratch;
     uint32_t n = vars.num;
-    rc_span_u32 base = rc_span_u32_make(n ? rc_arena_alloc_type(arena, uint32_t, n) : NULL, n);
+    rc_array_u32 base_a = {0};
+    rc_span_u32 base = rc_array_u32_resize(&base_a, n, arena);
     for (uint32_t v = 0; v < n; v++) {
         rc_span_u32_set(base, v, RC_INDEX_NONE);
     }
@@ -110,8 +111,7 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
 // Build a reserved-byte set over [lo, hi] for the tests.
 static rc_bitset reserve_range(uint32_t lo, uint32_t hi, rc_arena *arena)
 {
-    rc_bitset bs = {0};
-    rc_bitset_resize(&bs, zp_bytes, arena);
+    rc_bitset bs = rc_bitset_make(zp_bytes, arena);
     for (uint32_t b = lo; b <= hi; b++) {
         rc_bitset_set(&bs, b);
     }
@@ -130,9 +130,10 @@ static void add_var(rc_array_zp_var *vars, uint8_t width, rc_arena *arena)
 // A hand-buildable interference graph: n zeroed n-bit rows, ready for rc_bitset_set through _at.
 static rc_span_bitset make_interfere(uint32_t n, rc_arena *arena)
 {
-    rc_span_bitset rows = rc_span_bitset_make(rc_arena_alloc_zero_type(arena, rc_bitset, n), n);
+    rc_array_bitset rows_a = {0};
+    rc_span_bitset rows = rc_array_bitset_resize(&rows_a, n, arena);
     for (uint32_t i = 0; i < n; i++) {
-        rc_bitset_resize(rc_span_bitset_at(rows, i), n, arena);
+        rc_span_bitset_set(rows, i, rc_bitset_make(n, arena));
     }
     return rows;
 }
@@ -140,11 +141,7 @@ static rc_span_bitset make_interfere(uint32_t n, rc_arena *arena)
 // A hand-set classes row: the values are vreg_class enumerators, stored as the u8 the struct carries.
 static rc_view_u8 make_classes(const uint8_t *values, uint32_t n, rc_arena *arena)
 {
-    uint8_t *data = rc_arena_alloc_type(arena, uint8_t, n);
-    for (uint32_t i = 0; i < n; i++) {
-        data[i] = values[i];
-    }
-    return rc_view_u8_make(data, n);
+    return rc_array_u8_make_copy(rc_view_u8_make(values, n), 0, arena).view;
 }
 
 RC_TEST(zpalloc, disjoint_share_interfering_split)

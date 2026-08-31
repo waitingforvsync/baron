@@ -266,8 +266,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // a call, the location after it (branch/jump/return end a block, a call falls through in-block). We model
     // BOTH edges of a conditional branch - the sound default for liveness (a spurious edge only lengthens live
     // ranges, never shortens them; a MISSING edge is the only unsound case, which is why computed flow taints).
-    rc_bitset leaders = {0};
-    rc_bitset_resize(&leaders, num_sections * cfg_addr_space, &scratch);
+    rc_bitset leaders = rc_bitset_make(num_sections * cfg_addr_space, &scratch);
     mark_leader(&leaders, rc_view_zp_insn_get(insns, 0).section, rc_view_zp_insn_get(insns, 0).pc);
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn insn = rc_view_zp_insn_get(insns, i);

@@ -202,10 +202,7 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count)
     RC_ASSERT(sec != NULL);
 
     section *s = rc_array_section_at(&sec->nodes, id);
-    for (uint32_t i = 0; i < count; i++) {
-        rc_array_bytes_push(&s->code, 0, sec->arena);
-    }
-
+    rc_array_bytes_push_n_zero(&s->code, count, sec->arena);
     s->pc += count;
 }
 

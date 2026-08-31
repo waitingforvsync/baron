@@ -11,9 +11,10 @@
 // owns the storage, the span says "these rows may be written but the row count never changes".
 static rc_span_bitset make_rows(uint32_t n, uint32_t width, rc_arena *arena)
 {
-    rc_span_bitset rows = rc_span_bitset_make(n ? rc_arena_alloc_zero_type(arena, rc_bitset, n) : NULL, n);
+    rc_array_bitset rows_a = {0};
+    rc_span_bitset rows = rc_array_bitset_resize(&rows_a, n, arena);
     for (uint32_t i = 0; i < n; i++) {
-        rc_bitset_resize(rc_span_bitset_at(rows, i), width, arena);
+        rc_span_bitset_set(rows, i, rc_bitset_make(width, arena));
     }
 
     return rows;
@@ -34,16 +35,16 @@ typedef struct byte_ids {
 
 static byte_ids byte_ids_make(rc_view_zp_var vars, rc_arena *arena)
 {
-    rc_span_u32 base = rc_span_u32_make(vars.num ? rc_arena_alloc_type(arena, uint32_t, vars.num) : NULL,
-                                        vars.num);
+    rc_array_u32 base_a = {0};
+    rc_span_u32 base = rc_array_u32_resize(&base_a, vars.num, arena);
     uint32_t nbytes = 0;
     for (uint32_t v = 0; v < vars.num; v++) {
         rc_span_u32_set(base, v, nbytes);
         nbytes += rc_view_zp_var_get(vars, v).width;
     }
 
-    rc_span_u32 owner = rc_span_u32_make(nbytes ? rc_arena_alloc_type(arena, uint32_t, nbytes) : NULL,
-                                         nbytes);
+    rc_array_u32 owner_a = {0};
+    rc_span_u32 owner = rc_array_u32_resize(&owner_a, nbytes, arena);
     for (uint32_t v = 0; v < vars.num; v++) {
         for (uint32_t k = 0; k < rc_view_zp_var_get(vars, v).width; k++) {
             rc_span_u32_set(owner, rc_span_u32_get(base, v) + k, v);
@@ -65,8 +66,13 @@ typedef struct pred_lists {
 static pred_lists pred_lists_make(cfg g, rc_arena *arena)
 {
     uint32_t nb = g.blocks.num;
-    rc_span_u32 count = rc_span_u32_make(rc_arena_alloc_zero_type(arena, uint32_t, nb), nb);
-    rc_span_u32 first = rc_span_u32_make(rc_arena_alloc_type(arena, uint32_t, nb), nb);
+
+    rc_array_u32 count_a = {0};
+    rc_span_u32 count = rc_array_u32_resize_zero(&count_a, nb, arena);
+
+    rc_array_u32 first_a = {0};
+    rc_span_u32 first = rc_array_u32_resize(&first_a, nb, arena);   // every slot filled by the prefix sum
+
     uint32_t npreds = 0;
     for (uint32_t b = 0; b < nb; b++) {
         basic_block blk = rc_view_basic_block_get(g.blocks, b);
@@ -87,8 +93,8 @@ static pred_lists pred_lists_make(cfg g, rc_arena *arena)
         rc_span_u32_set(count, b, 0);   // reused as the fill cursor
     }
 
-    rc_span_u32 preds = rc_span_u32_make(npreds ? rc_arena_alloc_type(arena, uint32_t, npreds) : NULL,
-                                         npreds);
+    rc_array_u32 preds_a = {0};
+    rc_span_u32 preds = rc_array_u32_resize(&preds_a, npreds, arena);   // every slot filled by the scatter
     for (uint32_t b = 0; b < nb; b++) {
         basic_block blk = rc_view_basic_block_get(g.blocks, b);
         for (uint32_t s = 0; s < blk.succ_count; s++) {
@@ -107,8 +113,8 @@ static pred_lists pred_lists_make(cfg g, rc_arena *arena)
 static rc_span_call_targets calls_make(cfg g, rc_view_zp_cflow cflows, rc_view_zp_insn insns,
                                        rc_arena *arena)
 {
-    rc_span_call_targets calls = rc_span_call_targets_make(
-        insns.num ? rc_arena_alloc_zero_type(arena, call_targets, insns.num) : NULL, insns.num);
+    rc_array_call_targets calls_a = {0};
+    rc_span_call_targets calls = rc_array_call_targets_resize_zero(&calls_a, insns.num, arena);
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.flow == zp_flow_call) {
@@ -123,8 +129,7 @@ static rc_span_call_targets calls_make(cfg g, rc_view_zp_cflow cflows, rc_view_z
 // The set of call-target entry blocks: the routines whose summaries the interprocedural fixpoints keep.
 static rc_bitset entry_blocks(rc_span_call_targets calls, uint32_t nb, rc_arena *arena)
 {
-    rc_bitset is_entry = {0};
-    rc_bitset_resize(&is_entry, nb, arena);
+    rc_bitset is_entry = rc_bitset_make(nb, arena);
     for (uint32_t i = 0; i < calls.num; i++) {
         call_targets ct = rc_span_call_targets_get(calls, i);
         for (uint32_t c = 0; c < ct.blocks.num; c++) {
@@ -268,8 +273,7 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
 // nothing of ours) or untrackable. A fresh set in arena each call - the sets are tiny and short-lived.
 static rc_bitset call_kill_bytes(call_targets ct, rc_view_bitset mwb, uint32_t nbytes, rc_arena *arena)
 {
-    rc_bitset out = {0};
-    rc_bitset_resize(&out, nbytes, arena);
+    rc_bitset out = rc_bitset_make(nbytes, arena);
     if (!ct.unknown && !ct.external && ct.blocks.num != 0) {
         rc_bitset_copy(&out, rc_view_bitset_at(mwb, rc_view_u32_get(ct.blocks, 0)));
         for (uint32_t a = 1; a < ct.blocks.num; a++) {
@@ -293,8 +297,10 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     rc_span_bitset live_out   = make_rows(nb, num_vars, arena);
     rc_span_bitset interfere  = make_rows(num_vars, num_vars, arena);
     rc_span_bitset must_write = make_rows(nb, num_vars, arena);
-    rc_span_u8     classes    = rc_span_u8_make(
-        num_vars ? rc_arena_alloc_zero_type(arena, uint8_t, num_vars) : NULL, num_vars);
+
+    rc_array_u8 classes_a = {0};
+    rc_span_u8 classes = rc_array_u8_resize_zero(&classes_a, num_vars, arena);   // all unused until classified
+
     liveness lv = {
         .live_in    = live_in.view,
         .live_out   = live_out.view,
@@ -327,8 +333,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
 
     // A full set for the unknown_succ taint: a block whose control may leave to an address we cannot model
     // must assume every byte is live out (the computed target might read any of them).
-    rc_bitset full = {0};
-    rc_bitset_resize(&full, nbytes, &scratch);
+    rc_bitset full = rc_bitset_make(nbytes, &scratch);
     for (uint32_t i = 0; i < nbytes; i++) {
         rc_bitset_set(&full, i);
     }
@@ -354,10 +359,9 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
 
     rc_span_bitset mwin   = make_rows(nb, nbytes, &scratch);   // per-entry working rows, re-seeded each visit
     rc_span_bitset mwout  = make_rows(nb, nbytes, &scratch);
-    rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
-    rc_bitset  mrow  = {0}; rc_bitset_resize(&mrow, nbytes, &scratch);
-    rc_bitset  in_ext = {0};                                 // extent of the entry under analysis
-    rc_bitset_resize(&in_ext, nb, &scratch);
+    rc_bitset  acc   = rc_bitset_make(nbytes, &scratch);
+    rc_bitset  mrow  = rc_bitset_make(nbytes, &scratch);
+    rc_bitset  in_ext = rc_bitset_make(nb, &scratch);                                 // extent of the entry under analysis
     rc_array_u32 stack = rc_array_u32_make(nb, &scratch);    // the extent walk's worklist
 
     bool mw_changed = true;
@@ -457,7 +461,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
 
     // Freeze each call's byte-level kill set, and project the var-level must-write rows for the finalize
     // sweep (a variable is killed only when EVERY one of its bytes is definitely written).
-    rc_span_bitset ckills = make_rows(insns.num, 0, &scratch);
+    rc_array_bitset ckills_a = {0};
+    rc_span_bitset ckills = rc_array_bitset_resize_zero(&ckills_a, insns.num, &scratch);   // zeroed = empty bitsets
     for (uint32_t i = 0; i < insns.num; i++) {
         if (rc_view_zp_insn_get(insns, i).flow == zp_flow_call) {
             rc_span_bitset_set(ckills, i,
@@ -471,7 +476,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // routine's later writes cannot land on its byte (its only reads are in the caller, invisible to
     // intraprocedural liveness). ret_from[b] lists the call sites whose callees' extents contain
     // returning block b; after[i] snapshots the live set just after call i, kept inside the fixpoint.
-    rc_span_u32_list ret_from = rc_span_u32_list_make(rc_arena_alloc_zero_type(&scratch, rc_array_u32, nb), nb);
+    rc_array_u32_list ret_from_a = {0};
+    rc_span_u32_list ret_from = rc_array_u32_list_resize_zero(&ret_from_a, nb, &scratch);
     for (uint32_t i = 0; i < insns.num; i++) {
         call_targets ct = rc_span_call_targets_get(calls, i);
         for (uint32_t c = 0; c < ct.blocks.num; c++) {
@@ -484,10 +490,11 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
     }
 
-    rc_span_bitset after = make_rows(insns.num, 0, &scratch);
+    rc_array_bitset after_a = {0};
+    rc_span_bitset after = rc_array_bitset_resize_zero(&after_a, insns.num, &scratch);   // zeroed = empty bitsets
     for (uint32_t i = 0; i < insns.num; i++) {
         if (rc_view_zp_insn_get(insns, i).flow == zp_flow_call) {
-            rc_bitset_resize(rc_span_bitset_at(after, i), nbytes, &scratch);
+            rc_span_bitset_set(after, i, rc_bitset_make(nbytes, &scratch));
         }
     }
 
@@ -515,8 +522,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // block's evolving live-in, which a precomputed use set cannot express.)
     rc_span_bitset bin   = make_rows(nb, nbytes, &scratch);
     rc_span_bitset bout  = make_rows(nb, nbytes, &scratch);
-    rc_bitset new_out = {0}; rc_bitset_resize(&new_out, nbytes, &scratch);
-    rc_bitset new_in  = {0}; rc_bitset_resize(&new_in,  nbytes, &scratch);
+    rc_bitset new_out = rc_bitset_make(nbytes, &scratch);
+    rc_bitset new_in  = rc_bitset_make(nbytes, &scratch);
     bool changed = true;
     while (changed) {
         changed = false;
@@ -596,7 +603,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // live set - remove the provably-rewritten bytes, add the read ones. A lone STA ptr removes only
     // the LSB's byte, so the MSB keeps the pointer live; once the MSB's store joins it the whole
     // variable goes dead and the range genuinely ends.
-    rc_bitset live = {0}; rc_bitset_resize(&live, nbytes, &scratch);
+    rc_bitset live = rc_bitset_make(nbytes, &scratch);
     for (uint32_t b = 0; b < nb; b++) {
         basic_block block = rc_view_basic_block_get(g.blocks, b);
         rc_bitset_copy(&live, rc_span_bitset_at(bout, b));
@@ -658,8 +665,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     // Classification. Scan every instruction for whether each vreg is ever read / written, then combine with
     // its live-in-at-entry status (see vreg_class). input wins over temp/output when a var is both live-in
     // and rewritten (an in-out param); C3 will separate those with real caller liveness.
-    rc_bitset seen_read  = {0}; rc_bitset_resize(&seen_read,  num_vars, &scratch);
-    rc_bitset seen_write = {0}; rc_bitset_resize(&seen_write, num_vars, &scratch);
+    rc_bitset seen_read  = rc_bitset_make(num_vars, &scratch);
+    rc_bitset seen_write = rc_bitset_make(num_vars, &scratch);
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.vreg == RC_INDEX_NONE) {
@@ -845,8 +852,7 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
 {
     uint32_t num_vars = vars.num;
     uint32_t nb = g.blocks.num;
-    rc_bitset result = {0};
-    rc_bitset_resize(&result, num_vars ? num_vars : 1, arena);
+    rc_bitset result = rc_bitset_make(num_vars ? num_vars : 1, arena);
     if (nb == 0 || num_vars == 0 || root >= nb) {
         return result;
     }
@@ -863,8 +869,7 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
 
     pred_lists pl = pred_lists_make(g, &scratch);
 
-    rc_bitset full = {0};
-    rc_bitset_resize(&full, nbytes, &scratch);
+    rc_bitset full = rc_bitset_make(nbytes, &scratch);
     for (uint32_t i = 0; i < nbytes; i++) {
         rc_bitset_set(&full, i);
     }
@@ -876,11 +881,10 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
     rc_span_bitset rbwb    = make_rows(nb, nbytes, &scratch);
     rc_span_bitset mayin   = make_rows(nb, nbytes, &scratch);
     rc_span_bitset mayout  = make_rows(nb, nbytes, &scratch);
-    rc_bitset  acc   = {0}; rc_bitset_resize(&acc, nbytes, &scratch);
-    rc_bitset  row   = {0}; rc_bitset_resize(&row, nbytes, &scratch);
-    rc_bitset  reads = {0}; rc_bitset_resize(&reads, nbytes, &scratch);
-    rc_bitset  in_ext = {0};
-    rc_bitset_resize(&in_ext, nb, &scratch);
+    rc_bitset  acc   = rc_bitset_make(nbytes, &scratch);
+    rc_bitset  row   = rc_bitset_make(nbytes, &scratch);
+    rc_bitset  reads = rc_bitset_make(nbytes, &scratch);
+    rc_bitset  in_ext = rc_bitset_make(nb, &scratch);
     rc_array_u32 stack = rc_array_u32_make(nb, &scratch);
     rbw_ctx c = {
         .g       = g,

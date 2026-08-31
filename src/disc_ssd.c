@@ -108,7 +108,8 @@ disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena)
 
     // Parse and validate every name, then place every file: contiguous whole sectors from sector 2, in
     // entry order. Each record remembers where its file landed for the catalogue below.
-    rc_span_dfs_file files = rc_span_dfs_file_make(n != 0 ? rc_arena_alloc_type(arena, dfs_file, n) : NULL, n);
+    rc_array_dfs_file files_a = {0};
+    rc_span_dfs_file files = rc_array_dfs_file_resize(&files_a, n, arena);   // every slot filled in placement order
     uint32_t next = ssd_first_sector;
 
     for (uint32_t i = 0; i < n; i++) {
@@ -197,12 +198,13 @@ RC_TEST(disc_ssd, catalogue_layout_and_truncation)
     // Two files: a 3-byte one with I/O-processor addresses (&FFFFxxxx truncates to &3xxxx, host bits
     // set), and a 300-byte one under directory X. Placement: boot at sector 2 (1 sector), data at 3 (2).
     static const uint8_t boot_code[] = {0xA9, 0x2A, 0x60};
-    uint8_t *table = rc_arena_alloc_zero(&arena, 300);
-    table[0]   = 0x11;
-    table[299] = 0x99;
+    rc_array_bytes table = rc_array_bytes_make(300, &arena);
+    rc_array_bytes_push_n_zero(&table, 300, &arena);
+    rc_array_bytes_set(&table, 0, 0x11);
+    rc_array_bytes_set(&table, 299, 0x99);
     output_entry e[] = {
         {.filename = RC_STR("boot"), .load = 0xFFFF1900, .exec = 0xFFFF1903, .code = RC_VIEW(boot_code)},
-        {.filename = RC_STR("X.data"), .load = 0x2000, .exec = 0x2000, .code = rc_view_bytes_make(table, 300)},
+        {.filename = RC_STR("X.data"), .load = 0x2000, .exec = 0x2000, .code = table.view},
     };
     output_spec spec = {.title = RC_STR("Mydisc"), .boot = 3, .cycle = 42, .entries = RC_VIEW(e)};
 
@@ -296,17 +298,19 @@ RC_TEST(disc_ssd, errors)
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("duplicate DFS filename")));
 
     // A 32nd file overflows the catalogue (counted before names are even looked at).
-    output_entry *many = rc_arena_alloc_type(&arena, output_entry, 32);
+    rc_array_output_entry many = rc_array_output_entry_make(32, &arena);
     for (uint32_t i = 0; i < 32; i++) {
-        many[i] = (output_entry) {.filename = RC_STR("f"), .code = RC_VIEW(byte)};
+        rc_array_output_entry_push(&many, (output_entry) {.filename = RC_STR("f"), .code = RC_VIEW(byte)}, &arena);
     }
-    spec.entries = rc_view_output_entry_make(many, 32);
+    spec.entries = many.view;
     r = disc_ssd_make(&spec, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("31 maximum")));
 
     // One file bigger than the 798 data sectors of an 80-track disc.
     uint32_t huge_len = 799 * 256 + 1;
-    output_entry huge[] = {{.filename = RC_STR("huge"), .code = rc_view_bytes_make(rc_arena_alloc_zero(&arena, huge_len), huge_len)}};
+    rc_array_bytes huge_code = rc_array_bytes_make(huge_len, &arena);
+    rc_array_bytes_push_n_zero(&huge_code, huge_len, &arena);
+    output_entry huge[] = {{.filename = RC_STR("huge"), .code = huge_code.view}};
     spec.entries = (rc_view_output_entry) RC_VIEW(huge);
     r = disc_ssd_make(&spec, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("disc full")));

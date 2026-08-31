@@ -235,12 +235,15 @@ typedef struct basic_match {
 static basic_match basic_find_keyword(rc_str text, uint32_t pos)
 {
     uint8_t c = basic_at(text, pos);
+
     for (uint32_t k = 0; ; k++) {
         const basic_keyword *e = &basic_keywords[k];
         uint8_t first = (uint8_t) e->text.data[0];
+
         if (c < first) {
             return (basic_match) {.entry = RC_INDEX_NONE};
         }
+
         if (c == first) {
             uint32_t i = 1;
             while (i < e->text.len && pos + i < text.len && basic_at(text, pos + i) == (uint8_t) e->text.data[i]) {
@@ -253,6 +256,7 @@ static basic_match basic_find_keyword(rc_str text, uint32_t pos)
                 return (basic_match) {.entry = k, .next = pos + i + 1};
             }
         }
+
         if (e->token == basic_end_of_table) {
             return (basic_match) {.entry = RC_INDEX_NONE};
         }
@@ -273,6 +277,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
     bool sos = true;
     bool lnexp = true;
     uint32_t pos = 0;
+
     while (pos < text.len) {
         uint8_t c = basic_at(text, pos);
 
@@ -281,6 +286,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
             pos++;
             continue;                                       // spaces change nothing, not even lnexp
         }
+
         if (c == '&') {
             rc_array_bytes_push(out, c, arena);
             pos++;
@@ -290,6 +296,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
             }
             continue;                                       // a hex literal changes no state either
         }
+
         if (c == '"') {
             rc_array_bytes_push(out, c, arena);
             pos++;
@@ -304,6 +311,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
             pos++;
             continue;
         }
+
         if (c == ':') {
             rc_array_bytes_push(out, c, arena);
             pos++;
@@ -311,11 +319,13 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
             lnexp = false;
             continue;
         }
+
         if (c == ',') {
             rc_array_bytes_push(out, c, arena);
             pos++;
             continue;                                       // ',' keeps lnexp: LIST 10,20 embeds both
         }
+
         if (c == '*') {
             if (sos) {
                 basic_push_raw(out, text, pos, text.len, arena);   // a * command: the OS gets it verbatim
@@ -327,15 +337,18 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
             lnexp = false;
             continue;
         }
+
         if (basic_is_digit(c) && lnexp) {
             uint32_t end = pos;
             uint32_t n = 0;
+
             while (end < text.len && basic_is_digit(basic_at(text, end))) {
                 if (n <= basic_max_line_number) {           // saturate: only "too big" matters
                     n = n * 10 + (uint32_t) (basic_at(text, end) - '0');
                 }
                 end++;
             }
+
             if (n <= basic_max_line_number) {
                 basic_push_line_number(out, n, arena);
                 pos = end;
@@ -344,55 +357,69 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
 
             // Too big for a line number: fall through and let it be an ordinary numeric literal.
         }
+
         if (c == '.' || basic_is_digit(c)) {
             while (pos < text.len && (basic_at(text, pos) == '.' || basic_is_digit(basic_at(text, pos)))) {
                 rc_array_bytes_push(out, basic_at(text, pos), arena);
                 pos++;
             }
+
             sos = false;
             lnexp = false;
             continue;
         }
+
         if (c >= 'A' && c < 'X') {                          // only 'A'-'W' can start a keyword
             basic_match m = basic_find_keyword(text, pos);
+
             if (m.entry != RC_INDEX_NONE) {
                 const basic_keyword *e = &basic_keywords[m.entry];
                 bool rejected = (e->flags & basic_flag_conditional) &&
                                 m.next < text.len && basic_is_var_char(basic_at(text, m.next));
+
                 if (!rejected) {
                     uint8_t token = e->token;
+
                     if ((e->flags & basic_flag_pseudo_var) && sos) {
                         token += 0x40;                      // the statement form: PAGE=&E00, TIME=0, ...
                     }
+
                     rc_array_bytes_push(out, token, arena);
                     pos = m.next;
+
                     if (e->flags & basic_flag_middle) {
                         sos = false;
                         lnexp = false;
                     }
+
                     if (e->flags & basic_flag_start) {
                         sos = true;
                         lnexp = false;
                     }
+
                     if (e->flags & basic_flag_fnproc) {     // the FN/PROC name belongs to the user
                         while (pos < text.len && basic_is_var_char(basic_at(text, pos))) {
                             rc_array_bytes_push(out, basic_at(text, pos), arena);
                             pos++;
                         }
                     }
+
                     if (e->flags & basic_flag_line_number) {
                         lnexp = true;                       // applied last, so ELSE/THEN keep it despite bit 2
                     }
+
                     if (e->flags & basic_flag_rest_raw) {   // REM and DATA own the rest of the line
                         basic_push_raw(out, text, pos, text.len, arena);
                         return;
                     }
+
                     continue;
                 }
             }
 
             // No keyword (or a conditional one vetoed): it is a variable name - fall through.
         }
+
         if (basic_is_var_char(c)) {
             while (pos < text.len && basic_is_var_char(basic_at(text, pos))) {
                 rc_array_bytes_push(out, basic_at(text, pos), arena);
@@ -403,6 +430,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
             rc_array_bytes_push(out, c, arena);             // any other punctuation passes through
             pos++;
         }
+
         sos = false;
         lnexp = false;
     }
@@ -417,6 +445,7 @@ basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
     // it straight back into the record header - reading the digits directly lands the same bytes.
     uint32_t pos = 0;
     uint32_t number = 0;
+
     while (pos < line.len && basic_is_digit((uint8_t) line.data[pos])) {
         if (number <= basic_max_line_number) {              // saturate: only "too big" matters
             number = number * 10 + (uint32_t) (line.data[pos] - '0');
@@ -445,6 +474,7 @@ basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
     rc_array_bytes_push(&out, (uint8_t) (number >> 8), arena);
     rc_array_bytes_push(&out, (uint8_t) (number & 0xFF), arena);
     rc_array_bytes_push(&out, 0, arena);                    // the length, filled in once we know it
+    
     basic_tokenise_text(&out, rc_str_substr(line, pos, end - pos), arena);
     if (out.num > basic_max_record) {
         return (basic_line_result) {.error = error_type_basic_line_too_long};

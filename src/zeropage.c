@@ -15,8 +15,7 @@ void zeropage_init(zeropage *zp, rc_arena *permanent)
 {
     RC_ASSERT(zp != NULL && permanent != NULL);
     zp->arena    = permanent;
-    zp->reserved = (rc_bitset) {0};
-    rc_bitset_resize(&zp->reserved, zeropage_size, permanent);   // 256 addressable, all zero
+    zp->reserved = rc_bitset_make(zeropage_size, permanent);   // 256 addressable, all zero
     zp->vars     = rc_array_zp_var_make(zeropage_vars_reserve, permanent);
     zp->insns    = rc_array_zp_insn_make(zeropage_insns_reserve, permanent);
     zp->cflows   = rc_array_zp_cflow_make(zeropage_cflows_reserve, permanent);
