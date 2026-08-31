@@ -107,6 +107,7 @@ rc_str error_type_name(error_type e)
         case error_type_not_implemented:         return RC_STR("Not implemented");
         case error_type_user_error:              return RC_STR("%");
         case error_type_no_convergence:          return RC_STR("Assembly did not settle");
+        case error_type_unsettled_symbol:        return RC_STR("Assembly did not settle: % kept changing");
         case error_type_source_load:             return RC_STR("Could not read the source file");
         case error_type_jmp_indirect_page_cross: return RC_STR("Indirect JMP vector straddles a page boundary (6502 bug)");
     }

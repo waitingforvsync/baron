@@ -159,6 +159,39 @@ void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, u
 }
 
 
+// Remember the pass's FIRST binding that would not settle; if we hit the pass cap, this is the
+// culprit we point at (changes cascade down the file, so the earliest is nearest the root cause).
+static void note_unsettled(baron *b, cursor at, rc_str name, value from, value to)
+{
+    if (b->unsettled.seen) {
+        return;
+    }
+    rc_mstr m = rc_mstr_make(64, b->per_pass);
+    rc_mstr_append_char(&m, '\'', b->per_pass);
+    rc_mstr_append(&m, name, b->per_pass);
+    rc_mstr_append(&m, RC_STR("' ("), b->per_pass);
+    value_format(&m, from, b->per_pass);
+    rc_mstr_append(&m, RC_STR(" -> "), b->per_pass);
+    value_format(&m, to, b->per_pass);
+    rc_mstr_append_char(&m, ')', b->per_pass);
+    b->unsettled = (unsettled_note) {.seen = true, .at = at, .payload = m.view};
+}
+
+
+// The dead-branch flavour: the binding vanished this pass (an IF arm flipping it in and out).
+static void note_unsettled_removed(baron *b, cursor at, rc_str name)
+{
+    if (b->unsettled.seen) {
+        return;
+    }
+    rc_mstr m = rc_mstr_make(name.len + 2, b->per_pass);
+    rc_mstr_append_char(&m, '\'', b->per_pass);
+    rc_mstr_append(&m, name, b->per_pass);
+    rc_mstr_append_char(&m, '\'', b->per_pass);
+    b->unsettled = (unsettled_note) {.seen = true, .at = at, .payload = m.view};
+}
+
+
 // ---- the verbose listing ----
 
 // Column layout: "  0900  AD 34 12        LDA magic" - everything hangs off these two numbers.
@@ -1691,13 +1724,12 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
     // Bind name = current pc; a moved label drives another pass, and a second definition (a
     // different source position) is a duplicate. A dead branch instead REMOVES the name.
     if (flags.active) {
-        symbol_status st = scopes_set_symbol(
-            &b->scopes,
-            scope,
-            name,
-            value_make_numeric((double)sections_pc(&b->sections, section)),
-            at
-        );
+        value pc  = value_make_numeric((double)sections_pc(&b->sections, section));
+        value was = {0};
+        if (!b->unsettled.seen) {
+            was = scopes_get_symbol(&b->scopes, scope, name);   // grabbed before the set clobbers it
+        }
+        symbol_status st = scopes_set_symbol(&b->scopes, scope, name, pc, at);
 
         if (st == symbol_status_duplicate) {
             semantic_error_payload(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos), name);
@@ -1705,6 +1737,9 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
             if (!cursor_is_none(original)) {
                 semantic_error_payload(b, flags, error_type_original_definition, original, name);   // point at the first binding
             }
+        }
+        else if (st == symbol_status_changed) {
+            note_unsettled(b, at, name, was, pc);
         }
         r.changed = (st == symbol_status_changed);
 
@@ -1718,6 +1753,9 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         // Dead branch: clear only the binding THIS label owns (its def is our cursor), so a live sibling
         // branch's - or an outer statement's - like-named binding survives.
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
+        if (r.changed) {
+            note_unsettled_removed(b, at, name);
+        }
     }
 
     verbose_text_line(b, flags, stmt, nm.next, 0, verbose_text_margin);   // ".name" at the margin (never its scope's braces)
@@ -1781,17 +1819,23 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
 
     parse_result r = {.next = at.pos};
     if (flags.active) {
-        symbol_status st = scopes_set_symbol(
-            &b->scopes,
-            scope,
-            key.view,
-            value_make_numeric((double) sections_pc(&b->sections, section)),
-            at);
+        value pc  = value_make_numeric((double) sections_pc(&b->sections, section));
+        value was = {0};
+        if (!b->unsettled.seen) {
+            was = scopes_get_symbol(&b->scopes, scope, key.view);
+        }
+        symbol_status st = scopes_set_symbol(&b->scopes, scope, key.view, pc, at);
+        if (st == symbol_status_changed) {
+            note_unsettled(b, at, RC_STR(".@"), was, pc);   // the key is unspellable - name it as written
+        }
         r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
     }
     else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, key.view), at)) {
         // The @source:pos key is unique per position, but keep the guard uniform with named labels.
         r.changed = scopes_remove_symbol(&b->scopes, scope, key.view);
+        if (r.changed) {
+            note_unsettled_removed(b, at, RC_STR(".@"));
+        }
     }
 
     verbose_text_line(b, flags, stmt, at.pos, 0, verbose_text_margin);   // the ".@" token is the whole statement
@@ -1972,6 +2016,10 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         semantic_error(b, flags, error_type_invalid_assignment, cursor_at(at, at.pos));
     }
     else if (flags.active) {
+        value was = {0};
+        if (!b->unsettled.seen) {
+            was = scopes_get_symbol(&b->scopes, scope, name);
+        }
         symbol_status st = scopes_set_symbol(&b->scopes, scope, name, e.value, at);
 
         if (st == symbol_status_duplicate) {
@@ -1993,6 +2041,9 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
                                            e.value.error.detail);   // e.g. x = 1/0
                 }
             }
+            if (st == symbol_status_changed) {
+                note_unsettled(b, at, name, was, e.value);
+            }
             r.changed = (st == symbol_status_changed);
         }
     }
@@ -2000,6 +2051,9 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         // Dead branch: clear only the binding THIS assignment owns (def is our cursor), so a live sibling
         // branch - IF TRUE:x=2:ELSE:x=3:ENDIF - or an outer binding of the same name is not clobbered.
         r.changed = scopes_remove_symbol(&b->scopes, scope, name);
+        if (r.changed) {
+            note_unsettled_removed(b, at, name);
+        }
     }
 
     // An assignment emits nothing, so it echoes at the margin like a label.
@@ -2914,6 +2968,7 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     b->include_depth   = 0;                  // balanced by handle_include, but a fatal unwind skips the decrement
     b->macro_depth     = 0;                  // ditto for macro expansion
     b->function_depth  = 0;                  // ditto for FUNCTION recursion (balanced by the evaluator)
+    b->unsettled       = (unsettled_note) {0};   // a fresh hunt for the pass's first non-settling binding
     expression_reset_random();               // replay the same RND stream every pass, so RND can converge
 
     macros_reset(&b->macros, base_statement_tokens, 128);
@@ -3496,6 +3551,18 @@ static uint32_t assemble_failed(baron *b)
 }
 
 
+// The did-not-settle report: point at the pass's first non-settling binding where one was seen.
+static void report_no_convergence(baron *b, uint32_t source)
+{
+    if (b->unsettled.seen) {
+        baron_error_payload(b, error_type_unsettled_symbol, b->unsettled.at, b->unsettled.payload);
+    }
+    else {
+        baron_error(b, error_type_no_convergence, (cursor) {.source = source});
+    }
+}
+
+
 // The shared core: run passes over the cached source until everything settles (or fails). Only the
 // final pass records recoverable errors and warnings, so the diagnostics array holds the complete
 // set. Returns the pass count, 0 on failure.
@@ -3512,6 +3579,13 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             // Settled. One more pass with checks armed, to record any deferred (recoverable) errors and
             // warnings. It fails only on an error - warnings leave the assemble succeeding.
             parse_result fin = run_pass(b, source, (parse_flags) {.final = true, .active = true}, scratch);
+
+            // A binding that moved on the ARMED pass means the pass we certified was no fixed point
+            // after all (a defined() guard flipped by its own binding, say): a replay of a true fixed
+            // point cannot change anything, so this fails like any other non-convergence.
+            if (!fin.fatal && fin.changed) {
+                report_no_convergence(b, source);
+            }
 
             if (fin.fatal || baron_has_errors(b)) {
                 return assemble_failed(b);
@@ -3550,10 +3624,11 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
     }
 
     // Did not settle within the cap. A final diagnostic pass names a concrete cause (an undefined
-    // symbol) where there is one; otherwise it is genuine oscillation.
+    // symbol) where there is one; otherwise it is genuine oscillation, and the first binding that
+    // moved on that pass makes a decent culprit - point at it, with its flip in the payload.
     parse_result diag = run_pass(b, source, (parse_flags) {.final = true, .active = true}, scratch);
     if (!diag.fatal && !baron_has_errors(b)) {
-        baron_error(b, error_type_no_convergence, (cursor) {.source = source});
+        report_no_convergence(b, source);
     }
 
     return assemble_failed(b);
@@ -6712,9 +6787,37 @@ RC_TEST_STEP(assemble, if_forward_ref_contradiction_does_not_converge, fix)
 {
     // fwdlabel = 5 is a contradiction: skipping the block puts fwdlabel at 5 (so the condition is
     // true, contradicting the skip); taking it puts fwdlabel at 10 (so the condition is false). The
-    // layout flips between the two forever and never settles.
+    // layout flips between the two forever and never settles - and the report names the flapping
+    // binding with its two values (the diagnostic pass sees the 10 -> 5 half of the cycle).
     RC_CHECK_TRUE(ERR("LDA #1 : IF fwdlabel = 5 : LDA #2 : JSR &FFEE : ENDIF : NOP : LDA fwdlabel : .fwdlabel : RTS")
-                  == error_type_no_convergence);
+                  == error_type_unsettled_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_unsettled_symbol), ==, RC_STR("'fwdlabel' (10 -> 5)"));
+}
+
+RC_TEST_STEP(assemble, unsettled_binding_flip_flop_names_the_symbol, fix)
+{
+    // flip's own existence toggles the layout that decides it: bound when end is 1, whereupon the
+    // NOP comes in and pushes end to 2, killing the branch that bound it. The dead-branch removal
+    // is the pass's first change, so the report points at flip (no values - it simply vanished).
+    RC_CHECK_TRUE(ERR("IF end = 1 : flip = 1 : ENDIF : IF defined(flip) : NOP : ENDIF : NOP : .end")
+                  == error_type_unsettled_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_unsettled_symbol), ==, RC_STR("'flip'"));
+}
+
+RC_TEST_STEP(assemble, final_pass_flip_is_an_error, fix)
+{
+    // The self-guarded default with nothing forcing a second pass: pass 1 settles (an add is not
+    // "changed"), then the armed pass sees owl defined, kills the branch and removes the binding.
+    // No fixed point exists, so the once-silent success is now a did-not-settle naming owl.
+    RC_CHECK_TRUE(ERR("IF not(defined(owl)) : owl = FALSE : ENDIF")
+                  == error_type_unsettled_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_unsettled_symbol), ==, RC_STR("'owl'"));
+
+    // With a reader downstream, the undefined complaint at the use keeps first place, and the
+    // did-not-settle report points back at the flapping binding as a breadcrumb.
+    RC_CHECK_TRUE(ERR("IF not(defined(owl)) : owl = FALSE : ENDIF : IF owl : NOP : ENDIF")
+                  == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_unsettled_symbol), ==, RC_STR("'owl'"));
 }
 
 RC_TEST_STEP(assemble, nested_if_forward_ref, fix)

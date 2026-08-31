@@ -605,8 +605,9 @@ ENDIF
 ```
 
 (Guarding an assignment to the *same* name - `IF DEFINED(debug) == FALSE : debug = 0 : ENDIF` - cannot
-settle: binding the symbol flips its own condition on the next pass. Baron will report it as undefined
-rather than loop forever.)
+settle: binding the symbol flips its own condition on the next pass. Baron reports it as
+`Assembly did not settle: 'debug' kept changing`, pointing at the binding - alongside an undefined-symbol
+error at any use the flip strands.)
 
 ## Macros ##
 

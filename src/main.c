@@ -14,7 +14,7 @@
 #endif
 
 
-#define BARON_VERSION "0.2.0"
+#define BARON_VERSION "0.2.1"
 
 
 static void display_version(void)
