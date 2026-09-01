@@ -52,6 +52,10 @@ add_executable(baron
     baron.h
 )
 
+if(WIN32)
+    target_sources(baron PRIVATE baron.rc)
+endif()
+
 target_link_libraries(baron PRIVATE richc)
 target_include_directories(baron PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
