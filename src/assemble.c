@@ -1068,12 +1068,12 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
     }
 
     // Reduce the count. On any non-known outcome we fall back to width 1 so the names still bind
-    // (references do not cascade); an unknown count also defers a pass.
+    // (references do not cascade); an unknown count also defers a pass, unless the branch is dead.
     uint16_t width = 1;
     bool     unresolved = false;
     int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
     if (arg.type == int_argument_type_unresolved) {
-        unresolved = true;
+        unresolved = flags.active;
     }
     else if (arg.type == int_argument_type_error) {
         semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
@@ -1314,7 +1314,7 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
                 }
                 break;
             case int_argument_type_unresolved:
-                unresolved = true;   // a forward-declared variable; it binds on a later pass
+                unresolved = flags.active;   // a forward-declared variable; it binds on a later pass (a dead branch owes nothing)
                 break;
             case int_argument_type_error:
             default:
@@ -1603,8 +1603,8 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
         }
 
         if (value_is_error(e.value)) {
-            if (e.value.error.code == error_type_unknown_symbol && !flags.final) {
-                unresolved = true;   // a forward reference; it prints once everything settles
+            if (e.value.error.code == error_type_unknown_symbol && flags.active && !flags.final) {
+                unresolved = true;   // a forward reference; it prints once everything settles (a dead branch owes nothing)
             }
             else {
                 // The undefined-on-final promotion (matching int_argument_make); other errors carry through.
@@ -1664,8 +1664,8 @@ static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scop
 
         if (value_is_error(e.value)) {
             broken = true;
-            if (e.value.error.code == error_type_unknown_symbol && !flags.final) {
-                unresolved = true;   // a forward reference; the message forms once everything settles
+            if (e.value.error.code == error_type_unknown_symbol && flags.active && !flags.final) {
+                unresolved = true;   // a forward reference; the message forms once everything settles (a dead branch owes nothing)
             }
             else {
                 error_type code = e.value.error.code == error_type_unknown_symbol
@@ -6599,6 +6599,19 @@ RC_TEST_STEP(assemble, print_dead_branch_and_undefined, fix)
     RC_CHECK(ASM("print nosuch"), ==, 0u);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_undefined_symbol);
     RC_CHECK(fix->r.channels[0].len, ==, 0u);
+}
+
+RC_TEST_STEP(assemble, dead_branch_undefined_never_defers, fix)
+{
+    // An unknown symbol in a dead branch owes no pass: the statement is parsed for its extent only,
+    // so a name that never binds settles immediately (it used to defer every pass, and the final
+    // diagnostic pass - rightly gated on active - had nothing to report, leaving a bare
+    // "did not settle"). Each snippet settles in the minimum two passes and stays silent.
+    RC_CHECK(ASM("if false\nprint \"x = \", nosuch\nendif"), ==, 2u);
+    RC_CHECK(ASM("if false\nerror \"x = \", nosuch\nendif"), ==, 2u);
+    RC_CHECK(ASM("za_pool &70..&7F\nif false\nza_auto nosuch, v\nlda v\nendif"), ==, 2u);
+    RC_CHECK(ASM("za_pool &70..&7F\nif false\nza_auto1 v\nsta v\nlda v\nza_discard nosuch\nendif"), ==, 2u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)
