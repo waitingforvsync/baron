@@ -717,7 +717,9 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         if (comma.token.type != lexeme_type_comma) {
             break;   // no more attributes - comma.token is the line terminator, left to require_separator
         }
-        lexer_result key = lexer_next(src, comma.next, statement_tokens(b));
+        // The key lexes against the bare assign table: attribute keys are their own namespace, so a
+        // spelling shared with a keyword or macro must still read as a plain identifier here.
+        lexer_result key = lexer_next(src, comma.next, assign_tokens);
         if (key.token.type != lexeme_type_identifier) {
             return syntax_error(b, error_type_unexpected_token, cursor_at(at, comma.next));   // want an attribute name
         }
@@ -3989,6 +3991,18 @@ RC_TEST_STEP(assemble, section_name_errors, fix)
     RC_CHECK_TRUE(ERR("SECTION 5 : ENDSECTION") == error_type_expected_section_name);   // a number is not a name
     RC_CHECK_TRUE(ERR("SECTION a : LDA #0") == error_type_unclosed_section);   // no ENDSECTION
     RC_CHECK_TRUE(ERR("ENDSECTION") == error_type_unexpected_endsection);   // no SECTION to close
+}
+
+RC_TEST_STEP(assemble, section_attribute_keys_are_own_namespace, fix)
+{
+    // An attribute key is a plain identifier in its own namespace: a macro sharing its spelling (a
+    // user's MACRO ORG broke org=) or a keyword spelling must not steal the lex. The value still applies.
+    RC_CHECK_TRUE(ASM("MACRO ORG : {} : ENDMACRO\nSECTION s, org=&2000, error=1 : .here EQUB 0 : ENDSECTION") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2000)));
+
+    // A malformed key still errors where it always did.
+    RC_CHECK_TRUE(ERR("SECTION s, = 1 : ENDSECTION") == error_type_unexpected_token);
+    RC_CHECK_TRUE(ERR("SECTION s, org : ENDSECTION") == error_type_expected_assign);
 }
 
 RC_TEST_STEP(assemble, section_guard, fix)
