@@ -2,7 +2,9 @@
 
 #include "richc/mstr.h"
 #include "richc/macros.h"
-
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 line_col line_col_from_offset(rc_str text, uint32_t pos)
 {
@@ -29,6 +31,17 @@ line_col line_col_from_offset(rc_str text, uint32_t pos)
 }
 
 
+// Determine whether we are being build from Visual Studio on Windows
+static bool is_building_from_visual_studio(void)
+{
+#ifdef _WIN32
+    DWORD buffer_size = GetEnvironmentVariableW(L"BuildingInsideVisualStudio", NULL, 0);
+    return buffer_size > 0;
+#else
+    return false;
+#endif
+}
+
 // The label after the location: companion frames are context for the error above them, not fresh failures,
 // so they read as notes whatever their severity says.
 static rc_str severity_label(diagnostic d)
@@ -52,10 +65,19 @@ static void append_diagnostic(rc_mstr *out, diagnostic d, rc_view_source_file so
         source_file src = rc_view_source_file_get(sources, d.at.source);
         line_col lc = line_col_from_offset(src.text, d.at.pos);
         rc_mstr_append(out, src.name, arena);
-        rc_mstr_append_char(out, ':', arena);
-        rc_mstr_append_u32(out, lc.line, arena);
-        rc_mstr_append_char(out, ':', arena);
-        rc_mstr_append_u32(out, lc.col, arena);
+        if (is_building_from_visual_studio()) {
+            rc_mstr_append_char(out, '(', arena);
+            rc_mstr_append_u32(out, lc.line, arena);
+            rc_mstr_append_char(out, ',', arena);
+            rc_mstr_append_u32(out, lc.col, arena);
+            rc_mstr_append_char(out, ')', arena);
+        }
+        else {
+            rc_mstr_append_char(out, ':', arena);
+            rc_mstr_append_u32(out, lc.line, arena);
+            rc_mstr_append_char(out, ':', arena);
+            rc_mstr_append_u32(out, lc.col, arena);
+        }
     }
     else {
         rc_mstr_append(out, origin, arena);
