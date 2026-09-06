@@ -21,49 +21,23 @@ typedef struct attribute {
 #include "richc/template/array.h"
 
 
-// One section: a contiguous block of object code with its own pc, a unique name and a resolved
-// attribute bag. The byte array fills from index 0 independent of pc, so an explicit org
-// repositions later labels without moving where code lands.
+// One section: a window onto the manager's shared emission stream, with its own pc, a unique name
+// and a resolved attribute bag. The window is contiguous because nesting is lexical and emission
+// sequential; an explicit org repositions later labels without moving where code lands.
 typedef struct section {
     rc_str              name;         // own namespace, separate from symbols and scopes; a view into source text
     uint32_t            pc;           // effective address of the next byte - the value a label takes
-    bool                cmos;         // consumed cmos attribute: 65C02 encodings allowed here
-    uint32_t            guard;        // consumed guard attribute: first address emission must not reach (RC_INDEX_NONE = unguarded)
-    rc_array_bytes      code;
+    bool                cmos;         // consumed cmos attribute: 65C02 encodings allowed here (never inherited)
+    bool                is_guarded;   // consumed guard attribute present? (never inherited)
+    uint32_t            guard;        // the guarded 16-bit address: first address emission must not reach (meaningful only when is_guarded)
+    uint32_t            begin;        // window into the shared stream: stream.num at creation
+    uint32_t            end;          // maintained on every emit here and on every child close
+    rc_view_bytes       code;         // the window's bytes, SEALED by sections_seal once the pass stops emitting
     rc_array_attribute  attributes;
 } section;
 
 #define RC_ARRAY_TYPE section
 #define RC_ARRAY_NAME section
-#include "richc/template/array.h"
-
-
-// One recorded INCSECTION: count zero bytes reserved at dst_offset in section dst, to be
-// overwritten with the bytes of the section named src_name by the post-assembly fixup. The copy
-// must wait until then: the source may be defined later, and the zp allocator patches bytes after
-// the final pass - copying last, in dependency order, gets both right.
-typedef struct splice {
-    uint32_t dst;          // destination section index
-    uint32_t dst_offset;   // where in dst's code buffer the reserved span begins
-    rc_str   src_name;     // the named source section (a view into permanent source text)
-    uint32_t count;        // bytes reserved this pass - the source's best-known size
-    cursor   at;           // the INCSECTION statement, for diagnostics
-} splice;
-
-#define RC_ARRAY_TYPE splice
-#define RC_ARRAY_NAME splice
-#include "richc/template/array.h"
-
-
-// A section's size as it stood at the end of the last pass - what a splice reserves for a source not
-// (yet) built this pass. Lives in the permanent arena: it is precisely cross-pass memory.
-typedef struct section_size {
-    rc_str   name;
-    uint32_t size;
-} section_size;
-
-#define RC_ARRAY_TYPE section_size
-#define RC_ARRAY_NAME section_size
 #include "richc/template/array.h"
 
 
@@ -80,14 +54,16 @@ typedef struct section_emission {
 
 
 // The section manager: sections addressed by index, in the same spirit as scopes is for symbols.
-// Sections are per-pass (object code is only read from the final pass's output), rebuilt by
-// sections_reset each pass; only sizes and emissions survive, in the permanent arena.
+// All emission appends to ONE shared stream; every section is a window into it, and ENDSECTION folds
+// a child's window into its parent's (the default section at index 0 is the true root, so its window
+// ends up covering the whole stream). Sections are per-pass (object code is only read from the final
+// pass's output), rebuilt by sections_reset each pass; only the emission fingerprints survive, in the
+// permanent arena.
 typedef struct sections {
-    rc_arena                  *arena;       // borrowed: baron's per_pass arena - nodes, code, attributes, splices
-    rc_arena                  *permanent;   // borrowed: backs sizes + emissions, the only cross-pass state
-    rc_array_section           nodes;       // index 0 is the default section
-    rc_array_splice            splices;     // this pass's INCSECTIONs, in statement order
-    rc_array_section_size      sizes;       // name -> size at the end of the last pass
+    rc_arena                  *arena;       // borrowed: baron's per_pass arena - stream, nodes, attributes
+    rc_arena                  *permanent;   // borrowed: backs emissions, the only cross-pass state
+    rc_array_bytes             stream;      // the one shared emission stream, rebuilt each pass
+    rc_array_section           nodes;       // index 0 is the default section, the root of the nesting tree
     rc_view_section_emission   emissions;   // per-section {size, crc}, rebuilt in full each settling pass
 } sections;
 
@@ -105,7 +81,11 @@ void sections_reset(sections *sec);
 
 // ---- queries ----
 
-uint32_t      sections_pc(const sections *sec, uint32_t id);
+uint32_t sections_pc(const sections *sec, uint32_t id);
+
+// Section id's bytes so far, computed live from its window. The view is invalidated by ANY section's
+// next emission (one shared, growing stream): take .num immediately, or read the bytes before the
+// next emit - never hold the view across one.
 rc_view_bytes sections_code(const sections *sec, uint32_t id);
 
 // The whole section list as a read-only view (index 0 is the default) - what a baron_result hands back.
@@ -121,28 +101,35 @@ uint32_t sections_find(const sections *sec, rc_str name);
 // Are 65C02 encodings allowed in section id (the consumed cmos attribute)?
 bool sections_cmos(const sections *sec, uint32_t id);
 
-// Section id's guard address, or RC_INDEX_NONE if unguarded (the consumed guard attribute).
+// Does section id carry a guard (the consumed guard attribute)?
+bool sections_is_guarded(const sections *sec, uint32_t id);
+
+// Section id's guarded 16-bit address. Only a guarded section has one - ask sections_is_guarded first.
 uint32_t sections_guard(const sections *sec, uint32_t id);
 
 
 // ---- mutation ----
 
-// Create the named section (own pc 0, empty code, empty attributes) and return its stable index, or
-// RC_INDEX_NONE if the name already exists this pass (names are unique; the caller raises the error).
-// Indices are stable across passes because creation order is first-sighting parse order, identical each pass.
+// Create the named section (an empty window at the stream tail, pc 0 - the caller seeds it from the
+// enclosing section - and empty attributes) and return its stable index, or RC_INDEX_NONE if the name
+// already exists this pass (names are unique; the caller raises the error). Indices are stable across
+// passes because creation order is first-sighting parse order, identical each pass.
 uint32_t sections_make(sections *sec, rc_str name);
 
-// Add (or, for an already-present key, replace) one attribute on section id. Upsert semantics carry the
-// inherit-then-override rule: a nested section copies its parent's bag first, then its own keys replace.
+// Add (or, for an already-present key, replace) one attribute on section id: a key repeated on one
+// SECTION line, last wins.
 void sections_add_attribute(sections *sec, uint32_t id, rc_str key, value v, cursor at);
 
-// Set section id's pc; does not move code already emitted.
+// Set section id's pc; does not move code already emitted. BBC host addresses are 32-bit
+// (&FFFFxxxx = the I/O processor), so addr may carry the full value - the pc keeps the low 16 bits,
+// the 6502's actual address; the attribute bag keeps the whole thing for the output stage.
 void sections_org(sections *sec, uint32_t id, uint32_t addr);
 
 // Set the consumed cmos attribute: allow 65C02 encodings in section id.
 void sections_set_cmos(sections *sec, uint32_t id, bool cmos);
 
-// Set the consumed guard attribute: the first address emission in section id must not reach.
+// Set the consumed guard attribute: the first address emission in section id must not reach. Like
+// sections_org, addr may be a full 32-bit host address; the guard keeps the low 16 bits.
 void sections_set_guard(sections *sec, uint32_t id, uint32_t addr);
 
 // Append a byte, pc += 1.
@@ -154,31 +141,17 @@ void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);
 // Append count zero bytes, pc += count.
 void sections_skip(sections *sec, uint32_t id, uint32_t count);
 
+// ENDSECTION bookkeeping: fold the closed child into its parent - the parent's window absorbs the
+// child's extent and its pc advances by the child's size, so bytes propagate all the way up to the
+// default section at index 0.
+void sections_close(sections *sec, uint32_t id, uint32_t parent);
 
-// ---- splices (INCSECTION) ----
-
-// Record an INCSECTION: reserve the source's best-known size in dst as zero bytes (pc advances with
-// them) and note the fixup for the post-assembly copy.
-void sections_splice(sections *sec, uint32_t dst, rc_str src_name, cursor at);
-
-// This pass's splice records, in statement order - the assembler's cycle check and final fixup walk them.
-rc_view_splice sections_splices(const sections *sec);
-
-// Did any splice reserve a size other than its source's settled size this pass? Folded into the pass's
-// changed flag so the layout gets another pass. An unknown source compares against 0, so a genuinely
-// missing section does not spin passes - the final fixup step reports it instead.
-bool sections_splices_changed(const sections *sec);
-
-// The fixup copy: overwrite dst's bytes at [offset, offset + src size) with src's whole code buffer.
-// The span was reserved by sections_splice and the sizes have settled, so it fits exactly.
-void sections_copy_in(sections *sec, uint32_t dst, uint32_t offset, uint32_t src);
+// End-of-pass: fill every section's code view as a slice of the stream. Views are only stable once
+// the pass stops growing the stream, so they are sealed in one step, never maintained live.
+void sections_seal(sections *sec);
 
 
 // ---- cross-pass bookkeeping ----
-
-// End-of-pass: record every named section's size into the cross-pass map (pinning a splice source that
-// never appeared at 0, so a vanished section cannot leave a stale size spinning the convergence loop).
-void sections_note_sizes(sections *sec);
 
 // Convergence hardening: did this pass EMIT differently from the previous one? Compares each section's
 // {size, crc} against last time's (and notes this pass's for next time). Call on SETTLING passes only:
@@ -188,9 +161,9 @@ bool sections_emission_changed(sections *sec);
 
 // ---- copying ----
 
-// A deep copy of one section into the given arena - the copy owns its backing outright (name, code,
-// attribute keys and values), so it outlives the per-pass original and the source text itself. This is
-// how a caller keeps a result's sections beyond the next assemble.
+// A deep copy of one SEALED section into the given arena - the copy owns its backing outright (name,
+// code bytes, attribute keys and values), so it outlives the per-pass original, its stream and the
+// source text itself. This is how a caller keeps a result's sections beyond the next assemble.
 section section_make_copy(section s, rc_arena *arena);
 
 

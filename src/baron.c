@@ -14,7 +14,7 @@ baron baron_make(baron_desc *a)
     b.per_pass  = &a->per_pass;
 
     // The per_pass managers are re-made / reseeded by run_pass each pass; sections also borrows
-    // permanent for the cross-pass splice sizes.
+    // permanent for the cross-pass emission fingerprints.
     scopes_init(&b.scopes, &a->permanent);
     scopes_make_root(&b.scopes);
     sections_init(&b.sections, &a->per_pass, &a->permanent);

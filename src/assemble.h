@@ -95,8 +95,9 @@ typedef struct baron_result {
     scopes_view         scopes;        // the resolved scope tree, read-only (query via the functions below)
 } baron_result;
 
-// The default section's object code (index 0) - the common single-section case, empty on failure. For
-// multiple sections, iterate r->sections directly.
+// The default section's object code (index 0) - the WHOLE emission stream, since the default is the
+// root every SECTION folds into. For a sectionless program that is exactly its bytes; empty on
+// failure. For individual sections, iterate r->sections directly.
 rc_view_bytes baron_result_code(const baron_result *r);
 
 // Look a symbol up in the result by its full dotted path (e.g. "routine.core"), from the top level. Hands

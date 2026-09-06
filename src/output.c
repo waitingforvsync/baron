@@ -76,7 +76,7 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
 
         // filename is the opt-in: a section becomes an output by naming the file it saves to. Absent
         // means not an output (which quietly covers the nameless default sections too - they can never
-        // carry attributes), and an EMPTY filename opts back out, cancelling an inherited one.
+        // carry attributes); an EMPTY filename can only be a mistake, so it is refused loudly.
         value fname = section_attr(s, RC_STR("filename"));
         if (value_is_none(fname)) {
             continue;
@@ -85,7 +85,7 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
             return (output_spec_result) {.error = spec_error(s.name, "filename attribute must be a string", arena)};
         }
         if (fname.string.len == 0) {
-            continue;
+            return (output_spec_result) {.error = spec_error(s.name, "filename attribute must not be empty", arena)};
         }
         rc_str filename = fname.string;
 
@@ -121,7 +121,7 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
                 .filename = filename,
                 .load     = load,
                 .exec     = exec,
-                .code     = s.code.view,
+                .code     = s.code,
             },
             arena);
     }
@@ -209,11 +209,7 @@ RC_TEST(output, spec_from_sections)
     sections_org(&sec, d, 0x2000);
     sections_emit_u8(&sec, d, 0x0D);
 
-    // "off": filename = "" opts back out (an inherited filename can be cancelled this way).
-    uint32_t off = sections_make(&sec, RC_STR("off"));
-    sections_add_attribute(&sec, off, RC_STR("filename"), value_make_string(RC_STR("")), cursor_none());
-    sections_emit_u8(&sec, off, 0xEA);
-
+    sections_seal(&sec);
     output_spec_result r = output_spec_make(sections_all(&sec), RC_STR("T"), 3, 42, &arena);
     RC_CHECK(r.error.len, ==, 0u);
     RC_CHECK(r.spec.title, ==, RC_STR("T"));
@@ -245,10 +241,18 @@ RC_TEST(output, spec_rejects_bad_attributes)
 
     uint32_t a = sections_make(&sec, RC_STR("code"));
     sections_add_attribute(&sec, a, RC_STR("filename"), value_make_numeric(7), cursor_none());
+    sections_seal(&sec);
     output_spec_result r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
     RC_CHECK_TRUE(r.error.len != 0);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("code")));
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("filename")));
+
+    // An empty filename can only be a leftover or a typo: refused, naming the section.
+    sections_add_attribute(&sec, a, RC_STR("filename"), value_make_string(RC_STR("")), cursor_none());
+    r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
+    RC_CHECK_TRUE(r.error.len != 0);
+    RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("code")));
+    RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("empty")));
 
     // A fractional load is refused too (addresses are whole numbers).
     sections_add_attribute(&sec, a, RC_STR("filename"), value_make_string(RC_STR("code")), cursor_none());

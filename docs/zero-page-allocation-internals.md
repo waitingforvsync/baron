@@ -540,8 +540,12 @@ Deliberate limitations, all soundness-safe or documented trust points:
   edge (the unsound direction) rather than merely add one - keep annotations and their sites in one
   bank until sites carry a section.
 - **The reserved set is global.** One physical zero page, one pool.
-- **INCSECTION splices are byte copies.** A marker lives in its source section's coordinates; the
-  spliced copy is never re-analysed, same as every annotation.
+- **Fall-through never crosses a section boundary.** A transfer's fall-through resolves in its own
+  section, so runtime flow that walks off the end of one section into the code textually after it -
+  now an expressible shape, since a nested section with no `org` transparently continues its parent's
+  addresses - is an edge the CFG does not wire, and a missed edge can hide a callee's uses (the
+  unsound direction). End a section's straight-line flow with a real transfer (`JMP`/`RTS`), or treat
+  a deliberate fall-through across `SECTION`/`ENDSECTION` as a trust point for now.
 - **Re-entrant interruption is outside the model.** A handler preempted by *itself* (or an unmarked
   RTS-dispatch inside a handler, invisible as ever) is a trust point, like recursion and `ZA_CANCALL`.
 

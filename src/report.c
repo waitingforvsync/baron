@@ -28,11 +28,11 @@ line_col line_col_from_offset(rc_str text, uint32_t pos)
 }
 
 
-// The label after the location: companion frames are context for the error above them, not fresh failures,
-// so they read as notes whatever their severity says.
+// The label after the location: only "error" or "warning", so Visual Studio / MSBuild can regexp the
+// line into its own format. Companion frames (context for the error above them, not fresh failures)
+// say so in their message text instead ("Note: ...").
 static rc_str severity_label(diagnostic d)
 {
-	// To keep MSBuild happy, we only emit "error" or "warning", so that Visual Studio can regexp this to its own format
     return d.severity == severity_error ? RC_STR("error") : RC_STR("warning");
 }
 
@@ -170,11 +170,12 @@ RC_TEST_STEP(report, warning_shown_and_filtered_by_threshold, fix)
 RC_TEST_STEP(report, duplicate_renders_original_definition_note, fix)
 {
     // A duplicate label signposts its first binding: the error at the redefinition, then a note at the
-    // original - the note keeps the FIRST binding's location.
+    // original keeping the FIRST binding's location. The label stays "error" (only error/warning, so
+    // MSBuild-style regexes match); the note-ness lives in the message.
     RC_CHECK(ASM("t", ".here\n.here"), ==, 0u);
     RC_CHECK(RENDER(severity_warning), ==,
              RC_STR("t:2:2: error: Duplicate symbol: 'here'\n"
-                    "t:1:2: note: First defined here: 'here'\n"));
+                    "t:1:2: error: Note: First defined here: 'here'\n"));
 }
 
 RC_TEST_STEP(report, payloads_render_into_messages, fix)
@@ -207,7 +208,7 @@ RC_TEST_STEP(report, include_error_names_the_child_file, fix)
     RC_CHECK(ASM("top", "nop\ninclude \"inc_bad_child.6502\""), ==, 0u);
     RC_CHECK(RENDER(severity_warning), ==,
              RC_STR("inc_bad_child.6502:1:4: error: Value out of range\n"
-                    "top:2:8: note: Included from here\n"));
+                    "top:2:8: error: Note: Included from here\n"));
 }
 
 #endif // BARON_TESTS

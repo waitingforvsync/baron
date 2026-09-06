@@ -90,14 +90,18 @@ to the end of the line.
 
 | Syntax | Meaning |
 |--------|---------|
-| `SECTION name [, attr = e ...]` ... `ENDSECTION` | A named, uniquely-named block of output. Nested sections inherit attributes. |
-| `INCSECTION name` | Splice the named section's assembled bytes at the current address (a literal copy - no relocation). The source may be defined anywhere. |
+| `SECTION name [, attr = e ...]` ... `ENDSECTION` | A named, uniquely-named block of output. Nesting is containment: a child's bytes land inline in its parent, and a child with an explicit `org` is rephased (its labels resolve at the runtime address while its bytes stay put - the relocation workflow). Attributes are never inherited. |
 
-Attributes Baron acts on: `org` (assembly address; default: inherited, else 0), `filename` (the request to
-save; `filename = ""` cancels an inherited one), `load` (default `org`), `exec` (default `load`),
+Attributes Baron acts on: `org` (assembly address; default: continue the enclosing section - the
+default section starts at 0), `filename` (the request to save; an empty filename is a config error),
+`load` (default `org`), `exec` (default `load`),
 `cmos` (truthy enables the 65C02 instruction set for this section - see the note under Reserved names),
 and `guard` (an address the section's emission must not reach; overrunning it is a non-halting error
 reporting the overshoot). Other keys are carried through untouched.
+
+The address attributes take the BBC's full 32-bit host addresses (`&FFFFxxxx` = the I/O processor,
+`&0000xxxx` = the second processor): `load` and `exec` keep the whole value for the catalogue, while
+`org` and `guard` apply their low 16 bits - the 6502's actual address - to the assembly.
 
 A filename destined for a disc image follows DFS rules: an optional single-character directory prefix
 (`"D.NAME"`; default `$`), then a name of up to 7 characters.

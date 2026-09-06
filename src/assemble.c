@@ -48,7 +48,6 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
 static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
-static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, uint32_t macro_index, rc_arena scratch);
@@ -407,7 +406,6 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("for"),    {.type = lexeme_type_keyword, .keyword = {.handle = handle_for}}},
     {RC_STR_INIT("include"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_include}}},
     {RC_STR_INIT("incbin"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incbin}}},
-    {RC_STR_INIT("incsection"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_incsection}}},
     {RC_STR_INIT("basic"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_basic}}},   // inline BBC BASIC lines
     {RC_STR_INIT("macro"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_macro}}},
     {RC_STR_INIT("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
@@ -661,9 +659,12 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// SECTION name, key = expr, ... / ENDSECTION - a uniquely-named region of object code with its own
-// address space. The assembler consumes the org, cmos and guard attributes and stores the whole bag
-// for the output stage; a SECTION does NOT open a naming scope.
+// SECTION name, key = expr, ... / ENDSECTION - a uniquely-named window of the emission stream, folded
+// into its enclosing section at ENDSECTION. With no org of its own a section continues the enclosing
+// address; an explicit org rephases (labels resolve at the runtime address while the bytes stay put -
+// the relocation workflow). The assembler consumes the org, cmos and guard attributes and stores the
+// whole bag for the output stage; attributes are never inherited, and a SECTION does NOT open a
+// naming scope.
 static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -683,29 +684,9 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                                         nm.token.identifier.name);   // names are unique
         }
 
-        // Inherit the parent's whole attribute bag, consumed keys included: a child with no org of
-        // its own starts at the parent's BASE address, not where the parent has emitted to.
-        // Explicit attributes below override.
-        uint32_t parent_org   = 0;
-        bool     parent_cmos  = false;
-        uint32_t parent_guard = RC_INDEX_NONE;
-        rc_view_attribute inherited = sections_attributes(&b->sections, section);
-        for (uint32_t i = 0; i < inherited.num; i++) {
-            attribute a = rc_view_attribute_get(inherited, i);
-            sections_add_attribute(&b->sections, child, a.key, a.v, a.at);
-            if (rc_str_is_equal_insensitive(a.key, RC_STR("org")) && value_is_number(a.v)) {
-                parent_org = (uint32_t) ((int64_t) a.v.numeric & 0xFFFF);
-            }
-            else if (rc_str_is_equal_insensitive(a.key, RC_STR("cmos")) && value_is_number(a.v)) {
-                parent_cmos = a.v.numeric != 0;
-            }
-            else if (rc_str_is_equal_insensitive(a.key, RC_STR("guard")) && value_is_number(a.v)) {
-                parent_guard = (uint32_t) ((int64_t) a.v.numeric & 0xFFFF);
-            }
-        }
-        sections_org(&b->sections, child, parent_org);
-        sections_set_cmos(&b->sections, child, parent_cmos);
-        sections_set_guard(&b->sections, child, parent_guard);
+        // Continue the enclosing section's address unless an explicit org below rephases; cmos and
+        // guard keep sections_make's defaults - nothing is inherited.
+        sections_org(&b->sections, child, sections_pc(&b->sections, section));
     }
 
     // The attribute list: , key = expr pairs to the end of the SECTION line. Parsed structurally even in a
@@ -741,14 +722,16 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                 int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, eq.next), eq.next);
                 switch ((int_argument_type) arg.type) {
                     case int_argument_type_known:
+                        // org and guard take the full 32-bit host address; the manager keeps their
+                        // 16-bit halves (the bag already stored the whole value for the output stage)
                         if (is_org) {
-                            sections_org(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
+                            sections_org(&b->sections, child, (uint32_t) arg.value);
                         }
                         else if (is_cmos) {
                             sections_set_cmos(&b->sections, child, arg.value != 0);
                         }
                         else {
-                            sections_set_guard(&b->sections, child, (uint32_t) (arg.value & 0xFFFF));
+                            sections_set_guard(&b->sections, child, (uint32_t) arg.value);
                         }
                         break;
                     case int_argument_type_unresolved:
@@ -780,8 +763,6 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     parse_result body = parse_block(b, cursor_at(at, sep.next), scope, body_section, flags, scratch);
     body.unresolved |= unresolved;
 
-    // The parent's cursor is untouched by the child: sections are separate address spaces.
-
     if (body.fatal) {
         return body;
     }
@@ -789,14 +770,13 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
     if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
         if (child != RC_INDEX_NONE) {
-            // The guard check, once the section is complete (INCSECTION reservations included):
+            // The guard check, once the section is complete:
             // pc past the guard means the guarded address was written. Recoverable.
-            uint32_t guard = sections_guard(&b->sections, child);
-            uint32_t pc    = sections_pc(&b->sections, child);
-            if (guard != RC_INDEX_NONE && pc > guard) {
+            uint32_t pc = sections_pc(&b->sections, child);
+            if (sections_is_guarded(&b->sections, child) && pc > sections_guard(&b->sections, child)) {
                 char storage[16];
                 rc_mstr over = {.data = storage, .cap = sizeof storage};
-                rc_mstr_append_u32(&over, pc - guard, NULL);
+                rc_mstr_append_u32(&over, pc - sections_guard(&b->sections, child), NULL);
                 semantic_error_payload(b, flags, error_type_guard_exceeded, stmt, over.view);
             }
 
@@ -806,6 +786,10 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             if (verbose_on(flags)) {
                 rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
             }
+
+            // Fold the child into its enclosing section: the parent's window absorbs the bytes and
+            // its pc advances by the child's size, all the way up to the default section.
+            sections_close(&b->sections, child, section);
         }
         body.next = cl.next;
         return fold(body, require_separator(b, cursor_at(at, body.next)));
@@ -2299,29 +2283,6 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
 }
 
 
-// INCSECTION <name> - splice the named section's assembled bytes here. The passes only RESERVE the
-// source's best-known size; the bytes land in one final, dependency-ordered fixup after allocation
-// (splices_resolve). The copy is literal: the bytes run at the SOURCE section's addresses.
-static parse_result handle_incsection(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
-{
-    (void) scope;
-    (void) scratch;
-    rc_str src = source_files_text(&b->source_files, at.source);
-    lexer_result nm = lexer_next(src, at.pos, statement_tokens(b));
-    if (nm.token.type != lexeme_type_identifier) {
-        return syntax_error(b, error_type_expected_section_name, cursor_at(at, at.pos));
-    }
-
-    uint32_t pc0 = sections_pc(&b->sections, section);
-    if (flags.active) {
-        sections_splice(&b->sections, section, nm.token.identifier.name, cursor_at(at, at.pos));
-    }
-
-    verbose_text_line(b, flags, stmt, nm.next, pc0, verbose_text_address);
-    return require_separator(b, cursor_at(at, nm.next));
-}
-
-
 // ---- MACRO ----
 
 // MACRO name [signature] : ...body... : ENDMACRO. The name registers BEFORE the body is scanned, so
@@ -2801,76 +2762,6 @@ static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t sec
 }
 
 
-// ---- the multi-pass driver ----
-
-// The INCSECTION dependency walk, shared by the per-pass cycle check and the final fixup. Splices
-// release in "everything spliced INTO my source has landed first" order - exactly the copy order -
-// and one that never releases sits on a cycle. With apply set this is the real fixup (an unknown
-// source is an error: absence is final by now); without it, the walk only proves acyclicity.
-static bool splices_resolve(baron *b, bool apply, rc_arena scratch)
-{
-    rc_view_splice all = sections_splices(&b->sections);
-    if (all.num == 0) {
-        return true;
-    }
-
-    rc_array_u32 src_a = {0};
-    rc_span_u32 src = rc_array_u32_resize(&src_a, all.num, &scratch);   // every slot filled by the loop below
-    rc_bitset done = rc_bitset_make(all.num, &scratch);   // the released set
-    uint32_t remaining = all.num;
-    bool ok = true;
-    for (uint32_t i = 0; i < all.num; i++) {
-        splice sp = rc_view_splice_get(all, i);
-        rc_span_u32_set(src, i, sections_find(&b->sections, sp.src_name));
-        if (rc_span_u32_get(src, i) == RC_INDEX_NONE) {
-            if (apply) {
-                baron_error_payload(b, error_type_unknown_section, sp.at, sp.src_name);
-                ok = false;
-            }
-            rc_bitset_set(&done, i);   // absent: it blocks nothing (and cannot sit on a cycle)
-            remaining--;
-        }
-    }
-
-    if (!ok) {
-        return false;
-    }
-
-    while (remaining > 0) {
-        bool progress = false;
-        for (uint32_t i = 0; i < all.num; i++) {
-            if (rc_bitset_is_set(&done, i)) {
-                continue;
-            }
-            bool ready = true;   // ready iff nothing unapplied still splices INTO our source
-            for (uint32_t j = 0; j < all.num && ready; j++) {
-                ready = rc_bitset_is_set(&done, j) || rc_view_splice_get(all, j).dst != rc_span_u32_get(src, i);
-            }
-            if (ready) {
-                if (apply) {
-                    splice sp = rc_view_splice_get(all, i);
-                    sections_copy_in(&b->sections, sp.dst, sp.dst_offset, rc_span_u32_get(src, i));
-                }
-                rc_bitset_set(&done, i);
-                remaining--;
-                progress = true;
-            }
-        }
-        if (!progress) {
-            for (uint32_t i = 0; i < all.num; i++) {
-                if (!rc_bitset_is_set(&done, i)) {
-                    splice sp = rc_view_splice_get(all, i);
-                    baron_error_payload(b, error_type_circular_incsection, sp.at, sp.src_name);
-                }
-            }
-            return false;
-        }
-    }
-
-    return true;
-}
-
-
 // ---- command-line predefines ----
 
 // Apply one -D "name=expression" into the root scope. The string registers as a synthetic source
@@ -3005,15 +2896,10 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
         scratch
     ));
 
-    // INCSECTION bookkeeping: a reservation that missed its source's settled size forces another
-    // pass; a dependency cycle can never settle, so it fails RIGHT NOW; and every named section's
-    // size rolls into the cross-pass map, ready for next pass's reservations.
     if (!r.fatal) {
-        r.changed |= sections_splices_changed(&b->sections);
-        if (!splices_resolve(b, false, scratch)) {
-            r.fatal = true;
-        }
-        sections_note_sizes(&b->sections);
+        // Seal the section windows: the stream has stopped growing, so the code views hold. The
+        // result's sections come from whichever pass ran last - every pass seals.
+        sections_seal(&b->sections);
 
         // Convergence hardening: emission that shifted with no symbol moving still owes another
         // pass. Settling passes only - final and output differ legitimately (INCBIN, ZA_AUTO).
@@ -3616,11 +3502,6 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
                 }
             }
 
-            // The INCSECTION fixup, absolutely last, so a spliced copy carries the allocated
-            // addresses; an unknown source is judged only here, once every IF arm has settled.
-            if (!splices_resolve(b, true, scratch)) {
-                return assemble_failed(b);
-            }
             return pass + 1;
         }
     }
@@ -3663,7 +3544,7 @@ rc_view_bytes baron_result_code(const baron_result *r)
         return (rc_view_bytes) {0};
     }
 
-    return rc_view_section_get(r->sections, sections_default).code.view;
+    return rc_view_section_get(r->sections, sections_default).code;
 }
 
 
@@ -3755,7 +3636,7 @@ static bool code_in_is(const baron_result *r, uint32_t passes, uint32_t index, c
     if (passes == 0 || index >= r->sections.num) {
         return false;
     }
-    rc_view_bytes code = rc_view_section_get(r->sections, index).code.view;
+    rc_view_bytes code = rc_view_section_get(r->sections, index).code;
     if (code.num != n) {
         return false;
     }
@@ -3920,24 +3801,24 @@ RC_TEST_STEP(assemble, skip_advances_pc, fix)
 
 RC_TEST_STEP(assemble, section_selects_and_creates, fix)
 {
-    // A SECTION block emits into a named section, not the default. The default (index 0) stays empty;
-    // "code" (index 1) carries the two instructions. ENDSECTION returns to the default.
+    // A SECTION block emits into a named window of the one emission stream; ENDSECTION folds it into
+    // the enclosing section, so the default (index 0, the root) covers everything emitted.
     RC_CHECK_TRUE(ASM("SECTION code : LDA #&11 : LDX #&22 : ENDSECTION") != 0);
     RC_CHECK(fix->r.sections.num, ==, 2u);   // default + "code"
     section def  = rc_view_section_get(fix->r.sections, 0);
     section code = rc_view_section_get(fix->r.sections, 1);
-    RC_CHECK(def.code.view.num, ==, 0u);     // nothing landed in the default
-    RC_CHECK(code.code.view.num, ==, 4u);    // LDA #, LDX # -> 4 bytes
+    RC_CHECK(def.code.num, ==, 4u);          // the root window covers the whole stream
+    RC_CHECK(code.code.num, ==, 4u);         // LDA #, LDX # -> 4 bytes
     RC_CHECK_TRUE(rc_str_is_equal(code.name, RC_STR("code")));
 }
 
 RC_TEST_STEP(assemble, section_names_are_unique, fix)
 {
-    // Distinct sections each hold their own bytes; there is no concatenation, so a repeated name is refused.
+    // Distinct sections are distinct windows, each covering its own bytes; a repeated name is refused.
     RC_CHECK_TRUE(ASM("SECTION a : EQUB 1 : ENDSECTION : SECTION b : EQUB 2 : ENDSECTION") != 0);
     RC_CHECK(fix->r.sections.num, ==, 3u);   // default + a + b
-    RC_CHECK(rc_view_section_get(fix->r.sections, 1).code.view.num, ==, 1u);   // a got one byte
-    RC_CHECK(rc_view_section_get(fix->r.sections, 2).code.view.num, ==, 1u);   // b got one
+    RC_CHECK(rc_view_section_get(fix->r.sections, 1).code.num, ==, 1u);   // a got one byte
+    RC_CHECK(rc_view_section_get(fix->r.sections, 2).code.num, ==, 1u);   // b got one
     RC_CHECK_TRUE(ERR("SECTION a : ENDSECTION : SECTION a : ENDSECTION") == error_type_duplicate_section);
 }
 
@@ -3950,39 +3831,32 @@ RC_TEST_STEP(assemble, section_org_attribute, fix)
     RC_CHECK(rc_view_section_get(fix->r.sections, 1).pc, ==, 0x3001u);   // &3000 + 1 emitted byte
 }
 
-RC_TEST_STEP(assemble, section_cursor_is_independent, fix)
+RC_TEST_STEP(assemble, section_pc_continues_and_folds, fix)
 {
-    // org is an INHERITED attribute, not a running cursor. A sibling section with no org of its own inherits
-    // the default section's org (0) - it does NOT continue from where the previous section ended. a runs at
-    // &2000 (x at &2000); b has no org, so it inherits 0 and y binds at 0, not &2001.
+    // A section with no org of its own CONTINUES the enclosing section's address. a runs at &2000 and
+    // folds its byte into the default (root) section, so sibling b picks up at the root's pc, 1.
     RC_CHECK_TRUE(ASM("SECTION a, org=&2000 : .x EQUB 0 : ENDSECTION : SECTION b : .y EQUB 0 : ENDSECTION") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x0000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x0001)));
 
-    // A NESTED section with no org starts at its PARENT's org, not where the parent has emitted
-    // to, and the parent's cursor is untouched: p overlaps o at &3000, q follows o at &3001.
+    // A NESTED section with no org is transparent: p continues past o, and the parent's pc advances
+    // through the child's bytes at ENDSECTION, so q follows p's two bytes.
     RC_CHECK_TRUE(ASM("SECTION outer, org=&3000 : .o EQUB 0 : SECTION inner : .p EQUB 0,0 : ENDSECTION : .q EQUB 0 : ENDSECTION") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("o")), value_make_numeric(0x3000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("p")), value_make_numeric(0x3000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("q")), value_make_numeric(0x3001)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("p")), value_make_numeric(0x3001)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("q")), value_make_numeric(0x3003)));
 }
 
-RC_TEST_STEP(assemble, section_nesting_inherits_attributes, fix)
+RC_TEST_STEP(assemble, section_no_attribute_inheritance, fix)
 {
-    // A nested section inherits its parent's attributes (its own keys override); org never inherits. Here
-    // the child inherits load=&1200 and overrides tag; a stored attribute round-trips into the result.
+    // Attributes stay on the SECTION line they are written on - a child carries only its own keys.
     RC_CHECK_TRUE(ASM("SECTION outer, load=&1200, tag=1 : SECTION inner, tag=2 : EQUB 0 : ENDSECTION : ENDSECTION") != 0);
     section inner = rc_view_section_get(fix->r.sections, 2);   // default, outer, inner
     RC_CHECK_TRUE(rc_str_is_equal(inner.name, RC_STR("inner")));
-    // inner has load (inherited), tag (overridden to 2), and no org.
-    bool saw_load = false, saw_tag = false;
-    for (uint32_t i = 0; i < inner.attributes.view.num; i++) {
-        attribute a = rc_view_attribute_get(inner.attributes.view, i);
-        if (rc_str_is_equal(a.key, RC_STR("load"))) { saw_load = true; RC_CHECK(a.v.numeric, ==, 4608.0); }   // &1200 inherited
-        if (rc_str_is_equal(a.key, RC_STR("tag")))  { saw_tag  = true; RC_CHECK(a.v.numeric, ==, 2.0); }       // own override
-    }
-    RC_CHECK_TRUE(saw_load);
-    RC_CHECK_TRUE(saw_tag);
+    RC_CHECK(inner.attributes.view.num, ==, 1u);   // tag alone; load did NOT inherit
+    attribute a = rc_view_attribute_get(inner.attributes.view, 0);
+    RC_CHECK(a.key, ==, RC_STR("tag"));
+    RC_CHECK(a.v.numeric, ==, 2.0);
 }
 
 RC_TEST_STEP(assemble, section_name_errors, fix)
@@ -4026,21 +3900,29 @@ RC_TEST_STEP(assemble, section_guard, fix)
     RC_CHECK(count, ==, 2u);
 }
 
-RC_TEST_STEP(assemble, section_guard_inherits_and_converges, fix)
+RC_TEST_STEP(assemble, section_guard_covers_children_not_inherited, fix)
 {
-    // A nested section inherits the guard (measured against its OWN bytes; its own key overrides),
-    // and a forward-referenced guard settles like any other attribute.
+    // A parent's guard naturally covers its children's bytes (its pc advances through them at
+    // ENDSECTION): outer's own check trips on the two bytes inner folded in.
     RC_CHECK_TRUE(ERR("SECTION outer, org=&2000, guard=&2001\nSECTION inner\nEQUB 1,2\nENDSECTION\nENDSECTION")
                   == error_type_guard_exceeded);
-    RC_CHECK_TRUE(ASM("SECTION outer, org=&2000, guard=&2001\n"
-                      "SECTION inner, guard=&2002\nEQUB 1,2\nENDSECTION\nENDSECTION") != 0);
+
+    // But the guard itself is NOT inherited: a rephased child running past the parent's guard address
+    // is fine (the addresses are different spaces), while its own guard still bites.
+    RC_CHECK_TRUE(ASM("SECTION outer, org=&2000, guard=&3000\n"
+                      "SECTION inner, org=&2FFF\nEQUB 1,2\nENDSECTION\nENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ERR("SECTION outer, org=&2000, guard=&3000\n"
+                      "SECTION inner, org=&2FFF, guard=&3000\nEQUB 1,2\nENDSECTION\nENDSECTION")
+                  == error_type_guard_exceeded);
+
+    // A forward-referenced guard settles like any other attribute.
     RC_CHECK_TRUE(ASM("SECTION code, org=0, guard=lim\nEQUB 1,2,3\nENDSECTION\nlim=3") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
 }
 
 
-// The result's section named name ({0} if absent) - the INCSECTION tests read spliced buffers via it.
+// The result's section named name ({0} if absent) - the section tests read named buffers via it.
 static section result_section(const baron_result *r, rc_str name)
 {
     for (uint32_t i = 0; i < r->sections.num; i++) {
@@ -4052,7 +3934,7 @@ static section result_section(const baron_result *r, rc_str name)
     return (section) {0};
 }
 
-// Do the named section's bytes equal expect? (The INCSECTION twin of code_is, which reads the default.)
+// Do the named section's bytes equal expect? (The named twin of code_is, which reads the default.)
 static bool section_code_is(const baron_result *r, rc_str name, const uint8_t *expect, uint32_t num)
 {
     section s = result_section(r, name);
@@ -4060,133 +3942,99 @@ static bool section_code_is(const baron_result *r, rc_str name, const uint8_t *e
         return false;
     }
     for (uint32_t i = 0; i < num; i++) {
-        if (rc_array_bytes_get(&s.code, i) != expect[i]) {
+        if (rc_view_bytes_get(s.code, i) != expect[i]) {
             return false;
         }
     }
     return true;
 }
 
-RC_TEST_STEP(assemble, incsection_splices_bytes, fix)
+RC_TEST_STEP(assemble, section_32bit_host_addresses, fix)
 {
-    // The relocation shape: load carries a stub, then the assembled bytes of code (spliced in place of
-    // the reserved span by the final fixup), then a trailer. Labels around the splice measure its length -
-    // the count the relocation stub needs.
-    uint32_t passes = ASM("SECTION code, org=&1100\nLDA #&2A : RTS\nENDSECTION\n"
-                          "SECTION load, org=&3000\nNOP\n.before\nINCSECTION code\n.after\nEQUB &FF\nENDSECTION\n"
-                          "size = after - before");
+    // BBC host addresses are 32-bit (&FFFFxxxx = the I/O processor, &0000xxxx = the second
+    // processor): org and guard accept the full value - labels and the guard check use the 6502's
+    // low 16 bits, while the attribute bag keeps the whole thing for the output stage.
+    RC_CHECK_TRUE(ASM("SECTION m, org=&FFFF2000\n.here EQUB 0\nENDSECTION") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2000)));
+    RC_CHECK(result_section(&fix->r, RC_STR("m")).pc, ==, 0x2001u);
+    attribute org = rc_view_attribute_get(result_section(&fix->r, RC_STR("m")).attributes.view, 0);
+    RC_CHECK(org.key, ==, RC_STR("org"));
+    RC_CHECK(org.v.numeric, ==, (double) 0xFFFF2000u);   // unmasked
+
+    RC_CHECK_TRUE(ERR("SECTION m, org=&FFFF2000, guard=&FFFF2002\nEQUB 1,2,3\nENDSECTION")
+                  == error_type_guard_exceeded);
+    RC_CHECK_TRUE(ASM("SECTION m, org=&FFFF2000, guard=&FFFF2003\nEQUB 1,2,3\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, section_nesting_propagates_bytes, fix)
+{
+    // A child's bytes land inline in its parent's stream, in statement order, whatever the child's
+    // org says: the parent carries everything, the child covers just its own emission, and the
+    // default (root) section aggregates the lot.
+    RC_CHECK_TRUE(ASM("SECTION outer, org=&2000\nEQUB 1\n"
+                      "SECTION inner, org=&400\nEQUB 2,3\nENDSECTION\n"
+                      "EQUB 4\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("outer"), (uint8_t[]) {1, 2, 3, 4}, 4));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("inner"), (uint8_t[]) {2, 3}, 2));
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 4u);
+    RC_CHECK(result_section(&fix->r, RC_STR("outer")).pc, ==, 0x2004u);   // advanced through the child
+    RC_CHECK(result_section(&fix->r, RC_STR("inner")).pc, ==, 0x0402u);   // its own runtime space
+}
+
+RC_TEST_STEP(assemble, section_relocation_workflow, fix)
+{
+    // The relocation shape, by pure nesting: the loader holds the payload at its load address while
+    // the payload's labels resolve at its runtime address; a label after ENDSECTION measures the
+    // size, and the stub follows in place.
+    uint32_t passes = ASM("SECTION Loader, org=&1900\n"
+                          ".payload\n"
+                          "SECTION Code, org=&400\n.start\nLDA #&2A\nRTS\nENDSECTION\n"
+                          ".entry\nJMP start\n"
+                          "ENDSECTION\n"
+                          "size = entry - payload");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xEA, 0xA9, 0x2A, 0x60, 0xFF}, 5));
-    RC_CHECK(result_section(&fix->r, RC_STR("load")).pc, ==, 0x3005u);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("start")), value_make_numeric(0x400)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("entry")), value_make_numeric(0x1903)));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("size")), value_make_numeric(3)));
-
-    // Splicing the same section twice is two copies.
-    RC_CHECK_TRUE(ASM("SECTION a, org=0\nEQUB 1, 2\nENDSECTION\n"
-                      "SECTION b, org=&2000\nINCSECTION a\nINCSECTION a\nENDSECTION") != 0);
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("b"), (uint8_t[]) {1, 2, 1, 2}, 4));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("Loader"),
+                                  (uint8_t[]) {0xA9, 0x2A, 0x60, 0x4C, 0x00, 0x04}, 6));
+    RC_CHECK(result_section(&fix->r, RC_STR("Loader")).pc, ==, 0x1906u);
 }
 
-RC_TEST_STEP(assemble, incsection_forward_reference, fix)
+RC_TEST_STEP(assemble, section_nesting_three_deep, fix)
 {
-    // The source section may be defined LATER: the first pass reserves nothing (its size is unknown), the
-    // settle check demands another, and the reservation then tracks the real size until the layout holds
-    // still. The fixup fills the span at the very end regardless of order.
-    uint32_t passes = ASM("SECTION load, org=&3000\nNOP\nINCSECTION code\nEQUB &FF\nENDSECTION\n"
-                          "SECTION code, org=&1100\nLDA #&2A : RTS\nENDSECTION");
-    RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(passes >= 3u);   // the missed reservation forced at least one extra pass
+    // Folds compose through the levels: b continues a transparently, c rephases inside b, and every
+    // ancestor's window and pc absorb the grandchild on the way out.
+    RC_CHECK_TRUE(ASM("SECTION a, org=&1000\nEQUB 1\n"
+                      "SECTION b\nEQUB 2\n"
+                      "SECTION c, org=&8000\n.deep EQUB 3\nENDSECTION\n"
+                      ".midb EQUB 4\nENDSECTION\n"
+                      ".enda EQUB 5\nENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xEA, 0xA9, 0x2A, 0x60, 0xFF}, 5));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("deep")), value_make_numeric(0x8000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("midb")), value_make_numeric(0x1003)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("enda")), value_make_numeric(0x1004)));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("a"), (uint8_t[]) {1, 2, 3, 4, 5}, 5));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("b"), (uint8_t[]) {2, 3, 4}, 3));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("c"), (uint8_t[]) {3}, 1));
 }
 
-RC_TEST_STEP(assemble, incsection_errors, fix)
+RC_TEST_STEP(assemble, section_nesting_converges, fix)
 {
-    // A source that never appears is judged once everything has settled (an IF arm could still have
-    // produced it), and named in the diagnostic.
-    RC_CHECK_TRUE(ERR("SECTION a, org=0 : INCSECTION nosuch : ENDSECTION") == error_type_unknown_section);
-    RC_CHECK(diag_payload(&fix->r, error_type_unknown_section), ==, RC_STR("nosuch"));
-
-    // A cycle can never settle, so it is refused outright: self-insertion on the very first pass...
-    RC_CHECK_TRUE(ERR("SECTION a, org=0 : NOP : INCSECTION a : ENDSECTION") == error_type_circular_incsection);
-    RC_CHECK(diag_payload(&fix->r, error_type_circular_incsection), ==, RC_STR("a"));
-
-    // ...and a mutual pair at the latest by the fixup step.
-    RC_CHECK_TRUE(ERR("SECTION a, org=0 : INCSECTION b : ENDSECTION\n"
-                      "SECTION b, org=&100 : INCSECTION a : ENDSECTION") == error_type_circular_incsection);
-
-    // A missing / non-identifier name is the SECTION family's usual complaint.
-    RC_CHECK_TRUE(ERR("INCSECTION") == error_type_expected_section_name);
-    RC_CHECK_TRUE(ERR("INCSECTION 5") == error_type_expected_section_name);
-}
-
-RC_TEST_STEP(assemble, incsection_converges, fix)
-{
-    // A source whose size shifts while the assembly settles (LDA addr sizes optimistically zero-page, then
-    // widens to absolute once addr binds): the reservation tracks it, and labels after the splice land on
-    // the settled layout.
-    uint32_t passes = ASM("SECTION load, org=&3000\nINCSECTION code\n.endlab\nENDSECTION\n"
+    // A child whose size shifts while the assembly settles (LDA addr sizes optimistically zero-page,
+    // then widens to absolute once addr binds) moves the parent's labels after it; the layout tracks
+    // it and converges.
+    uint32_t passes = ASM("SECTION load, org=&3000\n"
                           "SECTION code, org=&1100\nLDA addr\nENDSECTION\n"
+                          ".endlab\nENDSECTION\n"
                           "addr = &1234");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xAD, 0x34, 0x12}, 3));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("endlab")), value_make_numeric(0x3003)));
-}
-
-RC_TEST_STEP(assemble, incsection_carries_za_auto_patches, fix)
-{
-    // The reason the fixup runs ABSOLUTELY last: the zero-page allocator patches operand bytes after the
-    // final pass, in the section the instructions emitted into. The spliced copy must carry those PATCHED
-    // bytes - the allocated &70, not the placeholder 0.
-#define ZP_SPLICE_PROG "ZA_POOL &70..&7F\n" \
-                       "SECTION load, org=&3000\nINCSECTION code\nENDSECTION\n" \
-                       "SECTION code, org=&1100\nZA_AUTO1 v\nSTA v : LDA v : RTS\nENDSECTION"
-    RC_CHECK_TRUE(ASM(ZP_SPLICE_PROG) != 0);
-    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
-
-    // The same through the -v listing path (the listing pass rebuilds the sections; the fixup runs after).
-    fix->desc.verbose = true;
-    RC_CHECK_TRUE(ASM(ZP_SPLICE_PROG) != 0);
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
-    fix->desc.verbose = false;
-#undef ZP_SPLICE_PROG
-}
-
-RC_TEST_STEP(assemble, incsection_chains, fix)
-{
-    // A chain defined most-dependent FIRST (a needs b needs c, both forward): the dependency-ordered fixup
-    // copies bottom-up, so c's ZP-patched bytes arrive in a THROUGH b.
-    uint32_t passes = ASM("ZA_POOL &70..&7F\n"
-                          "SECTION a, org=0\nEQUB 1\nINCSECTION b\nENDSECTION\n"
-                          "SECTION b, org=&100\nEQUB 2\nINCSECTION c\nENDSECTION\n"
-                          "SECTION c, org=&200\nZA_AUTO1 w\nSTA w : LDA w : RTS\nENDSECTION");
-    RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("c"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("b"), (uint8_t[]) {2, 0x85, 0x70, 0xA5, 0x70, 0x60}, 6));
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("a"), (uint8_t[]) {1, 2, 0x85, 0x70, 0xA5, 0x70, 0x60}, 7));
-}
-
-RC_TEST_STEP(assemble, incsection_listing_line, fix)
-{
-    fix->desc.verbose = true;
-    // INCSECTION lists as an address-only line: only space is reserved while the passes run - the bytes
-    // belong to the post-assembly fixup - so there is no byte dump to show, like an INCLUDE or macro line.
-    RC_CHECK_TRUE(ASM("SECTION code, org=&1100\nLDA #&12\nENDSECTION\n"
-                      "SECTION load, org=&3000\nINCSECTION code\nENDSECTION") != 0);
-    RC_CHECK(VERB(), ==,
-             RC_STR("SECTION code, org=&1100\n"
-                    "  1100  A9 12           LDA #&12\n"
-                    "ENDSECTION\n"
-                    "\n"
-                    "SECTION load, org=&3000\n"
-                    "  3000                  INCSECTION code\n"
-                    "ENDSECTION\n"
-                    "\n"));
-    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xA9, 0x12}, 2));
-    fix->desc.verbose = false;
 }
 
 RC_TEST_STEP(assemble, basic_block_emits_program, fix)
@@ -4699,19 +4547,19 @@ RC_TEST_STEP(assemble, cmos_refused_outside, fix)
     RC_CHECK_TRUE(ERR("SECTION C, cmos = TRUE : LDX (&70) : ENDSECTION") == error_type_bad_addressing_mode);
 }
 
-RC_TEST_STEP(assemble, cmos_inherits_and_overrides, fix)
+RC_TEST_STEP(assemble, cmos_is_not_inherited, fix)
 {
-    // Nested sections inherit the flag like any attribute; an explicit cmos = FALSE opts back out; a
-    // sibling section is untouched by either.
+    // The flag stays on the section it is written on: a nested section reverts to NMOS unless it
+    // says cmos = TRUE itself, and a sibling is untouched too.
+    RC_CHECK_TRUE(ERR("SECTION outer, cmos = TRUE\n"
+                      "SECTION inner : PHX : ENDSECTION\n"
+                      "ENDSECTION") == error_type_needs_cmos);
+
     uint32_t passes = ASM("SECTION outer, cmos = TRUE\n"
-                          "SECTION inner : PHX : ENDSECTION\n"
+                          "SECTION inner, cmos = TRUE : PHX : ENDSECTION\n"
                           "ENDSECTION");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-
-    RC_CHECK_TRUE(ERR("SECTION outer, cmos = TRUE\n"
-                      "SECTION inner, cmos = FALSE : PHX : ENDSECTION\n"
-                      "ENDSECTION") == error_type_needs_cmos);
 
     RC_CHECK_TRUE(ERR("SECTION a, cmos = TRUE : PHX : ENDSECTION\n"
                       "SECTION b : PHX : ENDSECTION") == error_type_needs_cmos);
@@ -5720,7 +5568,7 @@ RC_TEST_STEP(assemble, za_entry_replaces_default_roots, fix)
 RC_TEST_STEP(assemble, za_entry_default_roots_per_section, fix)
 {
     // With no markers anywhere, EACH section's first block roots itself - the multi-section generalisation
-    // of the old block-0 presumption, and what keeps the INCSECTION relocation workflow warning-free.
+    // of the old block-0 presumption, and what keeps a rephased relocation section warning-free.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 u, w\n"
                       "SECTION one, org=&2000\n.m1 STA u : LDA u : RTS\nENDSECTION\n"
                       "SECTION two, org=&3000\n.m2 STA w : LDA w : RTS\nENDSECTION\n") != 0);
@@ -6222,9 +6070,9 @@ RC_TEST_STEP(assemble, result_exposes_sections, fix)
     RC_CHECK_TRUE(ASM("LDA #&12 : LDX #&34") != 0);   // 4 bytes in the default section (org 0)
     RC_CHECK(fix->r.sections.num, ==, 1u);
     section o = rc_view_section_get(fix->r.sections, 0);
-    RC_CHECK(o.code.view.num, ==, 4u);
+    RC_CHECK(o.code.num, ==, 4u);
     RC_CHECK(o.pc, ==, 4u);                                       // org 0 + 4 emitted bytes
-    RC_CHECK(baron_result_code(&fix->r).num, ==, o.code.view.num);   // the convenience matches section 0
+    RC_CHECK(baron_result_code(&fix->r).num, ==, o.code.num);     // the convenience matches section 0
 }
 
 RC_TEST_STEP(assemble, result_exposes_sources, fix)
@@ -6251,9 +6099,9 @@ RC_TEST_STEP(assemble, section_copies_survive_next_assemble, fix)
     RC_CHECK_TRUE(ASM("LDX #&EE : LDY #&FF : NOP") != 0);   // supersedes the first result's sections
 
     RC_CHECK(copy.code.num, ==, 3u);
-    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 0), ==, 0xA9u);
-    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 1), ==, 0x12u);
-    RC_CHECK((uint32_t) rc_array_bytes_get(&copy.code, 2), ==, 0x60u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 0), ==, 0xA9u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 1), ==, 0x12u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 2), ==, 0x60u);
     rc_arena_deinit(&kept);
 }
 

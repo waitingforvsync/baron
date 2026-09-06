@@ -58,8 +58,8 @@ into its own:
 
 A few BeebAsm conveniences are spelled differently here: `MAPCHAR` is a one-line user function (the
 recipe is in [Strings and character codes](#strings-and-character-codes)), `COPYBLOCK` is now better
-done by `INCSECTION`, and `ASSERT` is spelled with the tools you have:
-`IF weird : ERROR "oh frak" : ENDIF`.
+done with a nested, rephased section (see [Sections](#sections)), and `ASSERT` is spelled with the
+tools you have: `IF weird : ERROR "oh frak" : ENDIF`.
 
 ## A first program ##
 
@@ -203,15 +203,21 @@ ENDSECTION
 - `guard` sets an address the section must not reach - `guard = &3000` means the last byte may land at
   `&2FFF` and no further. Overrunning it reports how many bytes too far you went, without stopping the
   assembly: you get every overrun (and everything else) in one run.
-- `filename` asks for the section to be saved - no filename, no file. `load` defaults to `org`, and
-  `exec` defaults to `load`.
-- Sections nest, and a child inherits its parent's attributes - handy for one outer section holding
-  the file attributes and inner ones organising the code. A nested `filename = ""` opts back out of an
-  inherited filename.
-- `cmos = TRUE` enables the 65C02 instruction set for the section (and, by inheritance, its children;
-  `cmos = FALSE` opts a child back out): `PHX`, `STZ`, `BRA`, `LDA (zp)` and friends. Everywhere else is
-  plain NMOS 6502, and a CMOS instruction there says so: `CMOS-only instruction (needs cmos=TRUE on the
-  section)`.
+- `filename` asks for the section to be saved - no filename, no file. `load` defaults to `org`, and `exec` defaults to `load`.
+- Addresses are the BBC's full 32-bit host addresses: `&FFFFxxxx` runs on the I/O processor,
+  `&0000xxxx` on the second processor. `org`, `load`, `exec` and `guard` all take the whole value -
+  `load` and `exec` carry it through to the catalogue, while the assembly address and the guard
+  check use the 6502's low 16 bits.
+- Sections nest, and nesting means *containment*: a child's bytes land inline in its parent, right
+  where the child is written, and the parent's address advances past them at `ENDSECTION`. A child
+  with no `org` of its own simply continues the enclosing address; a child with an explicit `org` is
+  *rephased* - its labels resolve at the runtime address it names while its bytes stay put in the
+  parent (see the relocation workflow below).
+- Attributes are never inherited: they stay on the `SECTION` line they are written on. A nested
+  section that wants `cmos = TRUE` or a `guard` says so itself.
+- `cmos = TRUE` enables the 65C02 instruction set for the section: `PHX`, `STZ`, `BRA`, `LDA (zp)`
+  and friends. Everywhere else is plain NMOS 6502, and a CMOS instruction there says so: `CMOS-only
+  instruction (needs cmos=TRUE on the section)`.
 - Section names don't clash with symbol/label names, but must be unique.
 - Two sections may sit at the *same* address - sideways banks, swap-in overlays - without complaint;
   each keeps its own instruction pointer.
@@ -220,18 +226,17 @@ Code outside any section lands in a nameless default section starting at address
 scratch and experiments, but it can never be saved - anything you want out of the assembler needs a named
 section with a filename.
 
-`INCSECTION <name>` splices another section's assembled bytes at the current address - the relocation
-workflow. Assemble the code at its *runtime* address in its own section, then splice those bytes into the
-loadable section behind a copy-down stub:
+Relocation workflow is achieved with nested sections. Nest the code at its *runtime* address inside the loadable
+section, and it is carried inside the file while its labels point where it will run; a label after
+the `ENDSECTION` measures its size, and the copy-down stub follows in place:
 
 ```
-SECTION Code, org = &400        ; assembled for &400, carried inside GAME
-    ; ...
-ENDSECTION
-
 SECTION Loader, org = &1200, filename = "GAME", exec = entry
 .payload
-    INCSECTION Code
+    SECTION Code, org = &400    ; assembled for &400, carried inside GAME
+    .start
+        ; ... the program ...
+    ENDSECTION
 .entry
     ; ... copy `payload` down to &400 and jump to it ...
     LDX #HI(entry-payload+&FF)
@@ -241,14 +246,15 @@ SECTION Loader, org = &1200, filename = "GAME", exec = entry
     INY : BNE loop
     INC loop+2 : INC loop+5
     DEX : BNE loop
-    JMP codeentry
+    JMP start
 ENDSECTION
 ```
 
-The copy is literal - the bytes still expect to run at the source section's addresses - and the source may
-be defined before or after the splice, in the same file or not.
+Labels around the child live in the loader's address space (`payload` is where the bytes sit in the
+file's memory image, `entry - payload` their length), while labels inside it live in the child's
+(`start` = `&400`) - which is exactly what the stub needs on each side of the copy.
 
-## Other includes ##
+## Includes ##
 
 `INCLUDE "file.6502"` splices another source file in textually (paths resolve relative to the including
 file), and `INCBIN "file.dat"` splices a binary file's bytes into the output.
