@@ -2256,7 +2256,10 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
                 rc_str path = file_path_resolve(base, e.value.string, &scratch);   // source_files keeps its own copy
                 uint32_t inc_source = source_files_add_file(&b->source_files, path);
                 if (inc_source == RC_INDEX_NONE) {
-                    semantic_error(b, flags, error_type_source_load, cursor_at(at, at.pos));
+                    // FATAL, like INCBIN's: a recoverable error only records on the final pass, and
+                    // the missing file's absent definitions can turn a later statement fatal first,
+                    // leaving the load failure unreported (issue #1) - the one error that must survive.
+                    return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
                 }
                 else {
                     // The INCLUDE line itself: address, no bytes - the spliced file's lines follow.
@@ -7199,10 +7202,30 @@ RC_TEST_STEP(assemble, macro_fatal_error_still_leaves_the_frame, fix)
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_expanded_from));
 }
 
-RC_TEST_STEP(assemble, include_missing_file_is_an_error, fix)
+RC_TEST_STEP(assemble, include_missing_file_is_fatal, fix)
 {
+    // FATAL, like INCBIN's: a recoverable error would only record on the final pass, and the
+    // missing file's absent definitions can turn a later statement fatal before one runs (issue #1).
     RC_CHECK(INC("include \"no_such_baron_file.6502\""), ==, 0u);
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_source_load));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_source_load);
+}
+
+RC_TEST_STEP(assemble, include_missing_file_reports_before_its_fallout, fix)
+{
+    // Issue #1's shape: the missing file's macro is used below, so its call site would misparse as
+    // a bad assignment. The report must be the load failure at the INCLUDE, not the innocent line.
+    RC_CHECK(INC("include \"no_such_baron_file.6502\"\nGREET 7"), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_source_load);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_expected_assign));
+}
+
+RC_TEST_STEP(assemble, include_missing_nested_file_keeps_its_frame, fix)
+{
+    // The nested twin: the failure sits inside a pulled file, and the fatal unwind must still
+    // leave the "included from" trail back to the outer INCLUDE.
+    RC_CHECK(INC("include \"inc_missing_inc.6502\""), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_source_load);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_included_from));
 }
 
 RC_TEST_STEP(assemble, include_forward_declared_filename, fix)
