@@ -334,7 +334,9 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
             rc_mstr_append(out, RC_STR("none"), arena);
             return;
         case value_type_numeric:
-            rc_mstr_append_f64(out, v.numeric, arena);
+            // 10 significant digits: every 32-bit integer renders exactly (no point, no
+            // exponent), which matters for addresses; the default 6 would mangle &FFFF1900.
+            rc_mstr_append_f64(out, v.numeric, (rc_float_format) {.precision = 10}, arena);
             return;
         case value_type_boolean:
             rc_mstr_append(out, v.numeric != 0.0 ? RC_STR("TRUE") : RC_STR("FALSE"), arena);
