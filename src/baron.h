@@ -33,7 +33,8 @@ typedef struct baron {
     functions           functions;       // FUNCTION store + its dynamic operand-token table, rebuilt each pass
     rc_array_diagnostic diagnostics;     // in permanent; empty means the assemble succeeded
     rc_mstr             channels[baron_num_channels];   // PRINT streams (per_pass); channel 0 doubles as the -v listing
-    bool                want_verbose;    // run the -v listing pass?
+    bool                want_verbose;         // run the -v listing pass?
+    bool                want_verbose_full;    // -vv: dump every emitted byte (8 per line) and whole list values
     rc_view_str         defines;         // -D name=expression predefines, bound at the top of each pass
     uint32_t            include_depth;   // the three depth counters guard runaway recursion, reset per pass
     uint32_t            macro_depth;

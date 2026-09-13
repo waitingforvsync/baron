@@ -45,6 +45,8 @@ add_executable(baron
     file_utils.h
     report.c
     report.h
+    symdump.c
+    symdump.h
     assemble.c
     assemble.h
     assemble_internal.h

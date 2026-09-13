@@ -27,6 +27,7 @@ switch, keyword and operator live in the [reference](reference.md).
 - [Macros](#macros)
 - [Functions](#functions)
 - [Logging](#logging)
+- [The symbol dump](#the-symbol-dump)
 - [Saving your work](#saving-your-work)
 
 ## Coming from BeebAsm ##
@@ -114,15 +115,31 @@ $ baron -o hello.ssd --title HELLO --opt 3 boot.6502 hello.6502
 That builds a DFS `.ssd` with the two files on it, titled `HELLO`, set to `*EXEC !BOOT`. Load it
 into your favourite emulator, hit Shift-Break, and there we are.
 
-While we are here, try `baron -v -p . hello.6502` - the listing shows every byte against its source line:
+While we are here, try `baron -v -p . hello.6502` - the listing shows every byte against its source line,
+with each label's address alongside it:
 
 ```
-.start
-  2000  A2 00           LDX #0
-.loop
-  2002  BD 0E 20        LDA message,X
-  2005  F0 06           BEQ done
+  2000  .start
+  2000  A2 00                       LDX #0
+  2002  .loop
+  2002  BD 0E 20                    LDA message,X
+  2005  F0 06                       BEQ done
   ...
+```
+
+A grep for a label answers with its address; and an assignment lists as what it evaluated to, with the
+source expression bracketed after it when they differ (`PLAY_R7 = 28 [34 - 4 - 2]`), so computed
+constants show their values too. For a machine-readable version of all this, see the symbol dump below.
+
+`-v` keeps long things short: an emission past eight bytes (`EQUS`, `INCBIN`, `SKIP`...) truncates its
+dump with `...`, and a list value in an assignment cuts off after eight elements. `-vv` is the
+uncut edition - every emitted byte, eight per line with the address running down the margin, and
+list values rendered whole:
+
+```
+  000A  41 42 43 44 45 46 47 48     incbin "blob.bin"
+  0012  49 4A 4B 4C 4D 4E 4F 50
+  001A  51 52
 ```
 
 ## The shape of a line ##
@@ -734,6 +751,43 @@ IF * > &3000 : ERROR "code overran the screen by ", * - &3000, " bytes" : ENDIF
 The same name doubles as a *function* in expression position - `ERROR("bad width: ", w)` returns an
 error value that reports wherever it ends up used, which is how a [`FUNCTION` body](#functions) refuses
 bad input.
+
+## The symbol dump ##
+
+`--symbols <file>` writes every resolved symbol - labels, computed constants, `ZA_AUTO` allocations -
+to one JSON file once the whole run has assembled:
+
+```
+$ baron --symbols syms.json main.6502 tools.6502
+```
+
+```json
+{
+  "main.6502": {
+    "PLAY_R7": 28,
+    "install_irq": 6400,
+    "msg": "HELLO",
+    "scroll": 112,
+    "table": [5, 6, 7, 8]
+  },
+  "tools.6502": {
+    "entry": 0,
+    "score": 2349
+  }
+}
+```
+
+One object per command-line source file, keyed by the path as you spelt it - each file assembles in
+its own universe, so their symbols are never merged. Inside, every symbol sits under its full dotted
+path, sorted, one per line: `grep '"scroll"' syms.json` answers with its address, and two builds'
+dumps diff cleanly. Values keep their types - numbers as numbers (a `ZA_AUTO` variable is its
+allocated address, which is the one thing only the assembler can tell you), booleans as
+`true`/`false`, strings as strings, lists and ranges as arrays.
+
+Baron's internals are included too: symbols inside anonymous `{ }` scopes, per-iteration `FOR`
+frames and local labels appear under their unspellable `@` keys (`"@0:3:0.i"` is iteration 0's `i`).
+Filter out keys containing `@` if only the source-spellable names matter. Like every other output,
+the file is only written when every file assembled, and `--check` skips the write.
 
 ## Saving your work ##
 

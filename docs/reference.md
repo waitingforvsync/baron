@@ -12,13 +12,14 @@ depth, see [Zero page allocation](zero-page-allocation.md).
 ## Command line reference ##
 
 ```
-baron [-v] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>] [--title <t>]
-      [--opt <0-3>] [--cycle <0-99>] [-log<n> <file>] <source files>
+baron [-v | -vv] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>] [--title <t>]
+      [--opt <0-3>] [--cycle <0-99>] [-log<n> <file>] [--symbols <file>] <source files>
 ```
 
 | Switch | What it does |
 |--------|--------------|
-| `-v` | Print an assembly listing to stdout: every emitted byte against its source line, macro expansions and includes followed through, `PRINT` output interleaved. |
+| `-v` | Print an assembly listing to stdout: emitted bytes against their source line (up to eight, then `...`), each label's address alongside it, assignments as their evaluated values (source expression bracketed when it differs; list values cut after eight elements), macro expansions and includes followed through, `PRINT` output interleaved. |
+| `-vv` | The uncut `-v`: every emitted byte, wrapped eight per line with the address in the margin, and list values rendered whole. |
 | `-D <sym>=<expr>` | Predefine a symbol before assembly, e.g. `-D DEBUG=TRUE -D version="1.0"` (no spaces inside the assignment; repeat the switch for more). The expression gets the full evaluator and may forward-reference symbols the source defines. Applies to every source file on the line. See [Predefined symbols](guide.md#predefined-symbols). |
 | `--check` | Assemble and validate everything, write nothing - no binaries, no image, no logs. |
 | `-p <path>` | Write every saved section as a raw binary into the directory *path* (which must already exist; `.` for the current one). Nothing is written without this or `-o`. |
@@ -28,6 +29,7 @@ baron [-v] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>] [--t
 | `--opt <0-3>` | The `*OPT4` boot option: 0 none, 1 `*LOAD`, 2 `*RUN`, 3 `*EXEC !BOOT`. Needs `-o`. |
 | `--cycle <0-99>` | The catalogue cycle number. Needs `-o`. |
 | `-log<n> <file>` | Redirect `PRINT` channel *n* (0-9) to a file. Channel 0 otherwise goes to stdout; channels 1-9 are otherwise discarded. |
+| `--symbols <file>` | Write every source file's resolved symbols - labels, computed constants, `ZA_AUTO` allocations - to one JSON file: an object per source file, symbols under their full dotted paths, sorted, one per line. See [The symbol dump](guide.md#the-symbol-dump). |
 | `--help` | Print the switch summary. |
 | `--version` | Print the version and author information. |
 

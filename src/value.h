@@ -150,5 +150,15 @@ bool value_is_equal(value a, value b);
 // Diagnostics.
 void value_format(rc_mstr *out, value v, rc_arena *arena);
 
+// value_format with a per-level cap on list elements: past it a list closes with ", ...}". The
+// -v listing's rendering of assignments; PRINT and friends stay uncut.
+void value_format_max(rc_mstr *out, value v, uint32_t max_list_elements, rc_arena *arena);
+
+// Append v as a JSON value: numbers, booleans and strings as their JSON selves (strings escaped;
+// integers exact), lists as arrays, a bounded range as the array it enumerates to (an unbounded
+// one degrades to a string of its spelling), and none/error/za_auto - which cannot survive a
+// successful assemble - as null.
+void value_append_json(rc_mstr *out, value v, rc_arena *arena);
+
 
 #endif // ifndef BARON_VALUE_H_

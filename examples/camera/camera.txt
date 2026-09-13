@@ -1,229 +1,229 @@
 SECTION Boot, filename="!BOOT", org=&1200
-  1200  A9 0F           LDA #15
-  1202  A2 00           LDX #0
-  1204  20 F4 FF        JSR &FFF4
-  1207  A2 00           LDX #0
-.@
-  1209  BD 1C 12        LDA message,X
-  120C  20 E3 FF        JSR &FFE3
-  120F  E8              INX
-  1210  C9 0D           CMP #13
-  1212  D0 F5           BNE @-
-  1214  A2 1B           LDX #LO(cmd)
-  1216  A0 12           LDY #HI(cmd)
-  1218  4C F7 FF        JMP &FFF7
-.cmd
-  121B  2F              EQUS "/"
-.message
-  121C  43 41 4D 45...  EQUS "CAMERA", 13
+  1200  A9 0F                       LDA #15
+  1202  A2 00                       LDX #0
+  1204  20 F4 FF                    JSR &FFF4
+  1207  A2 00                       LDX #0
+  1209  .@
+  1209  BD 1C 12                    LDA message,X
+  120C  20 E3 FF                    JSR &FFE3
+  120F  E8                          INX
+  1210  C9 0D                       CMP #13
+  1212  D0 F5                       BNE @-
+  1214  A2 1B                       LDX #LO(cmd)
+  1216  A0 12                       LDY #HI(cmd)
+  1218  4C F7 FF                    JMP &FFF7
+  121B  .cmd
+  121B  2F                          EQUS "/"
+  121C  .message
+  121C  43 41 4D 45 52 41 0D        EQUS "CAMERA", 13
 ENDSECTION
 
-skyeven  = &5F
-skyodd   = &AF
-grounde  = &55
-groundo  = &AA
+skyeven = 95 [&5F]
+skyodd = 175 [&AF]
+grounde = 85 [&55]
+groundo = 170 [&AA]
 SECTION Code, org = &1100, load = &FFFF1100, exec = &FFFF0000+entry, filename = "CAMERA", guard = &6000
 framectr = &02 [auto]
 irqchange = &03 [auto]
 scr = &00 [auto]
 camidx = &04 [auto]
 drawpage = &05 [auto]
-.mainloop
+  1100  .mainloop
 {
-  1100  A5 02           LDA framectr
-  1102  85 04           STA camidx
-  1104  20 1A 11        JSR clearscreen
-  1107  20 26 12        JSR drawsprites
-  110A  20 0F 13        JSR swapbuffers
-  110D  A9 70           LDA #112
-  110F  8D 4F FE        STA &FE4F
-  1112  AD 4F FE        LDA &FE4F
-  1115  10 E9           BPL mainloop
-  1117  6C FC FF        JMP (&FFFC)
+  1100  A5 02                       LDA framectr
+  1102  85 04                       STA camidx
+  1104  20 1A 11                    JSR clearscreen
+  1107  20 26 12                    JSR drawsprites
+  110A  20 0F 13                    JSR swapbuffers
+  110D  A9 70                       LDA #112
+  110F  8D 4F FE                    STA &FE4F
+  1112  AD 4F FE                    LDA &FE4F
+  1115  10 E9                       BPL mainloop
+  1117  6C FC FF                    JMP (&FFFC)
 }
-.clearscreen
+  111A  .clearscreen
 {
-  111A  A5 05           LDA drawpage
-  111C  C9 70           CMP #&70
-  111E  F0 03           BEQ @+
-  1120  4C 26 11        JMP clear6000
-.@
-  1123  4C A6 11        JMP clear7000
+  111A  A5 05                       LDA drawpage
+  111C  C9 70                       CMP #&70
+  111E  F0 03                       BEQ @+
+  1120  4C 26 11                    JMP clear6000
+  1123  .@
+  1123  4C A6 11                    JMP clear7000
 }
-.clear6000
-  1126                  clearbody &6000
+  1126  .clear6000
+  1126                              clearbody &6000
 {
-  1126  A9 5F           LDA #skyeven
-  1128  A0 00           LDY #0
-.@
-  112A  99 00 60        STA base + pg*256, Y
-  112D  99 00 61        STA base + pg*256, Y
-  1130  99 00 62        STA base + pg*256, Y
-  1133  99 00 63        STA base + pg*256, Y
-  1136  99 00 64        STA base + pg*256, Y
-  1139  99 00 65        STA base + pg*256, Y
-  113C  99 00 66        STA base + pg*256, Y
-  113F  99 00 67        STA base + pg*256, Y
-  1142  C8              INY
-  1143  C8              INY
-  1144  D0 E4           BNE @-
-  1146  A9 AF           LDA #skyodd
-.@
-  1148  C8              INY
-  1149  99 00 60        STA base + pg*256, Y
-  114C  99 00 61        STA base + pg*256, Y
-  114F  99 00 62        STA base + pg*256, Y
-  1152  99 00 63        STA base + pg*256, Y
-  1155  99 00 64        STA base + pg*256, Y
-  1158  99 00 65        STA base + pg*256, Y
-  115B  99 00 66        STA base + pg*256, Y
-  115E  99 00 67        STA base + pg*256, Y
-  1161  C8              INY
-  1162  D0 E4           BNE @-
-  1164  A9 55           LDA #grounde
-  1166  A0 00           LDY #0
-.@
-  1168  99 00 68        STA base + &800 + pg*256, Y
-  116B  99 00 69        STA base + &800 + pg*256, Y
-  116E  99 00 6A        STA base + &800 + pg*256, Y
-  1171  99 00 6B        STA base + &800 + pg*256, Y
-  1174  99 00 6C        STA base + &800 + pg*256, Y
-  1177  99 00 6D        STA base + &800 + pg*256, Y
-  117A  99 00 6E        STA base + &800 + pg*256, Y
-  117D  99 00 6F        STA base + &800 + pg*256, Y
-  1180  C8              INY
-  1181  C8              INY
-  1182  D0 E4           BNE @-
-  1184  A9 AA           LDA #groundo
-  1186  C8              INY
-.@
-  1187  99 00 68        STA base + &800 + pg*256, Y
-  118A  99 00 69        STA base + &800 + pg*256, Y
-  118D  99 00 6A        STA base + &800 + pg*256, Y
-  1190  99 00 6B        STA base + &800 + pg*256, Y
-  1193  99 00 6C        STA base + &800 + pg*256, Y
-  1196  99 00 6D        STA base + &800 + pg*256, Y
-  1199  99 00 6E        STA base + &800 + pg*256, Y
-  119C  99 00 6F        STA base + &800 + pg*256, Y
-  119F  C8              INY
-  11A0  C8              INY
-  11A1  C0 01           CPY #1
-  11A3  D0 E2           BNE @-
+  1126  A9 5F                       LDA #skyeven
+  1128  A0 00                       LDY #0
+  112A  .@
+  112A  99 00 60                    STA base + pg*256, Y
+  112D  99 00 61                    STA base + pg*256, Y
+  1130  99 00 62                    STA base + pg*256, Y
+  1133  99 00 63                    STA base + pg*256, Y
+  1136  99 00 64                    STA base + pg*256, Y
+  1139  99 00 65                    STA base + pg*256, Y
+  113C  99 00 66                    STA base + pg*256, Y
+  113F  99 00 67                    STA base + pg*256, Y
+  1142  C8                          INY
+  1143  C8                          INY
+  1144  D0 E4                       BNE @-
+  1146  A9 AF                       LDA #skyodd
+  1148  .@
+  1148  C8                          INY
+  1149  99 00 60                    STA base + pg*256, Y
+  114C  99 00 61                    STA base + pg*256, Y
+  114F  99 00 62                    STA base + pg*256, Y
+  1152  99 00 63                    STA base + pg*256, Y
+  1155  99 00 64                    STA base + pg*256, Y
+  1158  99 00 65                    STA base + pg*256, Y
+  115B  99 00 66                    STA base + pg*256, Y
+  115E  99 00 67                    STA base + pg*256, Y
+  1161  C8                          INY
+  1162  D0 E4                       BNE @-
+  1164  A9 55                       LDA #grounde
+  1166  A0 00                       LDY #0
+  1168  .@
+  1168  99 00 68                    STA base + &800 + pg*256, Y
+  116B  99 00 69                    STA base + &800 + pg*256, Y
+  116E  99 00 6A                    STA base + &800 + pg*256, Y
+  1171  99 00 6B                    STA base + &800 + pg*256, Y
+  1174  99 00 6C                    STA base + &800 + pg*256, Y
+  1177  99 00 6D                    STA base + &800 + pg*256, Y
+  117A  99 00 6E                    STA base + &800 + pg*256, Y
+  117D  99 00 6F                    STA base + &800 + pg*256, Y
+  1180  C8                          INY
+  1181  C8                          INY
+  1182  D0 E4                       BNE @-
+  1184  A9 AA                       LDA #groundo
+  1186  C8                          INY
+  1187  .@
+  1187  99 00 68                    STA base + &800 + pg*256, Y
+  118A  99 00 69                    STA base + &800 + pg*256, Y
+  118D  99 00 6A                    STA base + &800 + pg*256, Y
+  1190  99 00 6B                    STA base + &800 + pg*256, Y
+  1193  99 00 6C                    STA base + &800 + pg*256, Y
+  1196  99 00 6D                    STA base + &800 + pg*256, Y
+  1199  99 00 6E                    STA base + &800 + pg*256, Y
+  119C  99 00 6F                    STA base + &800 + pg*256, Y
+  119F  C8                          INY
+  11A0  C8                          INY
+  11A1  C0 01                       CPY #1
+  11A3  D0 E2                       BNE @-
 }
-  11A5  60              RTS
-.clear7000
-  11A6                  clearbody &7000
+  11A5  60                          RTS
+  11A6  .clear7000
+  11A6                              clearbody &7000
 {
-  11A6  A9 5F           LDA #skyeven
-  11A8  A0 00           LDY #0
-.@
-  11AA  99 00 70        STA base + pg*256, Y
-  11AD  99 00 71        STA base + pg*256, Y
-  11B0  99 00 72        STA base + pg*256, Y
-  11B3  99 00 73        STA base + pg*256, Y
-  11B6  99 00 74        STA base + pg*256, Y
-  11B9  99 00 75        STA base + pg*256, Y
-  11BC  99 00 76        STA base + pg*256, Y
-  11BF  99 00 77        STA base + pg*256, Y
-  11C2  C8              INY
-  11C3  C8              INY
-  11C4  D0 E4           BNE @-
-  11C6  A9 AF           LDA #skyodd
-.@
-  11C8  C8              INY
-  11C9  99 00 70        STA base + pg*256, Y
-  11CC  99 00 71        STA base + pg*256, Y
-  11CF  99 00 72        STA base + pg*256, Y
-  11D2  99 00 73        STA base + pg*256, Y
-  11D5  99 00 74        STA base + pg*256, Y
-  11D8  99 00 75        STA base + pg*256, Y
-  11DB  99 00 76        STA base + pg*256, Y
-  11DE  99 00 77        STA base + pg*256, Y
-  11E1  C8              INY
-  11E2  D0 E4           BNE @-
-  11E4  A9 55           LDA #grounde
-  11E6  A0 00           LDY #0
-.@
-  11E8  99 00 78        STA base + &800 + pg*256, Y
-  11EB  99 00 79        STA base + &800 + pg*256, Y
-  11EE  99 00 7A        STA base + &800 + pg*256, Y
-  11F1  99 00 7B        STA base + &800 + pg*256, Y
-  11F4  99 00 7C        STA base + &800 + pg*256, Y
-  11F7  99 00 7D        STA base + &800 + pg*256, Y
-  11FA  99 00 7E        STA base + &800 + pg*256, Y
-  11FD  99 00 7F        STA base + &800 + pg*256, Y
-  1200  C8              INY
-  1201  C8              INY
-  1202  D0 E4           BNE @-
-  1204  A9 AA           LDA #groundo
-  1206  C8              INY
-.@
-  1207  99 00 78        STA base + &800 + pg*256, Y
-  120A  99 00 79        STA base + &800 + pg*256, Y
-  120D  99 00 7A        STA base + &800 + pg*256, Y
-  1210  99 00 7B        STA base + &800 + pg*256, Y
-  1213  99 00 7C        STA base + &800 + pg*256, Y
-  1216  99 00 7D        STA base + &800 + pg*256, Y
-  1219  99 00 7E        STA base + &800 + pg*256, Y
-  121C  99 00 7F        STA base + &800 + pg*256, Y
-  121F  C8              INY
-  1220  C8              INY
-  1221  C0 01           CPY #1
-  1223  D0 E2           BNE @-
+  11A6  A9 5F                       LDA #skyeven
+  11A8  A0 00                       LDY #0
+  11AA  .@
+  11AA  99 00 70                    STA base + pg*256, Y
+  11AD  99 00 71                    STA base + pg*256, Y
+  11B0  99 00 72                    STA base + pg*256, Y
+  11B3  99 00 73                    STA base + pg*256, Y
+  11B6  99 00 74                    STA base + pg*256, Y
+  11B9  99 00 75                    STA base + pg*256, Y
+  11BC  99 00 76                    STA base + pg*256, Y
+  11BF  99 00 77                    STA base + pg*256, Y
+  11C2  C8                          INY
+  11C3  C8                          INY
+  11C4  D0 E4                       BNE @-
+  11C6  A9 AF                       LDA #skyodd
+  11C8  .@
+  11C8  C8                          INY
+  11C9  99 00 70                    STA base + pg*256, Y
+  11CC  99 00 71                    STA base + pg*256, Y
+  11CF  99 00 72                    STA base + pg*256, Y
+  11D2  99 00 73                    STA base + pg*256, Y
+  11D5  99 00 74                    STA base + pg*256, Y
+  11D8  99 00 75                    STA base + pg*256, Y
+  11DB  99 00 76                    STA base + pg*256, Y
+  11DE  99 00 77                    STA base + pg*256, Y
+  11E1  C8                          INY
+  11E2  D0 E4                       BNE @-
+  11E4  A9 55                       LDA #grounde
+  11E6  A0 00                       LDY #0
+  11E8  .@
+  11E8  99 00 78                    STA base + &800 + pg*256, Y
+  11EB  99 00 79                    STA base + &800 + pg*256, Y
+  11EE  99 00 7A                    STA base + &800 + pg*256, Y
+  11F1  99 00 7B                    STA base + &800 + pg*256, Y
+  11F4  99 00 7C                    STA base + &800 + pg*256, Y
+  11F7  99 00 7D                    STA base + &800 + pg*256, Y
+  11FA  99 00 7E                    STA base + &800 + pg*256, Y
+  11FD  99 00 7F                    STA base + &800 + pg*256, Y
+  1200  C8                          INY
+  1201  C8                          INY
+  1202  D0 E4                       BNE @-
+  1204  A9 AA                       LDA #groundo
+  1206  C8                          INY
+  1207  .@
+  1207  99 00 78                    STA base + &800 + pg*256, Y
+  120A  99 00 79                    STA base + &800 + pg*256, Y
+  120D  99 00 7A                    STA base + &800 + pg*256, Y
+  1210  99 00 7B                    STA base + &800 + pg*256, Y
+  1213  99 00 7C                    STA base + &800 + pg*256, Y
+  1216  99 00 7D                    STA base + &800 + pg*256, Y
+  1219  99 00 7E                    STA base + &800 + pg*256, Y
+  121C  99 00 7F                    STA base + &800 + pg*256, Y
+  121F  C8                          INY
+  1220  C8                          INY
+  1221  C0 01                       CPY #1
+  1223  D0 E2                       BNE @-
 }
-  1225  60              RTS
-tabstride = nslots * ncam DIV 256
-.drawsprites
+  1225  60                          RTS
+tabstride = 15 [nslots * ncam DIV 256]
+  1226  .drawsprites
 {
 slots = &06 [auto]
 tabhi = &07 [auto]
-  1226  A9 14           LDA #HI(tab_xl)
-  1228  85 07           STA tabhi
-  122A  A9 0F           LDA #nslots
-  122C  85 06           STA slots
-.slotloop
-  122E  A4 04           LDY camidx
-  1230  A9 00           LDA #0
-  1232  85 00           STA scr
-  1234  A5 07           LDA tabhi
-  1236  18              CLC
-  1237  69 2D           ADC #3*tabstride
-  1239  85 01           STA scr+1
-  123B  B1 00           LDA (scr),Y
-  123D  F0 38           BEQ done
-  123F  85 0B           STA drawsprite.sht
-  1241  A5 07           LDA tabhi
-  1243  85 01           STA scr+1
-  1245  B1 00           LDA (scr),Y
-  1247  85 08           STA drawsprite.sxl
-  1249  A5 01           LDA scr+1
-  124B  18              CLC
-  124C  69 0F           ADC #tabstride
-  124E  85 01           STA scr+1
-  1250  B1 00           LDA (scr),Y
-  1252  85 09           STA drawsprite.sxr
-  1254  A5 01           LDA scr+1
-  1256  18              CLC
-  1257  69 0F           ADC #tabstride
-  1259  85 01           STA scr+1
-  125B  B1 00           LDA (scr),Y
-  125D  85 0A           STA drawsprite.syrow
-  125F  A5 01           LDA scr+1
-  1261  18              CLC
-  1262  69 1E           ADC #2*tabstride
-  1264  85 01           STA scr+1
-  1266  B1 00           LDA (scr),Y
-  1268  A8              TAY
-  1269  B9 3B 13        LDA colbytes,Y
-  126C  85 0C           STA drawsprite.solid
-  126E  20 78 12        JSR drawsprite
-  1271  E6 07           INC tabhi
-  1273  C6 06           DEC slots
-  1275  D0 B7           BNE slotloop
-.done
-  1277  60              RTS
+  1226  A9 14                       LDA #HI(tab_xl)
+  1228  85 07                       STA tabhi
+  122A  A9 0F                       LDA #nslots
+  122C  85 06                       STA slots
+  122E  .slotloop
+  122E  A4 04                       LDY camidx
+  1230  A9 00                       LDA #0
+  1232  85 00                       STA scr
+  1234  A5 07                       LDA tabhi
+  1236  18                          CLC
+  1237  69 2D                       ADC #3*tabstride
+  1239  85 01                       STA scr+1
+  123B  B1 00                       LDA (scr),Y
+  123D  F0 38                       BEQ done
+  123F  85 0B                       STA drawsprite.sht
+  1241  A5 07                       LDA tabhi
+  1243  85 01                       STA scr+1
+  1245  B1 00                       LDA (scr),Y
+  1247  85 08                       STA drawsprite.sxl
+  1249  A5 01                       LDA scr+1
+  124B  18                          CLC
+  124C  69 0F                       ADC #tabstride
+  124E  85 01                       STA scr+1
+  1250  B1 00                       LDA (scr),Y
+  1252  85 09                       STA drawsprite.sxr
+  1254  A5 01                       LDA scr+1
+  1256  18                          CLC
+  1257  69 0F                       ADC #tabstride
+  1259  85 01                       STA scr+1
+  125B  B1 00                       LDA (scr),Y
+  125D  85 0A                       STA drawsprite.syrow
+  125F  A5 01                       LDA scr+1
+  1261  18                          CLC
+  1262  69 1E                       ADC #2*tabstride
+  1264  85 01                       STA scr+1
+  1266  B1 00                       LDA (scr),Y
+  1268  A8                          TAY
+  1269  B9 3B 13                    LDA colbytes,Y
+  126C  85 0C                       STA drawsprite.solid
+  126E  20 78 12                    JSR drawsprite
+  1271  E6 07                       INC tabhi
+  1273  C6 06                       DEC slots
+  1275  D0 B7                       BNE slotloop
+  1277  .done
+  1277  60                          RTS
 }
-.drawsprite
+  1278  .drawsprite
 {
 sxl = &08 [auto]
 sxr = &09 [auto]
@@ -238,291 +238,291 @@ curb = &0F [auto]
 ys = &10 [auto]
 msk = &0A [auto]
 whibase = &11 [auto]
-  1278  A5 08           LDA sxl
-  127A  29 03           AND #3
-  127C  85 0D           STA lom
-  127E  A5 09           LDA sxr
-  1280  29 03           AND #3
-  1282  85 0E           STA rom
-  1284  A5 08           LDA sxl
-  1286  4A              LSR A
-  1287  4A              LSR A
-  1288  85 08           STA firstb
-  128A  85 0F           STA curb
-  128C  A5 09           LDA sxr
-  128E  38              SEC
-  128F  E9 01           SBC #1
-  1291  4A              LSR A
-  1292  4A              LSR A
-  1293  85 09           STA lastb
-  1295  A5 0A           LDA syrow
-  1297  29 07           AND #7
-  1299  85 10           STA ys
-  129B  A5 0A           LDA syrow
-  129D  4A              LSR A
-  129E  4A              LSR A
-  129F  4A              LSR A
-  12A0  18              CLC
-  12A1  65 05           ADC drawpage
-  12A3  85 11           STA whibase
-.striploop
-  12A5  A9 FF           LDA #&FF
-  12A7  A6 0F           LDX curb
-  12A9  E4 08           CPX firstb
-  12AB  D0 05           BNE @+
-  12AD  A6 0D           LDX lom
-  12AF  3D 3F 13        AND leftmasks,X
-.@
-  12B2  A6 0F           LDX curb
-  12B4  E4 09           CPX lastb
-  12B6  D0 05           BNE @+
-  12B8  A6 0E           LDX rom
-  12BA  3D 43 13        AND rightmasks,X
-.@
-  12BD  85 0A           STA msk
-  12BF  A5 0F           LDA curb
-  12C1  0A              ASL A
-  12C2  0A              ASL A
-  12C3  0A              ASL A
-  12C4  85 00           STA scr
-  12C6  A5 11           LDA whibase
-  12C8  85 01           STA scr+1
-  12CA  A4 10           LDY ys
-  12CC  A6 0B           LDX sht
-  12CE  A5 0A           LDA msk
-  12D0  C9 FF           CMP #&FF
-  12D2  D0 11           BNE masked
-  12D4  A5 0C           LDA solid
-.fullrow
-  12D6  91 00           STA (scr),Y
-  12D8  88              DEY
-  12D9  10 04           BPL @+
-  12DB  C6 01           DEC scr+1
-  12DD  A0 07           LDY #7
-.@
-  12DF  CA              DEX
-  12E0  D0 F4           BNE fullrow
-  12E2  4C 03 13        JMP nextstrip
-.masked
-  12E5  49 FF           EOR #&FF
-  12E7  8D F4 12        STA mand+1
-  12EA  A5 0C           LDA solid
-  12EC  25 0A           AND msk
-  12EE  8D F6 12        STA mora+1
-.maskrow
-  12F1  B1 00           LDA (scr),Y
-.mand
-  12F3  29 00           AND #0
-.mora
-  12F5  09 00           ORA #0
-  12F7  91 00           STA (scr),Y
-  12F9  88              DEY
-  12FA  10 04           BPL @+
-  12FC  C6 01           DEC scr+1
-  12FE  A0 07           LDY #7
-.@
-  1300  CA              DEX
-  1301  D0 EE           BNE maskrow
-.nextstrip
-  1303  A5 0F           LDA curb
-  1305  C5 09           CMP lastb
-  1307  F0 05           BEQ done
-  1309  E6 0F           INC curb
-  130B  4C A5 12        JMP striploop
-.done
-  130E  60              RTS
+  1278  A5 08                       LDA sxl
+  127A  29 03                       AND #3
+  127C  85 0D                       STA lom
+  127E  A5 09                       LDA sxr
+  1280  29 03                       AND #3
+  1282  85 0E                       STA rom
+  1284  A5 08                       LDA sxl
+  1286  4A                          LSR A
+  1287  4A                          LSR A
+  1288  85 08                       STA firstb
+  128A  85 0F                       STA curb
+  128C  A5 09                       LDA sxr
+  128E  38                          SEC
+  128F  E9 01                       SBC #1
+  1291  4A                          LSR A
+  1292  4A                          LSR A
+  1293  85 09                       STA lastb
+  1295  A5 0A                       LDA syrow
+  1297  29 07                       AND #7
+  1299  85 10                       STA ys
+  129B  A5 0A                       LDA syrow
+  129D  4A                          LSR A
+  129E  4A                          LSR A
+  129F  4A                          LSR A
+  12A0  18                          CLC
+  12A1  65 05                       ADC drawpage
+  12A3  85 11                       STA whibase
+  12A5  .striploop
+  12A5  A9 FF                       LDA #&FF
+  12A7  A6 0F                       LDX curb
+  12A9  E4 08                       CPX firstb
+  12AB  D0 05                       BNE @+
+  12AD  A6 0D                       LDX lom
+  12AF  3D 3F 13                    AND leftmasks,X
+  12B2  .@
+  12B2  A6 0F                       LDX curb
+  12B4  E4 09                       CPX lastb
+  12B6  D0 05                       BNE @+
+  12B8  A6 0E                       LDX rom
+  12BA  3D 43 13                    AND rightmasks,X
+  12BD  .@
+  12BD  85 0A                       STA msk
+  12BF  A5 0F                       LDA curb
+  12C1  0A                          ASL A
+  12C2  0A                          ASL A
+  12C3  0A                          ASL A
+  12C4  85 00                       STA scr
+  12C6  A5 11                       LDA whibase
+  12C8  85 01                       STA scr+1
+  12CA  A4 10                       LDY ys
+  12CC  A6 0B                       LDX sht
+  12CE  A5 0A                       LDA msk
+  12D0  C9 FF                       CMP #&FF
+  12D2  D0 11                       BNE masked
+  12D4  A5 0C                       LDA solid
+  12D6  .fullrow
+  12D6  91 00                       STA (scr),Y
+  12D8  88                          DEY
+  12D9  10 04                       BPL @+
+  12DB  C6 01                       DEC scr+1
+  12DD  A0 07                       LDY #7
+  12DF  .@
+  12DF  CA                          DEX
+  12E0  D0 F4                       BNE fullrow
+  12E2  4C 03 13                    JMP nextstrip
+  12E5  .masked
+  12E5  49 FF                       EOR #&FF
+  12E7  8D F4 12                    STA mand+1
+  12EA  A5 0C                       LDA solid
+  12EC  25 0A                       AND msk
+  12EE  8D F6 12                    STA mora+1
+  12F1  .maskrow
+  12F1  B1 00                       LDA (scr),Y
+  12F3  .mand
+  12F3  29 00                       AND #0
+  12F5  .mora
+  12F5  09 00                       ORA #0
+  12F7  91 00                       STA (scr),Y
+  12F9  88                          DEY
+  12FA  10 04                       BPL @+
+  12FC  C6 01                       DEC scr+1
+  12FE  A0 07                       LDY #7
+  1300  .@
+  1300  CA                          DEX
+  1301  D0 EE                       BNE maskrow
+  1303  .nextstrip
+  1303  A5 0F                       LDA curb
+  1305  C5 09                       CMP lastb
+  1307  F0 05                       BEQ done
+  1309  E6 0F                       INC curb
+  130B  4C A5 12                    JMP striploop
+  130E  .done
+  130E  60                          RTS
 }
-.swapbuffers
+  130F  .swapbuffers
 {
-  130F  A5 03           LDA irqchange
-.@
-  1311  C5 03           CMP irqchange
-  1313  F0 FC           BEQ @-
-  1315  A9 0C           LDA #12
-  1317  8D 00 FE        STA &FE00
-  131A  A5 05           LDA drawpage
-  131C  4A              LSR A
-  131D  4A              LSR A
-  131E  4A              LSR A
-  131F  8D 01 FE        STA &FE01
-  1322  A5 05           LDA drawpage
-  1324  49 10           EOR #&10
-  1326  85 05           STA drawpage
-  1328  60              RTS
+  130F  A5 03                       LDA irqchange
+  1311  .@
+  1311  C5 03                       CMP irqchange
+  1313  F0 FC                       BEQ @-
+  1315  A9 0C                       LDA #12
+  1317  8D 00 FE                    STA &FE00
+  131A  A5 05                       LDA drawpage
+  131C  4A                          LSR A
+  131D  4A                          LSR A
+  131E  4A                          LSR A
+  131F  8D 01 FE                    STA &FE01
+  1322  A5 05                       LDA drawpage
+  1324  49 10                       EOR #&10
+  1326  85 05                       STA drawpage
+  1328  60                          RTS
 }
-.irq
-  1329  A9 02           LDA #&02
-  132B  8D 4D FE        STA &FE4D
-  132E  A5 03           LDA irqchange
-  1330  49 01           EOR #1
-  1332  85 03           STA irqchange
-  1334  F0 02           BEQ @+
-  1336  E6 02           INC framectr
-.@
-  1338  A5 FC           LDA &FC
-  133A  40              RTI
-.colbytes
-  133B  00 0F F0 FF     EQUB &00, &0F, &F0, &FF
-.leftmasks
-  133F  FF 77 33 11     EQUB &FF, &77, &33, &11
-.rightmasks
-  1343  FF 88 CC EE     EQUB &FF, &88, &CC, &EE
-.entry
+  1329  .irq
+  1329  A9 02                       LDA #&02
+  132B  8D 4D FE                    STA &FE4D
+  132E  A5 03                       LDA irqchange
+  1330  49 01                       EOR #1
+  1332  85 03                       STA irqchange
+  1334  F0 02                       BEQ @+
+  1336  E6 02                       INC framectr
+  1338  .@
+  1338  A5 FC                       LDA &FC
+  133A  40                          RTI
+  133B  .colbytes
+  133B  00 0F F0 FF                 EQUB &00, &0F, &F0, &FF
+  133F  .leftmasks
+  133F  FF 77 33 11                 EQUB &FF, &77, &33, &11
+  1343  .rightmasks
+  1343  FF 88 CC EE                 EQUB &FF, &88, &CC, &EE
+  1347  .entry
 {
-  1347  78              SEI
-  1348  A2 FF           LDX #&FF
-  134A  9A              TXS
-  134B  A9 7F           LDA #&7F
-  134D  8D 4E FE        STA &FE4E
-  1350  8D 43 FE        STA &FE43
-  1353  A9 0F           LDA #&0F
-  1355  8D 42 FE        STA &FE42
-  1358  A9 03           LDA #3
-  135A  8D 40 FE        STA &FE40
-  135D  A9 04           LDA #&04
-  135F  8D 4C FE        STA &FE4C
-  1362  A9 82           LDA #&82
-  1364  8D 4E FE        STA &FE4E
-  1367  A2 0D           LDX #13
-.crtcloop
-  1369  8E 00 FE        STX &FE00
-  136C  BD A3 13        LDA crtcregs,X
-  136F  8D 01 FE        STA &FE01
-  1372  CA              DEX
-  1373  10 F4           BPL crtcloop
-  1375  A9 C4           LDA #&C4
-  1377  8D 20 FE        STA &FE20
-  137A  A2 0F           LDX #15
-.palloop
-  137C  BD B1 13        LDA paldata,X
-  137F  8D 21 FE        STA &FE21
-  1382  CA              DEX
-  1383  10 F7           BPL palloop
-  1385  20 26 11        JSR clear6000
-  1388  20 A6 11        JSR clear7000
-  138B  A9 00           LDA #0
-  138D  85 02           STA framectr
-  138F  85 03           STA irqchange
-  1391  A9 70           LDA #&70
-  1393  85 05           STA drawpage
-  1395  A9 29           LDA #LO(irq)
-  1397  8D 04 02        STA &204
-  139A  A9 13           LDA #HI(irq)
-  139C  8D 05 02        STA &205
-  139F  58              CLI
-  13A0  4C 00 11        JMP mainloop
+  1347  78                          SEI
+  1348  A2 FF                       LDX #&FF
+  134A  9A                          TXS
+  134B  A9 7F                       LDA #&7F
+  134D  8D 4E FE                    STA &FE4E
+  1350  8D 43 FE                    STA &FE43
+  1353  A9 0F                       LDA #&0F
+  1355  8D 42 FE                    STA &FE42
+  1358  A9 03                       LDA #3
+  135A  8D 40 FE                    STA &FE40
+  135D  A9 04                       LDA #&04
+  135F  8D 4C FE                    STA &FE4C
+  1362  A9 82                       LDA #&82
+  1364  8D 4E FE                    STA &FE4E
+  1367  A2 0D                       LDX #13
+  1369  .crtcloop
+  1369  8E 00 FE                    STX &FE00
+  136C  BD A3 13                    LDA crtcregs,X
+  136F  8D 01 FE                    STA &FE01
+  1372  CA                          DEX
+  1373  10 F4                       BPL crtcloop
+  1375  A9 C4                       LDA #&C4
+  1377  8D 20 FE                    STA &FE20
+  137A  A2 0F                       LDX #15
+  137C  .palloop
+  137C  BD B1 13                    LDA paldata,X
+  137F  8D 21 FE                    STA &FE21
+  1382  CA                          DEX
+  1383  10 F7                       BPL palloop
+  1385  20 26 11                    JSR clear6000
+  1388  20 A6 11                    JSR clear7000
+  138B  A9 00                       LDA #0
+  138D  85 02                       STA framectr
+  138F  85 03                       STA irqchange
+  1391  A9 70                       LDA #&70
+  1393  85 05                       STA drawpage
+  1395  A9 29                       LDA #LO(irq)
+  1397  8D 04 02                    STA &204
+  139A  A9 13                       LDA #HI(irq)
+  139C  8D 05 02                    STA &205
+  139F  58                          CLI
+  13A0  4C 00 11                    JMP mainloop
 }
-.crtcregs
-  13A3  3F              EQUB 63
-  13A4  20              EQUB 32
-  13A5  2D              EQUB 45
-  13A6  24              EQUB &24
-  13A7  26              EQUB 38
-  13A8  00              EQUB 0
-  13A9  10              EQUB 16
-  13AA  1A              EQUB 26
-  13AB  00              EQUB 0
-  13AC  07              EQUB 7
-  13AD  20              EQUB 32
-  13AE  08              EQUB 8
-  13AF  0C              EQUB HI(&6000/8)
-  13B0  00              EQUB LO(&6000/8)
+  13A3  .crtcregs
+  13A3  3F                          EQUB 63
+  13A4  20                          EQUB 32
+  13A5  2D                          EQUB 45
+  13A6  24                          EQUB &24
+  13A7  26                          EQUB 38
+  13A8  00                          EQUB 0
+  13A9  10                          EQUB 16
+  13AA  1A                          EQUB 26
+  13AB  00                          EQUB 0
+  13AC  07                          EQUB 7
+  13AD  20                          EQUB 32
+  13AE  08                          EQUB 8
+  13AF  0C                          EQUB HI(&6000/8)
+  13B0  00                          EQUB LO(&6000/8)
 physcols = {0, 4, 1, 2}
-.paldata
-  13B1  07 17 23 33...  EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
-  13C1  00 00 00 00...  ALIGN &100
-  1400                  include "tables.6502"
-ncam    = 256
-radius  = 375
+  13B1  .paldata
+  13B1  07 17 23 33 47 57 63 73...  EQUB (0..15)*16 + (physcols[(0..15) div 8 * 2 + (0..15) div 2 mod 2] eor 7)
+  13C1  00 00 00 00 00 00 00 00...  ALIGN &100
+  1400                              include "tables.6502"
+ncam = 256
+radius = 375
 camorig = {600, 32, 600}
 objecty = 0
-focal   = 128
-near    = 64
+focal = 128
+near = 64
 lookahead = 1000
-objects = {...
-nobj = LEN(objects)
-k = 2*PI / ncam
-t = 0 ..< ncam
-sn  = SIN(t*k)
-cs  = COS(t*k)
-den = 1 + sn*sn
-lemx = cs/den
-lemz = SIN(2*t*k)/(2*den)
-campath = camorig + ZIP(lemx, FULL(ncam, 0), lemz) * radius
-dxdt = sn*(sn*sn - 3)/den^2
-dzdt = (1 - 3*sn*sn)/den^2
-hdg = normalise(ZIP(dxdt, FULL(ncam, 0), dzdt))
-target = hdg*lookahead + {0, -camorig[1], 0}
-fwd    = normalise(target)
-right = ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])
-up    = cross(fwd, right)
-objpos = objects[.., 0..2]
-rel = objpos - ZIP(campath)
-vx = viewdot(rel, right)
-vy = viewdot(rel, up)
-vz = viewdot(rel, fwd)
-vzc = MAX({vz, near}, 0)
-px  = focal*vx/vzc
-py  = focal*vy/vzc
-h   = focal*objects[.., 3]/vzc
-sxc = px/2 + 64
-syc = 64 - py
-xlc = clamp(ROUND(sxc - h/4), 0, 128)
-xrc = clamp(ROUND(sxc + h/4), 0, 128)
-ybi = ROUND(syc)
-yti = ROUND(syc - h) + 1
-ybc = MIN({ybi, 127}, 0)
-tpc = MAX({yti, 0}, 0)
-hgt = ybc - tpc + 1
-vis = (vz > near) * (xrc > xlc) * (hgt >= 1)
-xlb = xlc*vis
-xrb = xrc*vis
-syb = ybc*vis
-szb = hgt*vis
-w   = 2*MAX(ABS(vz)) + 1
-vzs = vz*vis
-camcol = ZIP(t)
-key    = camcol*w - vzs
-colb = FULL(ncam, objects[.., 4])
-allkey = FLATTEN(key)
-allvz  = FLATTEN(vz)
-allxl  = FLATTEN(xlb)
-allxr  = FLATTEN(xrb)
-ally   = FLATTEN(syb)
-allh   = FLATTEN(szb)
-allcol = FLATTEN(colb)
-recs = ZIP(allkey, allvz, allxl, allxr, ally, allh, allcol)
-sortedf = SORT(recs, 0)
-campath[32]    = {776.777, 32, 725}
-fwd[0]         = {0, -0.0319836, 0.999488}
-up[0]          = {-0, 0.999488, 0.0319836}
+objects = {{365, 0, 45, 64, 2}, {820, 0, 55, 64, 1}, {235, 0, 65, 64, 1}, {995, 0, 110, 64, 2}, {700, 0, 140, 64, 1}, {580, 0, 195, 64, 1}, {145, 0, 260, 64, 3}, {390, 0, 260, 64, 2}, ...} [{...]
+nobj = 32 [LEN(objects)]
+k = 0.02454369261 [2*PI / ncam]
+t = 0..255 [0 ..< ncam]
+sn = {0, 0.02454122852, 0.04906767433, 0.0735645636, 0.09801714033, 0.1224106752, 0.1467304745, 0.1709618888, ...} [SIN(t*k)]
+cs = {1, 0.9996988187, 0.9987954562, 0.9972904567, 0.9951847267, 0.9924795346, 0.98917651, 0.9852776424, ...} [COS(t*k)]
+den = {1, 1.000602272, 1.002407637, 1.005411745, 1.00960736, 1.014984373, 1.021529832, 1.029227967, ...} [1 + sn*sn]
+lemx = {1, 0.9990970906, 0.9963964955, 0.9919224254, 0.9857146117, 0.9778274037, 0.9683285586, 0.9572977742, ...} [cs/den]
+lemz = {0, 0.02451907002, 0.04889085874, 0.07297034035, 0.09661692742, 0.1196965127, 0.1420833088, 0.1636614356, ...} [SIN(2*t*k)/(2*den)]
+campath = {{975, 32, 600}, {974.661409, 32, 609.1946513}, {973.6486858, 32, 618.334072}, {971.9709095, 32, 627.3638776}, {969.6429794, 32, 636.2313478}, {966.6852764, 32, 644.8861923}, {963.1232095, 32, 653.2812408}, {958.9866653, 32, 661.3730383}, ...} [camorig + ZIP(lemx, FULL(ncam, 0), lemz) * radius]
+dxdt = {-0, -0.07352031996, -0.1463791816, -0.2179304278, -0.2875578496, -0.3546885677, -0.4188046243, -0.4794523771, ...} [sn*(sn*sn - 3)/den^2]
+dzdt = {1, 0.9969919023, 0.9880138062, 0.9732028118, 0.9527825284, 0.9270560194, 0.8963964629, 0.8612360101, ...} [(1 - 3*sn*sn)/den^2]
+hdg = {{-0, 0, 1}, {-0.07354245624, 0, 0.9972920872}, {-0.1465552896, 0, 0.9892024803}, {-0.2185193241, 0, 0.9758326214}, {-0.2889358836, 0, 0.9573484502}, {-0.3573360797, 0, 0.9339758702}, {-0.4232890125, 0, 0.9059947086}, {-0.4864086232, 0, 0.8737314526}, ...} [normalise(ZIP(dxdt, FULL(ncam, 0), dzdt))]
+target = {{0, -32, 1000}, {-73.54245624, -32, 997.2920872}, {-146.5552896, -32, 989.2024803}, {-218.5193241, -32, 975.8326214}, {-288.9358836, -32, 957.3484502}, {-357.3360797, -32, 933.9758702}, {-423.2890125, -32, 905.9947086}, {-486.4086232, -32, 873.7314526}, ...} [hdg*lookahead + {0, -camorig[1], 0}]
+fwd = {{0, -0.03198362857, 0.9994883929}, {-0.0735048314, -0.03198362857, 0.9967818654}, {-0.1464803108, -0.03198362857, 0.9886963973}, {-0.218407528, -0.03198362857, 0.9753333785}, {-0.2887880619, -0.03198362857, 0.956858664}, {-0.3571532641, -0.03198362857, 0.9334980415}, {-0.4230724548, -0.03198362857, 0.9055311952}, {-0.4861597731, -0.03198362857, 0.8732844454}, ...} [normalise(target)]
+right = {{1, 0, 0}, {0.9972920872, 0, 0.07354245624}, {0.9892024803, 0, 0.1465552896}, {0.9758326214, 0, 0.2185193241}, {0.9573484502, 0, 0.2889358836}, {0.9339758702, 0, 0.3573360797}, {0.9059947086, 0, 0.4232890125}, {0.8737314526, 0, 0.4864086232}, ...} [ZIP(hdg[.., 2], FULL(ncam, 0), -hdg[.., 0])]
+up = {{-0, 0.9994883929, 0.03198362857}, {-0.002352154605, 0.9994883929, 0.03189701969}, {-0.004687369947, 0.9994883929, 0.03163828471}, {-0.006989040898, 0.9994883929, 0.03121066811}, {-0.009241217982, 0.9994883929, 0.03061947725}, {-0.01142890445, 0.9994883929, 0.02987193733}, {-0.01353831855, 0.9994883929, 0.02897699825}, {-0.01555711274, 0.9994883929, 0.02794510225}, ...} [cross(fwd, right)]
+objpos = {{365, 0, 45}, {820, 0, 55}, {235, 0, 65}, {995, 0, 110}, {700, 0, 140}, {580, 0, 195}, {145, 0, 260}, {390, 0, 260}, ...} [objects[.., 0..2]]
+rel = {{{-610, -32, -555}, {-155, -32, -545}, {-740, -32, -535}, {20, -32, -490}, {-275, -32, -460}, {-395, -32, -405}, {-830, -32, -340}, {-585, -32, -340}, ...}, {{-609.661409, -32, -564.1946513}, {-154.661409, -32, -554.1946513}, {-739.661409, -32, -544.1946513}, {20.33859103, -32, -499.1946513}, {-274.661409, -32, -469.1946513}, {-394.661409, -32, -414.1946513}, {-829.661409, -32, -349.1946513}, {-584.661409, -32, -349.1946513}, ...}, {{-608.6486858, -32, -573.334072}, {-153.6486858, -32, -563.334072}, {-738.6486858, -32, -553.334072}, {21.3513142, -32, -508.334072}, {-273.6486858, -32, -478.334072}, {-393.6486858, -32, -423.334072}, {-828.6486858, -32, -358.334072}, {-583.6486858, -32, -358.334072}, ...}, {{-606.9709095, -32, -582.3638776}, {-151.9709095, -32, -572.3638776}, {-736.9709095, -32, -562.3638776}, {23.02909046, -32, -517.3638776}, {-271.9709095, -32, -487.3638776}, {-391.9709095, -32, -432.3638776}, {-826.9709095, -32, -367.3638776}, {-581.9709095, -32, -367.3638776}, ...}, {{-604.6429794, -32, -591.2313478}, {-149.6429794, -32, -581.2313478}, {-734.6429794, -32, -571.2313478}, {25.3570206, -32, -526.2313478}, {-269.6429794, -32, -496.2313478}, {-389.6429794, -32, -441.2313478}, {-824.6429794, -32, -376.2313478}, {-579.6429794, -32, -376.2313478}, ...}, {{-601.6852764, -32, -599.8861923}, {-146.6852764, -32, -589.8861923}, {-731.6852764, -32, -579.8861923}, {28.31472363, -32, -534.8861923}, {-266.6852764, -32, -504.8861923}, {-386.6852764, -32, -449.8861923}, {-821.6852764, -32, -384.8861923}, {-576.6852764, -32, -384.8861923}, ...}, {{-598.1232095, -32, -608.2812408}, {-143.1232095, -32, -598.2812408}, {-728.1232095, -32, -588.2812408}, {31.87679051, -32, -543.2812408}, {-263.1232095, -32, -513.2812408}, {-383.1232095, -32, -458.2812408}, {-818.1232095, -32, -393.2812408}, {-573.1232095, -32, -393.2812408}, ...}, {{-593.9866653, -32, -616.3730383}, {-138.9866653, -32, -606.3730383}, {-723.9866653, -32, -596.3730383}, {36.01333466, -32, -551.3730383}, {-258.9866653, -32, -521.3730383}, {-378.9866653, -32, -466.3730383}, {-813.9866653, -32, -401.3730383}, {-568.9866653, -32, -401.3730383}, ...}, ...} [objpos - ZIP(campath)]
+vx = {{-610, -155, -740, 20, -275, -395, -830, -585, ...}, {-649.5027595, -194.9994352, -777.6798817, -16.4284849, -308.4233769, -424.0535923, -853.0953906, -608.7588292, ...}, {-686.1019306, -234.5492491, -811.7671472, -53.37827416, -340.7963472, -451.4401039, -872.217089, -629.8624813, ...}, {-719.5597747, -273.3707387, -842.047629, -90.58146713, -371.8965107, -476.9778625, -887.2612967, -648.1823045, ...}, {-749.6819712, -311.1990675, -868.358552, -127.7716151, -401.5213314, -500.5116718, -898.1774152, -663.6270449, ...}, {-776.3205098, -347.7881281, -890.5906514, -164.6888664, -429.4916657, -521.9152858, -904.9679441, -676.1438559, ...}, {-799.3752286, -382.9147461, -908.6887604, -201.0847764, -455.654545, -541.0930144, -907.6869268, -685.7182232, ...}, {-818.7939929, -416.3820957, -922.6509093, -236.7266172, -479.8851371, -557.9804371, -906.4370585, -692.3728526, ...}, ...} [viewdot(rel, right)]
+vy = {{-49.73454243, -49.41470614, -49.09486986, -47.65560657, -46.69609772, -44.93699814, -42.85806229, -42.85806229, ...}, {-48.54573858, -49.29699873, -47.60201809, -47.9542897, -46.30349351, -44.26689887, -41.17040534, -41.74668322, ...}, {-47.26997362, -49.0863441, -46.02784983, -48.16652818, -45.83460551, -43.53201545, -39.43652102, -40.58492666, ...}, {-45.91744977, -48.78535669, -44.38466109, -48.2918521, -45.293765, -42.73849334, -37.66956713, -39.38188215, ...}, {-44.4991858, -48.39774521, -42.68543792, -48.33088711, -44.68614348, -41.89312608, -35.88293024, -38.14702864, ...}, {-43.02678778, -47.92821993, -40.94359145, -48.28532166, -44.01763672, -41.00321164, -34.08996227, -36.89004386, ...}, {-41.51221048, -47.38237544, -39.1726891, -48.15784628, -43.29473236, -40.07639923, -32.30372577, -35.62061382, ...}, {-39.96751864, -46.76655391, -37.38619194, -47.95206802, -42.52436669, -39.12053254, -30.53675685, -34.34824947, ...}, ...} [viewdot(rel, up)]
+vz = {{-553.6925819, -543.697698, -533.7028141, -488.7258364, -458.7411846, -403.769323, -338.8025775, -338.8025775, ...}, {-516.5424618, -540.0193414, -487.0511964, -498.0596843, -446.4723031, -382.8287207, -286.0632978, -304.0719815, ...}, {-476.6748067, -533.4363841, -437.8584383, -504.6921367, -431.819553, -359.8636139, -231.8794129, -267.767089, ...}, {-434.4084362, -524.0305277, -386.50879, -508.6085093, -414.9182872, -335.066048, -176.6621037, -230.171948, ...}, {-390.0876872, -511.9176688, -333.4080659, -509.8283531, -395.9301149, -308.648321, -120.8297009, -191.582776, ...}, {-344.0752491, -497.2450038, -278.9753639, -508.4044328, -375.0392786, -280.8384946, -64.79945209, -152.3020018, ...}, {-296.7447084, -480.1873634, -223.6346654, -504.4208272, -352.4485172, -251.8756069, -8.979561382, -112.6323128, ...}, {-248.4730884, -460.9429407, -167.806629, -497.9902565, -328.3745901, -222.0047728, 46.23821745, -72.87092696, ...}, ...} [viewdot(rel, fwd)]
+vzc = {{64, 64, 64, 64, 64, 64, 64, 64, ...}, {64, 64, 64, 64, 64, 64, 64, 64, ...}, {64, 64, 64, 64, 64, 64, 64, 64, ...}, {64, 64, 64, 64, 64, 64, 64, 64, ...}, {64, 64, 64, 64, 64, 64, 64, 64, ...}, {64, 64, 64, 64, 64, 64, 64, 64, ...}, {64, 64, 64, 64, 64, 64, 64, 64, ...}, {64, 64, 64, 64, 64, 64, 64, 64, ...}, ...} [MAX({vz, near}, 0)]
+px = {{-1220, -310, -1480, 40, -550, -790, -1660, -1170, ...}, {-1299.005519, -389.9988705, -1555.359763, -32.8569698, -616.8467539, -848.1071846, -1706.190781, -1217.517658, ...}, {-1372.203861, -469.0984983, -1623.534294, -106.7565483, -681.5926943, -902.8802078, -1744.434178, -1259.724963, ...}, {-1439.119549, -546.7414774, -1684.095258, -181.1629343, -743.7930215, -953.9557249, -1774.522593, -1296.364609, ...}, {-1499.363942, -622.3981349, -1736.717104, -255.5432301, -803.0426628, -1001.023344, -1796.35483, -1327.25409, ...}, {-1552.64102, -695.5762562, -1781.181303, -329.3777328, -858.9833315, -1043.830572, -1809.935888, -1352.287712, ...}, {-1598.750457, -765.8294921, -1817.377521, -402.1695528, -911.3090901, -1082.186029, -1815.373854, -1371.436446, ...}, {-1637.587986, -832.7641915, -1845.301819, -473.4532345, -959.7702741, -1115.960874, -1812.874117, -1384.745705, ...}, ...} [focal*vx/vzc]
+py = {{-99.46908486, -98.82941229, -98.18973972, -95.31121315, -93.39219543, -89.87399629, -85.71612457, -85.71612457, ...}, {-97.09147717, -98.59399746, -95.20403618, -95.90857941, -92.60698701, -88.53379774, -82.34081067, -83.49336643, ...}, {-94.53994724, -98.1726882, -92.05569967, -96.33305636, -91.66921101, -87.06403091, -78.87304204, -81.16985331, ...}, {-91.83489953, -97.57071339, -88.76932218, -96.58370421, -90.58752999, -85.47698669, -75.33913425, -78.76376429, ...}, {-88.9983716, -96.79549042, -85.37087583, -96.66177421, -89.37228697, -83.78625216, -71.76586047, -76.29405728, ...}, {-86.05357556, -95.85643986, -81.88718291, -96.57064331, -88.03527345, -82.00642327, -68.17992455, -73.78008773, ...}, {-83.02442095, -94.76475087, -78.3453782, -96.31569256, -86.58946472, -80.15279846, -64.60745154, -71.24122764, ...}, {-79.93503727, -93.53310782, -74.77238387, -95.90413603, -85.04873338, -78.24106507, -61.0735137, -68.69649894, ...}, ...} [focal*vy/vzc]
+h = {{128, 128, 128, 128, 128, 128, 128, 128, ...}, {128, 128, 128, 128, 128, 128, 128, 128, ...}, {128, 128, 128, 128, 128, 128, 128, 128, ...}, {128, 128, 128, 128, 128, 128, 128, 128, ...}, {128, 128, 128, 128, 128, 128, 128, 128, ...}, {128, 128, 128, 128, 128, 128, 128, 128, ...}, {128, 128, 128, 128, 128, 128, 128, 128, ...}, {128, 128, 128, 128, 128, 128, 128, 128, ...}, ...} [focal*objects[.., 3]/vzc]
+sxc = {{-546, -91, -676, 84, -211, -331, -766, -521, ...}, {-585.5027595, -130.9994352, -713.6798817, 47.5715151, -244.4233769, -360.0535923, -789.0953906, -544.7588292, ...}, {-622.1019306, -170.5492491, -747.7671472, 10.62172584, -276.7963472, -387.4401039, -808.217089, -565.8624813, ...}, {-655.5597747, -209.3707387, -778.047629, -26.58146713, -307.8965107, -412.9778625, -823.2612967, -584.1823045, ...}, {-685.6819712, -247.1990675, -804.358552, -63.77161507, -337.5213314, -436.5116718, -834.1774152, -599.6270449, ...}, {-712.3205098, -283.7881281, -826.5906514, -100.6888664, -365.4916657, -457.9152858, -840.9679441, -612.1438559, ...}, {-735.3752286, -318.9147461, -844.6887604, -137.0847764, -391.654545, -477.0930144, -843.6869268, -621.7182232, ...}, {-754.7939929, -352.3820957, -858.6509093, -172.7266172, -415.8851371, -493.9804371, -842.4370585, -628.3728526, ...}, ...} [px/2 + 64]
+syc = {{163.4690849, 162.8294123, 162.1897397, 159.3112131, 157.3921954, 153.8739963, 149.7161246, 149.7161246, ...}, {161.0914772, 162.5939975, 159.2040362, 159.9085794, 156.606987, 152.5337977, 146.3408107, 147.4933664, ...}, {158.5399472, 162.1726882, 156.0556997, 160.3330564, 155.669211, 151.0640309, 142.873042, 145.1698533, ...}, {155.8348995, 161.5707134, 152.7693222, 160.5837042, 154.58753, 149.4769867, 139.3391343, 142.7637643, ...}, {152.9983716, 160.7954904, 149.3708758, 160.6617742, 153.372287, 147.7862522, 135.7658605, 140.2940573, ...}, {150.0535756, 159.8564399, 145.8871829, 160.5706433, 152.0352734, 146.0064233, 132.1799245, 137.7800877, ...}, {147.024421, 158.7647509, 142.3453782, 160.3156926, 150.5894647, 144.1527985, 128.6074515, 135.2412276, ...}, {143.9350373, 157.5331078, 138.7723839, 159.904136, 149.0487334, 142.2410651, 125.0735137, 132.6964989, ...}, ...} [64 - py]
+xlc = {{0, 0, 0, 52, 0, 0, 0, 0, ...}, {0, 0, 0, 16, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, ...} [clamp(ROUND(sxc - h/4), 0, 128)]
+xrc = {{0, 0, 0, 116, 0, 0, 0, 0, ...}, {0, 0, 0, 80, 0, 0, 0, 0, ...}, {0, 0, 0, 43, 0, 0, 0, 0, ...}, {0, 0, 0, 5, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, ...} [clamp(ROUND(sxc + h/4), 0, 128)]
+ybi = {{163, 163, 162, 159, 157, 154, 150, 150, ...}, {161, 163, 159, 160, 157, 153, 146, 147, ...}, {159, 162, 156, 160, 156, 151, 143, 145, ...}, {156, 162, 153, 161, 155, 149, 139, 143, ...}, {153, 161, 149, 161, 153, 148, 136, 140, ...}, {150, 160, 146, 161, 152, 146, 132, 138, ...}, {147, 159, 142, 160, 151, 144, 129, 135, ...}, {144, 158, 139, 160, 149, 142, 125, 133, ...}, ...} [ROUND(syc)]
+yti = {{36, 36, 35, 32, 30, 27, 23, 23, ...}, {34, 36, 32, 33, 30, 26, 19, 20, ...}, {32, 35, 29, 33, 29, 24, 16, 18, ...}, {29, 35, 26, 34, 28, 22, 12, 16, ...}, {26, 34, 22, 34, 26, 21, 9, 13, ...}, {23, 33, 19, 34, 25, 19, 5, 11, ...}, {20, 32, 15, 33, 24, 17, 2, 8, ...}, {17, 31, 12, 33, 22, 15, -2, 6, ...}, ...} [ROUND(syc - h) + 1]
+ybc = {{127, 127, 127, 127, 127, 127, 127, 127, ...}, {127, 127, 127, 127, 127, 127, 127, 127, ...}, {127, 127, 127, 127, 127, 127, 127, 127, ...}, {127, 127, 127, 127, 127, 127, 127, 127, ...}, {127, 127, 127, 127, 127, 127, 127, 127, ...}, {127, 127, 127, 127, 127, 127, 127, 127, ...}, {127, 127, 127, 127, 127, 127, 127, 127, ...}, {127, 127, 127, 127, 127, 127, 125, 127, ...}, ...} [MIN({ybi, 127}, 0)]
+tpc = {{36, 36, 35, 32, 30, 27, 23, 23, ...}, {34, 36, 32, 33, 30, 26, 19, 20, ...}, {32, 35, 29, 33, 29, 24, 16, 18, ...}, {29, 35, 26, 34, 28, 22, 12, 16, ...}, {26, 34, 22, 34, 26, 21, 9, 13, ...}, {23, 33, 19, 34, 25, 19, 5, 11, ...}, {20, 32, 15, 33, 24, 17, 2, 8, ...}, {17, 31, 12, 33, 22, 15, 0, 6, ...}, ...} [MAX({yti, 0}, 0)]
+hgt = {{92, 92, 93, 96, 98, 101, 105, 105, ...}, {94, 92, 96, 95, 98, 102, 109, 108, ...}, {96, 93, 99, 95, 99, 104, 112, 110, ...}, {99, 93, 102, 94, 100, 106, 116, 112, ...}, {102, 94, 106, 94, 102, 107, 119, 115, ...}, {105, 95, 109, 94, 103, 109, 123, 117, ...}, {108, 96, 113, 95, 104, 111, 126, 120, ...}, {111, 97, 116, 95, 106, 113, 126, 122, ...}, ...} [ybc - tpc + 1]
+vis = {{0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, ...} [(vz > near) * (xrc > xlc) * (hgt >= 1)]
+xlb = {{0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, ...} [xlc*vis]
+xrb = {{0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, ...} [xrc*vis]
+syb = {{0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, ...} [ybc*vis]
+szb = {{0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, {0, 0, 0, 0, 0, 0, 0, 0, ...}, ...} [hgt*vis]
+w = 1790.721686 [2*MAX(ABS(vz)) + 1]
+vzs = {{-0, -0, -0, -0, -0, -0, -0, -0, ...}, {-0, -0, -0, -0, -0, -0, -0, -0, ...}, {-0, -0, -0, -0, -0, -0, -0, -0, ...}, {-0, -0, -0, -0, -0, -0, -0, -0, ...}, {-0, -0, -0, -0, -0, -0, -0, -0, ...}, {-0, -0, -0, -0, -0, -0, -0, -0, ...}, {-0, -0, -0, -0, -0, -0, -0, -0, ...}, {-0, -0, -0, -0, -0, -0, 0, -0, ...}, ...} [vz*vis]
+camcol = {{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, ...} [ZIP(t)]
+key = {{0, 0, 0, 0, 0, 0, 0, 0, ...}, {1790.721686, 1790.721686, 1790.721686, 1790.721686, 1790.721686, 1790.721686, 1790.721686, 1790.721686, ...}, {3581.443372, 3581.443372, 3581.443372, 3581.443372, 3581.443372, 3581.443372, 3581.443372, 3581.443372, ...}, {5372.165057, 5372.165057, 5372.165057, 5372.165057, 5372.165057, 5372.165057, 5372.165057, 5372.165057, ...}, {7162.886743, 7162.886743, 7162.886743, 7162.886743, 7162.886743, 7162.886743, 7162.886743, 7162.886743, ...}, {8953.608429, 8953.608429, 8953.608429, 8953.608429, 8953.608429, 8953.608429, 8953.608429, 8953.608429, ...}, {10744.33011, 10744.33011, 10744.33011, 10744.33011, 10744.33011, 10744.33011, 10744.33011, 10744.33011, ...}, {12535.0518, 12535.0518, 12535.0518, 12535.0518, 12535.0518, 12535.0518, 12535.0518, 12535.0518, ...}, ...} [camcol*w - vzs]
+colb = {{2, 1, 1, 2, 1, 1, 3, 2, ...}, {2, 1, 1, 2, 1, 1, 3, 2, ...}, {2, 1, 1, 2, 1, 1, 3, 2, ...}, {2, 1, 1, 2, 1, 1, 3, 2, ...}, {2, 1, 1, 2, 1, 1, 3, 2, ...}, {2, 1, 1, 2, 1, 1, 3, 2, ...}, {2, 1, 1, 2, 1, 1, 3, 2, ...}, {2, 1, 1, 2, 1, 1, 3, 2, ...}, ...} [FULL(ncam, objects[.., 4])]
+allkey = {0, 0, 0, 0, 0, 0, 0, 0, ...} [FLATTEN(key)]
+allvz = {-553.6925819, -543.697698, -533.7028141, -488.7258364, -458.7411846, -403.769323, -338.8025775, -338.8025775, ...} [FLATTEN(vz)]
+allxl = {0, 0, 0, 0, 0, 0, 0, 0, ...} [FLATTEN(xlb)]
+allxr = {0, 0, 0, 0, 0, 0, 0, 0, ...} [FLATTEN(xrb)]
+ally = {0, 0, 0, 0, 0, 0, 0, 0, ...} [FLATTEN(syb)]
+allh = {0, 0, 0, 0, 0, 0, 0, 0, ...} [FLATTEN(szb)]
+allcol = {2, 1, 1, 2, 1, 1, 3, 2, ...} [FLATTEN(colb)]
+recs = {{0, -553.6925819, 0, 0, 0, 0, 2}, {0, -543.697698, 0, 0, 0, 0, 1}, {0, -533.7028141, 0, 0, 0, 0, 1}, {0, -488.7258364, 0, 0, 0, 0, 2}, {0, -458.7411846, 0, 0, 0, 0, 1}, {0, -403.769323, 0, 0, 0, 0, 1}, {0, -338.8025775, 0, 0, 0, 0, 3}, {0, -338.8025775, 0, 0, 0, 0, 2}, ...} [ZIP(allkey, allvz, allxl, allxr, ally, allh, allcol)]
+sortedf = {{-535.7497663, 535.7497663, 56, 64, 68, 16, 1}, {-440.798369, 440.798369, 83, 92, 69, 18, 2}, {-435.800927, 435.800927, 32, 42, 69, 18, 1}, {-360.8392976, 360.8392976, 50, 62, 71, 22, 1}, {-220.9109225, 220.9109225, 0, 11, 78, 37, 1}, {-210.9160386, 210.9160386, 44, 63, 79, 39, 2}, {-100.9723154, 100.9723154, 126, 128, 100, 81, 1}, {0, -553.6925819, 0, 0, 0, 0, 2}, ...} [SORT(recs, 0)]
+campath[32]    = {776.7766953, 32, 725}
+fwd[0]         = {0, -0.03198362857, 0.9994883929}
+up[0]          = {-0, 0.9994883929, 0.03198362857}
 shape sortedf  = {8192, 7}
-vz    @ cam 102 = {30.9867, -423.808, 159.993, -600.823, -307.449, -189.862, 241.891, -2.77845, -754.017, -200.585, -555.105, -366.59, -82.5882, 309.218, -695.039, 34.4673, -110.951, -382.837, -734.82, 100.976, 325.468, -574.545, -395.197, -203.325, 214.267, 14.3318, -570.697, -433.955, -778.694, -91.4673, -587.845, 170.106}
-slots @ cam 102 = {325.468, 309.218, 241.891, -395.197, -734.82, 100.976, -574.545, 170.106, -91.4673, 214.267, 14.3318, -570.697, -433.955, -778.694, -587.845, -203.325, -382.837, -200.585, 34.4673, -110.951, 30.9867, -423.808, -600.823, -307.449, -189.862, 159.993, -754.017, -555.105, -366.59, -82.5882, -695.039, -2.77845}
+vz    @ cam 102 = {30.98666894, -423.8084157, 159.9926944, -600.8230704, -307.4490135, -189.8618631, 241.8908469, -2.778448921, -754.0169613, -200.5846063, -555.1054228, -366.5896355, -82.58820636, 309.2184962, -695.0388162, 34.46732748, -110.9508238, -382.8372464, -734.8203086, 100.9764778, 325.4681452, -574.5447716, -395.1969874, -203.324947, 214.266509, 14.33184688, -570.6970115, -433.9553562, -778.6942955, -91.46728886, -587.8453788, 170.1056399}
+slots @ cam 102 = {325.4681452, 309.2184962, 241.8908469, -395.1969874, -734.8203086, 100.9764778, -574.5447716, 170.1056399, -91.46728886, 214.266509, 14.33184688, -570.6970115, -433.9553562, -778.6942955, -587.8453788, -203.324947, -382.8372464, -200.5846063, 34.46732748, -110.9508238, 30.98666894, -423.8084157, -600.8230704, -307.4490135, -189.8618631, 159.9926944, -754.0169613, -555.1054228, -366.5896355, -82.58820636, -695.0388162, -2.778448921}
 h     @ cam 102 = {25, 26, 34, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 xl    @ cam 102 = {122, 55, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 xr    @ cam 102 = {128, 69, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 y     @ cam 102 = {72, 73, 77, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 slot0 colour   = {1, 1, 2, 1, 1, 1, 1, 1}
-percam = SUM(vis, 1)
-maxvis = MAX(percam)
-nslots = maxvis
+percam = {7, 7, 7, 9, 9, 10, 10, 10, ...} [SUM(vis, 1)]
+maxvis = 15 [MAX(percam)]
+nslots = 15 [maxvis]
 max visible    = 15 of 32 objects -> 15 slots emitted
-relxz = rel[.., .., {0, 2}]
+relxz = {{{-610, -555}, {-155, -545}, {-740, -535}, {20, -490}, {-275, -460}, {-395, -405}, {-830, -340}, {-585, -340}, ...}, {{-609.661409, -564.1946513}, {-154.661409, -554.1946513}, {-739.661409, -544.1946513}, {20.33859103, -499.1946513}, {-274.661409, -469.1946513}, {-394.661409, -414.1946513}, {-829.661409, -349.1946513}, {-584.661409, -349.1946513}, ...}, {{-608.6486858, -573.334072}, {-153.6486858, -563.334072}, {-738.6486858, -553.334072}, {21.3513142, -508.334072}, {-273.6486858, -478.334072}, {-393.6486858, -423.334072}, {-828.6486858, -358.334072}, {-583.6486858, -358.334072}, ...}, {{-606.9709095, -582.3638776}, {-151.9709095, -572.3638776}, {-736.9709095, -562.3638776}, {23.02909046, -517.3638776}, {-271.9709095, -487.3638776}, {-391.9709095, -432.3638776}, {-826.9709095, -367.3638776}, {-581.9709095, -367.3638776}, ...}, {{-604.6429794, -591.2313478}, {-149.6429794, -581.2313478}, {-734.6429794, -571.2313478}, {25.3570206, -526.2313478}, {-269.6429794, -496.2313478}, {-389.6429794, -441.2313478}, {-824.6429794, -376.2313478}, {-579.6429794, -376.2313478}, ...}, {{-601.6852764, -599.8861923}, {-146.6852764, -589.8861923}, {-731.6852764, -579.8861923}, {28.31472363, -534.8861923}, {-266.6852764, -504.8861923}, {-386.6852764, -449.8861923}, {-821.6852764, -384.8861923}, {-576.6852764, -384.8861923}, ...}, {{-598.1232095, -608.2812408}, {-143.1232095, -598.2812408}, {-728.1232095, -588.2812408}, {31.87679051, -543.2812408}, {-263.1232095, -513.2812408}, {-383.1232095, -458.2812408}, {-818.1232095, -393.2812408}, {-573.1232095, -393.2812408}, ...}, {{-593.9866653, -616.3730383}, {-138.9866653, -606.3730383}, {-723.9866653, -596.3730383}, {36.01333466, -551.3730383}, {-258.9866653, -521.3730383}, {-378.9866653, -466.3730383}, {-813.9866653, -401.3730383}, {-568.9866653, -401.3730383}, ...}, ...} [rel[.., .., {0, 2}]]
 path clearance = 68 world units
-slotcol = ZIP(0 ..< nslots)
-camoff  = (0 ..< ncam)*nobj
-grid    = slotcol + camoff
-slotidx = FLATTEN(grid)
-.tab_xl
-  1400  38 3D 06 00...  EQUB sortedf[slotidx, 2]
-.tab_xr
-  2300  40 44 0E 06...  EQUB sortedf[slotidx, 3]
-.tab_y
-  3200  44 44 43 42...  EQUB sortedf[slotidx, 4]
-.tab_h
-  4100  10 10 0F 0C...  EQUB sortedf[slotidx, 5]
-.tab_col
-  5000  01 01 02 01...  EQUB sortedf[slotidx, 6]
+slotcol = {{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, ...} [ZIP(0 ..< nslots)]
+camoff = {0, 32, 64, 96, 128, 160, 192, 224, ...} [(0 ..< ncam)*nobj]
+grid = {{0, 32, 64, 96, 128, 160, 192, 224, ...}, {1, 33, 65, 97, 129, 161, 193, 225, ...}, {2, 34, 66, 98, 130, 162, 194, 226, ...}, {3, 35, 67, 99, 131, 163, 195, 227, ...}, {4, 36, 68, 100, 132, 164, 196, 228, ...}, {5, 37, 69, 101, 133, 165, 197, 229, ...}, {6, 38, 70, 102, 134, 166, 198, 230, ...}, {7, 39, 71, 103, 135, 167, 199, 231, ...}, ...} [slotcol + camoff]
+slotidx = {0, 32, 64, 96, 128, 160, 192, 224, ...} [FLATTEN(grid)]
+  1400  .tab_xl
+  1400  38 3D 06 00 08 0F 15 1B...  EQUB sortedf[slotidx, 2]
+  2300  .tab_xr
+  2300  40 44 0E 06 0E 14 1B 20...  EQUB sortedf[slotidx, 3]
+  3200  .tab_y
+  3200  44 44 43 42 42 41 41 41...  EQUB sortedf[slotidx, 4]
+  4100  .tab_h
+  4100  10 10 0F 0C 0C 0A 0A 0A...  EQUB sortedf[slotidx, 5]
+  5000  .tab_col
+  5000  01 01 02 01 01 01 01 01...  EQUB sortedf[slotidx, 6]
 ENDSECTION
 

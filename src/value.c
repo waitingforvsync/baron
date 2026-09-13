@@ -327,7 +327,7 @@ bool value_is_equal(value a, value b)
 }
 
 
-void value_format(rc_mstr *out, value v, rc_arena *arena)
+static void format_value(rc_mstr *out, value v, uint32_t max_list_elements, rc_arena *arena)
 {
     switch ((value_type) v.type) {
         case value_type_none:
@@ -356,7 +356,9 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
                 rc_mstr_append_i64(out, v.range.start, arena);
             }
             rc_mstr_append(out, RC_STR(".."), arena);
-            if (v.range.step != 1) {
+            // A stored 0 means "infer the direction" - the plain spelling re-infers it, so only a
+            // genuine explicit step earns its segment.
+            if (v.range.step != 0 && v.range.step != 1) {
                 rc_mstr_append_i64(out, v.range.step, arena);
                 rc_mstr_append(out, RC_STR(".."), arena);
             }
@@ -364,16 +366,22 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
                 rc_mstr_append_i64(out, v.range.end, arena);
             }
             return;
-        case value_type_list:
+        case value_type_list: {
+            // Each nesting level truncates at the same budget, so a monster table stays legible.
+            uint32_t shown = v.list.num > max_list_elements ? max_list_elements : v.list.num;
             rc_mstr_append_char(out, '{', arena);
-            for (uint32_t i = 0; i < v.list.num; i++) {
+            for (uint32_t i = 0; i < shown; i++) {
                 if (i > 0) {
                     rc_mstr_append(out, RC_STR(", "), arena);
                 }
-                value_format(out, rc_view_value_get(v.list, i), arena);
+                format_value(out, rc_view_value_get(v.list, i), max_list_elements, arena);
+            }
+            if (v.list.num > shown) {
+                rc_mstr_append(out, RC_STR(", ..."), arena);
             }
             rc_mstr_append_char(out, '}', arena);
             return;
+        }
         case value_type_za_auto:
             // Normally invisible - PRINT speaks on the output pass, where the symbol is a real number -
             // but an edge path (ERROR, say) may still render one before allocation.
@@ -385,6 +393,110 @@ void value_format(rc_mstr *out, value v, rc_arena *arena)
                 rc_mstr_append_i64(out, v.za_auto.offset, arena);
             }
             rc_mstr_append_char(out, '>', arena);
+            return;
+    }
+
+    RC_UNREACHABLE();
+}
+
+
+void value_format(rc_mstr *out, value v, rc_arena *arena)
+{
+    format_value(out, v, UINT32_MAX, arena);
+}
+
+
+void value_format_max(rc_mstr *out, value v, uint32_t max_list_elements, rc_arena *arena)
+{
+    format_value(out, v, max_list_elements, arena);
+}
+
+
+// Append s as a JSON string: quoted, with the two mandatory escapes plus \u escapes for anything
+// outside printable ASCII - source bytes are not guaranteed UTF-8, so high bytes escape as their
+// Latin-1 code points to keep the JSON valid.
+static void json_append_string(rc_mstr *out, rc_str s, rc_arena *arena)
+{
+    rc_mstr_append_char(out, '"', arena);
+    for (uint32_t i = 0; i < s.len; i++) {
+        char c = s.data[i];
+        if (c == '"' || c == '\\') {
+            rc_mstr_append_char(out, '\\', arena);
+            rc_mstr_append_char(out, c, arena);
+        }
+        else if ((uint8_t) c < 0x20 || (uint8_t) c >= 0x7F) {
+            rc_mstr_append(out, RC_STR("\\u00"), arena);
+            rc_mstr_append_hex8(out, (uint8_t) c, arena);
+        }
+        else {
+            rc_mstr_append_char(out, c, arena);
+        }
+    }
+    rc_mstr_append_char(out, '"', arena);
+}
+
+
+void value_append_json(rc_mstr *out, value v, rc_arena *arena)
+{
+    switch ((value_type) v.type) {
+        case value_type_numeric:
+            if (!isfinite(v.numeric)) {
+                rc_mstr_append(out, RC_STR("null"), arena);   // JSON has no NaN or infinity
+            }
+            else if (v.numeric == floor(v.numeric) &&
+                     v.numeric >= -9223372036854775808.0 && v.numeric < 9223372036854775808.0) {
+                rc_mstr_append_i64(out, (int64_t) v.numeric, arena);   // exact, no 10-digit cliff
+            }
+            else {
+                rc_mstr_append_f64(out, v.numeric, (rc_float_format) {.precision = 17}, arena);   // round-trips
+            }
+            return;
+        case value_type_boolean:
+            rc_mstr_append(out, v.numeric != 0.0 ? RC_STR("true") : RC_STR("false"), arena);
+            return;
+        case value_type_string:
+            json_append_string(out, v.string, arena);
+            return;
+        case value_type_range:
+            // A bounded range of sane size enumerates to the array it stands for; anything
+            // unbounded (or absurd) falls back to a string in value_format's range spelling.
+            if (v.range.has_start && v.range.has_end) {
+                int64_t step = value_range_step(v.range);
+                int64_t n    = (v.range.end - v.range.start) / step + 1;
+                if (n <= (int64_t) VALUE_LIST_MAX_LENGTH) {
+                    rc_mstr_append_char(out, '[', arena);
+                    for (int64_t i = 0; i < n; i++) {
+                        if (i > 0) {
+                            rc_mstr_append(out, RC_STR(", "), arena);
+                        }
+                        rc_mstr_append_i64(out, v.range.start + i * step, arena);
+                    }
+                    rc_mstr_append_char(out, ']', arena);
+                    return;
+                }
+            }
+            {
+                rc_mstr spelled = rc_mstr_make(16, arena);
+                value_format(&spelled, v, arena);
+                json_append_string(out, spelled.view, arena);
+            }
+            return;
+        case value_type_list:
+            rc_mstr_append_char(out, '[', arena);
+            for (uint32_t i = 0; i < v.list.num; i++) {
+                if (i > 0) {
+                    rc_mstr_append(out, RC_STR(", "), arena);
+                }
+                value_append_json(out, rc_view_value_get(v.list, i), arena);
+            }
+            rc_mstr_append_char(out, ']', arena);
+            return;
+        case value_type_none:
+        case value_type_error:
+        case value_type_za_auto:
+            // None of these survives a successful assemble (ZA_AUTO symbols are rewritten to
+            // their allocated numbers by the output pass); render the honest nothing.
+            rc_mstr_append(out, RC_STR("null"), arena);
             return;
     }
 
@@ -534,6 +646,54 @@ RC_TEST(value, formatting)
     value list = value_make_list((rc_view_value) RC_VIEW(elems));
     value_format(&out, list, &arena);
     RC_CHECK(out.view, ==, RC_STR("{1, 2, 3}"));
+
+    // The capped variant cuts each list level at the budget; value_format itself never cuts.
+    out = rc_mstr_make(16, &arena);
+    value_format_max(&out, list, 2, &arena);
+    RC_CHECK(out.view, ==, RC_STR("{1, 2, ...}"));
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(value, json)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_mstr out;
+
+    // Integers render exactly across the full 32-bit address range; non-integers round-trip.
+    out = rc_mstr_make(16, &arena);
+    value_append_json(&out, value_make_numeric(4294842624.0), &arena);   // &FFFF1900's low 32 bits
+    RC_CHECK(out.view, ==, RC_STR("4294842624"));
+
+    out = rc_mstr_make(16, &arena);
+    value_append_json(&out, value_make_numeric(0.1), &arena);
+    RC_CHECK(out.view, ==, RC_STR("0.10000000000000001"));
+
+    out = rc_mstr_make(16, &arena);
+    value_append_json(&out, value_make_bool(true), &arena);
+    value_append_json(&out, value_make_bool(false), &arena);
+    RC_CHECK(out.view, ==, RC_STR("truefalse"));
+
+    // Strings escape quotes, backslashes and anything outside printable ASCII.
+    out = rc_mstr_make(16, &arena);
+    value_append_json(&out, value_make_string(RC_STR("a\"b\\c\n\x7f")), &arena);
+    RC_CHECK(out.view, ==, RC_STR("\"a\\\"b\\\\c\\u000A\\u007F\""));
+
+    // A bounded range enumerates to its array; an unbounded one degrades to its spelling.
+    out = rc_mstr_make(16, &arena);
+    value_range stepped = {.start = 0, .end = 10, .step = 2, .has_start = true, .has_end = true};
+    value_append_json(&out, value_make_range(stepped), &arena);
+    RC_CHECK(out.view, ==, RC_STR("[0, 2, 4, 6, 8, 10]"));
+
+    out = rc_mstr_make(16, &arena);
+    value_append_json(&out, value_make_range_open_end(value_make_numeric(5), false), &arena);
+    RC_CHECK(out.view, ==, RC_STR("\"5..\""));
+
+    // Lists recurse; none (which cannot survive an assemble) is null.
+    out = rc_mstr_make(16, &arena);
+    value elems[] = {value_make_numeric(1), value_make_string(RC_STR("x")), value_make_none()};
+    value_append_json(&out, value_make_list((rc_view_value) RC_VIEW(elems)), &arena);
+    RC_CHECK(out.view, ==, RC_STR("[1, \"x\", null]"));
 
     rc_arena_deinit(&arena);
 }

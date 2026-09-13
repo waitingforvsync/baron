@@ -193,10 +193,13 @@ static void note_unsettled_removed(baron *b, cursor at, rc_str name)
 
 // ---- the verbose listing ----
 
-// Column layout: "  0900  AD 34 12        LDA magic" - everything hangs off these two numbers.
+// Column layout: "  0900  AD 34 12                     LDA magic" - everything hangs off these two
+// numbers. Eight bytes fill 23 characters, the -v ellipsis three more, and a two-space gap lands the
+// source text at column 36.
 enum {
-    verbose_max_bytes  = 4,    // hex bytes shown before the dump is truncated with "..."
-    verbose_byte_field = 16,   // the byte field's total width including the gap before the source text
+    verbose_max_bytes    = 8,    // hex bytes per line; -v truncates past this with "...", -vv wraps
+    verbose_byte_field   = 28,   // the byte field's total width including the gap before the source text
+    verbose_max_elements = 8,    // list elements shown in an assignment's value under -v; -vv shows all
 };
 
 // Echo the statement's source [stmt.pos, end_pos) verbatim, leading blanks trimmed; a span
@@ -263,13 +266,32 @@ void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
         width += (i > 0) ? 3 : 2;
     }
 
-    if (num > verbose_max_bytes) {
+    if (num > verbose_max_bytes && !b->want_verbose_full) {
         rc_mstr_append(&b->channels[0], RC_STR("..."), b->per_pass);
         width += 3;
     }
 
     rc_mstr_append_n(&b->channels[0], ' ', verbose_byte_field - width, b->per_pass);
     verbose_source(b, stmt, end_pos);
+
+    // -vv: the rest of the dump wraps onto address-only continuation lines, eight bytes apiece,
+    // the source echo staying with the first.
+    if (num > verbose_max_bytes && b->want_verbose_full) {
+        for (uint32_t i = verbose_max_bytes; i < num; i++) {
+            if (i % verbose_max_bytes == 0) {
+                rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
+                rc_mstr_append_hex16(&b->channels[0], (uint16_t) (pc + i), b->per_pass);
+                rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
+            }
+            else {
+                rc_mstr_append_char(&b->channels[0], ' ', b->per_pass);
+            }
+            rc_mstr_append_hex8(&b->channels[0], rc_view_bytes_get(code, code_begin + i), b->per_pass);
+            if ((i + 1) % verbose_max_bytes == 0 || i + 1 == num) {
+                rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
+            }
+        }
+    }
 }
 
 
@@ -280,14 +302,66 @@ void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
         return;
     }
 
-    if (kind == verbose_text_address) {
-        // An address but no bytes: the line marks where something lands; its bytes follow.
+    if (kind != verbose_text_margin) {
+        // An address but no bytes: the line marks where something lands. A label sits in the
+        // byte-field column itself, so it reads at a glance and greps with its address; the
+        // address kind leaves the field empty because its bytes follow on later lines.
         rc_mstr_append(&b->channels[0], RC_STR("  "), b->per_pass);
         rc_mstr_append_hex16(&b->channels[0], (uint16_t) pc, b->per_pass);
-        rc_mstr_append_n(&b->channels[0], ' ', 2 + verbose_byte_field, b->per_pass);
+        rc_mstr_append_n(&b->channels[0], ' ', kind == verbose_text_address ? 2 + verbose_byte_field : 2, b->per_pass);
     }
 
     verbose_source(b, stmt, end_pos);
+}
+
+
+// List an assignment as what it became - name = value - with the source expression bracketed
+// after it when that adds anything: "base = 18 [&12]", but a literal that already reads as the
+// value stays clean ("x = 5"). expr is the raw source slice of the right-hand side. The scratch
+// staging goes in per_pass, NOT the caller's scratch: v's backing (a list's elements, say) lives
+// in the region the caller's eval copy already claimed, and an allocation from our own copy of
+// that scratch would silently write over it.
+static void verbose_assign_line(baron *b, parse_flags flags, rc_str name, value v, rc_str expr)
+{
+    if (!verbose_on(flags)) {
+        return;
+    }
+
+    rc_mstr formatted = rc_mstr_make(32, b->per_pass);
+    value_format_max(&formatted, v, b->want_verbose_full ? UINT32_MAX : verbose_max_elements, b->per_pass);
+
+    // Trim the expression to its first line, like verbose_source: leading blanks off, cut at a
+    // newline with an ellipsis, trailing blanks (or a CR) tidied.
+    uint32_t begin = 0;
+    while (begin < expr.len && (expr.data[begin] == ' ' || expr.data[begin] == '\t')) {
+        begin++;
+    }
+    uint32_t end = begin;
+    while (end < expr.len && expr.data[end] != '\n') {
+        end++;
+    }
+    bool cut = end < expr.len;
+    while (end > begin && (expr.data[end - 1] == ' ' || expr.data[end - 1] == '\t' ||
+                           expr.data[end - 1] == '\r')) {
+        end--;
+    }
+    rc_str shown = rc_str_substr(expr, begin, end - begin);
+
+    rc_mstr *out = &b->channels[0];
+    rc_mstr_append(out, name, b->per_pass);
+    rc_mstr_append(out, RC_STR(" = "), b->per_pass);
+    rc_mstr_append(out, formatted.view, b->per_pass);
+
+    if (cut || !rc_str_is_equal(shown, formatted.view)) {
+        rc_mstr_append(out, RC_STR(" ["), b->per_pass);
+        rc_mstr_append(out, shown, b->per_pass);
+        if (cut) {
+            rc_mstr_append(out, RC_STR("..."), b->per_pass);
+        }
+        rc_mstr_append_char(out, ']', b->per_pass);
+    }
+
+    rc_mstr_append_char(out, '\n', b->per_pass);
 }
 
 
@@ -1744,7 +1818,9 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         }
     }
 
-    verbose_text_line(b, flags, stmt, nm.next, 0, verbose_text_margin);   // ".name" at the margin (never its scope's braces)
+    // ".name" with its address, never its scope's braces; re-read the pc here since the binding
+    // block above only runs when active (the verbose gate covers that).
+    verbose_text_line(b, flags, stmt, nm.next, sections_pc(&b->sections, section), verbose_text_label);
 
     // A following '{' - optionally one separator away - makes the label name a scope. Anything
     // else is not the label's to parse: it never owns the statement that follows it.
@@ -1824,7 +1900,7 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
         }
     }
 
-    verbose_text_line(b, flags, stmt, at.pos, 0, verbose_text_margin);   // the ".@" token is the whole statement
+    verbose_text_line(b, flags, stmt, at.pos, sections_pc(&b->sections, section), verbose_text_label);   // the ".@" token is the whole statement
     return r;
 }
 
@@ -1982,6 +2058,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
 // emits nothing.
 static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_str name, rc_arena scratch)
 {
+    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     lexer_result eq = lexer_next(src, at.pos, assign_tokens);
@@ -2042,8 +2119,8 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         }
     }
 
-    // An assignment emits nothing, so it echoes at the margin like a label.
-    verbose_text_line(b, flags, stmt, e.next, 0, verbose_text_margin);
+    // An assignment emits nothing, so it lists at the margin as what it became: name = value.
+    verbose_assign_line(b, flags, name, e.value, rc_str_substr(src, eq.next, e.next - eq.next));
 
     return fold(r, require_separator(b, cursor_at(at, e.next)));
 }
@@ -2827,8 +2904,9 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
         r.changed = (st == symbol_status_changed);
     }
 
-    // Echo it in the listing like the assignment it is.
-    verbose_text_line(b, flags, def, text.len, 0, verbose_text_margin);
+    // List it like the assignment it is: name = value [expr if different].
+    verbose_assign_line(b, flags, nm.token.identifier.name, e.value,
+                        rc_str_substr(text, eq.next, e.next - eq.next));
 
     return r;
 }
@@ -4103,9 +4181,9 @@ RC_TEST_STEP(assemble, basic_listing, fix)
     RC_CHECK_TRUE(ASM("BASIC\n10CLS\n20GOTO 10\nENDBASIC") != 0);
     RC_CHECK(VERB(), ==,
              RC_STR("BASIC\n"
-                    "  0000  0D 00 0A 05...  10CLS\n"
-                    "  0005  0D 00 14 0A...  20GOTO 10\n"
-                    "  000F  0D FF           ENDBASIC\n"));
+                    "  0000  0D 00 0A 05 DB              10CLS\n"
+                    "  0005  0D 00 14 0A E5 20 8D 54...  20GOTO 10\n"
+                    "  000F  0D FF                       ENDBASIC\n"));
     fix->desc.verbose = false;
 }
 
@@ -5196,9 +5274,9 @@ RC_TEST_STEP(assemble, bitabs_emits_and_lists, fix)
     fix->desc.verbose = true;   // the listing is opt-in
     RC_CHECK_TRUE(ASM("bitabs\nlda #1\nrts") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("  0000  2C              bitabs\n"
-                    "  0001  A9 01           lda #1\n"
-                    "  0003  60              rts\n"));
+             RC_STR("  0000  2C                          bitabs\n"
+                    "  0001  A9 01                       lda #1\n"
+                    "  0003  60                          rts\n"));
     fix->desc.verbose = false;
 }
 
@@ -6125,15 +6203,15 @@ RC_TEST_STEP(assemble, listing_full_shape, fix)
     RC_CHECK(VERB(), ==,
              RC_STR("section main, org=&900\n"
                     "var = &70 [auto]\n"
-                    ".label\n"
-                    "  0900  A9 12           lda #&12\n"
-                    "  0902  85 70           sta var\n"
-                    ".inner\n"
-                    "  0904  A2 01           ldx #1\n"
-                    "  0906  A5 70           lda var\n"
-                    "  0908  60              rts\n"
-                    "  0909  41 42 43 44...  equs \"ABCDEFGH\"\n"
-                    "  0911  00              equb 0\n"
+                    "  0900  .label\n"
+                    "  0900  A9 12                       lda #&12\n"
+                    "  0902  85 70                       sta var\n"
+                    "  0904  .inner\n"
+                    "  0904  A2 01                       ldx #1\n"
+                    "  0906  A5 70                       lda var\n"
+                    "  0908  60                          rts\n"
+                    "  0909  41 42 43 44 45 46 47 48     equs \"ABCDEFGH\"\n"
+                    "  0911  00                          equb 0\n"
                     "endsection\n"
                     "\n"
                     "x = 5\n"));
@@ -6146,9 +6224,9 @@ RC_TEST_STEP(assemble, listing_macro_expansion, fix)
     // the bytes, echoing the BODY's source (parameter names and all).
     RC_CHECK_TRUE(ASM("macro add8 addr\nclc\nlda addr\nendmacro\nadd8 &70") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("  0000                  add8 &70\n"
-                    "  0000  18              clc\n"
-                    "  0001  A5 70           lda addr\n"));
+             RC_STR("  0000                              add8 &70\n"
+                    "  0000  18                          clc\n"
+                    "  0001  A5 70                       lda addr\n"));
 }
 
 RC_TEST_STEP(assemble, listing_include_child, fix)
@@ -6160,9 +6238,9 @@ RC_TEST_STEP(assemble, listing_include_child, fix)
     fix->r = assemble_string(&fix->desc, RC_STR("top"), RC_STR("include \"inc_child.6502\""));
     RC_CHECK_TRUE(fix->r.passes != 0);
     RC_CHECK(fix->r.channels[0], ==,
-             RC_STR("  0000                  include \"inc_child.6502\"\n"
-                    ".child\n"
-                    "  0000  A2 02           ldx #2\n"));
+             RC_STR("  0000                              include \"inc_child.6502\"\n"
+                    "  0000  .child\n"
+                    "  0000  A2 02                       ldx #2\n"));
 }
 
 RC_TEST_STEP(assemble, listing_for_repeats, fix)
@@ -6171,9 +6249,9 @@ RC_TEST_STEP(assemble, listing_for_repeats, fix)
     // A FOR body lists once per iteration - that is what actually assembled.
     RC_CHECK_TRUE(ASM("for i = 1..3\nequb i\nnext") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("  0000  01              equb i\n"
-                    "  0001  02              equb i\n"
-                    "  0002  03              equb i\n"));
+             RC_STR("  0000  01                          equb i\n"
+                    "  0001  02                          equb i\n"
+                    "  0002  03                          equb i\n"));
 }
 
 RC_TEST_STEP(assemble, listing_dead_branch_and_failure, fix)
@@ -6182,7 +6260,7 @@ RC_TEST_STEP(assemble, listing_dead_branch_and_failure, fix)
     // A dead branch leaves no trace (the gate is listing && active), and a failed assemble has no listing
     // at all.
     RC_CHECK_TRUE(ASM("if false\nlda #1\nendif\nrts") != 0);
-    RC_CHECK(VERB(), ==, RC_STR("  0000  60              rts\n"));
+    RC_CHECK(VERB(), ==, RC_STR("  0000  60                          rts\n"));
 
     RC_CHECK(ASM("lda"), ==, 0u);
     RC_CHECK(VERB().len, ==, 0u);
@@ -6193,39 +6271,41 @@ RC_TEST_STEP(assemble, listing_local_label, fix)
     fix->desc.verbose = true;   // the listing is opt-in
     RC_CHECK_TRUE(ASM("ldx #2\n.@\ndex\nbne @-") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("  0000  A2 02           ldx #2\n"
-                    ".@\n"
-                    "  0002  CA              dex\n"
-                    "  0003  D0 FD           bne @-\n"));
+             RC_STR("  0000  A2 02                       ldx #2\n"
+                    "  0002  .@\n"
+                    "  0002  CA                          dex\n"
+                    "  0003  D0 FD                       bne @-\n"));
 }
 
 RC_TEST_STEP(assemble, listing_skip_and_multiline, fix)
 {
     fix->desc.verbose = true;   // the listing is opt-in
-    // SKIP's zero padding truncates like any long dump; a multi-line list literal echoes only its first
-    // line, closed with an ellipsis (the BYTES are all there - only the source echo is cut).
-    RC_CHECK_TRUE(ASM("skip 8") != 0);
-    RC_CHECK(VERB(), ==, RC_STR("  0000  00 00 00 00...  skip 8\n"));
+    // SKIP's zero padding truncates like any long dump (eight bytes fit; the ninth trips the
+    // ellipsis); a multi-line list literal echoes only its first line, closed with an ellipsis
+    // (the BYTES are all there - only the source echo is cut).
+    RC_CHECK_TRUE(ASM("skip 9") != 0);
+    RC_CHECK(VERB(), ==, RC_STR("  0000  00 00 00 00 00 00 00 00...  skip 9\n"));
 
     RC_CHECK_TRUE(ASM("equb {1,\n2}") != 0);
-    RC_CHECK(VERB(), ==, RC_STR("  0000  01 02           equb {1,...\n"));
+    RC_CHECK(VERB(), ==, RC_STR("  0000  01 02                       equb {1,...\n"));
 }
 
 RC_TEST_STEP(assemble, listing_assignments_and_braces, fix)
 {
     fix->desc.verbose = true;   // the listing is opt-in
-    // Assignments echo verbatim at the margin (they emit nothing and land nowhere); braces echo at the
-    // margin too, so the scope structure survives into the listing, whether the '{' shares the label's
-    // line or not; and a ZA_AUTO declaration lists as the assignment it became: tmp = &70 [auto].
+    // Assignments list at the margin as what they became - evaluated value, source expression
+    // bracketed when it differs; braces echo at the margin too, so the scope structure survives
+    // into the listing, whether the '{' shares the label's line or not; and a ZA_AUTO declaration
+    // lists as the assignment it became: tmp = &70 [auto].
     RC_CHECK_TRUE(ASM("za_pool &70..&7F\nbase = &12\n.sub {\nza_auto1 tmp\nsta tmp\nlda #base\nrts\n}") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("base = &12\n"
-                    ".sub\n"
+             RC_STR("base = 18 [&12]\n"
+                    "  0000  .sub\n"
                     "{\n"
                     "tmp = &70 [auto]\n"
-                    "  0000  85 70           sta tmp\n"
-                    "  0002  A9 12           lda #base\n"
-                    "  0004  60              rts\n"
+                    "  0000  85 70                       sta tmp\n"
+                    "  0002  A9 12                       lda #base\n"
+                    "  0004  60                          rts\n"
                     "}\n"));
 
     // An anonymous scope's braces list the same way, and a dead branch's do not list at all (the gate is
@@ -6233,19 +6313,57 @@ RC_TEST_STEP(assemble, listing_assignments_and_braces, fix)
     RC_CHECK_TRUE(ASM("{\nnop\n}\nif false\n{\nw = 1\n}\nendif") != 0);
     RC_CHECK(VERB(), ==,
              RC_STR("{\n"
-                    "  0000  EA              nop\n"
+                    "  0000  EA                          nop\n"
                     "}\n"));
 
     // A mid-line '{' gets its own margin line, and the statement before it echoes without the brace
     // (its slice ends where the separator was found).
     RC_CHECK_TRUE(ASM("LDX #8 {.loop DEX:BNE loop }") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("  0000  A2 08           LDX #8\n"
+             RC_STR("  0000  A2 08                       LDX #8\n"
                     "{\n"
-                    ".loop\n"
-                    "  0002  CA              DEX\n"
-                    "  0003  D0 FD           BNE loop\n"
+                    "  0002  .loop\n"
+                    "  0002  CA                          DEX\n"
+                    "  0003  D0 FD                       BNE loop\n"
                     "}\n"));
+
+    // A list or string assignment lists cleanly - the regression that mattered: a list's elements
+    // live in eval's scratch region, and the formatter once staged its text over them.
+    RC_CHECK_TRUE(ASM("xs = {1, 2}\nname = \"joe\"\nys = {1+1, 3}") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("xs = {1, 2}\n"
+                    "name = \"joe\"\n"
+                    "ys = {2, 3} [{1+1, 3}]\n"));
+
+    // Under plain -v a long list value cuts off after eight elements (the full story is one -vv away).
+    RC_CHECK_TRUE(ASM("xs = {1,2,3,4,5,6,7,8,9}") != 0);
+    RC_CHECK(VERB(), ==, RC_STR("xs = {1, 2, 3, 4, 5, 6, 7, 8, ...} [{1,2,3,4,5,6,7,8,9}]\n"));
+}
+
+RC_TEST_STEP(assemble, listing_full_dump, fix)
+{
+    // -vv alone implies the listing pass, and nothing truncates: a long emission wraps onto
+    // address-only continuation lines, eight bytes apiece, the source echo staying with the first;
+    // an emission that just fits stays on one line; and a long list value renders whole.
+    fix->desc.verbose_full = true;
+    RC_CHECK_TRUE(ASM("equs \"ABCDEFGHIJK\"\nrts") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000  41 42 43 44 45 46 47 48     equs \"ABCDEFGHIJK\"\n"
+                    "  0008  49 4A 4B\n"
+                    "  000B  60                          rts\n"));
+
+    RC_CHECK_TRUE(ASM("skip 17\nequb 1") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("  0000  00 00 00 00 00 00 00 00     skip 17\n"
+                    "  0008  00 00 00 00 00 00 00 00\n"
+                    "  0010  00\n"
+                    "  0011  01                          equb 1\n"));
+
+    RC_CHECK_TRUE(ASM("equs \"ABCDEFGH\"") != 0);
+    RC_CHECK(VERB(), ==, RC_STR("  0000  41 42 43 44 45 46 47 48     equs \"ABCDEFGH\"\n"));
+
+    RC_CHECK_TRUE(ASM("xs = {1,2,3,4,5,6,7,8,9}") != 0);
+    RC_CHECK(VERB(), ==, RC_STR("xs = {1, 2, 3, 4, 5, 6, 7, 8, 9} [{1,2,3,4,5,6,7,8,9}]\n"));
 }
 
 RC_TEST_STEP(assemble, error_statement, fix)
@@ -6396,13 +6514,14 @@ RC_TEST_STEP(assemble, define_malformed, fix)
 RC_TEST_STEP(assemble, define_listing, fix)
 {
     fix->desc.verbose = true;   // the listing is opt-in
-    // A define echoes at the margin like the assignment it is, ahead of the source's first line.
-    static const rc_str defs[] = {RC_STR_INIT("screenwidth=64")};
+    // A define lists at the margin like the assignment it is, ahead of the source's first line -
+    // evaluated form, with the expression bracketed when it differs.
+    static const rc_str defs[] = {RC_STR_INIT("screenwidth=8*8")};
     fix->desc.defines = (rc_view_str) RC_VIEW(defs);
     RC_CHECK_TRUE(ASM("lda #screenwidth") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("screenwidth=64\n"
-                    "  0000  A9 40           lda #screenwidth\n"));
+             RC_STR("screenwidth = 64 [8*8]\n"
+                    "  0000  A9 40                       lda #screenwidth\n"));
 }
 
 RC_TEST_STEP(assemble, print_to_channel_zero, fix)
@@ -6434,9 +6553,9 @@ RC_TEST_STEP(assemble, print_interleaves_listing, fix)
     fix->desc.verbose = true;   // now PRINT speaks on the LISTING pass, into the listing's own channel 0
     RC_CHECK_TRUE(ASM("lda #1\nprint \"pc is \", *\nrts") != 0);
     RC_CHECK(VERB(), ==,
-             RC_STR("  0000  A9 01           lda #1\n"
+             RC_STR("  0000  A9 01                       lda #1\n"
                     "pc is 2\n"
-                    "  0002  60              rts\n"));
+                    "  0002  60                          rts\n"));
 }
 
 RC_TEST_STEP(assemble, print_forward_reference_and_for, fix)

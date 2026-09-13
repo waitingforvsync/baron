@@ -352,15 +352,16 @@ typedef struct scope_prefix {
 } scope_prefix;
 
 // Build that prefix by value, recursing to the parent first so the segments land in reading order. The
-// intermediate strings pile up in scratch.
-static scope_prefix build_scope_prefix(rc_view_scope_node nodes, uint32_t i, rc_arena *scratch)
+// intermediate strings pile up in scratch. include_anonymous keeps '@' names as ordinary segments
+// instead of dooming the scope (the symbol-dump wants the lot).
+static scope_prefix build_scope_prefix(rc_view_scope_node nodes, uint32_t i, bool include_anonymous, rc_arena *scratch)
 {
     if (i == RC_INDEX_NONE) {
         return (scope_prefix) {.prefix = RC_STR(""), .spellable = true};   // walked off the top of the root
     }
 
     scope_node   node   = rc_view_scope_node_get(nodes, i);
-    scope_prefix parent = build_scope_prefix(nodes, node.parent, scratch);
+    scope_prefix parent = build_scope_prefix(nodes, node.parent, include_anonymous, scratch);
     if (!parent.spellable) {
         return parent;   // already doomed by an ancestor
     }
@@ -369,7 +370,7 @@ static scope_prefix build_scope_prefix(rc_view_scope_node nodes, uint32_t i, rc_
         return parent;   // the root: no segment of its own
     }
 
-    if (rc_str_starts_with(node.name, RC_STR("@"))) {
+    if (!include_anonymous && rc_str_starts_with(node.name, RC_STR("@"))) {
         return (scope_prefix) {.prefix = RC_STR(""), .spellable = false};
     }
 
@@ -387,15 +388,17 @@ typedef struct symbol_flatten {
     rc_array_symbol_entry *out;
     rc_arena              *arena;
     rc_str                 prefix;
+    bool                   include_anonymous;
 } symbol_flatten;
 
-// One symbol of the current scope: skip the unspellable '@' local labels, otherwise record it under its full
-// path. A top-level name (empty prefix) is stored by reference to its owned key - no copy; a nested name is
-// prefixed into arena (the prefix already carries its trailing '.').
+// One symbol of the current scope: skip the unspellable '@' local labels (unless we want the lot),
+// otherwise record it under its full path. A top-level name (empty prefix) is stored by reference to
+// its owned key - no copy; a nested name is prefixed into arena (the prefix already carries its
+// trailing '.').
 static void flatten_symbol(symbol_flatten *c, const rc_trie_symbol_pool *pool, uint32_t i)
 {
     rc_str name = rc_trie_symbol_key_get(pool, i);
-    if (rc_str_starts_with(name, RC_STR("@"))) {
+    if (!c->include_anonymous && rc_str_starts_with(name, RC_STR("@"))) {
         return;   // a local label bound under an unspellable key
     }
 
@@ -419,14 +422,14 @@ static void flatten_symbol(symbol_flatten *c, const rc_trie_symbol_pool *pool, u
 #define RC_TRIE_FOREACH_NAME          rc_trie_symbol_foreach_flatten   // the local-label one already owns the default name
 #include "richc/template/algorithm/hash_trie_foreach.h"
 
-rc_view_symbol_entry scopes_view_flatten(scopes_view v, rc_arena *arena, rc_arena scratch)
+static rc_view_symbol_entry view_flatten(scopes_view v, bool include_anonymous, rc_arena *arena, rc_arena scratch)
 {
     RC_ASSERT(arena != NULL);
 
     rc_array_symbol_entry out = rc_array_symbol_entry_make(64, arena);
-    symbol_flatten        ctx = { .out = &out, .arena = arena };
+    symbol_flatten        ctx = { .out = &out, .arena = arena, .include_anonymous = include_anonymous };
     for (uint32_t i = 0; i < v.nodes.num; i++) {
-        scope_prefix sp = build_scope_prefix(v.nodes, i, &scratch);
+        scope_prefix sp = build_scope_prefix(v.nodes, i, include_anonymous, &scratch);
         if (!sp.spellable) {
             continue;   // an unspellable scope: none of its symbols are reachable by path
         }
@@ -435,6 +438,18 @@ rc_view_symbol_entry scopes_view_flatten(scopes_view v, rc_arena *arena, rc_aren
     }
 
     return out.view;
+}
+
+
+rc_view_symbol_entry scopes_view_flatten(scopes_view v, rc_arena *arena, rc_arena scratch)
+{
+    return view_flatten(v, false, arena, scratch);
+}
+
+
+rc_view_symbol_entry scopes_view_flatten_all(scopes_view v, rc_arena *arena, rc_arena scratch)
+{
+    return view_flatten(v, true, arena, scratch);
 }
 
 
@@ -680,6 +695,29 @@ RC_TEST_STEP(scopes, flatten_snapshots_spellable_symbols, fix)
     RC_CHECK_TRUE(value_is_none(flattened_lookup(out, RC_STR("hidden"))));
     RC_CHECK_TRUE(value_is_none(flattened_lookup(out, RC_STR("@0:20"))));
     RC_CHECK(out.num, ==, 2u);   // exactly the two spellable symbols
+
+    rc_arena_deinit(&scratch);
+}
+
+RC_TEST_STEP(scopes, flatten_all_includes_anonymous, fix)
+{
+    // The same table as flatten_snapshots_spellable_symbols, but flatten_all keeps the lot: the
+    // anonymous scope's symbol under its '@' segment, and the top-level local label verbatim.
+    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
+    uint32_t anon    = scopes_make_child(&fix->scopes, fix->root, RC_STR("@0:12"));
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),   value_make_numeric(1.0),  (cursor){0, 1});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"),  value_make_numeric(2.0),  (cursor){0, 2});
+    scopes_set_symbol(&fix->scopes, anon,      RC_STR("hidden"),value_make_numeric(3.0),  (cursor){0, 3});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("@0:20"), value_make_numeric(4.0),  (cursor){0, 4});   // a local label
+
+    rc_arena scratch = rc_arena_make_default();
+    rc_view_symbol_entry out = scopes_view_flatten_all(scopes_view_make(&fix->scopes), &fix->arena, scratch);
+
+    RC_CHECK_TRUE(value_is_equal(flattened_lookup(out, RC_STR("top")),           value_make_numeric(1.0)));
+    RC_CHECK_TRUE(value_is_equal(flattened_lookup(out, RC_STR("routine.core")),  value_make_numeric(2.0)));
+    RC_CHECK_TRUE(value_is_equal(flattened_lookup(out, RC_STR("@0:12.hidden")),  value_make_numeric(3.0)));
+    RC_CHECK_TRUE(value_is_equal(flattened_lookup(out, RC_STR("@0:20")),         value_make_numeric(4.0)));
+    RC_CHECK(out.num, ==, 4u);   // nothing skipped
 
     rc_arena_deinit(&scratch);
 }

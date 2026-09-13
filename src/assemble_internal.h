@@ -85,8 +85,9 @@ expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena
 
 // How a non-emitting statement sits in the listing.
 typedef enum verbose_text_kind {
-    verbose_text_margin = 0,   // at the margin: labels, braces, assignments, SECTION framing
+    verbose_text_margin = 0,   // at the margin: braces, assignments, SECTION framing
     verbose_text_address,      // address + empty byte field: macro invocations, INCLUDE
+    verbose_text_label,        // address, then the text in the byte-field column: labels
 } verbose_text_kind;
 
 // Append one listing line, only when flags.listing && flags.active: a code line is address + hex

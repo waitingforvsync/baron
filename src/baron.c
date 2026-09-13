@@ -24,7 +24,8 @@ baron baron_make(baron_desc *a)
     functions_init(&b.functions, &a->per_pass);
 
     b.diagnostics  = rc_array_diagnostic_make(256, &a->permanent);
-    b.want_verbose = a->verbose;
+    b.want_verbose      = a->verbose || a->verbose_full;   // -vv implies -v
+    b.want_verbose_full = a->verbose_full;
     b.defines      = a->defines;
     return b;
 }

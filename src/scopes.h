@@ -161,5 +161,10 @@ value scopes_view_get_symbol(scopes_view v, rc_str full_path);
 // prefix. The snapshot is position-independent, so it outlives the view.
 rc_view_symbol_entry scopes_view_flatten(scopes_view v, rc_arena *arena, rc_arena scratch);
 
+// The same flatten with NOTHING skipped: unspellable '@' scopes and symbols appear verbatim as path
+// segments ("sub.@2:34.loop", "@1:100:3.i"), so the whole table - anonymous blocks, FOR iterations,
+// call frames, local labels - is on show. The symbol-dump feed.
+rc_view_symbol_entry scopes_view_flatten_all(scopes_view v, rc_arena *arena, rc_arena scratch);
+
 
 #endif // ifndef BARON_SCOPES_H_

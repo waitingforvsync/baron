@@ -70,7 +70,8 @@ typedef struct baron_desc {
     rc_arena    permanent;   // scopes/symbols, source text, diagnostics, the harvested result
     rc_arena    per_pass;    // sections, macros, functions
     rc_arena    scratch;
-    bool        verbose;     // build the assembly listing into channels[0] (one extra pass)
+    bool        verbose;       // build the assembly listing into channels[0] (one extra pass)
+    bool        verbose_full;  // -vv: implies verbose; dump every emitted byte (8 per line) and whole list values
     rc_view_str defines;     // "name=expression" predefines, bound into the root scope each pass
 } baron_desc;
 
