@@ -11,13 +11,14 @@
 // The image, or a human-readable complaint (empty = success; the image is only valid then). The disc is
 // an 80-track one (the catalogue declares 800 sectors), but the file is truncated after the last used
 // sector - emulators happily treat the missing remainder as zeroes, and it keeps a mostly-empty disc
-// small on the host.
+// small on the host. pad writes the remainder out anyway (filled with &E5, the single-density format
+// filler), for the tools that insist on a full 200K image.
 typedef struct disc_ssd_result {
     rc_view_bytes image;   // built in full by disc_ssd_make
     rc_str         error;
 } disc_ssd_result;
 
-disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena);
+disc_ssd_result disc_ssd_make(const output_spec *spec, bool pad, rc_arena *arena);
 
 
 #endif // ifndef BARON_DISC_SSD_H_

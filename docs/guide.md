@@ -800,7 +800,9 @@ destinations:
   sidecar beside each (`$.CODE 001100 001100 001F40` style), which most emulators and transfer tools read.
 - **A disc image**: `-o game.ssd` gathers the same sections onto a DFS single-sided disc image.
   `--title` sets the disc title, `--opt` the `*OPT4` boot option (`3` execs a `!BOOT` you have supplied
-  as just another named section), `--cycle` the catalogue cycle number.
+  as just another named section), `--cycle` the catalogue cycle number. The image is truncated after
+  the last used sector (emulators read the missing remainder as zeroes); `--pad` writes it out to a
+  full 200K disc instead, for the tools that expect one.
 
 Neither is implied, and they are not exclusive - `baron -p build -o game.ssd ...` writes both. A run
 given neither still assembles, reports, lists and prints; it simply has nowhere to put the bytes, and

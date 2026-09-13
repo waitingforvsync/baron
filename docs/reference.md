@@ -13,7 +13,7 @@ depth, see [Zero page allocation](zero-page-allocation.md).
 
 ```
 baron [-v | -vv] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>] [--title <t>]
-      [--opt <0-3>] [--cycle <0-99>] [-log<n> <file>] [--symbols <file>] <source files>
+      [--opt <0-3>] [--cycle <0-99>] [--pad] [-log<n> <file>] [--symbols <file>] <source files>
 ```
 
 | Switch | What it does |
@@ -28,6 +28,7 @@ baron [-v | -vv] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>
 | `--title <t>` | The disc title, up to 12 characters. Needs `-o`. |
 | `--opt <0-3>` | The `*OPT4` boot option: 0 none, 1 `*LOAD`, 2 `*RUN`, 3 `*EXEC !BOOT`. Needs `-o`. |
 | `--cycle <0-99>` | The catalogue cycle number. Needs `-o`. |
+| `--pad` | Pad the image out to a full 80-track disc (200K); every unused sector is filled with `&E5`, the single-density format filler. Without it the image is truncated after the last used sector. Needs `-o`. |
 | `-log<n> <file>` | Redirect `PRINT` channel *n* (0-9) to a file. Channel 0 otherwise goes to stdout; channels 1-9 are otherwise discarded. |
 | `--symbols <file>` | Write every source file's resolved symbols - labels, computed constants, `ZA_AUTO` allocations - to one JSON file: an object per source file, symbols under their full dotted paths, sorted, one per line. See [The symbol dump](guide.md#the-symbol-dump). |
 | `--help` | Print the switch summary. |

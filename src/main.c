@@ -43,6 +43,7 @@ static void display_help(void)
     puts("  -o <file>        Create a .ssd disk image containing the saved sections");
     puts("  --cycle <0-99>   Set this cycle count");
     puts("  --opt <n>        Set this *OPT 4,n boot option");
+    puts("  --pad            Pad the image out to a full 80-track disc (200K)");
     puts("  --title <title>  Set this disk title");
     puts("");
     puts("Options for generating raw binary files to the host:");
@@ -130,7 +131,8 @@ int main(int argc, char **argv)
     const char *log_paths[baron_num_channels] = {0};   // -logN: write PRINT channel N to this file
     int32_t boot = 0;
     int32_t cycle = 0;
-    bool disc_options = false;   // any of --title/--opt/--cycle, which only mean something with -o
+    bool pad = false;            // --pad: fill the image out to a whole 80-track disc
+    bool disc_options = false;   // any of --title/--opt/--cycle/--pad, which only mean something with -o
     int files = 0;
     rc_array_str defines = rc_array_str_make(8, &cli);   // -D: "name=expression" predefines, in argv order
 
@@ -186,6 +188,10 @@ int main(int argc, char **argv)
             cycle = parse_option_value("--cycle", argv[++i], 99);
             disc_options = true;
         }
+        else if (strcmp(argv[i], "--pad") == 0) {
+            pad = true;
+            disc_options = true;
+        }
         else if (argv[i][0] == '-') {
             fprintf(stderr, "baron: unknown option '%s'.\nbaron --help for options.", argv[i]);
             return 1;
@@ -203,7 +209,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (out == NULL && disc_options) {
-        fprintf(stderr, "baron: --title/--opt/--cycle describe a disc image and need -o.\nbaron --help for options.");
+        fprintf(stderr, "baron: --title/--opt/--cycle/--pad describe a disc image and need -o.\nbaron --help for options.");
         return 1;
     }
     if (inf && raw == NULL) {
@@ -348,7 +354,7 @@ int main(int argc, char **argv)
             if (out != NULL) {
                 // --check still BUILDS the image - a full disc or a bad catalogue should fail a check
                 // run - it just never lands on disk.
-                disc_ssd_result d = disc_ssd_make(&sr.spec, &cli);
+                disc_ssd_result d = disc_ssd_make(&sr.spec, pad, &cli);
                 if (d.error.len != 0) {
                     fprintf(stderr, "baron: %.*s\n", (int) d.error.len, d.error.data);
                     failed = true;

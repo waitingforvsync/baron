@@ -14,6 +14,7 @@ enum {
     ssd_max_boot         = 3,
     ssd_max_cycle        = 99,
     ssd_address_mask     = 0x3FFFF, // DFS addresses are 18-bit; we truncate and map directly
+    ssd_filler           = 0xE5,    // what a freshly-formatted single-density sector holds
 };
 
 // "<before><name><after>" - the shape of every complaint that names a file.
@@ -85,7 +86,7 @@ typedef struct dfs_file {
 #define RC_ARRAY_NAME dfs_file
 #include "richc/template/array.h"
 
-disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena)
+disc_ssd_result disc_ssd_make(const output_spec *spec, bool pad, rc_arena *arena)
 {
     RC_ASSERT(spec != NULL && arena != NULL);
 
@@ -132,12 +133,18 @@ disc_ssd_result disc_ssd_make(const output_spec *spec, rc_arena *arena)
 
     // The image: the catalogue sectors first (all zero until filled in below), then each file's bytes
     // padded to a whole sector. Sized exactly up front, so nothing ever grows.
-    rc_array_bytes img = rc_array_bytes_make(next * ssd_sector_size, arena);
+    uint32_t total = (pad ? ssd_total_sectors : next) * ssd_sector_size;
+    rc_array_bytes img = rc_array_bytes_make(total, arena);
     rc_array_bytes_push_n_zero(&img, ssd_catalogue_size, arena);
     for (uint32_t i = 0; i < n; i++) {
         output_entry e = rc_view_output_entry_get(spec->entries, i);
         rc_array_bytes_append(&img, e.code, arena);
         rc_array_bytes_push_n_zero(&img, (ssd_sector_size - e.code.num % ssd_sector_size) % ssd_sector_size, arena);
+    }
+
+    // --pad: write the unused remainder out too, wearing the filler byte a real format would leave.
+    for (uint32_t first = rc_array_bytes_push_n(&img, total - img.num, arena); first < img.num; first++) {
+        rc_array_bytes_set(&img, first, ssd_filler);
     }
 
     // The disc-level catalogue fields: title split 8 + 4 across the two sectors, then the cycle count
@@ -208,7 +215,7 @@ RC_TEST(disc_ssd, catalogue_layout_and_truncation)
     };
     output_spec spec = {.title = RC_STR("Mydisc"), .boot = 3, .cycle = 42, .entries = RC_VIEW(e)};
 
-    disc_ssd_result r = disc_ssd_make(&spec, &arena);
+    disc_ssd_result r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK(r.error.len, ==, 0u);
     RC_CHECK(r.image.num, ==, 5u * 256u);   // 2 catalogue + 1 + 2 file sectors, truncated there
 
@@ -259,11 +266,33 @@ RC_TEST(disc_ssd, catalogue_layout_and_truncation)
     rc_arena_deinit(&arena);
 }
 
+RC_TEST(disc_ssd, pad_fills_the_disc)
+{
+    rc_arena arena = rc_arena_make_default();
+
+    // One 3-byte file, padded: the full 800 sectors, catalogue and file untouched, &E5 from the first
+    // unused sector to the very end (the file's own sector still zero-pads).
+    static const uint8_t code[] = {0xA9, 0x2A, 0x60};
+    output_entry e[] = {{.filename = RC_STR("boot"), .load = 0x1900, .exec = 0x1900, .code = RC_VIEW(code)}};
+    output_spec spec = {.title = RC_STR("Full"), .entries = RC_VIEW(e)};
+
+    disc_ssd_result r = disc_ssd_make(&spec, true, &arena);
+    RC_CHECK(r.error.len, ==, 0u);
+    RC_CHECK(r.image.num, ==, 800u * 256u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(r.image, 0), ==, (uint32_t) 'F');
+    RC_CHECK((uint32_t) rc_view_bytes_get(r.image, 512), ==, 0xA9u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(r.image, 515), ==, 0u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(r.image, 768), ==, 0xE5u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(r.image, 800 * 256 - 1), ==, 0xE5u);
+
+    rc_arena_deinit(&arena);
+}
+
 RC_TEST(disc_ssd, empty_disc)
 {
     rc_arena arena = rc_arena_make_default();
     output_spec spec = {.title = RC_STR("Empty"), .boot = 0, .cycle = 0};
-    disc_ssd_result r = disc_ssd_make(&spec, &arena);
+    disc_ssd_result r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK(r.error.len, ==, 0u);
     RC_CHECK(r.image.num, ==, 512u);   // just the catalogue
     RC_CHECK((uint32_t) rc_view_bytes_get(r.image, 256 + 5), ==, 0u);
@@ -280,12 +309,12 @@ RC_TEST(disc_ssd, errors)
     // A name over 7 characters, and one with a dot that is not a directory specifier.
     output_entry longname[] = {{.filename = RC_STR("longname"), .code = RC_VIEW(byte)}};
     output_spec spec = {.entries = RC_VIEW(longname)};
-    disc_ssd_result r = disc_ssd_make(&spec, &arena);
+    disc_ssd_result r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("valid DFS filename")));
 
     output_entry dotted[] = {{.filename = RC_STR("game.bin"), .code = RC_VIEW(byte)}};
     spec.entries = (rc_view_output_entry) RC_VIEW(dotted);
-    r = disc_ssd_make(&spec, &arena);
+    r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("valid DFS filename")));
 
     // Names collide without regard to case.
@@ -294,7 +323,7 @@ RC_TEST(disc_ssd, errors)
         {.filename = RC_STR("$.FILE"), .code = RC_VIEW(byte)},
     };
     spec.entries = (rc_view_output_entry) RC_VIEW(dup);
-    r = disc_ssd_make(&spec, &arena);
+    r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("duplicate DFS filename")));
 
     // A 32nd file overflows the catalogue (counted before names are even looked at).
@@ -303,7 +332,7 @@ RC_TEST(disc_ssd, errors)
         rc_array_output_entry_push(&many, (output_entry) {.filename = RC_STR("f"), .code = RC_VIEW(byte)}, &arena);
     }
     spec.entries = many.view;
-    r = disc_ssd_make(&spec, &arena);
+    r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("31 maximum")));
 
     // One file bigger than the 798 data sectors of an 80-track disc.
@@ -312,18 +341,18 @@ RC_TEST(disc_ssd, errors)
     rc_array_bytes_push_n_zero(&huge_code, huge_len, &arena);
     output_entry huge[] = {{.filename = RC_STR("huge"), .code = huge_code.view}};
     spec.entries = (rc_view_output_entry) RC_VIEW(huge);
-    r = disc_ssd_make(&spec, &arena);
+    r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("disc full")));
 
     // Disc-level limits: a 13-character title, boot option 4, cycle 100.
     spec = (output_spec) {.title = RC_STR("ThirteenChars")};
-    r = disc_ssd_make(&spec, &arena);
+    r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("too long")));
     spec = (output_spec) {.boot = 4};
-    r = disc_ssd_make(&spec, &arena);
+    r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("boot option")));
     spec = (output_spec) {.cycle = 100};
-    r = disc_ssd_make(&spec, &arena);
+    r = disc_ssd_make(&spec, false, &arena);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("cycle count")));
 
     rc_arena_deinit(&arena);
