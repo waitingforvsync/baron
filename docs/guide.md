@@ -144,7 +144,7 @@ list values rendered whole:
 
 ## The shape of a line ##
 
-The basics, quickly:
+Here are the basics:
 
 - Comments run from `;` or `\` to the end of the line.
 - `:` separates statements, so `LDA #0 : STA &70` is two statements on one line.
@@ -153,6 +153,7 @@ The basics, quickly:
 - Strings are double-quoted; write `""` inside one for a literal quote.
 - `name = expr` binds a case-sensitive symbol. Symbols are immutable - one name, one value -
   which is what lets Baron re-run passes freely. (Loops that want a changing variable use `FOR`.)
+  To define a symbol with the same name as a reserved word, write an `@` prefix, C#-style: `@next = 5` binds `next`.
 
 ## Labels and scopes ##
 

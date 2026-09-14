@@ -58,7 +58,7 @@ to the end of the line.
 | Syntax | Meaning |
 |--------|---------|
 | `.name` | Bind a label at the current address. |
-| `name = expr` | Bind a symbol to a value. Symbols are immutable: one name, one value, per scope. |
+| `name = expr` | Bind a symbol to a value. Symbols are immutable: one name, one value, per scope. Prefix the name with `@` (`@next = 5`) if the name clashes with a keyword. |
 | `{` ... `}` | A scope. A label immediately before the brace names it; its symbols are reachable from outside as `name.symbol`. Anonymous scopes are truly private. Both braces double as statement separators, so `LDX #8 {.loop DEX : BNE loop } RTS` needs no extra colons. |
 | `.@` | Bind an anonymous local label here. Referenced by `@-` / `@+` (nearest behind / ahead, within the current scope). |
 
@@ -131,12 +131,17 @@ The full story - liveness, footprints, sections, every error - is in
 
 ### Reserved names ###
 
-`TRUE`, `FALSE` and `PI` are reserved outright - they cannot be labels or symbols. Instruction mnemonics,
-directive keywords and (already-defined) macro names win over identifiers at the start of a statement, so
-a label or symbol spelled like one will not parse; pick another name. All the NMOS 6502 mnemonics are
-recognised, plus the 65C02 extras (`BRA`, `STZ`, `PHX`, ...) - usable inside a section carrying
-`cmos = TRUE`; elsewhere the target is plain NMOS and a CMOS-only encoding is refused with its own
-message.
+`TRUE`, `FALSE` and `PI` are reserved outright - they cannot name a label or symbol anywhere. Any
+other spelling is fair game wherever a name is *defined*: labels (`.next`, `.clr`), `FOR` variables,
+macro and `FUNCTION` parameters, `ZA_AUTO` names and `-D` defines may all share a spelling with a
+mnemonic, directive or macro, because references are read where an operand is expected, and no
+mnemonic, directive or macro name means anything there. The one exception is a plain assignment,
+whose name starts the statement - there the keywords win, so `next = 5` will not parse. Prefix the
+name with `@` to force it to read as a name: `@next = 5` binds `next`, referenced bare (the C#
+idiom). Macro and `FUNCTION` *names* stay restricted - they become keywords themselves. All the NMOS
+6502 mnemonics are recognised, plus the 65C02 extras (`BRA`, `STZ`, `PHX`, ...) - usable inside a
+section carrying `cmos = TRUE`; elsewhere the target is plain NMOS and a CMOS-only encoding is
+refused with its own message.
 
 ## Expression reference ##
 

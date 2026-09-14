@@ -36,7 +36,7 @@ typedef enum error_type {
     error_type_unexpected_endif,      // ENDIF with no IF to match
     error_type_unclosed_for,          // FOR reached '}' or end of input before NEXT
     error_type_unexpected_next,       // NEXT with no FOR to match
-    error_type_reserved_constant,     // a built-in constant (TRUE/FALSE/PI) used as a statement / assignment target
+    error_type_reserved_constant,     // a built-in constant (TRUE/FALSE/PI) used as a symbol or label name
     error_type_expected_macro_name,   // MACRO with no name after it
     error_type_macro_name_reserved,   // a macro named like a mnemonic / keyword / constant, or a dotted name
     error_type_unquoted_macro_token,  // a bare (non-comma) literal token in a signature - it must be quoted

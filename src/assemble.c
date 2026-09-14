@@ -43,6 +43,7 @@ static parse_result handle_bitzp(baron *b, cursor stmt, cursor at, uint32_t scop
 static parse_result handle_bitabs(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_verbatim_assignment(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_open_brace(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -453,6 +454,7 @@ static const token statement_token_entries[] = {
 
     {RC_STR_INIT("."),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_label}}},
     {RC_STR_INIT(".@"),     {.type = lexeme_type_keyword, .keyword = {.handle = handle_local_label}}},
+    {RC_STR_INIT("@"),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_verbatim_assignment}}},
     {RC_STR_INIT("{"),      {.type = lexeme_type_keyword, .keyword = {.handle = handle_open_brace}}},
     {RC_STR_INIT("skip"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_skip}}},
     {RC_STR_INIT("skipto"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_skipto}}},
@@ -517,6 +519,40 @@ static const token assign_token_entries[] = {
     {RC_STR_INIT("="), {.type = lexeme_type_assign}},
 };
 static const token_table assign_tokens = RC_VIEW(assign_token_entries);
+
+
+// The table peek_symbol lexes against: only the three operand-position constants are tokens, so a
+// name position accepts nearly any spelling - the constants come back typed (refused), everything
+// else is an identifier. The handle stays NULL; nothing here evaluates them.
+static const token symbol_token_entries[] = {
+    {RC_STR_INIT("true"),  {.type = lexeme_type_constant}},
+    {RC_STR_INIT("false"), {.type = lexeme_type_constant}},
+    {RC_STR_INIT("pi"),    {.type = lexeme_type_constant}},
+};
+static const token_table symbol_tokens = RC_VIEW(symbol_token_entries);
+
+// The one place a symbol being DEFINED gets its name (labels, assignments via '@', FOR variables,
+// ZA_AUTO names, macro / FUNCTION parameters, -D defines). Keyword spellings all read as names -
+// references are operand-position lexes, which never see the statement tables - but TRUE / FALSE /
+// PI are refused: a symbol so named would bind, yet every reference would evaluate the constant.
+typedef struct symbol_result {
+    rc_str   name;       // empty when nothing here is a name
+    uint32_t next;       // past the name when found (else the given position)
+    bool     reserved;   // the spelling is a built-in constant - refused, not a name
+} symbol_result;
+
+static symbol_result peek_symbol(const baron *b, cursor at)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+    lexer_result nm = lexer_next(src, at.pos, symbol_tokens);
+    if (nm.token.type == lexeme_type_constant) {
+        return (symbol_result) {.next = nm.next, .reserved = true};
+    }
+    if (nm.token.type != lexeme_type_identifier) {
+        return (symbol_result) {.next = at.pos};
+    }
+    return (symbol_result) {.name = nm.token.identifier.name, .next = nm.next};
+}
 
 // '{' is a keyword token, so it is recognised by the handler it carries.
 static bool is_open_brace(lexeme lx)
@@ -1035,11 +1071,14 @@ static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t sc
     }
 
     while (true) {
-        lexer_result nm = lexer_next(src, pos, statement_tokens(b));
-        if (nm.token.type != lexeme_type_identifier) {
+        symbol_result sym = peek_symbol(b, cursor_at(at, pos));
+        if (sym.reserved) {
+            return syntax_error(b, error_type_reserved_constant, cursor_at(at, pos));
+        }
+        if (sym.name.len == 0) {
             return syntax_error(b, error_type_expected_var_name, cursor_at(at, pos));   // no name: malformed
         }
-        rc_str name = nm.token.identifier.name;
+        rc_str name = sym.name;
         cursor def  = cursor_at(at, pos);
 
         if (is_dotted(name)) {
@@ -1090,12 +1129,12 @@ static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t sc
             scopes_remove_symbol(&b->scopes, scope, name);   // dead branch: clear only our own binding
         }
 
-        lexer_result lr = lexer_next(src, nm.next, statement_tokens(b));
+        lexer_result lr = lexer_next(src, sym.next, statement_tokens(b));
         if (lr.token.type == lexeme_type_comma) {
             pos = lr.next;
             continue;   // another name follows
         }
-        return require_separator(b, cursor_at(at, nm.next));
+        return require_separator(b, cursor_at(at, sym.next));
     }
 }
 
@@ -1762,17 +1801,19 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    // The label name. A name spelled exactly like a mnemonic would lex as that opcode (the same
-    // limitation an assignment target has at statement start) - acceptable, and not worth a
-    // private name table.
-    lexer_result nm = lexer_next(src, at.pos, statement_tokens(b));
-    if (nm.token.type != lexeme_type_identifier) {
+    // The name via peek_symbol, so a spelling shared with a mnemonic, directive or macro still
+    // labels fine - .next / .foo work everywhere they are used.
+    symbol_result sym = peek_symbol(b, at);
+    if (sym.reserved) {
+        return syntax_error(b, error_type_reserved_constant, cursor_at(at, at.pos));
+    }
+    if (sym.name.len == 0) {
         return syntax_error(b, error_type_expected_label_name, cursor_at(at, at.pos));   // no name token: malformed
     }
 
-    rc_str name = nm.token.identifier.name;
+    rc_str name = sym.name;
 
-    parse_result r = {.next = nm.next};
+    parse_result r = {.next = sym.next};
 
     // A dotted name is a legal token but not a legal label - the stream is fine, so we record it and
     // carry on (consuming just the name, leaving the rest of the line to the loop).
@@ -1820,7 +1861,7 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
 
     // ".name" with its address, never its scope's braces; re-read the pc here since the binding
     // block above only runs when active (the verbose gate covers that).
-    verbose_text_line(b, flags, stmt, nm.next, sections_pc(&b->sections, section), verbose_text_label);
+    verbose_text_line(b, flags, stmt, sym.next, sections_pc(&b->sections, section), verbose_text_label);
 
     // A following '{' - optionally one separator away - makes the label name a scope. Anything
     // else is not the label's to parse: it never owns the statement that follows it.
@@ -2126,6 +2167,22 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
 }
 
 
+// '@name = expr' - the verbatim assignment, C#-style: '@' forces whatever follows to be read as a
+// name, so a symbol may share its spelling with a mnemonic, directive or macro. The '@' is syntax,
+// not part of the name - the symbol binds and is referenced bare.
+static parse_result handle_verbatim_assignment(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    symbol_result sym = peek_symbol(b, at);
+    if (sym.reserved) {
+        return syntax_error(b, error_type_reserved_constant, cursor_at(at, at.pos));
+    }
+    if (sym.name.len == 0) {
+        return syntax_error(b, error_type_expected_var_name, cursor_at(at, at.pos));
+    }
+    return handle_assignment(b, stmt, cursor_at(at, sym.next), scope, section, flags, sym.name, scratch);
+}
+
+
 // ---- the FOR loop ----
 
 // FOR <var> = <range-or-list> : ... : NEXT, evaluated each pass. Each iteration runs the body once
@@ -2136,14 +2193,18 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
     (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    // The loop variable: a bare identifier (a dotted path cannot be a binding target). A malformed
-    // header (no name, no '=') is fatal - we cannot reliably find the matching NEXT.
-    lexer_result var = lexer_next(src, at.pos, statement_tokens(b));
-    if (var.token.type != lexeme_type_identifier || is_dotted(var.token.identifier.name)) {
+    // The loop variable via peek_symbol - a keyword spelling is fine, a dotted path cannot be a
+    // binding target. A malformed header (no name, no '=') is fatal - we cannot reliably find the
+    // matching NEXT.
+    symbol_result var = peek_symbol(b, at);
+    if (var.reserved) {
+        return syntax_error(b, error_type_reserved_constant, cursor_at(at, at.pos));
+    }
+    if (var.name.len == 0 || is_dotted(var.name)) {
         return syntax_error(b, error_type_expected_label_name, cursor_at(at, at.pos));
     }
 
-    rc_str name = var.token.identifier.name;
+    rc_str name = var.name;
 
     lexer_result eq = lexer_next(src, var.next, assign_tokens);
     if (eq.token.type != lexeme_type_assign) {
@@ -2392,7 +2453,9 @@ static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scop
     // Register the name now (idempotent), before the body is scanned, so a self-call inside lexes as a macro.
     uint32_t index = macros_index_for_name(&b->macros, name);
 
-    // The signature: slots up to the terminator MACRO insists on. Built in the manager arena, stored as a view.
+    // The signature: slots up to the terminator MACRO insists on. Built in the manager arena, stored as
+    // a view. Structural slots (strings, commas, and this construct's OWN closers - ENDMACRO / '}')
+    // keep their meaning; any other spelling is a parameter name via peek_symbol.
     rc_array_macro_slot slots = rc_array_macro_slot_make(8, b->macros.arena);
     uint32_t pos = nm.next;
     while (true) {
@@ -2401,11 +2464,7 @@ static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scop
             pos = s.next;   // the required separator; the body starts here
             break;
         }
-        if (s.token.type == lexeme_type_identifier) {
-            rc_array_macro_slot_push(&slots,
-                (macro_slot) {.type = macro_slot_param, .name = s.token.identifier.name}, b->macros.arena);
-        }
-        else if (s.token.type == lexeme_type_string_literal || s.token.type == lexeme_type_escaped_string_literal) {
+        if (s.token.type == lexeme_type_string_literal || s.token.type == lexeme_type_escaped_string_literal) {
             uint32_t id = macros_intern_literal(&b->macros, index, s.token.string_literal.ref);
             rc_array_macro_slot_push(&slots,
                 (macro_slot) {.type = macro_slot_literal, .literal_id = id}, b->macros.arena);
@@ -2416,11 +2475,22 @@ static parse_result handle_macro(baron *b, cursor stmt, cursor at, uint32_t scop
             rc_array_macro_slot_push(&slots,
                 (macro_slot) {.type = macro_slot_comma}, b->macros.arena);
         }
-        else if (s.token.type == lexeme_type_closer) {
-            return syntax_error(b, error_type_expected_separator, cursor_at(at, pos));   // ENDMACRO / '}' before a separator
+        else if (s.token.type == lexeme_type_closer
+                 && (s.token.closer.id == closer_endmacro || s.token.closer.id == closer_brace)) {
+            return syntax_error(b, error_type_expected_separator, cursor_at(at, pos));   // our closer before a separator
         }
         else {
-            return syntax_error(b, error_type_unquoted_macro_token, cursor_at(at, pos));   // bare punctuation must be quoted
+            symbol_result p = peek_symbol(b, cursor_at(at, pos));
+            if (p.reserved) {
+                return syntax_error(b, error_type_reserved_constant, cursor_at(at, pos));
+            }
+            if (p.name.len == 0) {
+                return syntax_error(b, error_type_unquoted_macro_token, cursor_at(at, pos));   // bare punctuation must be quoted
+            }
+            rc_array_macro_slot_push(&slots,
+                (macro_slot) {.type = macro_slot_param, .name = p.name}, b->macros.arena);
+            pos = p.next;
+            continue;
         }
         pos = s.next;
     }
@@ -2506,7 +2576,8 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
     // Register the name now (idempotent), before the body is scanned, so a self-call inside lexes as a call.
     uint32_t index = functions_index_for_name(&b->functions, name);
 
-    // The parameter list: '(' identifiers (comma-separated) ')'. Empty is allowed (a niladic function).
+    // The parameter list: '(' names via peek_symbol (comma-separated) ')'. Empty is allowed (a niladic
+    // function); a keyword spelling is a fine parameter, the constants are not.
     lexer_result lp = lexer_next(src, nm.next, func_paren_tokens);
     if (lp.token.type != lexeme_type_open_paren) {
         return syntax_error(b, error_type_expected_function_params, cursor_at(at, nm.next));
@@ -2517,11 +2588,15 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
     lexer_result t = lexer_next(src, pos, func_paren_tokens);
     if (t.token.type != lexeme_type_close_paren) {
         while (true) {
-            if (t.token.type != lexeme_type_identifier) {
+            symbol_result p = peek_symbol(b, cursor_at(at, pos));
+            if (p.reserved) {
+                return syntax_error(b, error_type_reserved_constant, cursor_at(at, pos));
+            }
+            if (p.name.len == 0) {
                 return syntax_error(b, error_type_expected_function_params, cursor_at(at, pos));
             }
-            rc_array_str_push(&params, t.token.identifier.name, b->functions.arena);
-            pos = t.next;
+            rc_array_str_push(&params, p.name, b->functions.arena);
+            pos = p.next;
             t = lexer_next(src, pos, func_paren_tokens);
             if (t.token.type == lexeme_type_close_paren) {
                 break;
@@ -2857,18 +2932,22 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
     rc_str text = source_files_text(&b->source_files, src);
     cursor def  = {.source = src};
 
-    lexer_result nm = lexer_next(text, 0, base_statement_tokens);
-    if (nm.token.type != lexeme_type_identifier) {
+    symbol_result sym = peek_symbol(b, def);
+    if (sym.reserved) {
+        return syntax_error(b, error_type_reserved_constant, def);
+    }
+    if (sym.name.len == 0) {
         return syntax_error(b, error_type_expected_var_name, def);
     }
 
-    if (is_dotted(nm.token.identifier.name)) {
+    rc_str sym_name = sym.name;
+    if (is_dotted(sym_name)) {
         return syntax_error(b, error_type_invalid_assignment, def);
     }
 
-    lexer_result eq = lexer_next(text, nm.next, assign_tokens);
+    lexer_result eq = lexer_next(text, sym.next, assign_tokens);
     if (eq.token.type != lexeme_type_assign) {
-        return syntax_error(b, error_type_expected_assign, (cursor) {.source = src, .pos = nm.next});
+        return syntax_error(b, error_type_expected_assign, (cursor) {.source = src, .pos = sym.next});
     }
 
     expr_result e = eval(b, (cursor) {.source = src, .pos = eq.next}, 0, sections_default, scratch);
@@ -2883,13 +2962,13 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
     // Bind it, mirroring handle_assignment: a duplicate is a second -D of the same name (a source
     // assignment to it collides at ITS site instead - we bound first).
     parse_result r = {.next = e.next};
-    symbol_status st = scopes_set_symbol(&b->scopes, 0, nm.token.identifier.name, e.value, def);
+    symbol_status st = scopes_set_symbol(&b->scopes, 0, sym_name, e.value, def);
 
     if (st == symbol_status_duplicate) {
-        semantic_error_payload(b, flags, error_type_duplicate_symbol, def, nm.token.identifier.name);
-        cursor original = scopes_symbol_def(&b->scopes, 0, nm.token.identifier.name);
+        semantic_error_payload(b, flags, error_type_duplicate_symbol, def, sym_name);
+        cursor original = scopes_symbol_def(&b->scopes, 0, sym_name);
         if (!cursor_is_none(original)) {
-            semantic_error_payload(b, flags, error_type_original_definition, original, nm.token.identifier.name);
+            semantic_error_payload(b, flags, error_type_original_definition, original, sym_name);
         }
     }
     else {
@@ -2908,7 +2987,7 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
     }
 
     // List it like the assignment it is: name = value [expr if different].
-    verbose_assign_line(b, flags, nm.token.identifier.name, e.value,
+    verbose_assign_line(b, flags, sym_name, e.value,
                         rc_str_substr(text, eq.next, e.next - eq.next));
 
     return r;
@@ -5601,8 +5680,9 @@ RC_TEST_STEP(assemble, za_entry_parses_and_is_reserved, fix)
     RC_CHECK_TRUE(ASM("ZA_POOL &70 : ZA_AUTO1 v : ZA_ENTRY : .main : STA v : LDA v : RTS") != 0);
     RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_unreachable));
 
-    // The names are statement keywords now, so a label cannot be spelled after them...
-    RC_CHECK_TRUE(ERR(".za_entry RTS") == error_type_expected_label_name);
+    // The names are statement keywords, but a label may still share the spelling...
+    RC_CHECK_TRUE(ASM(".za_entry RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     // ...and a marker takes no operand.
     RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_ENTRY 5 : RTS") == error_type_expected_separator);
 
@@ -5960,13 +6040,13 @@ RC_TEST_STEP(assemble, za_discard_confines_indexed_array, fix)
 
 RC_TEST_STEP(assemble, za_discard_operand_errors, fix)
 {
-    // Only a whole ZA_AUTO variable can be discarded: a number, a var+n slice, or a label is refused, an
-    // unknown name defers and errors on the final pass, and the keyword itself is reserved.
+    // Only a whole ZA_AUTO variable can be discarded: a number, a var+n slice, or a label is refused,
+    // an unknown name defers and errors on the final pass, and a label may share the keyword's spelling.
     RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_DISCARD 5") == error_type_za_discard_needs_var);
     RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 v : STA v : LDA v : ZA_DISCARD v+1") == error_type_za_discard_needs_var);
     RC_CHECK_TRUE(ERR("ZA_POOL &70 : .lbl ZA_DISCARD lbl") == error_type_za_discard_needs_var);
     RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_DISCARD nothere") == error_type_undefined_symbol);
-    RC_CHECK_TRUE(ERR(".za_discard RTS") == error_type_expected_label_name);
+    RC_CHECK_TRUE(ASM(".za_discard RTS") != 0);
 
     // The happy path parses as a comma list, like the other annotations.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 u, w : STA u : LDA u : STA w : LDA w\n"
@@ -6494,8 +6574,9 @@ RC_TEST_STEP(assemble, define_undefined_and_value_errors, fix)
 
 RC_TEST_STEP(assemble, define_malformed, fix)
 {
-    // A definition that can never come right is fatal on the first pass: a reserved name (the same
-    // collision rules the source has), a missing '=', text left over after the expression, a dotted name.
+    // A definition that can never come right is fatal on the first pass: a reserved constant, a
+    // missing '=', text left over after the expression, a dotted name. A keyword spelling is a fine
+    // name now - defines get theirs via peek_symbol, like the source's own binding positions.
     static const rc_str no_eq[]    = {RC_STR_INIT("just_a_name")};
     static const rc_str trailing[] = {RC_STR_INIT("x=1:y=2")};
     static const rc_str reserved[] = {RC_STR_INIT("pi=5")};
@@ -6507,9 +6588,9 @@ RC_TEST_STEP(assemble, define_malformed, fix)
     fix->desc.defines = (rc_view_str) RC_VIEW(trailing);
     RC_CHECK_TRUE(ERR("RTS") == error_type_expected_end_of_expression);
     fix->desc.defines = (rc_view_str) RC_VIEW(reserved);
-    RC_CHECK_TRUE(ERR("RTS") == error_type_expected_var_name);
+    RC_CHECK_TRUE(ERR("RTS") == error_type_reserved_constant);
     fix->desc.defines = (rc_view_str) RC_VIEW(mnemonic);
-    RC_CHECK_TRUE(ERR("RTS") == error_type_expected_var_name);
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB lda"), (uint8_t[]) {0x01}, 1));
     fix->desc.defines = (rc_view_str) RC_VIEW(dotted);
     RC_CHECK_TRUE(ERR("RTS") == error_type_invalid_assignment);
 }
@@ -6618,6 +6699,68 @@ RC_TEST_STEP(assemble, label_does_not_own_following_statement, fix)
     // no longer swallows what follows), and the inner label still binds to the current pc.
     RC_CHECK_TRUE(ASM(".r { .e }") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r.e")), value_make_numeric(0)));
+}
+
+RC_TEST_STEP(assemble, labels_share_keyword_spellings, fix)
+{
+    // The name lexes from the tiny assignment table, so a directive, closer or mnemonic spelling binds
+    // like any other; references are operand-position lexes, which never saw those tables anyway.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("JMP next : .next RTS"), (uint8_t[]) {0x4C, 0x03, 0x00, 0x60}, 4));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(".clr LDA clr : BNE clr"), (uint8_t[]) {0xA5, 0x00, 0xD0, 0xFC}, 4));
+
+    // A macro no longer steals a like-named label (in any case) - the namespaces are disjoint, so both work.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("MACRO FOO\nNOP\nENDMACRO\n.foo RTS : FOO : JMP foo"),
+                          (uint8_t[]) {0x60, 0xEA, 0x4C, 0x00, 0x00}, 5));
+
+    // A FUNCTION's operand token bakes the '(' in, so the bare name still reads as the label.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION sqr(x) = x*x\n.sqr EQUB sqr(2) : JMP sqr"),
+                          (uint8_t[]) {0x04, 0x4C, 0x00, 0x00}, 4));
+
+    // A keyword-named label may open a scope, reached by the usual dotted path.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(".for { .loop RTS } : JMP for.loop"),
+                          (uint8_t[]) {0x60, 0x4C, 0x00, 0x00}, 4));
+
+    // TRUE / FALSE / PI stay off limits - a reference would evaluate the constant, never the label.
+    RC_CHECK_TRUE(ERR(".pi RTS") == error_type_reserved_constant);
+    RC_CHECK_TRUE(ERR(".TRUE RTS") == error_type_reserved_constant);
+    RC_CHECK_TRUE(ERR(".false RTS") == error_type_reserved_constant);
+}
+
+RC_TEST_STEP(assemble, symbols_share_keyword_spellings, fix)
+{
+    // Every name-defining position goes through peek_symbol, so the label relaxation holds for FOR
+    // variables, macro parameters, ZA_AUTO names and FUNCTION parameters too - and TRUE / FALSE / PI
+    // are refused in each with the same error.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR lda = 0..<3 : EQUB lda : NEXT"), (uint8_t[]) {0x00, 0x01, 0x02}, 3));
+    RC_CHECK_TRUE(ERR("FOR pi = 0..<3 : NEXT") == error_type_reserved_constant);
+
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("MACRO put next, error\nEQUB next, error\nENDMACRO\nput 7, 9"),
+                          (uint8_t[]) {0x07, 0x09}, 2));
+    RC_CHECK_TRUE(ERR("MACRO put true\nEQUB true\nENDMACRO\nput 7") == error_type_reserved_constant);
+
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : ZA_AUTO1 skip : STA skip : LDA skip : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_AUTO1 pi") == error_type_reserved_constant);
+
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION twice(equb) = equb*2\nEQUB twice(3)"), (uint8_t[]) {0x06}, 1));
+    RC_CHECK_TRUE(ERR("FUNCTION f(pi) = pi") == error_type_reserved_constant);
+}
+
+RC_TEST_STEP(assemble, verbatim_assignment, fix)
+{
+    // '@name = expr' reads the name verbatim, so a keyword spelling the statement dispatch would
+    // otherwise claim still assigns; the symbol binds bare and is referenced bare.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("@next = 5 : EQUB next"), (uint8_t[]) {0x05}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("@lda = 3 : LDA #lda"), (uint8_t[]) {0xA9, 0x03}, 2));
+
+    // An ordinary name after '@' is legal too - the marker is permission, not a requirement.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("@plain = 8 : EQUB plain"), (uint8_t[]) {0x08}, 1));
+
+    // The constants stay refused, a dotted target stays invalid, and '@' still needs a name and '='.
+    RC_CHECK_TRUE(ERR("@pi = 5") == error_type_reserved_constant);
+    RC_CHECK_TRUE(ERR("@a.b = 5") == error_type_invalid_assignment);
+    RC_CHECK_TRUE(ERR("@ = 5") == error_type_expected_var_name);
+    RC_CHECK_TRUE(ERR("@next") == error_type_expected_assign);
 }
 
 RC_TEST_STEP(assemble, brace_separates_statements, fix)

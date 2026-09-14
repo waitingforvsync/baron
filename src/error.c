@@ -33,7 +33,7 @@ rc_str error_type_name(error_type e)
         case error_type_unexpected_endif:        return RC_STR("ENDIF without an IF");
         case error_type_unclosed_for:            return RC_STR("Unclosed FOR");
         case error_type_unexpected_next:         return RC_STR("NEXT without a FOR");
-        case error_type_reserved_constant:       return RC_STR("Cannot redefine a built-in constant");
+        case error_type_reserved_constant:       return RC_STR("Cannot reassign a constant");
         case error_type_expected_macro_name:     return RC_STR("Expected a macro name");
         case error_type_macro_name_reserved:     return RC_STR("Reserved macro name");
         case error_type_unquoted_macro_token:    return RC_STR("Unquoted literal token in macro signature");
