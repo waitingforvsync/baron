@@ -61,7 +61,7 @@ typedef enum zp_flow {
 typedef enum zp_marker {
     zp_marker_none = 0,   // a real instruction
     zp_marker_discard,    // ZA_DISCARD: a full-width kill of its variable that pins nothing
-    zp_marker_wipe,       // ZA_WIPE: the preceding store sweeps the pool - every byte written here
+    zp_marker_wipe,       // ZA_WIPE: the sweep before it has written every pool byte
     zp_marker_label,      // a label stood here: the block-cut pivot for the markers above
 } zp_marker;
 

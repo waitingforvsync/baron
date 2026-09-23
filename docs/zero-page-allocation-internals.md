@@ -207,8 +207,10 @@ allocator believes it owns without any analysis seeing it.
 
 The check runs here rather than while recording because `ZA_POOL` statements fill the reserve set in
 source order, and a pool declared *after* the store would be missed mid-pass. The one blessed
-exception is the boot-time wipe: a `ZA_WIPE` marker after the store declares it a deliberate
-whole-pool sweep, and the warning stays quiet.
+exception is the boot-time wipe: a `ZA_WIPE` marker after the sweep declares it deliberate, and its
+stores stay quiet - the blessing runs from each store forward to the marker, reaching through the
+rest of the wipe loop but stopping at a label, jump, call or return, so a stray pool store anywhere
+else still warns.
 
 ## The control-flow graph ##
 
@@ -474,7 +476,7 @@ A discard is a promise, not a store, and three details follow from that:
 #### ZA_WIPE: a declared pool-wide store ####
 
 The same mechanism with every polarity flipped: where a discard kills one variable's value without
-supplying one, a wipe *supplies* every byte in the pool. It sits just after a sweeping store:
+supplying one, a wipe *supplies* every byte in the pool. It sits just after the sweep:
 
 ```
         LDA #0 : TAX
@@ -845,9 +847,9 @@ The refusals (all fatal):
 | `za_auto_recursion` | a fresh per-level value held across a recursive call (the recursion check) |
 | `zeropage_full` | a spill: more simultaneous liveness than reserved bytes |
 
-(`za_discard_needs_var` - an operand that is not a whole `ZA_AUTO` variable - `za_wipe_needs_store` -
-a marker with no store before it - and `za_indexedby_needs_indexed` - an annotation with no indexed
-access before it - are recoverable semantic errors at the statement, like the other operand mistakes.)
+(`za_discard_needs_var` - an operand that is not a whole `ZA_AUTO` variable - and
+`za_indexedby_needs_indexed` - an annotation with no indexed access before it - are recoverable
+semantic errors at the statement, like the other operand mistakes.)
 
 The warnings: `za_auto_unused`, `za_auto_unreachable`, `za_returnto_no_code` and
 `za_auto_indexed_access` (default level - silence an indexed access by declaring its set with

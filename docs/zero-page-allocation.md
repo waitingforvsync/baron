@@ -511,15 +511,21 @@ pointer aimed into the pool" the bargain warns about, except this one is deliber
     LDX #0
     TXA
 .wiploop
-    STA &00,X : ZA_WIPE         ; sweeps the whole pool - and says so
+    STA &00,X
     INX : CPX #&90 : BCC wiploop
+    ZA_WIPE                     ; the loop above swept the whole pool - and says so
 ```
 
-Placed after the sweeping store, it promises that store covers the *entire* pool: every variable
-counts as freshly written there. That does three things at once - it declares the wipe a legitimate
-initialiser (a `ZA_ENTRY` routine may now rely on wiped-to-zero values without drawing the input
-warning), it ends every earlier value's live range at the wipe, and it quiets the opt-in
-fixed-address warning for that store.
+Placed directly after the loop, it promises that by this point every pool byte has been freshly
+written. That does three things at once - it declares the wipe a legitimate initialiser (a
+`ZA_ENTRY` routine may now rely on wiped-to-zero values without drawing the input warning), it ends
+every earlier value's live range, and it quiets the opt-in fixed-address warning for the sweep's
+own stores. The blessing reaches back through the loop but stops at a label or any jump, call or
+return, so a stray pool store elsewhere still warns.
+
+Put it *after* the sweep, and before anything reads a variable: values count as initialised from
+the marker onwards, not from the loop - a wipe written above the loop would vouch for values that
+have not been written yet.
 
 TRUSTED like `ZA_DISCARD`, only a bigger promise: nothing survives it, so a value you *did* want
 across the wipe is already lost.
@@ -721,7 +727,6 @@ fall back to a hand-placed address.
 | `ZA_AUTO1 dereferenced as a pointer (declare it ZA_AUTO2)` | `(var),Y` on a one-byte variable. |
 | `Access past the end of ZA_AUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
 | `ZA_DISCARD needs a whole ZA_AUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZA_AUTO` variable, whole. |
-| `ZA_WIPE must follow a store instruction` | The marker annotates the store before it; here the previous instruction was not a memory write (or there was none). Put it right after the sweeping store. |
 | `ZA_INDEXEDBY must follow an indexed ZA_AUTO access` | The annotation describes the access before it; here the previous instruction was not an indexed access to a `ZA_AUTO` variable (or there was none). Put it right after the `var,X` / `var,Y` / `(var,X)` it bounds. |
 | `Declared index reaches past the end of ZA_AUTO variable: '...'` | The constant base plus the largest `ZA_INDEXEDBY` index (plus a pair's second byte, for `(var,X)`) lands outside the variable. Widen it, or shrink the declared set. |
 | `ZA_ENTRY/ZA_INTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |

@@ -1431,47 +1431,34 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
 }
 
 
-// ZA_WIPE - a trusted assertion that the store just before it sweeps the ENTIRE pool (the boot-time
-// zero-page wipe idiom). Every ZA_AUTO byte counts as written here: liveness ends every earlier
-// value, may/must-write treat every variable as freshly supplied, and the store's own fixed pool
-// address is not warned about. A size-0 marker like ZA_DISCARD; the one check is that a store
-// actually stands before it.
+// ZA_WIPE - a trusted assertion that by this point every pool byte has been freshly written (the
+// boot-time zero-page wipe idiom; place it directly after the wipe loop, ZA_DISCARD's whole-pool
+// sibling). Liveness ends every earlier value at the marker, may/must-write treat every variable
+// as freshly supplied from it, and the sweep's own fixed-base stores are not warned about (see
+// warn_pool_store). A size-0 marker like ZA_DISCARD, bound to the path it is written on.
 static parse_result handle_za_wipe(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     (void) stmt;
     (void) scope;
     (void) scratch;
     if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
-        // Back past any fellow markers to the last real instruction, which must be a memory write -
-        // anything else is a misplaced annotation, not a wipe.
-        uint32_t ni = zeropage_insn_count(&b->zeropage);
-        while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).size == 0) {
-            ni--;
-        }
-
-        zp_insn prev = ni > 0 ? zeropage_insn_get(&b->zeropage, ni - 1) : (zp_insn) {0};
-        if (ni == 0 || prev.flow != zp_flow_normal || !(prev.rw & vref_write)) {
-            semantic_error(b, flags, error_type_za_wipe_needs_store, cursor_at(at, at.pos));
-        }
-        else {
-            zeropage_add_insn(&b->zeropage, (zp_insn) {
-                .pc           = sections_pc(&b->sections, section),
-                .size         = 0,
-                .flow         = zp_flow_normal,
-                .rw           = vref_none,
-                .vreg         = RC_INDEX_NONE,
-                .var_scope    = RC_INDEX_NONE,
-                .var_def      = cursor_none(),
-                .var_offset   = RC_INDEX_NONE,
-                .marker       = zp_marker_wipe,
-                .literal_addr = RC_INDEX_NONE,
-                .target       = RC_INDEX_NONE,
-                .target_scope = RC_INDEX_NONE,
-                .target_def   = cursor_none(),
-                .section      = section,
-                .at           = cursor_at(at, at.pos),
-            });
-        }
+        zeropage_add_insn(&b->zeropage, (zp_insn) {
+            .pc           = sections_pc(&b->sections, section),
+            .size         = 0,
+            .flow         = zp_flow_normal,
+            .rw           = vref_none,
+            .vreg         = RC_INDEX_NONE,
+            .var_scope    = RC_INDEX_NONE,
+            .var_def      = cursor_none(),
+            .var_offset   = RC_INDEX_NONE,
+            .marker       = zp_marker_wipe,
+            .literal_addr = RC_INDEX_NONE,
+            .target       = RC_INDEX_NONE,
+            .target_scope = RC_INDEX_NONE,
+            .target_def   = cursor_none(),
+            .section      = section,
+            .at           = cursor_at(at, at.pos),
+        });
     }
 
     return require_separator(b, at);
@@ -3344,9 +3331,18 @@ static void warn_pool_store(baron *b, rc_view_zp_insn insns, uint32_t i)
         return;
     }
 
-    // A ZA_WIPE bound to this store sits just after it in the stream (markers may stack).
-    for (uint32_t j = i + 1; j < insns.num && rc_view_zp_insn_get(insns, j).size == 0; j++) {
-        if (rc_view_zp_insn_get(insns, j).marker == zp_marker_wipe) {
+    // A ZA_WIPE blesses the sweep it follows: this store is quiet if a wipe marker lies ahead of
+    // it in the stream with no label, jump, call or return in between. That reaches through the
+    // rest of a wipe loop (its INX / CPX / closing branch) to a marker placed after the loop, and
+    // through stacked markers for one placed on the store's own line - but never past a label
+    // (fresh code, not the sweep) or a transfer that leaves the straight run.
+    for (uint32_t j = i + 1; j < insns.num; j++) {
+        zp_insn m = rc_view_zp_insn_get(insns, j);
+        if (m.section != n.section || m.marker == zp_marker_label
+            || m.flow == zp_flow_jump || m.flow == zp_flow_call || m.flow == zp_flow_return) {
+            break;
+        }
+        if (m.marker == zp_marker_wipe) {
             return;
         }
     }
@@ -6506,13 +6502,15 @@ RC_TEST_STEP(assemble, za_discard_is_must_write_at_the_call, fix)
 
 RC_TEST_STEP(assemble, za_wipe_suppresses_pool_store, fix)
 {
-    // The boot-wipe idiom: annotating the sweeping store vouches for its literal base...
+    // The boot-wipe idiom, marker after the loop: the wipe blesses the sweep it follows, so the
+    // loop's fixed-base store draws no pool-store warning...
     #define WIPE(marker) \
         "ZA_POOL &70..&7F : ZA_AUTO1 v\n" \
         "LDX #0 : TXA\n" \
-        ".wl STA &70,X" marker " : INX : CPX #&10 : BCC wl\n" \
+        ".wl STA &70,X : INX : CPX #&10 : BCC wl\n" \
+        marker \
         "STA v : LDA v : RTS\n"
-    RC_CHECK_TRUE(ASM(WIPE(" : ZA_WIPE")) != 0);
+    RC_CHECK_TRUE(ASM(WIPE("ZA_WIPE\n")) != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_pool_store));
 
@@ -6521,21 +6519,33 @@ RC_TEST_STEP(assemble, za_wipe_suppresses_pool_store, fix)
     RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_pool_store));
     #undef WIPE
 
-    // Markers stack: a ZA_DISCARD between the store and its ZA_WIPE upsets neither.
+    // The blessing stops at a label (fresh code, not the sweep) and never reaches backwards past
+    // the wipe: a stray pool store before the loop's label, or after the marker, still warns.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v\n"
+                      "STA &7F : LDX #0 : TXA\n"
+                      ".wl STA &70,X : INX : CPX #&10 : BCC wl\n"
+                      "ZA_WIPE\n"
+                      "STA v : LDA v : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_pool_store), ==, 1u);   // the &7F store alone
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
+                      "STA &70,X : ZA_WIPE : STA &7F : RTS\n") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_pool_store), ==, 1u);   // the post-wipe store alone
+
+    // The on-the-store spelling still works, and markers stack in between.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
                       "STA &70,X : ZA_DISCARD v : ZA_WIPE : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_pool_store));
 }
 
-RC_TEST_STEP(assemble, za_wipe_errors, fix)
+RC_TEST_STEP(assemble, za_wipe_placement, fix)
 {
-    // ZA_WIPE annotates the store before it; anywhere else it is a misplaced promise.
-    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_WIPE") == error_type_za_wipe_needs_store);
-    RC_CHECK_TRUE(ERR("ZA_POOL &70 : LDA &70 : ZA_WIPE") == error_type_za_wipe_needs_store);
-    RC_CHECK_TRUE(ERR("ZA_POOL &70 : JSR sub : ZA_WIPE : .sub RTS") == error_type_za_wipe_needs_store);
-
-    // A dead branch owes nothing, and the spelling stays free for a label.
+    // A bare marker is legal anywhere - it asserts at its own spot on its own path. A dead branch
+    // owes nothing, and the spelling stays free for a label.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : ZA_WIPE") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : LDA &70 : ZA_WIPE") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(ASM("ZA_POOL &70 : IF FALSE : ZA_WIPE : ENDIF : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(ASM(".za_wipe RTS") != 0);
@@ -6545,19 +6555,25 @@ RC_TEST_STEP(assemble, za_wipe_initializes_entry_inputs, fix)
 {
     // A program relying on the wipe for initialisation: ctr's only direct touch is the INC
     // read-modify-write, so without the wipe its read looks like an external input; the wipe's
-    // whole-pool write supplies it.
+    // whole-pool write supplies it. The marker sits after the loop, where the sweep is complete.
     #define BOOT(marker) \
         "ZA_POOL &70..&7F : ZA_AUTO1 ctr\n" \
         ".entry ZA_ENTRY : LDX #0 : TXA\n" \
-        ".wl STA &70,X" marker " : INX : CPX #&10 : BCC wl\n" \
+        ".wl STA &70,X : INX : CPX #&10 : BCC wl\n" \
+        marker \
         "INC ctr : RTS\n"
-    RC_CHECK_TRUE(ASM(BOOT(" : ZA_WIPE")) != 0);
+    RC_CHECK_TRUE(ASM(BOOT("ZA_WIPE\n")) != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
     RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_pool_store));
 
     // The control: unannotated, the INC's read really is unsupplied.
     RC_CHECK_TRUE(ASM(BOOT("")) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
+
+    // Coverage begins AT the marker, not at the loop: a read squeezed between the sweep and its
+    // ZA_WIPE is not yet supplied, which is why the marker belongs directly after the loop.
+    RC_CHECK_TRUE(ASM(BOOT("INC ctr\nZA_WIPE\n")) != 0);
     RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
     #undef BOOT
 }

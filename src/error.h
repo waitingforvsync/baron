@@ -77,7 +77,6 @@ typedef enum error_type {
     error_type_za_auto_address,       // a ZA_AUTO address used where a number is needed NOW - addresses exist only after allocation
     error_type_za_discard_needs_var,  // a ZA_DISCARD operand that is not a whole ZA_AUTO variable
     error_type_za_pool_store,         // opt-in warning: a store whose fixed address / indexed base lies inside the ZA_POOL
-    error_type_za_wipe_needs_store,   // a ZA_WIPE that does not follow a store instruction
     error_type_za_indexedby_needs_indexed, // a ZA_INDEXEDBY that does not follow an indexed ZA_AUTO access
     error_type_za_indexedby_out_of_range,  // a declared index takes the access past the variable's end
     error_type_za_entry_no_code,      // a ZA_ENTRY/ZA_INTERRUPT marker whose pc begins no assembled instruction
