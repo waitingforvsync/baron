@@ -3,6 +3,7 @@
 
 #include "richc/arena.h"
 #include "richc/mstr.h"
+#include <stdint.h>
 #include "richc/str.h"
 #include "cursor.h"
 #include "error.h"
@@ -128,6 +129,21 @@ value value_make_range_open(bool exclusive);                         // ..
 // The effective step of a range: the stored .step, or the inferred +-1 direction when
 // .step is 0 (the "infer the direction" convention). An open end infers ascending.
 int64_t value_range_step(value_range r);
+
+// The well-defined double -> int64 conversion: the plain C cast is undefined once the value
+// cannot be represented, and expression arithmetic can hand us any magnitude (1e99, an
+// infinity, NaN). Saturate instead - absurd magnitudes land on the extremes, where every
+// downstream range check already refuses them with a sensible diagnostic - and NaN becomes 0.
+static inline int64_t value_to_i64(double d)
+{
+    if (!(d >= -9223372036854775808.0)) {   // NaN fails every comparison, so it lands here too
+        return d != d ? 0 : INT64_MIN;
+    }
+    if (d >= 9223372036854775808.0) {
+        return INT64_MAX;
+    }
+    return (int64_t) d;
+}
 
 // Type queries.
 value_type value_type_of(value v);

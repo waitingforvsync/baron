@@ -34,8 +34,8 @@ typedef enum prec {
 
 // Coerce a number to 32 bits, truncating toward zero; the int64 hop makes the truncation
 // well-defined before the 32-bit wrap.
-static int32_t  as_i32(value v) { return (int32_t)(int64_t)v.numeric; }
-static uint32_t as_u32(value v) { return (uint32_t)(int64_t)v.numeric; }
+static int32_t  as_i32(value v) { return (int32_t)value_to_i64(v.numeric); }
+static uint32_t as_u32(value v) { return (uint32_t)value_to_i64(v.numeric); }
 
 // Adjust a za_auto address by a numeric delta. The offset must stay an integral, non-negative byte
 // index into the variable; whether it stays within the declared WIDTH is checked later, at the
@@ -1119,7 +1119,7 @@ static value fn_full(rc_view_value args, rc_arena *arena)
         return value_make_error(error_type_type_mismatch);
     }
 
-    int64_t n = (int64_t)count.numeric;                  // truncate toward zero
+    int64_t n = value_to_i64(count.numeric);             // truncate toward zero
     if (n < 0) {
         return value_make_error(error_type_domain);
     }

@@ -69,7 +69,7 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
     if (value_is_number(v)) {   // a boolean coerces: TRUE / FALSE are 1 / 0 here
         return (int_argument) {
             .type = int_argument_type_known,
-            .value = (int64_t) v.numeric
+            .value = value_to_i64(v.numeric)
         };
     }
 
