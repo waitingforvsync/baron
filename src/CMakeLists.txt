@@ -1,5 +1,5 @@
-add_executable(baron
-    main.c
+# Everything except main.c, shared with the fuzz harness below.
+set(BARON_SOURCES
     value.c
     value.h
     symbols.h
@@ -54,6 +54,8 @@ add_executable(baron
     baron.h
 )
 
+add_executable(baron main.c ${BARON_SOURCES})
+
 if(WIN32)
     target_sources(baron PRIVATE baron.rc)
 endif()
@@ -65,6 +67,18 @@ if(MSVC)
     target_compile_options(baron PRIVATE /W3)
 else()
     target_compile_options(baron PRIVATE -Wall -Wextra)
+endif()
+
+# Gated by the BARON_FUZZ option (default OFF): a libFuzzer harness driving assemble_string
+# with arbitrary bytes (fuzz_assemble.c). Clang only. Configure the build with
+# -fsanitize=fuzzer-no-link,address,undefined in CMAKE_C_FLAGS so every object is
+# instrumented; the harness target adds libFuzzer's own main at link time.
+if(BARON_FUZZ)
+    add_executable(baron_fuzz fuzz_assemble.c ${BARON_SOURCES})
+    target_link_libraries(baron_fuzz PRIVATE richc)
+    target_include_directories(baron_fuzz PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_options(baron_fuzz PRIVATE -Wall -Wextra -fsanitize=fuzzer)
+    target_link_options(baron_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
 
 # Gated by the BARON_TESTS option (default OFF). Tests are compiled into the binary

@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    name: build and attach baron.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # The shipping binary: CL, Release, and NO test harness compiled in
+      # (BARON_TESTS stays off). CI has already tested this commit on push.
+      - name: Configure
+        run: cmake -B build
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      # Attaches to the tag's release: creates a draft one if none exists yet (edit the
+      # notes and publish), or adds the file to an already-created release.
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: build/src/Release/baron.exe

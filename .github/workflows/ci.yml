@@ -14,7 +14,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -27,7 +27,7 @@ jobs:
           fi
 
       - name: Configure
-        run: cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release -DBARON_TESTS=ON
+        run: cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror -DBARON_TESTS=ON
 
       # POST_BUILD copies src/test into a working dir and runs `baron --test` there;
       # a failing RC_CHECK fails the build, so this step IS the test run.
@@ -61,7 +61,7 @@ jobs:
     name: asan + ubsan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -71,8 +71,24 @@ jobs:
       - name: Configure
         run: >
           cmake -B build-asan -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -Werror"
           -DBARON_TESTS=ON
 
       - name: Build and run the unit tests under the sanitizers
         run: cmake --build build-asan
+
+  msvc:
+    name: build + tests (windows MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # The Visual Studio generator (the runner default) drives CL, matching the compiler
+      # the released .exe is built with.
+      - name: Configure
+        run: cmake -B build -DBARON_TESTS=ON
+
+      - name: Build and run the unit tests
+        run: cmake --build build --config Release

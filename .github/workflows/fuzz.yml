@@ -1,0 +1,54 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '14 2 * * *'   # nightly, on the default branch
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: libFuzzer over assemble_string
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      # Debug keeps RC_ASSERT armed; -O1 keeps iterations brisk under the sanitizers
+      # (compute-heavy inputs run 15-30x slower fully uninstrumented-unoptimised).
+      - name: Configure
+        run: >
+          cmake -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all -O1"
+          -DBARON_FUZZ=ON
+
+      - name: Build the harness
+        run: cmake --build build-fuzz --target baron_fuzz
+
+      # Seed with every real source in the repo (test fixtures + the examples, renamed
+      # to dodge the boot.6502 name collisions between examples).
+      - name: Seed the corpus
+        run: |
+          mkdir -p corpus
+          cp src/test/*.6502 src/test/*.bas corpus/ 2>/dev/null || true
+          for f in examples/*/*.6502; do
+            cp "$f" "corpus/$(echo "$f" | md5sum | cut -c1-8).6502"
+          done
+
+      - name: Fuzz
+        run: ./build-fuzz/src/baron_fuzz -max_total_time=900 -timeout=30 -rss_limit_mb=4096 corpus
+
+      - name: Upload any findings
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: |
+            crash-*
+            timeout-*
+            leak-*
+            oom-*
+          if-no-files-found: ignore
