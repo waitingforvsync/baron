@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: build + tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ninja
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y ninja-build
+          else
+            brew install ninja
+          fi
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release -DBARON_TESTS=ON
+
+      # POST_BUILD copies src/test into a working dir and runs `baron --test` there;
+      # a failing RC_CHECK fails the build, so this step IS the test run.
+      - name: Build and run the unit tests
+        run: cmake --build build
+
+      # The four examples are golden files: rebuild each in a clean directory with its
+      # documented command line and byte-compare the .ssd and the -v listing against
+      # the committed output. Linux only - the goldens are generated on Linux, and the
+      # listings contain formatted numbers we don't want at the mercy of another libc.
+      - name: Examples are byte-identical
+        if: runner.os == 'Linux'
+        run: |
+          set -e
+          B="$GITHUB_WORKSPACE/build/src/baron"
+          run_example() {
+            dir=$1; img=$2; txt=$3; shift 3
+            work=$(mktemp -d)
+            cp "examples/$dir"/*.6502 "$work"
+            (cd "$work" && "$B" "$@")
+            cmp "$work/$img" "examples/$dir/$img"
+            cmp "$work/$txt" "examples/$dir/$txt"
+            echo "$dir: OK"
+          }
+          run_example starglobe demo.ssd demo.txt --opt 3 --title STARGLOBE boot.6502 loader.6502 demo.6502 -o demo.ssd -v -log0 demo.txt
+          run_example camera camera.ssd camera.txt boot.6502 camera.6502 --opt 2 -o camera.ssd -v -log0 camera.txt
+          run_example colours colours.ssd colours.txt boot.6502 loader.6502 colours.6502 -o colours.ssd --opt 3 -v -log0 colours.txt
+          run_example spritescale spritescale.ssd spritescale.txt boot.6502 spritescale.6502 --opt 2 -o spritescale.ssd -v -log0 spritescale.txt
+
+  sanitizers:
+    name: asan + ubsan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure
+        run: >
+          cmake -B build-asan -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          -DBARON_TESTS=ON
+
+      - name: Build and run the unit tests under the sanitizers
+        run: cmake --build build-asan
