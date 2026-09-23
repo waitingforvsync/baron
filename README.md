@@ -1,4 +1,6 @@
 # Baron #
+[![CI](https://github.com/waitingforvsync/baron/actions/workflows/ci.yml/badge.svg)](https://github.com/waitingforvsync/baron/actions/workflows/ci.yml)
+
 A portable 6502 assembler designed for BBC Micro development, the spiritual successor to [BeebAsm](https://github.com/stardot/beebasm).
 
 ## About ##
@@ -31,7 +33,7 @@ Visual Studio for Windows has built-in CMake support: just open the folder conta
 Unit tests are off by default. Turn them on with the CMake variable `BARON_TESTS`: they are compiled into the `baron` executable and run automatically as a post-build step.
 
 ## Getting started ##
-Go and check out The Baron Guide, [here](docs/guide.md). A more po-faced reference can be found [here](docs/reference.md).
+Go and check out The Baron Guide, [here](docs/guide.md). A more po-faced reference can be found [here](docs/reference.md). The documentation is also published at [waitingforvsync.github.io/baron](https://waitingforvsync.github.io/baron/).
 
 There is a [Baron BBC Micro Assembler](https://marketplace.visualstudio.com/items?itemName=RichTalbot-Watkins.baron-vsc) extension in Visual Studio Code Marketplace, which is [developed](https://github.com/waitingforvsync/baron-vsc) in parallel with Baron.
 

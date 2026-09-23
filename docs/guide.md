@@ -14,7 +14,7 @@ switch, keyword and operator live in the [reference](reference.md).
 - [The shape of a line](#the-shape-of-a-line)
 - [Labels and scopes](#labels-and-scopes)
 - [Sections](#sections)
-- [Includes](#other-includes)
+- [Includes](#includes)
 - [Inline BASIC](#inline-basic)
 - [Expressions](#expressions)
 - [Lists and ranges](#lists-and-ranges)

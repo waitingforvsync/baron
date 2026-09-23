@@ -1,0 +1,131 @@
+/* The documentation site's one stylesheet: quiet, readable, happy in light and dark. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --accent: #0550ae;
+  --code-bg: #f6f8fa;
+  --border: #d1d9e0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14181d;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --accent: #74b3f7;
+    --code-bg: #1e242b;
+    --border: #3d444d;
+  }
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  max-width: 52em;
+  margin: 0 auto;
+  padding: 0 1.25em 4em;
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+}
+
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25em;
+  padding: 0.9em 0;
+  margin-bottom: 1.5em;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.95em;
+}
+
+.site-nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.site-nav a:first-child {
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.site-nav a:hover {
+  color: var(--accent);
+}
+
+.site-nav .ext {
+  margin-left: auto;
+}
+
+h1, h2, h3, h4 {
+  line-height: 1.25;
+  margin-top: 1.6em;
+}
+
+h1 {
+  font-size: 1.9em;
+}
+
+h2 {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.25em;
+}
+
+a {
+  color: var(--accent);
+}
+
+code, pre {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+code {
+  background: var(--code-bg);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.9em 1.1em;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  margin: 1em 0;
+}
+
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.4em 0.7em;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--code-bg);
+}
+
+blockquote {
+  margin: 1em 0;
+  padding: 0.1em 1em;
+  border-left: 4px solid var(--border);
+  color: var(--muted);
+}

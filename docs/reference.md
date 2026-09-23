@@ -276,19 +276,5 @@ Your own `FUNCTION` names join the table as they are defined, callable as `name(
 
 ## Version history ##
 
-- **0.1.3** (2026-08-28) - everything since the first release:
-  - A proper boolean type: comparisons and the predicates return `TRUE` / `FALSE`, which coerce
-    to 1 / 0 in any numeric context; `AND` / `OR` / `EOR` / `NOT` are logical on booleans and
-    bitwise on numbers.
-  - Added `--beebasm-true` command-line switch for BeebAsm compatibility, making TRUE equal to -1.
-  - Strings and characters: `CODES`, `CHR` and `FIND`, and the `IS_STRING` / `IS_NUMBER`
-    type predicates.
-  - `ERROR`: fail the build with your own message - as a statement, or as the `ERROR(...)`
-    value for `FUNCTION` guards.
-  - `ROUND` now rounds to nearest (halves away from zero); truncation toward zero is the new
-    `TRUNC`.
-  - Zero-page allocator additions: `ZA_ENTRY` / `ZA_INTERRUPT` root markers (with
-    unreachable-code warnings) and the `ZA_DISCARD` dead-value annotation.
-  - `-D <sym>=<expr>` predefines symbols from the command line.
-  - `REPEATED` joins as the friendlier name for `FULL`.
-- **0.1.0** (2026-08-26) - first release: the full assembler described here.
+See the [GitHub releases page](https://github.com/waitingforvsync/baron/releases) for
+what changed in each version.
