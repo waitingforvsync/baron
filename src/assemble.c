@@ -6921,6 +6921,19 @@ RC_TEST_STEP(assemble, listing_skip_and_multiline, fix)
     RC_CHECK(VERB(), ==, RC_STR("  0000  01 02                       equb {1,...\n"));
 }
 
+RC_TEST_STEP(assemble, listing_survives_embedded_nul, fix)
+{
+    fix->desc.verbose = true;
+    // A string symbol holding an embedded NUL (the CHR-built terminator idiom) must not cut the
+    // listing short: the assignment line shows unprintable bytes as '.', and everything after the
+    // string still lists. The emitted bytes themselves are untouched (48 49 00).
+    RC_CHECK_TRUE(ASM("foo = CHR(CONCAT(CODES(\"HI\"), {0}))\nEQUS foo\nEQUB 42") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("foo = \"HI.\" [CHR(CONCAT(CODES(\"HI\"), {0}))]\n"
+                    "  0000  48 49 00                    EQUS foo\n"
+                    "  0003  2A                          EQUB 42\n"));
+}
+
 RC_TEST_STEP(assemble, listing_assignments_and_braces, fix)
 {
     fix->desc.verbose = true;   // the listing is opt-in

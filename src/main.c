@@ -277,7 +277,12 @@ int main(int argc, char **argv)
             // line between files so a multi-file run reads as chapters. Redirected channels accumulate
             // across files and are written once at the end.
             if (log_paths[0] == NULL && r.channels[0].len != 0) {
-                fprintf(stdout, "%s%.*s", listed_any ? "\n" : "", (int) r.channels[0].len, r.channels[0].data);
+                if (listed_any) {
+                    fputc('\n', stdout);
+                }
+                // fwrite, not printf: PRINT may put ANY byte in the channel (an embedded NUL
+                // included), and even a precision-capped "%.*s" stops at the first NUL.
+                fwrite(r.channels[0].data, 1, r.channels[0].len, stdout);
                 listed_any = true;
             }
             for (uint32_t c = 0; c < baron_num_channels; c++) {

@@ -342,8 +342,15 @@ static void format_value(rc_mstr *out, value v, uint32_t max_list_elements, rc_a
             rc_mstr_append(out, v.numeric != 0.0 ? RC_STR("TRUE") : RC_STR("FALSE"), arena);
             return;
         case value_type_string:
+            // Quoted, and kept printable: a string may hold ANY byte (a CHR-built terminator, say),
+            // but this is the human-readable renderer - the listing and diagnostics must stay clean
+            // terminal text, so anything outside printable ASCII shows as '.'.
             rc_mstr_append_char(out, '"', arena);
-            rc_mstr_append(out, v.string, arena);
+            for (uint32_t i = 0; i < v.string.len; i++) {
+                char c = v.string.data[i];
+                bool printable = (uint8_t) c >= 0x20 && (uint8_t) c < 0x7F;
+                rc_mstr_append_char(out, printable ? c : '.', arena);
+            }
             rc_mstr_append_char(out, '"', arena);
             return;
         case value_type_error:
@@ -623,6 +630,13 @@ RC_TEST(value, formatting)
     out = rc_mstr_make(16, &arena);
     value_format(&out, value_make_string(RC_STR("hi")), &arena);
     RC_CHECK(out.view, ==, RC_STR("\"hi\""));
+
+    // A string may hold any byte (a CHR-built terminator, a high bit set); the human-readable
+    // renderer shows everything outside printable ASCII as '.', so an embedded NUL cannot cut a
+    // listing short at the terminal.
+    out = rc_mstr_make(16, &arena);
+    value_format(&out, value_make_string(rc_str_make("A\0\x1F\x7F\xFFz", 6)), &arena);
+    RC_CHECK(out.view, ==, RC_STR("\"A....z\""));
 
     out = rc_mstr_make(16, &arena);
     value_format(&out, value_make_error(error_type_type_mismatch), &arena);
