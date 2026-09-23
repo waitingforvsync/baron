@@ -28,7 +28,18 @@ jobs:
       - name: Build the harness
         run: cmake --build build-fuzz --target baron_fuzz
 
-      # Seed with every real source in the repo (test fixtures + the examples, renamed
+      # The corpus accumulates across runs: restore the most recent night's cache (the
+      # per-run key never matches, so restore-keys falls back to the newest), then save a
+      # fresh cache at the end - explicitly, and even when the fuzzer FAILS, or a run that
+      # found a bug would throw away everything it had learned on the way there.
+      - name: Restore the corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      # Top up with every real source in the repo (test fixtures + the examples, renamed
       # to dodge the boot.6502 name collisions between examples).
       - name: Seed the corpus
         run: |
@@ -40,6 +51,13 @@ jobs:
 
       - name: Fuzz
         run: ./build-fuzz/src/baron_fuzz -max_total_time=900 -timeout=30 -rss_limit_mb=4096 corpus
+
+      - name: Save the corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.run_id }}
 
       - name: Upload any findings
         if: failure()
