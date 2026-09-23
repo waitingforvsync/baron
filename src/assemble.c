@@ -2479,7 +2479,11 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
             }
             else {
                 rc_str base = source_files_name(&b->source_files, at.source);
-                rc_str path = file_path_resolve(base, e.value.string, &scratch);   // source_files keeps its own copy
+                // Resolve into per_pass, NOT scratch: the operand string may live in the region
+                // eval's scratch copy claimed (a built string - escaped quotes, CHR), and a scratch
+                // allocation here would copy it onto itself (the scratch-arena aliasing trap; the
+                // fuzzer caught the overlapping memcpy). source_files keeps its own copy anyway.
+                rc_str path = file_path_resolve(base, e.value.string, b->per_pass);
                 uint32_t inc_source = source_files_add_file(&b->source_files, path);
                 if (inc_source == RC_INDEX_NONE) {
                     // FATAL, like INCBIN's: a recoverable error only records on the final pass, and
@@ -2548,7 +2552,7 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
     if (flags.active) {
         if (value_is_string(e.value)) {
             rc_str base = source_files_name(&b->source_files, at.source);
-            rc_str path = file_path_resolve(base, e.value.string, &scratch);
+            rc_str path = file_path_resolve(base, e.value.string, b->per_pass);   // per_pass, not scratch: see handle_include
             if (flags.final || flags.output) {
                 // Load and emit for real. The output pass repeats this - its sections are the ones
                 // the result carries, so it must hold the real bytes too.
