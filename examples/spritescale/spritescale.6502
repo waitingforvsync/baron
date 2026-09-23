@@ -464,15 +464,20 @@ ENDMACRO
 .newcol
     INX
     LDY c
-    LDA (sproff),Y:STA idx,X
-    LDA #0:STA cp,X                 ; fires at cnt 0: fetches the first run
+    LDA (sproff),Y
+    STA idx,X:ZA_INDEXEDBY 0..3
+    LDA #0
+    STA cp,X:ZA_INDEXEDBY 0..3      ; fires at cnt 0: fetches the first run
     LDY slot
-    LDA slotbits,Y:STA colmask,X    ; the column's first slot
+    LDA slotbits,Y
+    STA colmask,X:ZA_INDEXEDBY 0..3 ; the column's first slot
     BNE advance                     ; always: slot bits are non-zero
     ZA_UNREACHABLE
 .slotloop
     LDY slot
-    LDA slotbits,Y:ORA colmask,X:STA colmask,X
+    LDA slotbits,Y
+    ORA colmask,X:ZA_INDEXEDBY 0..3
+    STA colmask,X:ZA_INDEXEDBY 0..3
 .advance
     DEC rem
     BNE samecol
@@ -728,8 +733,10 @@ ENDMACRO
 .@
     LDA aexh:BNE dummy
     LDY c
-    LDA (sproff),Y:STA aidx,X
-    LDA #0:STA aend,X               ; fetches at pair 0
+    LDA (sproff),Y
+    STA aidx,X:ZA_INDEXEDBY 0..3
+    LDA #0
+    STA aend,X:ZA_INDEXEDBY 0..3    ; fetches at pair 0
     INC c
     JSR findcol                     ; position on the next survivor
     BNE nextslot
@@ -737,9 +744,13 @@ ENDMACRO
     BNE nextslot
     ZA_UNREACHABLE
 .dummy
-    LDA #&FF:STA aend,X             ; never fetches
-    LDA #0:STA ce,X:STA co,X
-    LDA slotbits,X:STA cm,X
+    LDA #&FF
+    STA aend,X:ZA_INDEXEDBY 0..3    ; never fetches
+    LDA #0
+    STA ce,X:ZA_INDEXEDBY 0..3
+    STA co,X:ZA_INDEXEDBY 0..3
+    LDA slotbits,X
+    STA cm,X:ZA_INDEXEDBY 0..3
 .nextslot
     INX:CPX #4:BNE fillslot
 

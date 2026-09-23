@@ -17,7 +17,9 @@
 // form the address, whatever it then does to the pointed-to data, so it carries op_zpread ONLY
 // (a STA (zp),Y reads its pointer, it does not write it); and ABSOLUTE addressing (abs / absx /
 // absy) touches no zero-page byte, so it carries neither. Immediate, accumulator, implied and the
-// JMP vector modes carry no access flag.
+// JMP vector modes carry no access flag. One wrinkle lives in record_insn, not here: a ZA_AUTO
+// base widened to absx / absy (no zero-page encoding for that index) still lands in page zero,
+// so the recorder borrows the touch class from the mnemonic's plain zp cell.
 static const uint16_t opcode_defs[mnemonic_max][addr_mode_max] = {
     [mnemonic_adc] = {
         [addr_mode_imm]  = 0x69,
@@ -484,31 +486,39 @@ static zp_flow flow_from_cell(uint16_t cell)
 }
 
 
+// Does mode take a zero-page operand - a one-byte address or base the instruction reaches (or, for the
+// indirect forms, reads a pointer from)? These are the only modes whose literal operand could aim into
+// the ZA_POOL; the absolute family resolves by value, so its base is always >= &100.
+static bool mode_has_zp_operand(addr_mode mode)
+{
+    return mode == addr_mode_zp || mode == addr_mode_zpx || mode == addr_mode_zpy
+        || mode == addr_mode_indx || mode == addr_mode_indy || mode == addr_mode_ind;
+}
+
+
 // The attribution of one operand to a ZA_AUTO variable: the referenced binding's identity (def cursor + the
-// scope it was declared in) and how this instruction touches it. All-none / vref_none when the operand names
-// no bound symbol.
+// scope it was declared in) and how this instruction touches it. All-none when the operand names no bound
+// symbol.
 typedef struct operand_ref {
     cursor   def;
     uint32_t scope;
-    uint8_t  rw;
     bool     outside_envelope;   // the variable is reached by an indexed / indexed-indirect mode (unsound)
     bool     indirect;           // the variable is dereferenced as a zero-page POINTER ((var),Y / (var)) - it
 
                                  // needs 2 bytes, so a 1-byte ZA_AUTO1 here is refused (see zeropage_finalize)
 } operand_ref;
 
-// If the operand's leading identifier resolves (with shadowing) to a bound symbol, return its identity and rw
-// class; otherwise an all-none ref. The identity is mapped to a concrete vreg LATER (zeropage_resolve_vregs),
-// once the whole ZA_AUTO registry is populated, so a use before the declaration still attributes. The rw class
-// is read straight off the cell's op_zpread / op_zpwrite flags, which already encode the zero-page-operand
-// semantics per addressing mode (see the opcode table header). operand_pos is where the operand expression
-// begins, or RC_INDEX_NONE for a no-operand / immediate instruction (never a variable).
-static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode, uint16_t cell,
+// If the operand's leading identifier resolves (with shadowing) to a bound symbol, return its identity;
+// otherwise an all-none ref. The identity is mapped to a concrete vreg LATER (zeropage_resolve_vregs),
+// once the whole ZA_AUTO registry is populated, so a use before the declaration still attributes.
+// operand_pos is where the operand expression begins, or RC_INDEX_NONE for a no-operand / immediate
+// instruction (never a variable).
+static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode,
                                      uint32_t operand_pos)
 {
     operand_ref none = {
         .def   = cursor_none(),
-        .scope = RC_INDEX_NONE,   // rw/outside_envelope: zero-init (vref_none is the default)
+        .scope = RC_INDEX_NONE,   // outside_envelope/indirect: zero-init
     };
     if (operand_pos == RC_INDEX_NONE) {
         return none;
@@ -525,14 +535,9 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
         return none;   // resolves to nothing (undefined / not a bare symbol)
     }
 
-    // op_zpread / op_zpwrite already encode how the zero-page operand is touched per mode (a direct access
-    // reads/writes the byte; an indirect mode reads the pointer only; absolute carries neither), so the rw
-    // class is a straight read of the cell - no per-mode special-casing here.
-    uint8_t rw = (uint8_t) (((cell & op_zpread) ? vref_read : 0) | ((cell & op_zpwrite) ? vref_write : 0));
     return (operand_ref) {
         .def              = ref.def,
         .scope            = ref.scope,
-        .rw               = rw,
         .outside_envelope = !mode_in_var_envelope(mode),
         .indirect         = (mode == addr_mode_indy || mode == addr_mode_ind),
     };
@@ -542,8 +547,8 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
 // liveness passes: its address + size, control-flow class + resolved target (branch/jump/call to a plain
 // abs/rel address; an indirect/computed target stays RC_INDEX_NONE), and its variable touch (if any).
-static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, addr_mode mode,
-                        uint16_t cell, int_argument arg, uint32_t operand_base, uint32_t pc)
+static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, mnemonic m,
+                        addr_mode mode, uint16_t cell, int_argument arg, uint32_t operand_base, uint32_t pc)
 {
     if (!flags.final || !flags.active || !zeropage_is_enabled(&b->zeropage)) {
         return;
@@ -565,7 +570,7 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
                       : (mode == addr_mode_ind16x) ? zp_target_via_table
                                                    : zp_target_via_direct;
 
-    operand_ref op = attribute_operand(b, at, scope, mode, cell, operand_base);
+    operand_ref op = attribute_operand(b, at, scope, mode, operand_base);
 
     // The operand's identity plays one of two roles by control-flow class: for a branch/jump/call it
     // names the TARGET; for everything else it may name a ZA_AUTO VARIABLE the instruction touches.
@@ -582,22 +587,50 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     uint32_t id_scope = arg.za_auto ? arg.zp_scope : op.scope;
     cursor   id_def   = arg.za_auto ? arg.zp_def : op.def;
 
+    // A statically known zero-page operand that is no ZA_AUTO reference: carried so the finalizer can warn
+    // when a fixed address aims into the pool (the boot-wipe idiom, or a genuine stomp). The widened
+    // absolute indexed forms count when the base sits under &100 - STA &70,Y has no zero-page encoding,
+    // but it aims into the pool just as surely as STA &70,X does.
+    bool widened = mode == addr_mode_absx || mode == addr_mode_absy;
+    bool literal = !is_control && !arg.za_auto && arg.type == int_argument_type_known
+                && arg.value >= 0 && arg.value < zeropage_size
+                && (mode_has_zp_operand(mode) || widened);
+
+    // op_zpread / op_zpwrite already encode how the zero-page operand is touched per mode (a direct access
+    // reads/writes the byte; an indirect mode reads the pointer only; absolute carries neither), so the rw
+    // class is a straight read of the cell - whether or not the operand names a variable. With ONE
+    // exception: an operand widened to absolute indexed because the index has no zero-page encoding
+    // (LDA var,Y) can still land in page zero - a ZA_AUTO base always does, a literal one under &100 too -
+    // but its absolute cell carries no flags. Left there, the touch would be invisible to liveness and the
+    // pool-store check. The mnemonic's plain zp cell knows how the byte is really touched, so we borrow
+    // the flags from it.
+    uint16_t rw_cell = cell;
+    if (widened && (arg.za_auto || literal)) {
+        rw_cell = opcode_def(m, addr_mode_zp);
+    }
+    uint8_t rw = (uint8_t) (((rw_cell & op_zpread) ? vref_read : 0) | ((rw_cell & op_zpwrite) ? vref_write : 0));
+
     zeropage_add_insn(&b->zeropage, (zp_insn) {
         .pc             = pc,
         .size           = (uint16_t) (1 + mode_operand_bytes(mode)),
         .flow           = (uint8_t) flow,
 
         // A dispatch through a ZA_AUTO vector reads the pointer (both bytes; a table read is indexed).
-        .rw             = !is_control ? op.rw : (vector_var ? (uint8_t) vref_read : (uint8_t) vref_none),
+        .rw             = !is_control ? rw : (vector_var ? (uint8_t) vref_read : (uint8_t) vref_none),
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
         .var_scope      = is_var ? id_scope : RC_INDEX_NONE,
         .var_def        = is_var ? id_def : cursor_none(),
         .var_indexed    = is_control ? (vector_var && via == zp_target_via_table) : op.outside_envelope,
         .var_indirect   = is_control ? (vector_var && via == zp_target_via_vector) : op.indirect,
 
+        // (var,X) and JMP (table,X) read a 2-byte entry AT the indexed offset, so a declared index
+        // bound (ZA_INDEXEDBY) must leave room for the pair, not just the first byte.
+        .var_indexed_ptr = mode == addr_mode_indx || mode == addr_mode_ind16x,
+
         // A ZA_AUTO operand's known value IS the offset into the variable (0 for var, k for var+k) -
         // the base does not exist yet. Kept so the finalize pass can bounds-check it against the width.
         .var_offset     = (arg.za_auto && is_var) ? (uint32_t) arg.value : RC_INDEX_NONE,
+        .literal_addr   = literal ? (uint32_t) arg.value : RC_INDEX_NONE,
         .target         = target,
         .target_scope   = is_control ? id_scope : RC_INDEX_NONE,
         .target_def     = is_control ? id_def : cursor_none(),
@@ -754,7 +787,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     }
 
     // Record this instruction into the ZP IR (final active pass, feature on) for the CFG + liveness passes.
-    record_insn(b, at, scope, section, flags, mode, cell, arg, operand_base, insn_pc);
+    record_insn(b, at, scope, section, flags, m, mode, cell, arg, operand_base, insn_pc);
 
     uint32_t code0 = sections_code(&b->sections, section).num;   // where this instruction's bytes begin
 

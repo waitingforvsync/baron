@@ -86,4 +86,11 @@ void expression_reset_random(void);
 value range_to_list(value_range r, rc_arena *arena);
 
 
+// Every leaf of v, in order, as one rank-1 list: lists descended, ranges enumerated, everything
+// else (numbers, strings, errors - an unbounded range's included) kept whole as a leaf. Backs the
+// FLATTEN( builtin, and is the ONE descent for every EQUB-like operand in the assembler (EQUB
+// data, ZA_POOL bytes, annotation targets, ZA_INDEXEDBY index sets).
+value flatten_to_list(value v, rc_arena *arena);
+
+
 #endif // ifndef BARON_EXPRESSION_H_

@@ -71,6 +71,10 @@ rc_str error_type_name(error_type e)
         case error_type_za_auto_bad_width:       return RC_STR("ZA_AUTO count must be 1 to 256");
         case error_type_za_auto_address:         return RC_STR("Cannot use a ZA_AUTO address here: '%'");
         case error_type_za_discard_needs_var:    return RC_STR("ZA_DISCARD needs a whole ZA_AUTO variable: '%'");
+        case error_type_za_pool_store:           return RC_STR("Store into the ZA_POOL at a fixed address: '%'");
+        case error_type_za_wipe_needs_store:     return RC_STR("ZA_WIPE must follow a store instruction");
+        case error_type_za_indexedby_needs_indexed: return RC_STR("ZA_INDEXEDBY must follow an indexed ZA_AUTO access");
+        case error_type_za_indexedby_out_of_range: return RC_STR("Declared index reaches past the end of ZA_AUTO variable: '%'");
         case error_type_za_entry_no_code:        return RC_STR("ZA_ENTRY/ZA_INTERRUPT does not mark an instruction");
         case error_type_za_entry_input:          return RC_STR("ZA_AUTO input to a ZA_ENTRY routine: '%' (external callers cannot know its address)");
         case error_type_za_auto_unreachable:     return RC_STR("ZA_AUTO used in code unreachable from any entry (missing ZA_ENTRY/ZA_INTERRUPT, or dead code)");

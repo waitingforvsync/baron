@@ -13,7 +13,8 @@ depth, see [Zero page allocation](zero-page-allocation.md).
 
 ```
 baron [-v | -vv] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>] [--title <t>]
-      [--opt <0-3>] [--cycle <0-99>] [--pad] [-log<n> <file>] [--symbols <file>] <source files>
+      [--opt <0-3>] [--cycle <0-99>] [--pad] [-log<n> <file>] [--symbols <file>] [--warn <n>]
+      <source files>
 ```
 
 | Switch | What it does |
@@ -31,6 +32,7 @@ baron [-v | -vv] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>
 | `--pad` | Pad the image out to a full 80-track disc (200K); every unused sector is filled with `&E5`, the single-density format filler. Without it the image is truncated after the last used sector. Needs `-o`. |
 | `-log<n> <file>` | Redirect `PRINT` channel *n* (0-9) to a file. Channel 0 otherwise goes to stdout; channels 1-9 are otherwise discarded. |
 | `--symbols <file>` | Write every source file's resolved symbols - labels, computed constants, `ZA_AUTO` allocations - to one JSON file: an object per source file, symbols under their full dotted paths, sorted, one per line. See [The symbol dump](guide.md#the-symbol-dump). |
+| `--warn <n>` | Show warnings up to level *n*. The default 1 shows the ordinary warnings; `--warn 2` adds the opt-in audits (a store into the `ZA_POOL` at a fixed address); `--warn 0` shows errors only. Warnings never affect the exit code. |
 | `--help` | Print the switch summary. |
 | `--version` | Print the version and author information. |
 
@@ -122,7 +124,9 @@ A filename destined for a disc image follows DFS rules: an optional single-chara
 | `ZA_CANJUMP targets` | After a computed/indirect `JMP`, a self-modified branch, or an RTS-dispatch: the labels it may land on, replacing any literal operand. Targets flatten like `EQUB` data. |
 | `ZA_RETURN` | Declare the preceding jump/branch a return to this routine's caller (the inline-data trick's computed exit). |
 | `ZA_RETURNTO targets` | Declare where the preceding `JSR` resumes, replacing its fall-through (a data-consuming callee that resumes somewhere other than just past the data). |
-| `ZA_DISCARD vars` | Promise the named `ZA_AUTO` variables' current values are dead - later reads see only later writes. For arrays rebuilt via `STA arr,X`, whose writes prove nothing. |
+| `ZA_DISCARD vars` | Promise the named `ZA_AUTO` variables' current values are dead - later reads see only later writes. For arrays rebuilt via `STA arr,X`, whose writes prove nothing. Binds to the path it is written on; below a label it applies to every path through that point. |
+| `ZA_WIPE` | Promise the store just before it sweeps the whole pool (the boot-time zero-page wipe): every variable counts as freshly written there, and the store's fixed pool address is not warned about. Binds like `ZA_DISCARD`: written inside a branch arm it stays on that arm. |
+| `ZA_INDEXEDBY values` | Declare the index values the register can hold at the indexed `ZA_AUTO` access just before it (`var,X` / `var,Y` / `(var,X)`). Ranges and lists flatten like `EQUB` data; each value 0-255. The access is then bounds-checked against the variable's width (refused if any declared index reaches past the end) and the default-level unchecked-index warning goes quiet. |
 | `ZA_ENTRY` | Mark the routine it opens as an externally-called entry point (a reachability root). Any `ZA_ENTRY` replaces the default "each section starts a routine" presumption. |
 | `ZA_INTERRUPT` | Mark the routine it opens as an interrupt handler: a root whose variables are kept apart from the rest of the program. |
 

@@ -88,7 +88,9 @@ ZA_AUTO2 ptr
 ```
 
 Wider variables work the same way - `table`, `table+1`, up to `table+count-1` - or with an index
-(`table,X`), which is allowed but yours to bounds-check (see [The rules](#the-rules)).
+(`table,X`), which is allowed but warned about (the run-time index is yours to bounds-check) until
+you declare the index set with [`ZA_INDEXEDBY`](#za_indexedby) - then it is Baron's to check (see
+[The rules](#the-rules)).
 
 ## The address of a variable ##
 
@@ -112,10 +114,11 @@ vhi = v + 1                 ; aliases carry the identity: LDA vhi is a use of v
 What you can't do is make the *shape* of the program depend on an address: a condition (`IF v <> w`), a
 count (`SKIP v`, `ZA_AUTO v, q`), a loop bound (`FOR n = v..8`), a section's `org`. Those all need a real
 number while Baron is still assembling - before any addresses exist - so Baron refuses them at the
-line: `Cannot use a ZA_AUTO address here: 'v'`. The only arithmetic a placeholder address supports is
-adding or subtracting a whole number (that is how `ptr+1` works); the only other operator that will
-touch one is `~`, which formats it for `PRINT`. Anything else - multiply, compare, a range - is a type
-error.
+line: `Cannot use a ZA_AUTO address here: 'v'`.
+
+The only arithmetic a placeholder address supports is adding or subtracting a whole number (that is
+how `ptr+1` works); the only other operator that will touch one is `~`, which formats it for
+`PRINT`. Anything else - multiply, compare, a range - is a type error.
 
 ## What you can rely on ##
 
@@ -155,6 +158,14 @@ them by their fully scoped (dot separated) path:
 ```
 ZA_POOL &70..&8F            ; In reality only uses ONE byte for the lot
 
+.start
+    LDA #5 : STA scale.input
+    JSR scale
+    LDA scale.result : STA offset.input    ; one stage's result feeds the next
+    JSR offset
+    LDA offset.result                      ; A = (5 * 2) + 7
+    RTS
+
 .scale                      ; scale.input * 2 -> scale.result
 {
     ZA_AUTO1 input
@@ -170,14 +181,6 @@ ZA_POOL &70..&8F            ; In reality only uses ONE byte for the lot
     LDA input : CLC : ADC #7 : STA result
     RTS
 }
-
-.start
-    LDA #5 : STA scale.input
-    JSR scale
-    LDA scale.result : STA offset.input    ; one stage's result feeds the next
-    JSR offset
-    LDA offset.result                      ; A = (5 * 2) + 7
-    RTS
 ```
 
 Four variables, and the whole relay runs in a **single byte** - the `-v` listing shows every one of them
@@ -193,9 +196,10 @@ added, result out. That's the tightest packing possible, and it comes from three
 - **A guaranteed result needs no protecting beforehand.** Baron can prove that `offset` writes `result`
   on every path before returning - so whatever the caller reads afterwards, it can only ever be the
   value the routine just wrote. Whatever was in that byte *before* the call simply doesn't matter, so
-  the byte stays up for grabs right up to the `JSR`. That's what lets `offset.result` take the exact
-  same byte `scale.result` has just finished with, instead of being kept empty through every earlier
-  call "just in case".
+  the byte stays up for grabs right up to the `JSR`.
+
+  That last guarantee is what lets `offset.result` take the exact same byte `scale.result` has just
+  finished with, instead of being kept empty through every earlier call "just in case".
 
 We can show the final point by contriving a contrary scenario. Let's change `offset` so the store is
 *conditional*, and watch the allocation change with it:
@@ -225,15 +229,15 @@ really produced. In the example above, the relay line assembles to a load and a 
 byte:
 
 ```
-  0015  A5 70           LDA scale.res
-  0017  85 70           STA offset.xin
+  0007  A5 70                       LDA scale.result
+  0009  85 70                       STA offset.input
 ```
 
 The store is wasted - harmless, but six cycles of nothing. You might be tempted to guard the relay with
-`IF scale.res <> offset.xin` - but **an `IF` on a ZA_AUTO variable is an error, and the assembly fails**:
+`IF scale.result <> offset.input` - but **an `IF` on a ZA_AUTO variable is an error, and the assembly fails**:
 
 ```
-relay.6502:8:7: error: Incompatible types
+relay.6502:6:7: error: Incompatible types
 ```
 
 A conditional can't depend on an allocated address, because the addresses are only chosen once the
@@ -248,11 +252,12 @@ that value one name they share -
 ```
 ZA_AUTO1 pipe               ; scale's result IS offset's input
 
-.scale  { ZA_AUTO1 xin : LDA xin : ASL A : STA pipe : RTS }
-.offset { ZA_AUTO1 res : LDA pipe : CLC : ADC #7 : STA res : RTS }
-
     JSR scale
     JSR offset              ; no relay - the value is already where offset looks
+    RTS
+
+.scale  { ZA_AUTO1 xin : LDA xin : ASL A : STA pipe : RTS }
+.offset { ZA_AUTO1 res : LDA pipe : CLC : ADC #7 : STA res : RTS }
 ```
 
 They still share a single location, and the relay instructions are gone entirely. The scoped symbol
@@ -270,7 +275,9 @@ A classic 6502 idiom passes data to a subroutine inline, right after the call:
 
 `pstring` pulls the return address off the stack, walks the text to its terminator, and resumes the
 caller past it - either by pushing the adjusted address back and `RTS`ing, or by jumping straight
-there. Baron understands the shape: data emits no instructions, so the allocator's view of the caller
+there.
+
+Baron understands the shape: data emits no instructions, so the allocator's view of the caller
 simply steps from the `JSR` to the next instruction - exactly where a data-consuming callee resumes.
 A callee that returns with a munged `RTS` therefore needs **no annotation at all**: variables live
 across the call survive the excursion, and the callee's outputs flow back, just as for an ordinary
@@ -312,10 +319,11 @@ code paths share their tail without a jump:
 Spell the skip byte `BITABS` (emits `&2C`, a `BIT abs` - swallows the next **two** bytes) or `BITZP`
 (emits `&24`, a `BIT zp` - swallows **one**) rather than a raw `EQUB`, and the allocator models the
 trick exactly: the swallowed instruction touches its variables only on the branch-taken path, and the
-fall-through path resumes past it, executing nothing but a harmless flag-trashing read. With a raw
-`EQUB &2C` the byte is invisible and the analysis assumes the fall-through runs the swallowed
-instruction too - reads merely pack less tightly, but a swallowed *store* would be credited to a path
-that never performs it, which is exactly the kind of claim the allocator must not make. Use the
+fall-through path resumes past it, executing nothing but a harmless flag-trashing read.
+
+With a raw `EQUB &2C` the byte is invisible, and the analysis assumes the fall-through runs the
+swallowed instruction too. Reads merely pack less tightly, but a swallowed *store* would be credited
+to a path that never performs it - exactly the kind of claim the allocator must not make. Use the
 keywords; they also read better.
 
 What you swallow is yours to choose - a 2-byte instruction under `BITABS`, two 1-byte instructions,
@@ -328,8 +336,10 @@ two streams then interleave mid-instruction, past what the analysis can express.
 Some facts Baron cannot see from the instruction stream, and rather than guess it stops and asks. An
 annotation is your promise to the allocator.
 
-**`ZA_UNREACHABLE`** - after a branch you know is always taken, telling Baron not to bother with the code
-path that never happens:
+### ZA_UNREACHABLE ###
+
+Placed after a branch you know is always taken, telling Baron not to bother with the code path that
+never happens:
 
 ```
     ADC #10
@@ -341,8 +351,10 @@ It emits nothing and changes nothing; it just lets Baron pack tighter. It works 
 sited right after a call that never returns, it severs the continuation, so nothing is held live for
 code that never runs on that path.
 
-**`ZA_CANCALL`** - after a `JSR` whose real target is computed (self-modified, or dispatched through a
-table), naming every routine it can reach:
+### ZA_CANCALL ###
+
+Placed after a `JSR` whose real target is computed (self-modified, or dispatched through a table),
+naming every routine it can reach:
 
 ```
     JSR dispatch                ; address patched at runtime
@@ -355,8 +367,10 @@ destination may be external (`ZA_CANCALL handler_a, &FFEE`): that arm contribute
 may also arrive as a list-valued symbol - `subs = {handler_a, handler_b}` then `ZA_CANCALL subs` -
 flattened exactly like `EQUB` data (nested lists and ranges included).
 
-**`ZA_CANJUMP`** - after a computed or indirect `JMP` through a vector or table *you* assembled, naming
-every landing site:
+### ZA_CANJUMP ###
+
+Placed after a computed or indirect `JMP` through a vector or table *you* assembled, naming every
+landing site:
 
 ```
     JMP (vector)                ; one of the mode handlers - Baron cannot see which
@@ -365,7 +379,9 @@ every landing site:
 
 External arms work here too: `JMP (myvec) : ZA_CANJUMP &FFEE` says the vector may hold an OS address, and
 that arm is as clean an exit as an `RTS`. (A jump through a *constant* OS vector needs no annotation at
-all.) The declared targets *replace* whatever the literal operand said - a self-modified `JMP`'s
+all.)
+
+The declared targets *replace* whatever the literal operand said - a self-modified `JMP`'s
 placeholder wires no edge of its own - and list-valued symbols flatten here just as for `ZA_CANCALL`,
 so a jump table's target list can live in one word. A self-modified *branch* is annotated the same
 way: `BNE placeholder : ZA_CANJUMP real_a, real_b` replaces the taken edge with the declared arms
@@ -385,11 +401,13 @@ targets like any other dispatch:
 
 The `PHP : RTI` flavour (address pushed unadjusted) is annotated the same way.
 
-For all of these, list *every* destination - if you omit something by mistake, you may see your zp
-getting clobbered unexpectedly.
+For `ZA_CANCALL` and `ZA_CANJUMP` alike, list *every* destination - if you omit something by
+mistake, you may see your zp getting clobbered unexpectedly.
 
-**`ZA_RETURN`** - after a jump (or branch) whose destination is simply *whoever called this routine*:
-the [inline-data trick](#inline-data-after-a-jsr)'s exit, where a routine pops its return address,
+### ZA_RETURN ###
+
+Placed after a jump (or branch) whose destination is simply *whoever called this routine* - the
+[inline-data trick](#inline-data-after-a-jsr)'s exit, where a routine pops its return address,
 consumes the data following the call, and jumps past it:
 
 ```
@@ -398,13 +416,17 @@ consumes the data following the call, and jumps past it:
 ```
 
 No target list - the destination is "back to our caller", and Baron routes liveness home to every
-call site exactly as it does for an `RTS`. It also tames a self-modified direct `JMP` whose
-placeholder operand happens to name real code (the placeholder edge is ignored, as with `ZA_CANJUMP`).
-On a branch it declares a *conditional* return - the not-taken path carries on as usual. And it
-composes with `ZA_CANJUMP` on the same jump, for a dispatch that may instead hand straight back.
+call site exactly as it does for an `RTS`.
 
-**`ZA_RETURNTO`** - the caller-side counterpart, for when a data-consuming callee resumes you
-somewhere other than just past the data:
+It also tames a self-modified direct `JMP` whose placeholder operand happens to name real code (the
+placeholder edge is ignored, as with `ZA_CANJUMP`). On a branch it declares a *conditional* return -
+the not-taken path carries on as usual. And it composes with `ZA_CANJUMP` on the same jump, for a
+dispatch that may instead hand straight back.
+
+### ZA_RETURNTO ###
+
+The caller-side counterpart, for when a data-consuming callee resumes you somewhere other than just
+past the data:
 
 ```
     JSR emit : ZA_RETURNTO done
@@ -414,14 +436,18 @@ somewhere other than just past the data:
 ```
 
 It takes a target list like `ZA_CANCALL` (list-valued symbols and ranges flatten the same way) and
-REPLACES the call's normal continuation. You do not need it for the common shape - a callee that
-resumes just past the data resumes at the next instruction, which is what Baron assumes anyway. A
-declared target that is not the start of an assembled instruction draws a warning: it is almost
-always a mistyped label, or an address inside the data itself.
+REPLACES the call's normal continuation.
 
-**`ZA_DISCARD`** - tells Baron a variable's current value is finished with: everything read later comes
-from writes after this point. You need it when a variable is rebuilt through indexed stores, because
-`STA arr,X` never proves *which* byte it wrote:
+You do not need it for the common shape - a callee that resumes just past the data resumes at the
+next instruction, which is what Baron assumes anyway. A declared target that is not the start of an
+assembled instruction draws a warning: it is almost always a mistyped label, or an address inside
+the data itself.
+
+### ZA_DISCARD ###
+
+Tells Baron a variable's current value is finished with: everything read later comes from writes
+after this point. You need it when a variable is rebuilt through indexed stores, because `STA arr,X`
+never proves *which* byte it wrote:
 
 ```
     LDX #0
@@ -439,15 +465,114 @@ everything. One line fixes it - place it where the old value stops mattering, be
     ZA_DISCARD arr              ; the old value is dead; the fill loop makes a new one
 ```
 
-It emits nothing, takes a comma list, and wants whole variables (`ZA_DISCARD arr+1` is refused). TRUSTED
-like the others: if something *does* read the old value past a `ZA_DISCARD`, that byte may already belong
-to someone else. Inside a subroutine it also tells callers their copy dies at the `JSR`, just as a real
-full rewrite would. One quirk: at a loop's top it re-asserts every time around - Baron cannot tell "on
-entry" from "each iteration" at the same address. (In the spritescale demo, two `ZA_DISCARD` lines freed
-17 bytes of zero page at zero runtime cost - the two plotters' slot arrays fold onto each other.)
+It emits nothing, takes a comma list, and wants whole variables (`ZA_DISCARD arr+1` is refused).
+TRUSTED like the others: if something *does* read the old value past a `ZA_DISCARD`, that byte may
+already belong to someone else.
 
-**`ZA_ENTRY`** - put this at the top of any routine that the *outside world* calls. A routine that only
-BASIC ever `CALL`s is referenced by nothing in the program, so to Baron it looks like dead code:
+Inside a subroutine it also tells callers their copy dies at the `JSR`, just as a real full rewrite
+would. (In the spritescale demo, two `ZA_DISCARD` lines freed 17 bytes of zero page at zero runtime
+cost - the two plotters' slot arrays fold onto each other.)
+
+### Where a marker sits ###
+
+One placement rule, shared between `ZA_DISCARD` and `ZA_WIPE`: **a marker belongs to the path it is
+written on, and a label is the pivot.** A marker emits no bytes, so its address is the next
+instruction's - but Baron also remembers which side of a label you wrote it on, and that decides
+which path carries the promise:
+
+```
+    ZA_DISCARD arr      ; ABOVE the label: dead on the way INTO the loop -
+.fill                   ; the back edge re-entering at .fill never passes it
+    ...
+    BNE fill
+```
+
+```
+.fill
+    ZA_DISCARD arr      ; BELOW the label: "at this address, however you got
+    ...                 ; here" - re-asserted every time around the loop
+    BNE fill
+```
+
+The same choice applies at a branch join: above the label, the promise stays on the arm you wrote
+it in; below the label, it covers every arm arriving there. Write whichever you mean.
+
+The one exception is a marker just past an `RTS`/`JMP`: the path it sits on is dead, so it attaches
+to whatever arrives at that address - which is exactly what the RTS-dispatch idiom
+(`RTS : ZA_DISCARD v : ZA_CANJUMP target`) wants.
+
+### ZA_WIPE ###
+
+`ZA_DISCARD`'s mirror image, for the conventional boot-time zero-page sweep. The wipe loop stores
+through a literal base, so Baron cannot attribute it to any variable - it is exactly the "stray
+pointer aimed into the pool" the bargain warns about, except this one is deliberate:
+
+```
+    LDX #0
+    TXA
+.wiploop
+    STA &00,X : ZA_WIPE         ; sweeps the whole pool - and says so
+    INX : CPX #&90 : BCC wiploop
+```
+
+Placed after the sweeping store, it promises that store covers the *entire* pool: every variable
+counts as freshly written there. That does three things at once - it declares the wipe a legitimate
+initialiser (a `ZA_ENTRY` routine may now rely on wiped-to-zero values without drawing the input
+warning), it ends every earlier value's live range at the wipe, and it quiets the opt-in
+fixed-address warning for that store.
+
+TRUSTED like `ZA_DISCARD`, only a bigger promise: nothing survives it, so a value you *did* want
+across the wipe is already lost.
+
+The [placement rule](#where-a-marker-sits) applies here too, and helpfully: a `ZA_WIPE` ending a
+branch's arm stays IN that arm - the skipped path genuinely does not wipe, and Baron plans
+accordingly. Only a wipe written below a label claims every path through it, which for a wipe means
+"however you got here, everything was just swept" - true only if every arm really does.
+
+### ZA_INDEXEDBY ###
+
+An indexed access (`table,X`, `table,Y`, `(table,X)`) is normally trusted: Baron cannot know what
+the index register holds at run time, so keeping it in range is yours - and Baron says so with a
+default-level warning at every undeclared site. `ZA_INDEXEDBY` declares the values the register
+can hold at the access just before it - a declared access is *checked*, not trusted, and assembles
+in silence:
+
+```
+ZA_AUTO 8, frames
+    LDX #7
+.loop
+    LDA frames,X : ZA_INDEXEDBY 0..7    ; checked: every index stays inside the 8 bytes
+    DEX : BPL loop
+```
+
+The operand flattens like `EQUB` data - a range (`0..7`), a list (`{0, 2, 4}`), a comma run, or a
+symbol bound to any of those - and each value must be 0-255 (an index register holds a byte). Baron
+checks that the constant base plus the *largest* declared index stays inside the variable; a
+`(table,X)` reads a two-byte pair at the indexed offset, so the pair's second byte must fit too:
+
+```
+ZA_AUTO 4, quad
+    LDA quad,X : ZA_INDEXEDBY 0..3      ; fine - the whole variable
+    LDA quad,X : ZA_INDEXEDBY 0..4      ; refused - index 4 reaches past the end
+    LDA quad+2,X : ZA_INDEXEDBY 0..1    ; fine - base 2 leaves room for 0..1
+    LDA (quad,X) : ZA_INDEXEDBY 0..2    ; fine - the pair at offset 2 just fits
+```
+
+An in-range declaration also quiets the unchecked-index warning for that access - there is
+nothing left to warn about. TRUSTED like every annotation, but a smaller promise than most: only
+that the register stays inside the declared set at that instruction; the geometry is checked for
+you.
+
+One thing it does *not* do: discard. `STA arr,X : ZA_INDEXEDBY 0..7` bounds where the store can
+land, but a single execution still writes just one, unknowable byte - it proves nothing about the
+other seven. An array rebuilt through indexed stores still wants its [`ZA_DISCARD`](#za_discard)
+where the old value dies; the two annotations answer different questions - *where can an access
+land* versus *when is a value dead* - and compose happily on the same store.
+
+### ZA_ENTRY ###
+
+Put this at the top of any routine that the *outside world* calls. A routine that only BASIC ever
+`CALL`s is referenced by nothing in the program, so to Baron it looks like dead code:
 
 ```
 .blit
@@ -477,8 +602,10 @@ know an auto-allocated address. That draws a warning naming the variable
 (`ZA_AUTO input to a ZA_ENTRY routine`). The fix is one of two: give the variable a fixed home as
 above, or initialise it in the routine before the first read.
 
-**`ZA_INTERRUPT`** - the same marker, for interrupt handlers. These need more than a "way in", because
-an interrupt fires between any two instructions. Say the handler counts frames:
+### ZA_INTERRUPT ###
+
+The same marker, for interrupt handlers. These need more than a "way in", because an interrupt
+fires between any two instructions. Say the handler counts frames:
 
 ```
 ZA_AUTO1 vsync
@@ -498,9 +625,9 @@ nothing the handler touches can land on a byte the main program might be using w
 Temporaries *inside* the handler still share with each other as usual, and two marked handlers are
 kept apart from each other too (an NMI can land mid-IRQ).
 
-Two honest limits: a *multi-byte* variable shared with a handler can still be caught half-updated
-(keep shared state to single bytes, or bring your own interlock), and an RTS-dispatch inside a handler
-is as invisible here as anywhere - `ZA_CANJUMP` it.
+Two limits worth knowing: a *multi-byte* variable shared with a handler can still be caught
+half-updated (keep shared state to single bytes, or bring your own interlock), and an RTS-dispatch
+inside a handler is as invisible here as anywhere - `ZA_CANJUMP` it.
 
 ## The rules ##
 
@@ -521,9 +648,14 @@ What the allocator will not accept, and what it trusts you with:
   is refused - that byte belongs to someone else. The constant base of an indexed access is checked the
   same way (`table+16,X` is off the end before X gets a say).
 - **The run-time index is yours.** `table,X` is fine while X stays inside the declared width; Baron
-  can't check that at assembly time, so it trusts you (there's an opt-in warning, if you want to audit
-  every site). It likewise can't see a self-modified operand or a stray pointer aimed into the pool -
-  keeping those out is your side of the bargain.
+  can't check that at assembly time, so it trusts you - and warns at every undeclared site (default
+  level). A `ZA_INDEXEDBY` declaring the index set turns the trust into a real bounds check and the
+  warning off.
+- **Strays aimed into the pool are yours too.** Baron can't see a self-modified operand or a
+  *computed* pointer aimed into the pool - keeping those out is your side of the bargain. A pointer
+  with a *fixed* address or base is the one stray it can see: `--warn 2` flags every store whose
+  literal address lands in the pool, and a deliberate one - the boot-time wipe - is blessed with
+  `ZA_WIPE`.
 - **No fresh per-level value across recursion.** If a recursive routine writes a variable afresh at
   each level of the recursion and needs it back afterwards, one static byte can't hold a value per
   level, and Baron refuses. A counter merely `DEC`ed/`INC`ed through the recursion is one running value
@@ -589,15 +721,19 @@ fall back to a hand-placed address.
 | `ZA_AUTO1 dereferenced as a pointer (declare it ZA_AUTO2)` | `(var),Y` on a one-byte variable. |
 | `Access past the end of ZA_AUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
 | `ZA_DISCARD needs a whole ZA_AUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZA_AUTO` variable, whole. |
+| `ZA_WIPE must follow a store instruction` | The marker annotates the store before it; here the previous instruction was not a memory write (or there was none). Put it right after the sweeping store. |
+| `ZA_INDEXEDBY must follow an indexed ZA_AUTO access` | The annotation describes the access before it; here the previous instruction was not an indexed access to a `ZA_AUTO` variable (or there was none). Put it right after the `var,X` / `var,Y` / `(var,X)` it bounds. |
+| `Declared index reaches past the end of ZA_AUTO variable: '...'` | The constant base plus the largest `ZA_INDEXEDBY` index (plus a pair's second byte, for `(var,X)`) lands outside the variable. Widen it, or shrink the declared set. |
 | `ZA_ENTRY/ZA_INTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |
 | `BITABS resumes in the middle of an instruction` | The instruction after a `BITABS`/`BITZP` runs past the skip's resume point (a 3-byte instruction under a `BITABS`, say), so the two streams interleave mid-instruction. Swallow something that fits. |
 
-And five warnings:
+And six warnings (the default level shows in every run; opt-in ones need `--warn 2`):
 
 | Message | Level | What happened |
 |---------|-------|---------------|
 | `ZA_RETURNTO target does not begin an assembled instruction` | default | The declared resumption point matches no code Baron assembled - usually a mistyped label, or an address inside the inline data. That arm gets no edge; if it genuinely names an OS address, the warning is yours to wave through. |
 | `Unused ZA_AUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition** - referencing it is an error, exactly as if the declaration were not there. Use it or remove it. |
-| `Unchecked indexed access into ZA_AUTO variable: '...'` | opt-in | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. |
+| `Unchecked indexed access into ZA_AUTO variable: '...'` | default | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. Declare the index set with `ZA_INDEXEDBY` and the access is checked instead (no warning). |
+| `Store into the ZA_POOL at a fixed address: '...'` | opt-in | A store whose literal address or indexed base lies inside the pool without naming a `ZA_AUTO` - it may be quietly stomping an allocated variable. A deliberate whole-pool wipe is blessed with `ZA_WIPE`. |
 | `ZA_AUTO used in code unreachable from any entry (missing ZA_ENTRY/ZA_INTERRUPT, or dead code)` | default | Nothing can reach this code from any entry. Usually a handler or a BASIC-called routine missing its marker; sometimes dead code; occasionally a routine behind a computed call that wants a `ZA_CANCALL`. |
-| `ZA_AUTO input to a ZA_ENTRY routine: '...' (external callers cannot know its address)` | default | A `ZA_ENTRY` routine reads the variable and *nothing in the program could have written it first* - the value can only come from the caller, and an outside caller cannot know an auto-allocated address. Give the interface a fixed home (see `ZA_ENTRY` above), or initialise the variable before the first read. A write on any path silences it (a guarded init, a setup routine that may skip work, counts as supplying the value - the flag correlations that make such code correct are yours to uphold). |
+| `ZA_AUTO input to a ZA_ENTRY routine: '...' (external callers cannot know its address)` | default | A `ZA_ENTRY` routine reads the variable and *nothing in the program could have written it first* - the value can only come from the caller, and an outside caller cannot know an auto-allocated address. Give the interface a fixed home (see `ZA_ENTRY` above), or initialise the variable before the first read. A write on any path silences it - a guarded init counts as supplying the value, and the correlations that make such code correct are yours to uphold. |

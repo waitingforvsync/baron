@@ -38,6 +38,7 @@ static void display_help(void)
     puts("  -vv              As -v, but dump every emitted byte (8 per line) and whole list values");
     puts("  --beebasm-true   BeebAsm compatibility: TRUE coerces to -1 rather than 1");
     puts("  --symbols <file> Write every source file's resolved symbols to a JSON file");
+    puts("  --warn <n>       Show warnings up to level n (default 1; 2 adds the opt-in checks)");
     puts("");
     puts("Options for generating a .ssd disk image:");
     puts("  -o <file>        Create a .ssd disk image containing the saved sections");
@@ -89,7 +90,7 @@ static bool option_takes_value(const char *arg)
 {
     return strcmp(arg, "-o") == 0 || strcmp(arg, "-p") == 0 || strcmp(arg, "-D") == 0
         || strcmp(arg, "--title") == 0 || strcmp(arg, "--opt") == 0 || strcmp(arg, "--cycle") == 0
-        || strcmp(arg, "--symbols") == 0 || log_channel(arg) >= 0;
+        || strcmp(arg, "--symbols") == 0 || strcmp(arg, "--warn") == 0 || log_channel(arg) >= 0;
 }
 
 
@@ -131,6 +132,7 @@ int main(int argc, char **argv)
     const char *log_paths[baron_num_channels] = {0};   // -logN: write PRINT channel N to this file
     int32_t boot = 0;
     int32_t cycle = 0;
+    int32_t warn_level = severity_warning;   // --warn <n>: report warnings up to this level
     bool pad = false;            // --pad: fill the image out to a whole 80-track disc
     bool disc_options = false;   // any of --title/--opt/--cycle/--pad, which only mean something with -o
     int files = 0;
@@ -188,6 +190,9 @@ int main(int argc, char **argv)
             cycle = parse_option_value("--cycle", argv[++i], 99);
             disc_options = true;
         }
+        else if (strcmp(argv[i], "--warn") == 0 && i + 1 < argc) {
+            warn_level = parse_option_value("--warn", argv[++i], 255);
+        }
         else if (strcmp(argv[i], "--pad") == 0) {
             pad = true;
             disc_options = true;
@@ -201,7 +206,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (boot < 0 || cycle < 0) {
+    if (boot < 0 || cycle < 0 || warn_level < 0) {
         return 1;   // parse_option_value already complained
     }
     if (files == 0) {
@@ -261,7 +266,7 @@ int main(int argc, char **argv)
         rc_str path = rc_str_from_cstr(argv[i]);
         baron_result r = assemble_file(&desc, path);
 
-        rc_str rep = report_render(&r, path, severity_warning, &cli);
+        rc_str rep = report_render(&r, path, (uint8_t) warn_level, &cli);
         if (rep.len != 0) {
             fprintf(stderr, "%.*s", (int) rep.len, rep.data);
         }

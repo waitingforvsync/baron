@@ -69,13 +69,17 @@ typedef enum error_type {
     error_type_za_auto_recursion,     // a var FRESHLY written then held live across a recursive call (needs a byte per level)
     error_type_za_auto_computed_flow, // ZA_AUTO active past a computed/indirect jump the analysis cannot follow
     error_type_za_auto_register_name, // a ZA_AUTO variable named 'A' - ambiguous with accumulator addressing
-    error_type_za_auto_indexed_access, // a ZA_AUTO reached by indexed / indexed-indirect addressing (var,X etc.) - opt-in warning, user owns the index bounds
+    error_type_za_auto_indexed_access, // a ZA_AUTO reached by indexed / indexed-indirect addressing (var,X etc.) - default warning unless ZA_INDEXEDBY declares the index set
     error_type_za_auto_unused,        // a ZA_AUTO no instruction touches - warned, given no address, and left undefined
     error_type_za_auto_narrow_pointer, // a 1-byte ZA_AUTO1 dereferenced as a pointer ((var),Y / (var)) - needs ZA_AUTO2
     error_type_za_auto_out_of_bounds, // a var+n access reaches past the ZA_AUTO variable's declared width
     error_type_za_auto_bad_width,     // ZA_AUTO <count> with a count outside 1..256
     error_type_za_auto_address,       // a ZA_AUTO address used where a number is needed NOW - addresses exist only after allocation
     error_type_za_discard_needs_var,  // a ZA_DISCARD operand that is not a whole ZA_AUTO variable
+    error_type_za_pool_store,         // opt-in warning: a store whose fixed address / indexed base lies inside the ZA_POOL
+    error_type_za_wipe_needs_store,   // a ZA_WIPE that does not follow a store instruction
+    error_type_za_indexedby_needs_indexed, // a ZA_INDEXEDBY that does not follow an indexed ZA_AUTO access
+    error_type_za_indexedby_out_of_range,  // a declared index takes the access past the variable's end
     error_type_za_entry_no_code,      // a ZA_ENTRY/ZA_INTERRUPT marker whose pc begins no assembled instruction
     error_type_za_entry_input,        // warning: a ZA_ENTRY routine reads a ZA_AUTO before writing it - callers cannot know its address
     error_type_za_auto_unreachable,   // warning: ZA_AUTO-touching code unreachable from every declared/default root

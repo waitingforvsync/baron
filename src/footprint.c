@@ -62,7 +62,16 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
         }
         for (uint32_t k = 0; k < blk.num_insns; k++) {
             zp_insn n = rc_view_zp_insn_get(c->insns, blk.first_insn + k);
-            if (n.vreg != RC_INDEX_NONE && !n.var_kill) {
+            if (n.marker == zp_marker_wipe) {
+                // A ZA_WIPE genuinely rewrites the whole pool: the routine touches every variable, and
+                // each write is fresh (killed), so a caller's value held live across a call in here -
+                // recursive or not - rightly conflicts with everything.
+                for (uint32_t v = 0; v < c->touched->num; v++) {
+                    rc_bitset_set(c->touched, v);
+                    rc_bitset_set(c->killed, v);
+                }
+            }
+            if (n.vreg != RC_INDEX_NONE && n.marker != zp_marker_discard) {
                 // A ZA_DISCARD marker is not a touch: it stores nothing, so a caller's variable sharing the
                 // byte is safe across a callee that merely discards - and it must not feed killed, whose
                 // job is spotting FRESH per-level values across recursion.

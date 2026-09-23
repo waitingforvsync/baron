@@ -186,7 +186,7 @@ typedef struct touch_window {
 
 static touch_window insn_window(zp_insn n, uint16_t width)
 {
-    if (n.var_kill) {
+    if (n.marker == zp_marker_discard) {
         // A ZA_DISCARD "writes" the whole variable: the old value is promised dead here. No bytes are
         // read, and the caller must not treat this as a store (no pin).
         return (touch_window) {.write_first = 0, .write_count = width};
@@ -418,6 +418,10 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                                                                mwb.view, nbytes, &scratch);
                                 rc_bitset_union(&mrow, &ck);
                             }
+                            if (n.marker == zp_marker_wipe) {
+                                rc_bitset_union(&mrow, &full);   // a ZA_WIPE definitely writes every byte
+                                continue;
+                            }
                             if (n.vreg == RC_INDEX_NONE) {
                                 continue;
                             }
@@ -564,6 +568,10 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                         rc_bitset_union(&new_in, rc_span_bitset_at(bin, rc_view_u32_get(ct.blocks, c)));
                     }
                 }
+                if (n.marker == zp_marker_wipe) {
+                    rc_bitset_reset(&new_in);   // a ZA_WIPE rewrites every byte: nothing is live before it
+                    continue;
+                }
                 if (n.vreg == RC_INDEX_NONE) {
                     continue;
                 }
@@ -624,12 +632,18 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                     rc_bitset_union(&live, rc_span_bitset_at(bin, rc_view_u32_get(ct.blocks, c)));
                 }
             }
+            if (n.marker == zp_marker_wipe) {
+                // The DISCARD carve-out writ large: a ZA_WIPE ends EVERY value's range, and pins
+                // nothing - it has no variable of its own to pin, and by its promise nothing survives.
+                rc_bitset_reset(&live);
+                continue;
+            }
             if (n.vreg == RC_INDEX_NONE) {
                 continue;
             }
             touch_window w  = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
             uint32_t     vb = rc_span_u32_get(ids.base, n.vreg);
-            if (n.var_kill) {
+            if (n.marker == zp_marker_discard) {
                 // A ZA_DISCARD ends the old value's range without storing anything: clear the bytes, pin
                 // nothing - another variable may own them at this very instant, and that is the point.
                 for (uint32_t i = 0; i < w.write_count; i++) {
@@ -744,7 +758,7 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
 // new one.
 static touch_window may_write_window(zp_insn n, uint16_t width)
 {
-    if (n.var_kill || !(n.rw & vref_write)) {
+    if (n.marker == zp_marker_discard || !(n.rw & vref_write)) {
         return (touch_window) {0};
     }
 
@@ -770,6 +784,7 @@ typedef struct rbw_ctx {
     rc_array_u32        *stack;    // the extent walk's worklist
     rc_span_bitset       mayin, mayout;   // per-block "bytes some route may have written by here"
     rc_bitset           *row;      // one scratch row
+    const rc_bitset     *full;     // every byte id, for a ZA_WIPE's whole-pool write
     rc_arena            *scratch;  // backs the worklist's (never-needed) growth
 } rbw_ctx;
 
@@ -818,6 +833,10 @@ static bool may_write_flow(rbw_ctx *c, uint32_t e)
                     for (uint32_t a = 0; a < ct.blocks.num; a++) {
                         rc_bitset_union(c->row, rc_view_bitset_at(c->mayb, rc_view_u32_get(ct.blocks, a)));
                     }
+                }
+                if (n.marker == zp_marker_wipe) {
+                    rc_bitset_union(c->row, c->full);   // a ZA_WIPE may (indeed does) write every byte
+                    continue;
                 }
                 if (n.vreg == RC_INDEX_NONE) {
                     continue;
@@ -899,6 +918,7 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
         .mayin   = mayin,
         .mayout  = mayout,
         .row     = &row,
+        .full    = &full,
         .scratch = &scratch,
     };
 
@@ -977,6 +997,10 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
                             for (uint32_t a = 0; a < ct.blocks.num; a++) {
                                 rc_bitset_union(&acc, rc_span_bitset_at(mayb, rc_view_u32_get(ct.blocks, a)));
                             }
+                        }
+                        if (n.marker == zp_marker_wipe) {
+                            rc_bitset_union(&acc, &full);   // a ZA_WIPE supplies every byte from here on
+                            continue;
                         }
                         if (n.vreg == RC_INDEX_NONE) {
                             continue;
@@ -1239,7 +1263,7 @@ static uint32_t kill_marker(rc_array_zp_insn *insns, uint32_t pc, uint32_t vreg,
 {
     rc_array_zp_insn_push(insns,
         (zp_insn) {.pc = pc, .size = 0, .flow = zp_flow_normal, .rw = vref_none, .vreg = vreg,
-                   .var_kill = true, .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE,
+                   .marker = zp_marker_discard, .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE,
                    .target_def = cursor_none(), .at = (cursor) {0}},
         arena);
     return pc;

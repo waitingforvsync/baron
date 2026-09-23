@@ -336,6 +336,13 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // whose continuation an annotation reroutes or severs. The terminator cut matters where inline
     // data displaces the next instruction: the after-address leader then marks a pc nothing sits on,
     // and without the cut the terminator would sit mid-block, losing its edges.
+    //
+    // At a leader the cut lands on the LABEL record, or failing that on the first REAL instruction -
+    // never on a ZA_DISCARD/ZA_WIPE marker. A marker shares the next instruction's address, so its
+    // stream position against the label is the only trace of which side the user wrote it on: one
+    // before the label glues into the block falling in (its promise stays on that path), one after
+    // the label belongs to the join the label names. The one exception is a marker just past a
+    // terminator (the RTS-dispatch idiom): the fall path is dead, so it binds forward with the cut.
     uint32_t current  = RC_INDEX_NONE;
     uint32_t prev_sec = 0;
     uint32_t prev_pc  = 0;
@@ -345,13 +352,19 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
 
         // Within one section pc must never step backward - the property that keeps (section, pc) an
         // unambiguous block identity; it holds by construction, so this asserts rather than handles.
-        // Equal pcs DO occur (a size-0 ZA_DISCARD shares its neighbour's address), which is why a cut
-        // starts a new block only when the address CHANGES - same-pc records share a block, marker
-        // first. A real terminator always advances the pc, so its cut is never lost to that guard.
+        // Equal pcs DO occur (size-0 markers share their neighbour's address). A real terminator
+        // always advances the pc, so its carried cut is never lost to the new_addr guard; and the
+        // at_new_entry guard makes a second cut at one address impossible, so a marker that absorbed
+        // the address transition cannot cost the real instruction behind it its leader cut.
         RC_ASSERT(i == 0 || insn.section != prev_sec || insn.pc >= prev_pc);
         bool new_addr = i == 0 || insn.section != prev_sec || insn.pc != prev_pc;
+        bool at_new_entry = current == RC_INDEX_NONE
+                         || rc_array_basic_block_get(&blocks, current).section != insn.section
+                         || rc_array_basic_block_get(&blocks, current).pc != insn.pc;
         if (i == 0 || insn.section != prev_sec
-            || (new_addr && (addr_is_leader(&leaders, insn.section, insn.pc) || prev_cuts))) {
+            || (new_addr && prev_cuts)
+            || (at_new_entry && addr_is_leader(&leaders, insn.section, insn.pc)
+                && (insn.marker == zp_marker_label || insn.size > 0))) {
             current = rc_array_basic_block_push(
                 &blocks,
                 (basic_block) {
@@ -546,6 +559,16 @@ static uint32_t push_insn(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, z
                    .at = (cursor) {0}},
         arena);
     return pc + size;
+}
+
+// A size-0 marker record (ZA_DISCARD / ZA_WIPE / a label) at pc - the address of whatever comes next.
+static void push_marker(rc_array_zp_insn *insns, uint32_t pc, uint8_t kind, rc_arena *arena)
+{
+    rc_array_zp_insn_push(insns,
+        (zp_insn) {.pc = pc, .size = 0, .flow = zp_flow_normal, .rw = vref_none, .vreg = RC_INDEX_NONE,
+                   .marker = kind, .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE,
+                   .target_def = cursor_none(), .at = (cursor) {0}},
+        arena);
 }
 
 // A BITZP/BITABS marker: one emitted byte whose operand fetch swallows the next swallow bytes at run
@@ -871,35 +894,111 @@ RC_TEST(cfg, vector_jump_external_vs_own_label)
     rc_arena_deinit(&arena);
 }
 
-RC_TEST(cfg, size0_marker_shares_its_address)
+RC_TEST(cfg, size0_marker_binds_to_its_path)
 {
-    // A ZA_DISCARD marker is a size-0 record at the same pc as the instruction after it. The pair must land
-    // in ONE block - marker first - even when that address is a leader, so (section, pc) stays a unique
-    // block identity and a branch to the address still resolves.
+    // A ZA_DISCARD marker written above a leader (here, the loop head at 2002) glues into the block
+    // FALLING IN - its promise stays on the textual path - while the leader cut lands on the first
+    // real instruction. The back edge re-enters at the loop head without passing the marker.
     rc_arena arena = rc_arena_make_default();
     rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
     rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
     uint32_t pc = 0x2000;
     pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
-    rc_array_zp_insn_push(&insns,
-        (zp_insn) {.pc = pc, .size = 0, .flow = zp_flow_normal, .vreg = 0, .var_kill = true,
-                   .target = RC_INDEX_NONE, .target_scope = RC_INDEX_NONE, .target_def = cursor_none(),
-                   .at = (cursor) {0}},
-        &arena);                                                            // (ZA_DISCARD) @2002
+    push_marker(&insns, pc, zp_marker_discard, &arena);                     // (ZA_DISCARD) @2002
     pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
     pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2002,        &arena);   // BNE 2002 @2004
     pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2006
     (void) pc;
 
     cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
-    RC_CHECK(g.blocks.num, ==, 3u);                       // [2000] [marker+2002+branch] [2006]
+    RC_CHECK(g.blocks.num, ==, 3u);                       // [2000+marker] [2002+branch] [2006]
     uint32_t bi = cfg_block_at(g, 0, 0x2002);
     RC_CHECK_TRUE(bi != RC_INDEX_NONE);
     basic_block blk = rc_view_basic_block_get(g.blocks, bi);
-    RC_CHECK(blk.first_insn, ==, 1u);                     // the marker opens the block...
-    RC_CHECK(blk.num_insns, ==, 3u);                      // ...and the branch closes it
-    RC_CHECK(blk.succ_count, ==, 2u);                     // fall-through first, then the taken edge
-    RC_CHECK(cfg_succ(g, blk, 1), ==, bi);                // the loop edge resolves to the marker's block
+    RC_CHECK(blk.first_insn, ==, 2u);                     // the real instruction opens the loop head...
+    RC_CHECK(blk.num_insns, ==, 2u);                      // ...and the branch closes it - no marker inside
+    RC_CHECK(cfg_succ(g, blk, 1), ==, bi);                // the loop edge resolves to the loop head
+    basic_block fall = rc_view_basic_block_get(g.blocks, cfg_block_at(g, 0, 0x2000));
+    RC_CHECK(fall.num_insns, ==, 2u);                     // LDA + the marker, path-scoped
+    RC_CHECK(fall.succ_count, ==, 1u);                    // marker-tailed block still falls through cleanly
+    RC_CHECK(cfg_succ(g, fall, 0), ==, bi);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, label_marker_is_the_cut_pivot)
+{
+    // The same loop with a label record at the head: the cut lands ON the label, so a marker's stream
+    // position against it decides its block - before the label = the path falling in, after = the join.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+
+    // Above the label: [marker, label, insn] - the marker stays with the fall path.
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    push_marker(&insns, pc, zp_marker_discard, &arena);                     // (ZA_DISCARD) @2002
+    push_marker(&insns, pc, zp_marker_label,   &arena);                     // .loop @2002
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2002,        &arena);   // BNE 2002 @2004
+    (void) pc;
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 2u);
+    basic_block head = rc_view_basic_block_get(g.blocks, cfg_block_at(g, 0, 0x2002));
+    RC_CHECK(head.first_insn, ==, 2u);                    // the label opens the loop head
+    RC_CHECK(head.num_insns, ==, 3u);                     // label + LDA + branch; the discard is outside
+    basic_block fall = rc_view_basic_block_get(g.blocks, cfg_block_at(g, 0, 0x2000));
+    RC_CHECK(fall.num_insns, ==, 2u);                     // LDA + the discard
+
+    // Below the label: [label, marker, insn] - the marker belongs to the join, on every path.
+    rc_array_zp_insn insns2 = rc_array_zp_insn_make(8, &arena);
+    pc = 0x2000;
+    pc = push_insn(&insns2, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2000
+    push_marker(&insns2, pc, zp_marker_label,   &arena);                     // .loop @2002
+    push_marker(&insns2, pc, zp_marker_discard, &arena);                     // (ZA_DISCARD) @2002
+    pc = push_insn(&insns2, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2002
+    pc = push_insn(&insns2, pc, 2, zp_flow_branch, 0x2002,        &arena);   // BNE 2002 @2004
+    (void) pc;
+    cfg g2 = cfg_build(insns2.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(g2.blocks.num, ==, 2u);
+    basic_block head2 = rc_view_basic_block_get(g2.blocks, cfg_block_at(g2, 0, 0x2002));
+    RC_CHECK(head2.first_insn, ==, 1u);                   // the label opens the loop head...
+    RC_CHECK(head2.num_insns, ==, 4u);                    // ...and the discard sits INSIDE it this time
+    basic_block fall2 = rc_view_basic_block_get(g2.blocks, cfg_block_at(g2, 0, 0x2000));
+    RC_CHECK(fall2.num_insns, ==, 1u);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, marker_after_terminator_binds_forward)
+{
+    // Past a terminator there is no live fall path to bind to, so a marker there rides the terminator
+    // cut into the NEXT block - marker first, label and code gluing in behind it. This is what keeps
+    // the RTS-dispatch idiom (RTS : ZA_DISCARD v : ZA_CANJUMP target : .target) meaning "v dies at
+    // the dispatch target's entry".
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct backing: by-value scratch must not alias arena
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x2003,        &arena);   // BNE 2003 @2000
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2002
+    push_marker(&insns, pc, zp_marker_discard, &arena);                     // (ZA_DISCARD) @2003
+    push_marker(&insns, pc, zp_marker_label,   &arena);                     // .target @2003
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);   // LDA  @2003
+    pc = push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);   // RTS  @2005
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    RC_CHECK(g.blocks.num, ==, 3u);                       // [branch] [rts] [marker+label+lda+rts]
+    uint32_t bi = cfg_block_at(g, 0, 0x2003);
+    RC_CHECK_TRUE(bi != RC_INDEX_NONE);
+    basic_block blk = rc_view_basic_block_get(g.blocks, bi);
+    RC_CHECK(blk.first_insn, ==, 2u);                     // the marker opens the target block
+    RC_CHECK(blk.num_insns, ==, 4u);
+    basic_block br = rc_view_basic_block_get(g.blocks, cfg_block_at(g, 0, 0x2000));
+    RC_CHECK(cfg_succ(g, br, 1), ==, bi);                 // the taken edge still resolves there
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

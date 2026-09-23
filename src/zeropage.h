@@ -53,6 +53,18 @@ typedef enum zp_flow {
     zp_flow_skip,
 } zp_flow;
 
+// The size-0 marker kinds that share the instruction stream with real records. A marker emits no
+// bytes, so it carries the address of the NEXT instruction; its position in the STREAM says which
+// side of a label it was written on, and the CFG builder cuts blocks on the label records - which
+// is what binds a ZA_DISCARD/ZA_WIPE to the path it was written on rather than to every path
+// through its address (see cfg.c pass 2).
+typedef enum zp_marker {
+    zp_marker_none = 0,   // a real instruction
+    zp_marker_discard,    // ZA_DISCARD: a full-width kill of its variable that pins nothing
+    zp_marker_wipe,       // ZA_WIPE: the preceding store sweeps the pool - every byte written here
+    zp_marker_label,      // a label stood here: the block-cut pivot for the markers above
+} zp_marker;
+
 // How a control transfer reaches its destination. A DIRECT transfer's operand IS the destination (abs / rel).
 // An indirect JMP goes THROUGH a vector: its operand names the vector cell, and the destination is whatever
 // that cell holds at run time. We can still reason about it when the cell lies OUTSIDE the program - a fixed
@@ -82,8 +94,12 @@ typedef struct zp_insn {
     cursor   var_def;          // def cursor of the operand's base name, or cursor_none
     bool     var_indexed;      // reached by an indexed / indexed-indirect mode: outside the envelope (finalize warns)
     bool     var_indirect;     // dereferenced as a zero-page POINTER ((var),Y / (var)): ZA_AUTO1 here is refused
+    bool     var_indexed_ptr;  // the indexed access reads a 2-byte entry per slot ((var,X) / JMP (var,X))
+    bool     index_valid;      // a ZA_INDEXEDBY declared this access's index set, so it is checked, not trusted...
+    uint8_t  index_max;        // ...and this is the set's largest value (what the bounds check reaches with)
     uint32_t var_offset;       // compile-time byte offset into the var (k for var+k), or RC_INDEX_NONE if unknown
-    bool     var_kill;         // a ZA_DISCARD marker, not a real instruction: a full-width kill that pins nothing
+    uint8_t  marker;           // zp_marker: which size-0 marker kind this record is, or none (size == 0 iff marker != none)
+    uint32_t literal_addr;     // a non-ZA_AUTO zero-page operand's known address/base, or RC_INDEX_NONE (pool-store check)
     uint32_t target;           // branch/jump/call target address (same section only), or RC_INDEX_NONE
     uint32_t target_scope;     // scope of the target LABEL, when the operand named one, else RC_INDEX_NONE
     cursor   target_def;       // def cursor of the target label, or cursor_none; with target_scope, its identity
@@ -226,6 +242,10 @@ void zeropage_resolve_vregs(zeropage *zp);
 uint32_t         zeropage_insn_count(const zeropage *zp);
 zp_insn          zeropage_insn_get(const zeropage *zp, uint32_t index);
 rc_view_zp_insn  zeropage_insns(const zeropage *zp);   // the whole insn list, for the CFG builder
+
+// Fold a ZA_INDEXEDBY declaration onto a recorded access: the largest declared index is what the
+// bounds check reaches with. A second declaration on the same access unions (the larger max wins).
+void zeropage_set_index_max(zeropage *zp, uint32_t index, uint8_t max);
 
 // Record one control-flow annotation (final pass only). Returns its index.
 uint32_t         zeropage_add_cflow(zeropage *zp, zp_cflow cf);

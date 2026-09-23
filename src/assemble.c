@@ -34,6 +34,8 @@ static parse_result handle_za_canjump(baron *b, cursor stmt, cursor at, uint32_t
 static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_returnto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_wipe(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_za_indexedby(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_entry(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_za_interrupt(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_equb(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -470,6 +472,8 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("za_return"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_return}}},   // this jump returns to our caller
     {RC_STR_INIT("za_returnto"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_returnto}}},   // where a JSR resumes
     {RC_STR_INIT("za_discard"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_discard}}},   // a variable's value dies here
+    {RC_STR_INIT("za_wipe"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_wipe}}},   // the store before sweeps the whole pool
+    {RC_STR_INIT("za_indexedby"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_indexedby}}},   // the index set of the access before
     {RC_STR_INIT("za_entry"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_za_entry}}},   // an external entry root
     {RC_STR_INIT("za_interrupt"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_za_interrupt}}},   // an interrupt handler root
     {RC_STR_INIT("equb"),   {.type = lexeme_type_keyword, .keyword = {.handle = handle_equb}}},
@@ -592,7 +596,11 @@ parse_result require_separator(baron *b, cursor at)
 
 
 // The one place that projects baron into an expr_env; the cursor's source+pos double as the parse
-// start and the use site (for the impure @- / @+ locals).
+// start and the use site (for the impure @- / @+ locals). NOTE the result's backing (a list's
+// elements, a string's bytes) lives in the region OUR by-value scratch copy claimed - unclaimed
+// memory from the caller's point of view - so a caller that allocates into its own scratch while
+// still holding the value tramples it (the scratch-arena aliasing trap). Stage such work in
+// per_pass instead (see flatten_to_list's call sites).
 expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -978,44 +986,37 @@ static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// Add one ZA_POOL value's bytes to the reserve set, mirroring emit_data's descent (range
-// enumerated, list flattened, scalar one byte); each must land in the zero page.
-static parse_result za_pool_add(baron *b, value v, parse_flags flags, cursor at, rc_arena scratch)
+// Add one ZA_POOL value's bytes to the reserve set: the operand flattens like EQUB's data
+// (flatten_to_list - range enumerated, list descended), and each leaf must land in the zero page.
+static parse_result za_pool_add(baron *b, value v, parse_flags flags, cursor at)
 {
     if (!flags.active) {
         return (parse_result) {0};
     }
 
-    if (value_is_range(v)) {
-        return za_pool_add(b, range_to_list(v.range, &scratch), flags, at, scratch);
-    }
-
-    if (value_is_list(v)) {
-        parse_result acc = {0};
-        for (uint32_t i = 0; i < v.list.num; i++) {
-            acc = fold(acc, za_pool_add(b, rc_view_value_get(v.list, i), flags, at, scratch));
+    // Flatten into per_pass, NOT scratch: v's own backing lives in the region the caller's eval
+    // claimed - unclaimed from our copy's point of view - so a scratch allocation here would
+    // trample the very value we are reading (the scratch-arena aliasing trap).
+    bool unresolved = false;
+    value flat = flatten_to_list(v, b->per_pass);
+    for (uint32_t i = 0; i < flat.list.num; i++) {
+        // A numeric, a forward reference, or an error (a string leaf lands here as operand_not_numeric).
+        int_argument arg = int_argument_make(rc_view_value_get(flat.list, i), flags.final, at.pos);
+        if (arg.type == int_argument_type_error) {
+            semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
         }
-        return acc;
+        else if (arg.type == int_argument_type_unresolved) {
+            unresolved = true;   // a forward-referenced address settles on a later pass
+        }
+        else if (arg.value < 0 || arg.value >= zeropage_size) {
+            semantic_error(b, flags, error_type_reserve_not_zeropage, at);
+        }
+        else {
+            zeropage_reserve(&b->zeropage, (uint32_t) arg.value);
+        }
     }
 
-    // A numeric, a forward reference, or an error (a string / list leaf lands here as operand_not_numeric).
-    int_argument arg = int_argument_make(v, flags.final, at.pos);
-    if (arg.type == int_argument_type_error) {
-        semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
-        return (parse_result) {0};
-    }
-
-    if (arg.type == int_argument_type_unresolved) {
-        return (parse_result) {.unresolved = true};   // a forward-referenced address settles on a later pass
-    }
-
-    if (arg.value < 0 || arg.value >= zeropage_size) {
-        semantic_error(b, flags, error_type_reserve_not_zeropage, at);
-        return (parse_result) {0};
-    }
-
-    zeropage_reserve(&b->zeropage, (uint32_t) arg.value);
-    return (parse_result) {0};
+    return (parse_result) {.unresolved = unresolved};
 }
 
 
@@ -1038,7 +1039,7 @@ static parse_result handle_za_pool(baron *b, cursor stmt, cursor at, uint32_t sc
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        parse_result ra = za_pool_add(b, e.value, flags, cursor_at(at, pos), scratch);
+        parse_result ra = za_pool_add(b, e.value, flags, cursor_at(at, pos));
         unresolved |= ra.unresolved;
 
         lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
@@ -1210,13 +1211,13 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
 }
 
 
-// The instruction a trailing annotation binds to: the last recorded one, skipping ZA_DISCARD
-// markers, IF its flow fits the annotation's kind (binding to nothing beats mis-annotating).
-// A BITZP/BITABS skip fits nothing: a real emitted byte detaches a trailing annotation.
+// The instruction a trailing annotation binds to: the last recorded one, skipping size-0 markers
+// (ZA_DISCARD / ZA_WIPE), IF its flow fits the annotation's kind (binding to nothing beats
+// mis-annotating). A BITZP/BITABS skip fits nothing: a real emitted byte detaches a trailing annotation.
 static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 {
     uint32_t ni = zeropage_insn_count(&b->zeropage);
-    while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).var_kill) {
+    while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).size == 0) {
         ni--;
     }
 
@@ -1247,40 +1248,37 @@ static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 }
 
 
-// Record one annotation target value as cflows sited at site: ranges and lists flatten like EQUB's
-// data, so a symbol bound to a whole target table (handlers = {a, b}) annotates in one word.
+// Record one annotation target value as cflows sited at site: the operand flattens like EQUB's
+// data (flatten_to_list), so a symbol bound to a whole target table (handlers = {a, b}) annotates
+// in one word.
 static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cflow_kind kind,
-                                         parse_flags flags, cursor at, rc_arena scratch)
+                                         parse_flags flags, cursor at)
 {
-    if (value_is_range(v)) {
-        return record_cflow_targets(b, range_to_list(v.range, &scratch), site, kind, flags, at, scratch);
-    }
-
-    if (value_is_list(v)) {
-        parse_result acc = {0};
-        for (uint32_t i = 0; i < v.list.num; i++) {
-            acc = fold(acc, record_cflow_targets(b, rc_view_value_get(v.list, i), site, kind, flags, at, scratch));
+    bool unresolved = false;
+    value flat = flatten_to_list(v, b->per_pass);   // per_pass, not scratch: v's backing aliases scratch
+    for (uint32_t i = 0; i < flat.list.num; i++) {
+        int_argument arg = int_argument_no_za_auto(
+            int_argument_make(rc_view_value_get(flat.list, i), flags.final, at.pos), at.pos);
+        switch ((int_argument_type) arg.type) {
+            case int_argument_type_known:
+                zeropage_add_cflow(&b->zeropage, (zp_cflow) {
+                    .site   = site,
+                    .target = (uint32_t) (arg.value & 0xFFFF),
+                    .kind   = (uint8_t) kind,
+                    .at     = at,
+                });
+                break;
+            case int_argument_type_unresolved:
+                unresolved = true;   // a forward target: settle it next pass
+                break;
+            case int_argument_type_error:
+            default:
+                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+                break;
         }
-        return acc;
     }
 
-    int_argument arg = int_argument_no_za_auto(int_argument_make(v, flags.final, at.pos), at.pos);
-    switch ((int_argument_type) arg.type) {
-        case int_argument_type_known:
-            zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-                .site   = site,
-                .target = (uint32_t) (arg.value & 0xFFFF),
-                .kind   = (uint8_t) kind,
-                .at     = at,
-            });
-            return (parse_result) {0};
-        case int_argument_type_unresolved:
-            return (parse_result) {.unresolved = true};   // a forward target: settle it next pass
-        case int_argument_type_error:
-        default:
-            semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
-            return (parse_result) {0};
-    }
+    return (parse_result) {.unresolved = unresolved};
 }
 
 
@@ -1304,7 +1302,7 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
         }
 
         if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage) && site != RC_INDEX_NONE) {
-            parse_result rec = record_cflow_targets(b, e.value, site, kind, flags, cursor_at(at, pos), scratch);
+            parse_result rec = record_cflow_targets(b, e.value, site, kind, flags, cursor_at(at, pos));
             unresolved |= rec.unresolved;
         }
 
@@ -1403,7 +1401,8 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
                         .var_scope    = arg.zp_scope,
                         .var_def      = arg.zp_def,
                         .var_offset   = 0,
-                        .var_kill     = true,
+                        .marker       = zp_marker_discard,
+                        .literal_addr = RC_INDEX_NONE,
                         .target       = RC_INDEX_NONE,
                         .target_scope = RC_INDEX_NONE,
                         .target_def   = cursor_none(),
@@ -1427,6 +1426,146 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
         }
         parse_result r = require_separator(b, cursor_at(at, e.next));
         r.unresolved = unresolved;
+        return r;
+    }
+}
+
+
+// ZA_WIPE - a trusted assertion that the store just before it sweeps the ENTIRE pool (the boot-time
+// zero-page wipe idiom). Every ZA_AUTO byte counts as written here: liveness ends every earlier
+// value, may/must-write treat every variable as freshly supplied, and the store's own fixed pool
+// address is not warned about. A size-0 marker like ZA_DISCARD; the one check is that a store
+// actually stands before it.
+static parse_result handle_za_wipe(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) stmt;
+    (void) scope;
+    (void) scratch;
+    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+        // Back past any fellow markers to the last real instruction, which must be a memory write -
+        // anything else is a misplaced annotation, not a wipe.
+        uint32_t ni = zeropage_insn_count(&b->zeropage);
+        while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).size == 0) {
+            ni--;
+        }
+
+        zp_insn prev = ni > 0 ? zeropage_insn_get(&b->zeropage, ni - 1) : (zp_insn) {0};
+        if (ni == 0 || prev.flow != zp_flow_normal || !(prev.rw & vref_write)) {
+            semantic_error(b, flags, error_type_za_wipe_needs_store, cursor_at(at, at.pos));
+        }
+        else {
+            zeropage_add_insn(&b->zeropage, (zp_insn) {
+                .pc           = sections_pc(&b->sections, section),
+                .size         = 0,
+                .flow         = zp_flow_normal,
+                .rw           = vref_none,
+                .vreg         = RC_INDEX_NONE,
+                .var_scope    = RC_INDEX_NONE,
+                .var_def      = cursor_none(),
+                .var_offset   = RC_INDEX_NONE,
+                .marker       = zp_marker_wipe,
+                .literal_addr = RC_INDEX_NONE,
+                .target       = RC_INDEX_NONE,
+                .target_scope = RC_INDEX_NONE,
+                .target_def   = cursor_none(),
+                .section      = section,
+                .at           = cursor_at(at, at.pos),
+            });
+        }
+    }
+
+    return require_separator(b, at);
+}
+
+
+// The running result of flattening a ZA_INDEXEDBY operand list: the largest index seen so far
+// (meaningful once any is), folded parse flags for the deferral plumbing.
+typedef struct index_fold {
+    parse_result r;
+    uint32_t     max;
+    bool         any;
+} index_fold;
+
+// Fold one ZA_INDEXEDBY value into the running maximum: the operand flattens like EQUB's data
+// (flatten_to_list), and each leaf must be a plain 0..255 value - an index register only holds a byte.
+static index_fold indexedby_fold(baron *b, value v, index_fold acc,
+                                 parse_flags flags, cursor at)
+{
+    value flat = flatten_to_list(v, b->per_pass);   // per_pass, not scratch: v's backing aliases scratch
+    for (uint32_t i = 0; i < flat.list.num; i++) {
+        int_argument arg = int_argument_no_za_auto(
+            int_argument_make(rc_view_value_get(flat.list, i), flags.final, at.pos), at.pos);
+        switch ((int_argument_type) arg.type) {
+            case int_argument_type_known:
+                if (arg.value < 0 || arg.value > 255) {
+                    semantic_error(b, flags, error_type_value_out_of_range, at);
+                }
+                else {
+                    acc.max = acc.any && acc.max > (uint32_t) arg.value ? acc.max : (uint32_t) arg.value;
+                    acc.any = true;
+                }
+                break;
+            case int_argument_type_unresolved:
+                acc.r.unresolved = true;   // a forward bound: settle it next pass
+                break;
+            case int_argument_type_error:
+            default:
+                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+                break;
+        }
+    }
+
+    return acc;
+}
+
+
+// ZA_INDEXEDBY <values> - declares every value the index register can hold at the indexed ZA_AUTO
+// access just before it, so finalize bounds-checks the whole access and the unchecked-index warning
+// has nothing left to say. Ranges and lists flatten like EQUB's data (ZA_INDEXEDBY 0..7). TRUSTED -
+// the register staying inside the declared set is the user's promise, like any annotation.
+static parse_result handle_za_indexedby(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    (void) stmt;
+    rc_str src = source_files_text(&b->source_files, at.source);
+    uint32_t pos = at.pos;
+
+    // The access this annotation describes: back past any size-0 markers to the last real
+    // instruction, which must be an indexed ZA_AUTO access (only the final pass records, so only
+    // then is there anything to bind to).
+    uint32_t site = RC_INDEX_NONE;
+    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+        uint32_t ni = zeropage_insn_count(&b->zeropage);
+        while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).size == 0) {
+            ni--;
+        }
+        zp_insn prev = ni > 0 ? zeropage_insn_get(&b->zeropage, ni - 1) : (zp_insn) {0};
+        if (ni == 0 || !prev.var_indexed || cursor_is_none(prev.var_def)) {
+            semantic_error(b, flags, error_type_za_indexedby_needs_indexed, cursor_at(at, at.pos));
+        }
+        else {
+            site = ni - 1;
+        }
+    }
+
+    index_fold acc = {0};
+    while (true) {
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        if (e.error != expr_error_none) {
+            return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+        }
+        if (site != RC_INDEX_NONE) {
+            acc = indexedby_fold(b, e.value, acc, flags, cursor_at(at, pos));
+        }
+        lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
+        if (lr.token.type == lexeme_type_comma) {
+            pos = lr.next;
+            continue;   // another index follows
+        }
+        if (site != RC_INDEX_NONE && acc.any) {
+            zeropage_set_index_max(&b->zeropage, site, (uint8_t) acc.max);
+        }
+        parse_result r = require_separator(b, cursor_at(at, e.next));
+        r.unresolved = acc.r.unresolved;
         return r;
     }
 }
@@ -1479,55 +1618,54 @@ static void emit_le(baron *b, uint32_t section, uint64_t bits, uint32_t width)
 }
 
 
-// Emit one value as width-byte little-endian units (EQUB/EQUW/EQUD = 1/2/4): a string character by
-// character, a range enumerated, a list descended; anything else is one unit, where a forward
-// reference emits a zero placeholder of the right size and asks for another pass.
-static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags flags, cursor at, uint32_t width, rc_arena scratch)
+// Emit one value as width-byte little-endian units (EQUB/EQUW/EQUD = 1/2/4): the operand flattens
+// like every list-taking keyword's (flatten_to_list - range enumerated, list descended), then a
+// string leaf goes character by character and anything else is one unit, where a forward reference
+// emits a zero placeholder of the right size and asks for another pass.
+static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags flags, cursor at, uint32_t width)
 {
     if (!flags.active) {
         return (parse_result) {0};
     }
 
-    if (value_is_string(v)) {
-        for (uint32_t i = 0; i < v.string.len; i++) {
-            emit_le(b, section, (uint8_t) v.string.data[i], width);
+    // Flatten into per_pass, NOT scratch: v's own backing lives in the region the caller's eval
+    // claimed, which our by-value scratch copy would happily allocate over (the trap that turned
+    // EQUB {1, {2, 3}, 4} into 01 02 03 03 when this first flattened into scratch).
+    bool unresolved = false;
+    value flat = flatten_to_list(v, b->per_pass);
+    for (uint32_t i = 0; i < flat.list.num; i++) {
+        value leaf = rc_view_value_get(flat.list, i);
+        if (value_is_string(leaf)) {
+            for (uint32_t c = 0; c < leaf.string.len; c++) {
+                emit_le(b, section, (uint8_t) leaf.string.data[c], width);
+            }
+            continue;
         }
-        return (parse_result) {0};
-    }
 
-    if (value_is_range(v)) {
-        return emit_data(b, section, range_to_list(v.range, &scratch), flags, at, width, scratch);   // enumerated to a list (or an error leaf)
-    }
-
-    if (value_is_list(v)) {
-        parse_result acc = {0};
-        for (uint32_t i = 0; i < v.list.num; i++) {
-            acc = fold(acc, emit_data(b, section, rc_view_value_get(v.list, i), flags, at, width, scratch));
+        // A numeric, a forward reference, or some other error value - one width-byte unit either way.
+        int_argument arg = int_argument_make(leaf, flags.final, at.pos);
+        if (arg.type == int_argument_type_error) {
+            semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
+            emit_le(b, section, 0, width);   // best-effort placeholder; keeps the size stable
+            continue;
         }
-        return acc;
+
+        if (arg.type == int_argument_type_unresolved) {
+            emit_le(b, section, 0, width);   // placeholder of the right width; forces another pass
+            unresolved = true;
+            continue;
+        }
+
+        // We allow signed values, so the window is -(2^(8*width)-1) .. (2^(8*width)-1); recorded once settled.
+        int64_t limit = (int64_t) ((1ull << (8 * width)) - 1);
+        if (arg.value < -limit || arg.value > limit) {
+            semantic_error(b, flags, error_type_value_out_of_range, at);
+        }
+
+        emit_le(b, section, (uint64_t) arg.value, width);
     }
 
-    // A numeric, a forward reference, or some other error value - one width-byte unit either way.
-    int_argument arg = int_argument_make(v, flags.final, at.pos);
-    if (arg.type == int_argument_type_error) {
-        semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
-        emit_le(b, section, 0, width);   // best-effort placeholder; keeps the size stable
-        return (parse_result) {0};
-    }
-
-    if (arg.type == int_argument_type_unresolved) {
-        emit_le(b, section, 0, width);   // placeholder of the right width; forces another pass
-        return (parse_result) {.unresolved = true};
-    }
-
-    // We allow signed values, so the window is -(2^(8*width)-1) .. (2^(8*width)-1); recorded once settled.
-    int64_t limit = (int64_t) ((1ull << (8 * width)) - 1);
-    if (arg.value < -limit || arg.value > limit) {
-        semantic_error(b, flags, error_type_value_out_of_range, at);
-    }
-
-    emit_le(b, section, (uint64_t) arg.value, width);
-    return (parse_result) {0};
+    return (parse_result) {.unresolved = unresolved};
 }
 
 
@@ -1547,7 +1685,7 @@ static parse_result handle_equ(baron *b, cursor stmt, cursor at, uint32_t scope,
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        parse_result em = emit_data(b, section, e.value, flags, cursor_at(at, pos), width, scratch);
+        parse_result em = emit_data(b, section, e.value, flags, cursor_at(at, pos), width);
         if (em.fatal) {
             return em;
         }
@@ -1797,6 +1935,31 @@ static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
+// Drop a size-0 label marker into the instruction stream. Its position in the STREAM (not just its
+// address) is what the CFG's block cutting pivots on: a ZA_DISCARD/ZA_WIPE recorded before it binds
+// to the path falling in, one recorded after it belongs to the join the label names.
+static void record_label_marker(baron *b, cursor at, uint32_t section)
+{
+    zeropage_add_insn(&b->zeropage, (zp_insn) {
+        .pc           = sections_pc(&b->sections, section),
+        .size         = 0,
+        .flow         = zp_flow_normal,
+        .rw           = vref_none,
+        .vreg         = RC_INDEX_NONE,
+        .var_scope    = RC_INDEX_NONE,
+        .var_def      = cursor_none(),
+        .var_offset   = RC_INDEX_NONE,
+        .marker       = zp_marker_label,
+        .literal_addr = RC_INDEX_NONE,
+        .target       = RC_INDEX_NONE,
+        .target_scope = RC_INDEX_NONE,
+        .target_def   = cursor_none(),
+        .section      = section,
+        .at           = at,
+    });
+}
+
+
 static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -1845,9 +2008,11 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         r.changed = (st == symbol_status_changed);
 
         // Tie the label's identity (scope, def) to its placement, so a transfer that names it finds
-        // the right block even where banks share the address.
+        // the right block even where banks share the address - and mark the stream, so markers know
+        // which side of the label they were written on.
         if (flags.final && zeropage_is_enabled(&b->zeropage)) {
             zeropage_add_label(&b->zeropage, scope, at, section, sections_pc(&b->sections, section));
+            record_label_marker(b, at, section);
         }
     }
     else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), at)) {
@@ -1932,6 +2097,12 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
             note_unsettled(b, at, RC_STR(".@"), was, pc);   // the key is unspellable - name it as written
         }
         r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
+
+        // No zeropage_add_label (@+/@- resolve by value, never by identity), but the stream marker
+        // still matters: a .@ is a branch target markers may need to sit on the right side of.
+        if (flags.final && zeropage_is_enabled(&b->zeropage)) {
+            record_label_marker(b, at, section);
+        }
     }
     else if (cursor_is_equal(scopes_symbol_def(&b->scopes, scope, key.view), at)) {
         // The @source:pos key is unique per position, but keep the guard uniform with named labels.
@@ -2242,8 +2413,15 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
             }
         }
         else {
+            // The sequence is staged in per_pass, NOT scratch: an eval'd list's backing lives in
+            // the region the eval's own scratch copy claimed, and every body statement's evaluation
+            // allocates right over it - iteration two onwards would bind trampled garbage (the
+            // scratch-arena aliasing trap; EQUB x + SUM({1,2,3}) in the body found it).
             if (value_is_range(seq)) {
-                seq = range_to_list(seq.range, &scratch);
+                seq = range_to_list(seq.range, b->per_pass);
+            }
+            else if (value_is_list(seq)) {
+                seq = value_make_copy(seq, b->per_pass);
             }
             if (value_is_list(seq)) {
                 items = seq.list;
@@ -2392,7 +2570,7 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
                     return syntax_error(b, error_type_source_load, cursor_at(at, at.pos));
                 }
                 rc_str bytes = {.data = (const char *) f.contents.view.data, .len = f.contents.view.num};
-                pulled = emit_data(b, section, value_make_string(bytes), flags, cursor_at(at, at.pos), 1, scratch);
+                pulled = emit_data(b, section, value_make_string(bytes), flags, cursor_at(at, at.pos), 1);
             }
             else {
                 // Settling passes: reserve the file's size without reading it, so pc / later labels are right.
@@ -3154,6 +3332,49 @@ static void pin_var(liveness *lv, uint32_t v, uint32_t nv)
 }
 
 
+// Opt-in warning (Guard 0c): a store whose statically known address or indexed base lies inside the
+// ZA_POOL without naming a ZA_AUTO - the one stray pointer aimed into the pool the analysis CAN see.
+// A trailing ZA_WIPE marker vouches for the boot-wipe idiom; anything else may be quietly stomping
+// an allocated variable, which is the very thing the allocator exists to prevent.
+static void warn_pool_store(baron *b, rc_view_zp_insn insns, uint32_t i)
+{
+    zp_insn n = rc_view_zp_insn_get(insns, i);
+    if (n.literal_addr == RC_INDEX_NONE || !(n.rw & vref_write)
+        || !zeropage_is_reserved(&b->zeropage, n.literal_addr)) {
+        return;
+    }
+
+    // A ZA_WIPE bound to this store sits just after it in the stream (markers may stack).
+    for (uint32_t j = i + 1; j < insns.num && rc_view_zp_insn_get(insns, j).size == 0; j++) {
+        if (rc_view_zp_insn_get(insns, j).marker == zp_marker_wipe) {
+            return;
+        }
+    }
+
+    // "&NN" in a small stack buffer; the recorder copies it into the diagnostic's arena.
+    char storage[8];
+    rc_mstr addr = {.data = storage, .len = 0, .cap = sizeof storage};
+    rc_mstr_append_char(&addr, '&', NULL);
+    rc_mstr_append_hex8(&addr, (uint8_t) n.literal_addr, NULL);
+    baron_warning_payload(b, error_type_za_pool_store, n.at, severity_optional, addr.view);
+}
+
+
+// Does a REAL instruction begin at exactly (section, pc)? The "is there code here" test for the
+// markers-on-data checks. A block existing there is no longer proof: a label on a data run records
+// a size-0 marker, and a marker can head a block of its own.
+static bool code_at(rc_view_zp_insn insns, uint32_t section, uint32_t pc)
+{
+    for (uint32_t i = 0; i < insns.num; i++) {
+        zp_insn n = rc_view_zp_insn_get(insns, i);
+        if (n.section == section && n.pc == pc && n.size > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
 // Post-convergence zero-page allocation. Layout has settled with every ZA_AUTO reference sized as
 // a placeholder zero-page access, so assigning a real byte cannot perturb size. The governing rule
 // is CERTAINTY: only a program it can prove correct is accepted - anything else becomes a clear
@@ -3178,17 +3399,32 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // only advances) - two instructions at one address cannot happen.
 
     // Guard 0 (indexed access): the WHOLE variable is reserved and all live, so an in-width index
-    // is sound; the run-time index is unprovable, so an overrun is on the user - an OPT-IN warning,
-    // the same trust as ZA_CANCALL.
+    // is sound; the run-time index is unprovable, so an overrun is on the user - a default-level
+    // warning (silent assembly requires the annotation). A ZA_INDEXEDBY declaration changes the
+    // deal: the access becomes CHECKABLE (base offset plus the largest declared index, a pair's
+    // second byte for the indirect forms, must stay inside the variable), and in range the warning
+    // has nothing left to say.
     // Guard 0b (bounds): a var+offset access (2 bytes for a pointer deref) must lie WITHIN the
     // declared width; a 1-byte var used as a pointer gets the pointed "declare it ZA_AUTO2" message.
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn n = rc_view_zp_insn_get(insns, i);
         if (n.vreg == RC_INDEX_NONE) {
+            warn_pool_store(b, insns, i);   // Guard 0c: a fixed address aimed into the pool
             continue;
         }
-        if (n.var_indexed) {
-            baron_warning_payload(b, error_type_za_auto_indexed_access, n.at, severity_optional,
+        if (n.var_indexed && n.index_valid) {
+            uint32_t base   = n.var_offset != RC_INDEX_NONE ? n.var_offset : 0;
+            uint32_t access = n.var_indexed_ptr ? 2u : 1u;
+            if ((uint64_t) base + n.index_max + access > zeropage_var_get(&b->zeropage, n.vreg).width) {
+                baron_error_payload(b, error_type_za_indexedby_out_of_range, n.at,
+                                    zeropage_var_get(&b->zeropage, n.vreg).name);
+                refused = true;
+            }
+        }
+        else if (n.var_indexed) {
+            // Default-visible: an unchecked run-time index is the one hole in the certainty
+            // contract a user can close - declare the set with ZA_INDEXEDBY and it goes quiet.
+            baron_warning_payload(b, error_type_za_auto_indexed_access, n.at, severity_warning,
                                   zeropage_var_get(&b->zeropage, n.vreg).name);
         }
         if (n.var_offset != RC_INDEX_NONE) {
@@ -3241,6 +3477,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 
     // A ZA_RETURNTO point that begins no assembled instruction got no edge - almost always a
     // mistyped label. Warn rather than refuse: resuming into the OS is exotic but expressible.
+    // The test is for a REAL instruction, not a block: a label on the data records a marker there.
     for (uint32_t i = 0; i < cflows.num; i++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
         if (cf.kind != zp_cflow_za_returnto) {
@@ -3249,7 +3486,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         for (uint32_t j = 0; j < insns.num; j++) {
             zp_insn n = rc_view_zp_insn_get(insns, j);
             if (n.flow == zp_flow_call && n.pc == cf.site) {
-                if (cfg_block_at(g, n.section, cf.target) == RC_INDEX_NONE) {
+                if (!code_at(insns, n.section, cf.target)) {
                     baron_warning(b, error_type_za_returnto_no_code, cf.at, severity_warning);
                 }
                 break;
@@ -3292,7 +3529,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             any_sync = true;   // the declaration replaces the defaults even if it fails to resolve
         }
         uint32_t bi = cfg_block_at(g, e.section, e.pc);
-        if (bi == RC_INDEX_NONE) {
+        if (bi == RC_INDEX_NONE || !code_at(insns, e.section, e.pc)) {
+            // No block, or a block a label marker opened on data: either way no instruction here.
             baron_error(b, error_type_za_entry_no_code, e.at);
             refused = entry_unknown = true;
             continue;
@@ -3339,7 +3577,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             basic_block blk = rc_view_basic_block_get(g.blocks, bi);
             for (uint32_t i = 0; !rc_bitset_is_set(&reach, bi) && i < blk.num_insns; i++) {
                 zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
-                if (n.vreg != RC_INDEX_NONE && !n.var_kill) {   // a stray ZA_DISCARD is not a use worth warning over
+                if (n.vreg != RC_INDEX_NONE && n.marker != zp_marker_discard) {   // a stray ZA_DISCARD is not a use worth warning over
                     rc_bitset_set(&offending, bi);
                     any_offending = true;
                     break;
@@ -3484,11 +3722,14 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     }
                 }
             }
-            if (n.vreg != RC_INDEX_NONE) {
+            if (n.marker == zp_marker_wipe) {
+                rc_bitset_reset(&live);   // a ZA_WIPE rewrites the whole pool: nothing survives it
+            }
+            else if (n.vreg != RC_INDEX_NONE) {
                 // A write ends the range only when it covers the whole variable on its own
                 // (zp_insn_write_kills). At this sweep's variable granularity a fully-rewriting
                 // store PAIR conservatively stays live - extra edges only, never missed ones.
-                if (n.var_kill) {
+                if (n.marker == zp_marker_discard) {
                     rc_bitset_clear(&live, n.vreg);   // a ZA_DISCARD ends the whole variable's range, pinning nothing
                 }
                 else if (zp_insn_write_kills(n, zeropage_var_get(&b->zeropage, n.vreg).width)) {
@@ -3845,6 +4086,18 @@ static uint32_t diag_count(const baron_result *r, error_type code)
         }
     }
     return n;
+}
+
+// The severity level of the first diagnostic carrying code (0xFF when none does).
+static uint8_t diag_severity(const baron_result *r, error_type code)
+{
+    for (uint32_t i = 0; i < r->diagnostics.num; i++) {
+        diagnostic d = rc_view_diagnostic_get(r->diagnostics, i);
+        if (d.code == code) {
+            return d.severity;
+        }
+    }
+    return 0xFF;
 }
 
 // The payload of the first diagnostic carrying code ({0} when none does).
@@ -4833,10 +5086,12 @@ RC_TEST_STEP(assemble, za_auto_recursion_shared_vs_per_level, fix)
 RC_TEST_STEP(assemble, za_auto_indexed_access_warns, fix)
 {
     // Indexed access is sound within the variable's width (the whole variable is reserved and
-    // live); the run-time index is unprovable, so it is an OPT-IN warning, not a refusal.
+    // live); the run-time index is unprovable, so it is a warning, not a refusal - at the DEFAULT
+    // level, so silent assembly requires a ZA_INDEXEDBY declaration.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, table : STA table : LDA table,X : RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);              // it assembles: no error-severity diagnostic
-    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_indexed_access)); // ... but the opt-in warning is recorded
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_auto_indexed_access)); // ... but the warning is recorded
+    RC_CHECK(diag_severity(&fix->r, error_type_za_auto_indexed_access), ==, (uint8_t) severity_warning);
     RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);                       // and the table is placed as usual
 
     // v,Y (widens to absolute indexed, no zp form) and (p,X) (indexed-indirect) are likewise warned, not refused.
@@ -4864,6 +5119,158 @@ RC_TEST_STEP(assemble, za_auto_indexed_access_warns, fix)
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO2 p : STA p : STA p+1 : LDA (p),Y") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));
+}
+
+RC_TEST_STEP(assemble, za_auto_widened_indexed_stays_visible, fix)
+{
+    // LDA var,Y has no zero-page encoding, so the assembler widens the ZA_AUTO base to absolute
+    // indexed - and the absolute cell carries no rw flags. record_insn borrows the touch class from
+    // the mnemonic's zp cell, or the access would vanish from liveness entirely. First the shape
+    // that once classified the variable UNUSED (binding removed, LDA &0000,Y shipped): a read-only
+    // table now allocates and emits its real base.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : ZA_AUTO 4, table : LDA table,Y : RTS"),
+                          (uint8_t[]) {0xB9, 0x70, 0x00, 0x60}, 4));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_unused));
+    RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);
+
+    // The widened READ keeps the table live: t's store lands between the table's seeding and its
+    // indexed read, so t must stay off the table's bytes (before the fix it took &70 - a silent
+    // runtime clobber of the byte the LDA was about to read).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 2, table : ZA_AUTO1 t\n"
+                      "LDA #1 : STA table : LDA #2 : STA table+1\n"
+                      "LDA #9 : STA t : LDY #1 : LDA table,Y : ADC t : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "t"),     ==, 0x72);
+
+    // The widened WRITE pins: STA table,Y while keep's value is live across forces the two apart
+    // (an indexed store proves no kill, but it must still interfere with everything live over it).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 2, table : ZA_AUTO1 keep\n"
+                      "LDA #1 : STA keep : LDA #0 : STA table,Y : LDA keep : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "keep"),  ==, 0x72);
+
+    // LDX var,Y HAS a zero-page encoding, so it never widens - the zpy path is untouched by the
+    // borrow and still emits the short form with its own correct read flag.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDX v,Y : RTS"),
+                          (uint8_t[]) {0x85, 0x70, 0xB6, 0x70, 0x60}, 5));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, za_indexedby_validates_the_range, fix)
+{
+    // A declared index set turns the trust warning into a real bounds check: in range, the access
+    // is CHECKED and the opt-in warning has nothing left to say.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, table : LDA table,X : ZA_INDEXEDBY 0..3 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));
+    RC_CHECK(zp_addr(&fix->r, "table"), ==, 0x70);
+
+    // One index too many reaches past the variable: refused, naming it.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, table : LDA table,X : ZA_INDEXEDBY 0..4 : RTS")
+                  == error_type_za_indexedby_out_of_range);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_indexedby_out_of_range), ==, RC_STR("table"));
+
+    // The constant base counts: table+2 leaves room for indices 0..1 only.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, table : LDA table+2,X : ZA_INDEXEDBY 0..1 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, table : LDA table+2,X : ZA_INDEXEDBY 0..2 : RTS")
+                  == error_type_za_indexedby_out_of_range);
+
+    // Lists and comma runs flatten like EQUB's data; only the largest index matters.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 8, t : LDA t,X : ZA_INDEXEDBY {0, 3}, 7 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 8, t : LDA t,X : ZA_INDEXEDBY {0, 8} : RTS")
+                  == error_type_za_indexedby_out_of_range);
+
+    // The widened LDA t,Y checks the same way, and (p,X) reads a PAIR at the indexed offset - the
+    // declared bound must leave room for the second byte.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, t : LDA t,Y : ZA_INDEXEDBY 0..3 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, p : STA p : LDA (p,X) : ZA_INDEXEDBY 0..2 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, p : STA p : LDA (p,X) : ZA_INDEXEDBY 0..3 : RTS")
+                  == error_type_za_indexedby_out_of_range);
+}
+
+RC_TEST_STEP(assemble, za_indexedby_errors, fix)
+{
+    // Must follow an indexed ZA_AUTO access: a direct access, a literal indexed base and an empty
+    // stream all refuse - there is nothing whose index set it could describe.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : ZA_INDEXEDBY 0..3 : RTS")
+                  == error_type_za_indexedby_needs_indexed);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : LDA &60,X : ZA_INDEXEDBY 0..3 : RTS")
+                  == error_type_za_indexedby_needs_indexed);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : ZA_INDEXEDBY 0 : STA v : LDA v : RTS")
+                  == error_type_za_indexedby_needs_indexed);
+
+    // An index register holds a byte: anything outside 0..255 is no index.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, t : LDA t,X : ZA_INDEXEDBY 256 : RTS")
+                  == error_type_value_out_of_range);
+
+    // A forward-referenced bound resolves like any symbol; a dead branch owes nothing (and defers
+    // nothing - the minimum two passes suffice).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, t : LDA t,X : ZA_INDEXEDBY 0..n : RTS\nn = 3") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));
+    RC_CHECK(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, t : STA t : LDA t : IF 0 : ZA_INDEXEDBY bogus : ENDIF : RTS"), ==, 2u);
+}
+
+RC_TEST_STEP(assemble, za_indexedby_does_not_discard, fix)
+{
+    // A full-width declaration bounds WHERE the store can land; it says nothing about WHEN the old
+    // value dies - one execution still writes one unknowable byte, proving nothing about the rest.
+    // The confines-indexed-array shape (za_discard_confines_indexed_array) stays leaky with the
+    // declaration in place of the ZA_DISCARD: the warning goes quiet, the bytes do not come back.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      ".loop LDA &90 : BEQ done : LSR A : BCC toa\n"
+                      "JMP rb\n"
+                      ".toa JMP ra\n"
+                      ".done RTS\n"
+                      ".ra { ZA_AUTO 4, arr : LDX #0\n"
+                      ".l STA arr,X : ZA_INDEXEDBY 0..3 : INX : CPX #4 : BNE l\n"
+                      "LDA arr+0 : STA &91 : JMP loop }\n"
+                      ".rb { ZA_AUTO1 t : STA t : LDA t : STA &91 : JMP loop }\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_indexed_access));   // the store is checked...
+    RC_CHECK(zp_addr(&fix->r, "ra.arr"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "rb.t"), ==, 0x74);   // ...but nothing is freed: t still dodges arr's span
+}
+
+RC_TEST_STEP(assemble, za_pool_store_warns, fix)
+{
+    // A store whose fixed address aims into the pool bypasses the allocator's bookkeeping entirely -
+    // the one stray pointer we CAN see statically. Opt-in warning, naming the address.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : STA &72 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_pool_store), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_pool_store), ==, RC_STR("&72"));
+    RC_CHECK(diag_severity(&fix->r, error_type_za_pool_store), ==, (uint8_t) severity_optional);
+
+    // An indexed base counts too (the boot-wipe shape), and a read-modify-write is a store.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : STA &70,X : INC &7F : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_pool_store), ==, 2u);
+
+    // Quiet: a plain read of a pool byte, a store outside the pool, and the attributed STA v itself.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : LDA &72 : STA &6F : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_pool_store));
+
+    // A named constant is a fixed address too - the check is by value, not spelling.
+    RC_CHECK_TRUE(ASM("x = &72\nZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : STA x : RTS") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_pool_store), ==, 1u);
+
+    // The widened forms count when the base sits under &100: STA &70,Y has no zero-page encoding,
+    // but it aims into the pool just as surely as STA &70,X does. A high base stays exempt.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : STA &70,Y : STA &2000,Y : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_pool_store), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_pool_store), ==, RC_STR("&70"));
 }
 
 RC_TEST_STEP(assemble, za_auto_generic_width, fix)
@@ -6097,6 +6504,131 @@ RC_TEST_STEP(assemble, za_discard_is_must_write_at_the_call, fix)
     #undef PREP_CALL
 }
 
+RC_TEST_STEP(assemble, za_wipe_suppresses_pool_store, fix)
+{
+    // The boot-wipe idiom: annotating the sweeping store vouches for its literal base...
+    #define WIPE(marker) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 v\n" \
+        "LDX #0 : TXA\n" \
+        ".wl STA &70,X" marker " : INX : CPX #&10 : BCC wl\n" \
+        "STA v : LDA v : RTS\n"
+    RC_CHECK_TRUE(ASM(WIPE(" : ZA_WIPE")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_pool_store));
+
+    // ...and without it the same loop is warned.
+    RC_CHECK_TRUE(ASM(WIPE("")) != 0);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_za_pool_store));
+    #undef WIPE
+
+    // Markers stack: a ZA_DISCARD between the store and its ZA_WIPE upsets neither.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v\n"
+                      "STA &70,X : ZA_DISCARD v : ZA_WIPE : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_pool_store));
+}
+
+RC_TEST_STEP(assemble, za_wipe_errors, fix)
+{
+    // ZA_WIPE annotates the store before it; anywhere else it is a misplaced promise.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : ZA_WIPE") == error_type_za_wipe_needs_store);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : LDA &70 : ZA_WIPE") == error_type_za_wipe_needs_store);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70 : JSR sub : ZA_WIPE : .sub RTS") == error_type_za_wipe_needs_store);
+
+    // A dead branch owes nothing, and the spelling stays free for a label.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70 : IF FALSE : ZA_WIPE : ENDIF : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM(".za_wipe RTS") != 0);
+}
+
+RC_TEST_STEP(assemble, za_wipe_initializes_entry_inputs, fix)
+{
+    // A program relying on the wipe for initialisation: ctr's only direct touch is the INC
+    // read-modify-write, so without the wipe its read looks like an external input; the wipe's
+    // whole-pool write supplies it.
+    #define BOOT(marker) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 ctr\n" \
+        ".entry ZA_ENTRY : LDX #0 : TXA\n" \
+        ".wl STA &70,X" marker " : INX : CPX #&10 : BCC wl\n" \
+        "INC ctr : RTS\n"
+    RC_CHECK_TRUE(ASM(BOOT(" : ZA_WIPE")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_pool_store));
+
+    // The control: unannotated, the INC's read really is unsupplied.
+    RC_CHECK_TRUE(ASM(BOOT("")) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 1u);
+    #undef BOOT
+}
+
+RC_TEST_STEP(assemble, za_wipe_ends_every_live_range, fix)
+{
+    // v1's stale post-wipe read would naively hold it live across v2's whole range; the wipe ends
+    // every range at the marker, so v2 shares v1's byte - the promise outranks the stale read.
+    #define ACROSS(marker) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 v1, v2\n" \
+        "STA v1\n" \
+        "STA v2 : LDA v2\n" \
+        "STA &70,X" marker "\n" \
+        "LDA v1 : RTS\n"
+    RC_CHECK_TRUE(ASM(ACROSS("")) != 0);
+    RC_CHECK(zp_addr(&fix->r, "v1"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "v2"), ==, 0x71);   // v1 live across v2's range: distinct bytes
+
+    RC_CHECK_TRUE(ASM(ACROSS(" : ZA_WIPE")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v1"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "v2"), ==, 0x70);   // nothing survives the wipe: one byte serves both
+    #undef ACROSS
+}
+
+RC_TEST_STEP(assemble, za_wipe_footprint_touches_everything, fix)
+{
+    // A callee that MAY wipe (one branch) touches every variable yet definitely rewrites nothing:
+    // keep, live across the call, must dodge all of it - even v2, whose own range is nowhere near.
+    // The ZA_WIPE ends the arm and STAYS in it (it binds before .done's label record), so the skip
+    // path genuinely does not wipe - which is exactly what keeps sub's must-write empty.
+    #define MAYBE_WIPER(marker) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 keep, v2\n" \
+        ".main STA keep : JSR sub : LDA keep\n" \
+        "STA v2 : LDA v2 : RTS\n" \
+        ".sub BEQ done : STA &70,X" marker " : .done RTS\n"
+    RC_CHECK_TRUE(ASM(MAYBE_WIPER("")) != 0);
+    RC_CHECK(zp_addr(&fix->r, "keep"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "v2"), ==, 0x70);   // disjoint ranges, empty footprint: one byte
+
+    RC_CHECK_TRUE(ASM(MAYBE_WIPER(" : ZA_WIPE")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "v2"));   // the wipe's footprint is everything
+    #undef MAYBE_WIPER
+}
+
+RC_TEST_STEP(assemble, marker_binds_to_its_path, fix)
+{
+    // The same ZA_DISCARD, either side of a loop label. c is loop-carried (read then rewritten each
+    // time around); t is a temp whose range sits AFTER c's rewrite, where only the CARRY holds c
+    // live. Above the label the discard binds to the way in - the carry survives the back edge, c is
+    // live during t's range, and they get separate bytes. Below the label it re-asserts at every
+    // iteration's head - the carry is severed, c is dead during t's range, and one byte serves both.
+    // (Discarding the seed is deliberate: the test pins the binding, not the style.)
+    #define CARRY(above, below) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 c, t\n" \
+        "LDA #0 : STA c : LDX #4" above "\n" \
+        ".loop " below "LDA c : STA c : STA t : LDA t : DEX : BNE loop\n" \
+        "RTS\n"
+    RC_CHECK_TRUE(ASM(CARRY(" : ZA_DISCARD c", "")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "c"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "t"), ==, 0x71);   // entry-only: the carry keeps c live over t
+
+    RC_CHECK_TRUE(ASM(CARRY("", "ZA_DISCARD c : ")) != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "c"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "t"), ==, 0x70);   // per-iteration: the carry dies at the head
+    #undef CARRY
+}
+
 RC_TEST_STEP(assemble, org_and_labels, fix)
 {
     // A section's org sets label values but not where code lands (code still fills its buffer from index 0).
@@ -6998,6 +7530,13 @@ RC_TEST_STEP(assemble, for_binds_loop_variable, fix)
     // A list literal drives the loop just as a range does.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR x = {10, 20, 30} : LDA #x : NEXT"),
                           (uint8_t[]){0xA9, 0x0A, 0xA9, 0x14, 0xA9, 0x1E}, 6));
+
+    // The sequence survives an allocation-heavy body: an eval'd list's backing sits in memory the
+    // FOR's own scratch copy claimed, and the body's evaluations allocate over it - before the
+    // per_pass staging, iterations two and three here bound trampled garbage (0A 02 03, the tail
+    // elements read as the body's own {1,2,3} leftovers).
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FOR x = {10, 20, 30}\nEQUB x + SUM({1,2,3}) * 0\nNEXT"),
+                          (uint8_t[]){0x0A, 0x14, 0x1E}, 3));
 }
 
 RC_TEST_STEP(assemble, for_iteration_has_its_own_scope, fix)

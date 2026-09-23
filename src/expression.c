@@ -1000,6 +1000,14 @@ static void flatten_into(value v, rc_array_value *out, rc_arena *arena)
 }
 
 
+value flatten_to_list(value v, rc_arena *arena)
+{
+    rc_array_value out = {0};
+    flatten_into(v, &out, arena);
+    return value_make_list(out.view);
+}
+
+
 // The shared reduction body: f(L) folds every leaf to a scalar; f(L, axis) collapses one
 // axis. op + identity pick the specific reduction (sum / product / min / max).
 static value reduce(rc_view_value args, value (*op)(value, value, rc_arena *), value identity, rc_arena *arena)
@@ -1141,9 +1149,7 @@ static value fn_flatten(rc_view_value args, rc_arena *arena)
         return v;
     }
 
-    rc_array_value out = {0};
-    flatten_into(v, &out, arena);
-    return value_make_list(out.view);
+    return flatten_to_list(v, arena);
 }
 
 
