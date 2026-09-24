@@ -255,7 +255,7 @@ All broadcast; trigonometry is in radians.
 | `RANK(x)` | The number of axes (0 for a scalar; 1 for any range, unbounded included). |
 | `REPEATED(n, v)`, `FULL(n, v)` | A list of `n` copies of `v` (two names, one function). |
 | `FLATTEN(x)` | Every leaf, in order, as one flat list. |
-| `CONCAT(a, b, ...)` | Join: each list contributes its elements, each scalar itself. |
+| `CONCAT(a, b, ...)` | Join along the outermost axis: each list (or range) argument contributes its top-level elements, each scalar (strings included) itself - so a scalar and a one-element list are interchangeable. Not a flatten: nesting *inside* elements survives (`CONCAT({1,{2,3}}, 4)` is `{1,{2,3},4}`). To append a list as a single element, wrap it: `CONCAT(xs, {{3,4}})`. |
 | `ZIP(a, b, ...)` | Equal-length lists into a list of tuples: `ZIP({1,2},{3,4})` is `{{1,3},{2,4}}`. |
 | `REVERSE(x)` | The outermost axis reversed (works on strings too). |
 | `SORT(L [, key...])` | Sort ascending by numeric key; extra arguments subscript each element to find its key (`SORT(L, 0)` sorts on first items). |
