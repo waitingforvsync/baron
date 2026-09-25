@@ -1737,7 +1737,8 @@ typedef struct parser {
     rc_str          text;
     const expr_env *env;
     rc_arena       *arena;
-    bool            live;   // a call executes its body only when live
+    bool            live;      // a call executes its body only when live
+    bool            in_body;   // parsing a FUNCTION body, so an error raised here records its origin
 } parser;
 
 // The operand table to lex from: the dynamic one the env carries (base + user-FUNCTION names) when present,
@@ -1903,20 +1904,36 @@ typedef struct body_result {
     uint32_t   next;         // past the return expression, or AT the elif/else/endif keyword, or at EOF
     value      value;        // the return value (stop == body_stop_return); value_make_none() = empty return
     bool       saw_statement;// did any assignment / IF run before the stop (to tell a forward decl from a body)
-    uint16_t error;          // error_type
-    uint32_t   error_at;
-    rc_str     error_detail; // a payload for the error, when one helps (the duplicated local's name)
+    value_error error;       // code error_type_none unless the body failed; placed at its origin
+    uint32_t   error_at;     // where the definition scan reports a malformed body
 } body_result;
 
 static body_result interpret_statements(const parser *p, uint32_t pos, bool active);
 
-static body_result body_fail(error_type code, uint32_t at)
+static body_result body_fail(const parser *p, error_type code, uint32_t at)
 {
     return (body_result) {
         .next     = at,
-        .error    = code,
+        .error    = {
+            .code        = code,
+            .origin_type = value_origin_type_body,
+            .origin      = {p->env->source, at},
+        },
         .error_at = at,
     };
+}
+
+
+// Place an error value raised in this body at pos (the first placement wins, so an error carried in
+// from elsewhere keeps its true origin). Leading blanks are skipped to point at the text itself.
+static value place_error(const parser *p, value v, uint32_t pos)
+{
+    if (value_is_error(v) && v.error.origin_type == value_origin_type_none) {
+        v.error.origin_type = value_origin_type_body;
+        v.error.origin      = (cursor) {p->env->source, lexer_skip_whitespace(p->text, pos)};
+    }
+
+    return v;
 }
 
 
@@ -1942,23 +1959,24 @@ static body_result interpret_assignment(const parser *p, rc_str name, uint32_t p
 {
     lexer_result eq = lexer_next(p->text, pos, assign_only_tokens);
     if (eq.token.type != lexeme_type_assign) {
-        return body_fail(error_type_expected_assign, pos);
+        return body_fail(p, error_type_expected_assign, pos);
     }
 
     parser sp = body_sub(p, active);
     expr_result rhs = parse_precedence(&sp, eq.next, 0);
     if (rhs.error != expr_error_none) {
-        return body_fail(error_type_expression, rhs.error_at);
+        return body_fail(p, error_type_expression, rhs.error_at);
     }
 
+    rhs.value = place_error(p, rhs.value, eq.next);
     cursor at = {p->env->source, name_at};
     if (active) {
         // Bindings are single-assignment: a second live assignment to the same name in one call
         // (a parameter included) would otherwise be silently ignored, which reads like mutation
         // that never happens. Branches are fine - only the live one binds.
         if (scopes_set_symbol(p->env->scopes, p->env->scope_index, name, rhs.value, at) == symbol_status_duplicate) {
-            body_result dup = body_fail(error_type_duplicate_symbol, name_at);
-            dup.error_detail = name;
+            body_result dup = body_fail(p, error_type_duplicate_symbol, name_at);
+            dup.error.detail = name;
             return dup;
         }
     }
@@ -1978,16 +1996,18 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
     parser sp = body_sub(p, active);
     expr_result cond = parse_precedence(&sp, pos, 0);
     if (cond.error != expr_error_none) {
-        return body_fail(error_type_expression, cond.error_at);
+        return body_fail(p, error_type_expression, cond.error_at);
     }
 
     // A live IF whose condition is an error value is the call's result: running neither branch would
     // leave their bindings unmade and blame the return for an innocent local. A forward reference
     // still defers, since unknown_symbol propagates.
     if (active && value_is_error(cond.value)) {
-        body_result fail = body_fail(cond.value.error.code, pos);
-        fail.error_detail = cond.value.error.detail;
-        return fail;
+        return (body_result) {
+            .next     = cond.next,
+            .error    = place_error(p, cond.value, pos).error,
+            .error_at = pos,
+        };
     }
 
     // A live IF with a KNOWN condition (a number or a boolean) picks a branch; a non-numeric
@@ -1997,16 +2017,16 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
     bool else_active = decided && !run_if;
 
     body_result br = interpret_statements(p, cond.next, run_if);
-    if (br.error != error_type_none) {
+    if (br.error.code != error_type_none) {
         return br;
     }
 
     if (br.stop == body_stop_return) {
-        return body_fail(error_type_unclosed_function, br.next);   // a return inside a branch: top-level only
+        return body_fail(p, error_type_unclosed_function, br.next);   // a return inside a branch: top-level only
     }
 
     if (br.stop == body_stop_eof) {
-        return body_fail(error_type_unclosed_function, br.next);   // IF with no ENDIF
+        return body_fail(p, error_type_unclosed_function, br.next);   // IF with no ENDIF
     }
 
     // Consume the closer keyword the branch stopped at.
@@ -2017,11 +2037,11 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
 
     if (br.stop == body_stop_else) {
         body_result eb = interpret_statements(p, closer.next, else_active);
-        if (eb.error != error_type_none) {
+        if (eb.error.code != error_type_none) {
             return eb;
         }
         if (eb.stop != body_stop_endif) {
-            return body_fail(error_type_unclosed_function, eb.next);   // ELSE must end at ENDIF
+            return body_fail(p, error_type_unclosed_function, eb.next);   // ELSE must end at ENDIF
         }
         lexer_result end = lexer_next(p->text, eb.next, function_body_tokens);
         return (body_result) {.next = end.next, .saw_statement = true};
@@ -2053,12 +2073,12 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
                 };
             }
             if (rhs.error != expr_error_none) {
-                return body_fail(error_type_expression, rhs.error_at);
+                return body_fail(p, error_type_expression, rhs.error_at);
             }
             return (body_result) {
                 .stop          = body_stop_return,
                 .next          = rhs.next,
-                .value         = rhs.value,
+                .value         = place_error(p, rhs.value, lr.next),
                 .saw_statement = saw,
             };
         }
@@ -2067,7 +2087,7 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
             switch (lr.token.closer.id) {
                 case body_if: {
                     body_result ifr = interpret_if(p, lr.next, active);
-                    if (ifr.error != error_type_none) {
+                    if (ifr.error.code != error_type_none) {
                         return ifr;
                     }
                     pos = ifr.next;
@@ -2082,7 +2102,7 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
 
         if (lr.token.type == lexeme_type_identifier) {
             body_result a = interpret_assignment(p, lr.token.identifier.name, lr.next, active, pos);
-            if (a.error != error_type_none) {
+            if (a.error.code != error_type_none) {
                 return a;
             }
             pos = a.next;
@@ -2102,7 +2122,7 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
             continue;
         }
 
-        return body_fail(error_type_unexpected_token, pos);   // nothing else is a legal body statement
+        return body_fail(p, error_type_unexpected_token, pos);   // nothing else is a legal body statement
     }
 }
 
@@ -2151,10 +2171,16 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     rc_mstr_append_u32(&key, call_pos, NULL);
     uint32_t child = scopes_get_or_make_child(p->env->scopes, sig->def_scope, key.view);
 
+    // An error argument is the caller's doing, never the body's: placed at this call inside a body,
+    // else left for the top-level use site to report.
     cursor call_at = {p->env->source, call_pos};
     for (uint32_t i = 0; i < sig->params.num; i++) {
-        scopes_set_symbol(p->env->scopes, child, rc_view_str_get(sig->params, i),
-                          rc_view_value_get(args.view, i), call_at);
+        value arg = rc_view_value_get(args.view, i);
+        if (value_is_error(arg) && arg.error.origin_type == value_origin_type_none) {
+            arg.error.origin_type = p->in_body ? value_origin_type_body : value_origin_type_caller;
+            arg.error.origin      = (cursor) {p->env->source, lexer_skip_whitespace(p->text, call_pos)};
+        }
+        scopes_set_symbol(p->env->scopes, child, rc_view_str_get(sig->params, i), arg, call_at);
     }
 
     // Interpret the body in the child scope, in ITS source (a body may live in a different file than the call).
@@ -2163,14 +2189,14 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     body_env.source      = sig->body.source;
     body_env.offset      = sig->body.pos;
     parser body_p = {.text = source_files_text(p->env->sources, sig->body.source), .env = &body_env,
-                     .arena = p->arena, .live = true};
+                     .arena = p->arena, .live = true, .in_body = true};
 
     if (p->env->call_depth) { (*p->env->call_depth)++; }
     body_result br = interpret_statements(&body_p, sig->body.pos, true);
     if (p->env->call_depth) { (*p->env->call_depth)--; }
 
-    if (br.error != error_type_none) {
-        return ok(value_make_error_detail(br.error, br.error_detail), after);   // a malformed body -> a value
+    if (br.error.code != error_type_none) {
+        return ok((value) {.type = value_type_error, .error = br.error}, after);   // a failed body -> a value
     }
 
     if (br.stop != body_stop_return) {
@@ -2191,10 +2217,10 @@ function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, cons
     };
     body_result br = interpret_statements(&p, pos, false);   // inactive: just walk to the top-level '='
 
-    if (br.error != error_type_none) {
+    if (br.error.code != error_type_none) {
         return (function_body_scan) {
             .next     = br.error_at,
-            .error    = br.error,
+            .error    = br.error.code,
             .error_at = br.error_at,
         };
     }
@@ -2256,6 +2282,9 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
             if (value_is_none(v) ||
                 (value_is_error(v) && v.error.code == error_type_unknown_symbol && v.error.detail.len == 0)) {
                 v = value_make_error_detail(error_type_unknown_symbol, lex.identifier.name);
+                if (p->in_body) {
+                    v = place_error(p, v, pos);   // the exact spot, not just its statement
+                }
             }
             return ok(v, lr.next);
         }

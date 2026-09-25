@@ -96,7 +96,9 @@ value value_make_copy(value v, rc_arena *arena)
             // The detail is usually a view into source text, but error() composes its message in
             // the evaluation arena - so a bound error value must bring its detail's bytes along.
             if (v.error.detail.len != 0) {
-                return value_make_error_detail(v.error.code, rc_mstr_from_str(v.error.detail, v.error.detail.len, arena).view);
+                value c = v;   // keeps the origin
+                c.error.detail = rc_mstr_from_str(v.error.detail, v.error.detail.len, arena).view;
+                return c;
             }
             return v;
 

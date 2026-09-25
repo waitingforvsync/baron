@@ -96,6 +96,7 @@ rc_str error_type_name(error_type e)
         case error_type_duplicate_function:      return RC_STR("Duplicate function arity");
         case error_type_function_not_defined:    return RC_STR("Function body is not defined");
         case error_type_function_too_deep:       return RC_STR("Function recursion nested too deeply");
+        case error_type_called_from:             return RC_STR("Note: Called from here");
         case error_type_divide_by_zero:          return RC_STR("Division by zero");
         case error_type_domain:                  return RC_STR("Argument out of domain");
         case error_type_unknown_symbol:          return RC_STR("Unknown symbol: '%'");

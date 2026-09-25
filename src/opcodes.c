@@ -772,7 +772,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     // A value that can never be an address is recoverable: record it and emit a best-effort 0 operand,
     // so the instruction keeps its size and the layout still settles.
     if (arg.type == int_argument_type_error) {
-        semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+        semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);
     }
 
     uint16_t cell = opcode_def(m, mode);

@@ -57,12 +57,22 @@ typedef struct value_range {
 } value_range;
 
 
+// Where an error value was raised. Only a FUNCTION body needs saying: its source is elsewhere, so
+// the use site alone would point at the call rather than the culprit.
+typedef enum value_origin_type {
+    value_origin_type_none = 0,   // not placed yet: the use site reports it
+    value_origin_type_body,       // raised inside a FUNCTION body, at origin
+    value_origin_type_caller,     // an argument from a top-level caller: its use site reports it
+} value_origin_type;
+
 // An evaluation error riding in a value: the code, plus an optional detail string the diagnostic
 // machinery can surface (today: the symbol NAME behind an unknown_symbol, so "Undefined symbol: 'x'"
 // can say which - the evaluator is the only place that still knows it). {0} detail when there is none.
 typedef struct value_error {
-    uint16_t code;     // error_type (members store fixed widths, never enum types)
+    uint16_t code;          // error_type (members store fixed widths, never enum types)
+    uint8_t  origin_type;   // value_origin_type
     rc_str   detail;
+    cursor   origin;        // valid when origin_type == value_origin_type_body
 } value_error;
 
 

@@ -696,8 +696,11 @@ Locals bind **once**, parameters included: there is no mutation in a body, so a 
 same name is an error rather than a silent no-op (`x = x + 1` is asking for a loop that does not exist -
 recursion is the loop). Assigning the same name in an `IF` and its `ELSE` is fine; only one arm runs.
 
+An error inside a body is reported on the body line that caused it, followed by a note at the call it
+came from. A bad argument is the caller's mistake, so that one is reported at the call.
+
 To refuse bad input, `ERROR(...)` is also a *function*: it returns an error value carrying your message,
-which surfaces as a proper diagnostic wherever the result ends up used:
+which surfaces as a proper diagnostic once the result is used:
 
 ```
 FUNCTION checked(w)
@@ -750,8 +753,8 @@ IF * > &3000 : ERROR "code overran the screen by ", * - &3000, " bytes" : ENDIF
 ```
 
 The same name doubles as a *function* in expression position - `ERROR("bad width: ", w)` returns an
-error value that reports wherever it ends up used, which is how a [`FUNCTION` body](#functions) refuses
-bad input.
+error value that reports once it is used, which is how a [`FUNCTION` body](#functions) refuses bad
+input.
 
 ## The symbol dump ##
 

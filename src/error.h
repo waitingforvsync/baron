@@ -101,6 +101,7 @@ typedef enum error_type {
     error_type_duplicate_function,    // a second body defined for a function arity already given one
     error_type_function_not_defined,  // a function invoked while only forward-declared (its body never supplied)
     error_type_function_too_deep,     // function recursion hit the depth cap - a missing/wrong recursion base case
+    error_type_called_from,           // the companion frame: points at the use of a FUNCTION whose body failed
 
     // Value-evaluation errors: produced by the expression evaluator, carried inside a value.
     error_type_divide_by_zero,

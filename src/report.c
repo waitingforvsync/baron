@@ -178,6 +178,32 @@ RC_TEST_STEP(report, duplicate_renders_original_definition_note, fix)
                     "t:1:2: error: Note: First defined here: 'here'\n"));
 }
 
+RC_TEST_STEP(report, function_body_error_points_into_the_body, fix)
+{
+    // An error raised inside a FUNCTION body is reported where it happened - the exact spot for an
+    // undefined name, the statement for anything else - with the use site as its companion note.
+    RC_CHECK(ASM("t", "FUNCTION f(c)\n  m = c + n\n= m\nequb f(1)"), ==, 0u);
+    RC_CHECK(RENDER(severity_warning), ==,
+             RC_STR("t:2:11: error: Undefined symbol: 'n'\n"
+                    "t:4:5: error: Note: Called from here\n"));
+
+    RC_CHECK(ASM("t", "FUNCTION g(x)\n= x / 0\nequb g(1)"), ==, 0u);
+    RC_CHECK(RENDER(severity_warning), ==,
+             RC_STR("t:2:3: error: Division by zero\n"
+                    "t:3:5: error: Note: Called from here\n"));
+
+    // A bad argument is the caller's mistake, not the body's: reported at the use site alone.
+    RC_CHECK(ASM("t", "FUNCTION h(x)\n  IF x == 1\n    r = 1\n  ELSE\n    r = 2\n  ENDIF\n= r\nequb h(n)"), ==, 0u);
+    RC_CHECK(RENDER(severity_warning), ==, RC_STR("t:8:5: error: Undefined symbol: 'n'\n"));
+
+    // ... unless that caller is itself a body: then the call inside it is the culprit.
+    RC_CHECK(ASM("t", "FUNCTION h(x)\n  IF x == 1\n    r = 1\n  ELSE\n    r = 2\n  ENDIF\n= r\n"
+                      "FUNCTION k(y)\n  z = h(y / 0)\n= z\nequb k(1)"), ==, 0u);
+    RC_CHECK(RENDER(severity_warning), ==,
+             RC_STR("t:9:7: error: Division by zero\n"
+                    "t:11:5: error: Note: Called from here\n"));
+}
+
 RC_TEST_STEP(report, payloads_render_into_messages, fix)
 {
     // An ERROR statement's text passes through the bare "%" template whole - a '%' inside it is inert

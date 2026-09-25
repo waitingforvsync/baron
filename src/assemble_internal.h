@@ -39,6 +39,10 @@ parse_result syntax_error_payload(baron *b, error_type code, cursor at, rc_str p
 void semantic_error(baron *b, parse_flags flags, error_type code, cursor at);
 void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor at, rc_str payload);
 
+// Report a value error's code: at its FUNCTION body origin with a "called from" note at `at` when it
+// has one, else at `at` - carrying the error's detail as the payload either way.
+void semantic_error_cause(baron *b, parse_flags flags, error_type code, cursor at, value_error cause);
+
 // Like semantic_error at a positive severity level; does not fail the assemble.
 void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity);
 
@@ -56,7 +60,7 @@ typedef struct int_argument {
     uint8_t  type;           // int_argument_type
     uint16_t error;          // error_type, set when type == int_argument_type_error
     uint32_t error_at;
-    rc_str   error_detail;   // the error's payload (e.g. the undefined symbol's name), or {0}
+    value_error cause;       // the value error behind it: its payload and any FUNCTION body origin
     bool     za_auto;        // a ZA_AUTO address: value is the offset within it, zp_* its identity
     uint32_t zp_scope;
     cursor   zp_def;

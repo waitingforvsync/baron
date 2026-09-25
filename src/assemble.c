@@ -92,7 +92,7 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
                 .type = int_argument_type_error,
                 .error = error_type_undefined_symbol,
                 .error_at = at,
-                .error_detail = v.error.detail   // the symbol's name rides along into the diagnostic
+                .cause = v.error   // the symbol's name (and a FUNCTION body origin) ride along
             };
         }
         return (int_argument) { .type = int_argument_type_unresolved };   // a forward reference; settles later
@@ -103,7 +103,7 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
         .type = int_argument_type_error,
         .error = value_is_error(v) ? v.error.code : error_type_operand_not_numeric,
         .error_at = at,
-        .error_detail = value_is_error(v) ? v.error.detail : (rc_str) {0}
+        .cause = value_is_error(v) ? v.error : (value_error) {0}
     };
 }
 
@@ -117,7 +117,7 @@ static int_argument int_argument_no_za_auto(int_argument arg, uint32_t at)
             .type         = int_argument_type_error,
             .error        = error_type_za_auto_address,
             .error_at     = at,
-            .error_detail = arg.zp_name
+            .cause        = {.detail = arg.zp_name}
         };
     }
 
@@ -150,6 +150,19 @@ void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor
 void semantic_error(baron *b, parse_flags flags, error_type code, cursor at)
 {
     semantic_error_payload(b, flags, code, at, (rc_str) {0});
+}
+
+
+void semantic_error_cause(baron *b, parse_flags flags, error_type code, cursor at, value_error cause)
+{
+    if (cause.origin_type != value_origin_type_body) {
+        semantic_error_payload(b, flags, code, at, cause.detail);
+        return;
+    }
+
+    // Raised inside a FUNCTION body: the culprit is there, and the use site becomes its companion.
+    semantic_error_payload(b, flags, code, cause.origin, cause.detail);
+    semantic_error(b, flags, error_type_called_from, at);
 }
 
 
@@ -674,7 +687,7 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
                 unresolved = true;   // an unknown count emits nothing; forces another pass
                 break;
             case int_argument_type_error:
-                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);   // skip nothing
+                semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);   // skip nothing
                 break;
         }
     }
@@ -718,7 +731,7 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
                 unresolved = true;   // an unknown target emits nothing; forces another pass
                 break;
             case int_argument_type_error:
-                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);   // skip nothing
+                semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);   // skip nothing
                 break;
         }
     }
@@ -764,7 +777,7 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
                 unresolved = true;   // an unknown alignment emits nothing; forces another pass
                 break;
             case int_argument_type_error:
-                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);   // pad nothing
+                semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);   // pad nothing
                 break;
         }
     }
@@ -856,7 +869,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                         unresolved = true;   // a forward-referenced org/cmos owes another pass
                         break;
                     case int_argument_type_error:
-                        semantic_error_payload(b, flags, arg.error, cursor_at(at, eq.next), arg.error_detail);
+                        semantic_error_cause(b, flags, arg.error, cursor_at(at, eq.next), arg.cause);
                         break;
                 }
             }
@@ -1003,7 +1016,7 @@ static parse_result za_pool_add(baron *b, value v, parse_flags flags, cursor at)
         // A numeric, a forward reference, or an error (a string leaf lands here as operand_not_numeric).
         int_argument arg = int_argument_make(rc_view_value_get(flat.list, i), flags.final, at.pos);
         if (arg.type == int_argument_type_error) {
-            semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
+            semantic_error_cause(b, flags, arg.error, at, arg.cause);
         }
         else if (arg.type == int_argument_type_unresolved) {
             unresolved = true;   // a forward-referenced address settles on a later pass
@@ -1176,7 +1189,7 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
         unresolved = flags.active;
     }
     else if (arg.type == int_argument_type_error) {
-        semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+        semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);
     }
     else if (arg.value < 1 || arg.value > (int64_t) zeropage_size) {
         semantic_error(b, flags, error_type_za_auto_bad_width, cursor_at(at, at.pos));
@@ -1273,7 +1286,7 @@ static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cf
                 break;
             case int_argument_type_error:
             default:
-                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+                semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);
                 break;
         }
     }
@@ -1416,7 +1429,7 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
                 break;
             case int_argument_type_error:
             default:
-                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+                semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);
                 break;
         }
         lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
@@ -1497,7 +1510,7 @@ static index_fold indexedby_fold(baron *b, value v, index_fold acc,
                 break;
             case int_argument_type_error:
             default:
-                semantic_error_payload(b, flags, arg.error, cursor_at(at, arg.error_at), arg.error_detail);
+                semantic_error_cause(b, flags, arg.error, cursor_at(at, arg.error_at), arg.cause);
                 break;
         }
     }
@@ -1632,7 +1645,7 @@ static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags f
         // A numeric, a forward reference, or some other error value - one width-byte unit either way.
         int_argument arg = int_argument_make(leaf, flags.final, at.pos);
         if (arg.type == int_argument_type_error) {
-            semantic_error_payload(b, flags, arg.error, at, arg.error_detail);
+            semantic_error_cause(b, flags, arg.error, at, arg.cause);
             emit_le(b, section, 0, width);   // best-effort placeholder; keeps the size stable
             continue;
         }
@@ -1834,7 +1847,7 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
                 // The undefined-on-final promotion (matching int_argument_make); other errors carry through.
                 error_type code = e.value.error.code == error_type_unknown_symbol
                                 ? error_type_undefined_symbol : e.value.error.code;
-                semantic_error_payload(b, flags, code, cursor_at(at, pos), e.value.error.detail);
+                semantic_error_cause(b, flags, code, cursor_at(at, pos), e.value.error);
             }
         }
         else if (print_on(b, flags)) {
@@ -1894,7 +1907,7 @@ static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scop
             else {
                 error_type code = e.value.error.code == error_type_unknown_symbol
                                 ? error_type_undefined_symbol : e.value.error.code;
-                semantic_error_payload(b, flags, code, cursor_at(at, pos), e.value.error.detail);
+                semantic_error_cause(b, flags, code, cursor_at(at, pos), e.value.error);
             }
         }
         else if (record) {
@@ -2151,7 +2164,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
                 acc.unresolved = true;   // undecidable yet; owe another pass
                 break;
             case int_argument_type_error:
-                semantic_error_payload(b, flags, cond.error, cursor_at(at, cond.error_at), cond.error_detail);   // neither branch runs
+                semantic_error_cause(b, flags, cond.error, cursor_at(at, cond.error_at), cond.cause);   // neither branch runs
                 break;
         }
     }
@@ -2294,13 +2307,13 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         else {
             if (value_is_error(e.value)) {
                 if (e.value.error.code == error_type_unknown_symbol) {
-                    semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
-                                           e.value.error.detail);
+                    semantic_error_cause(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
+                                         e.value.error);
                     if (!flags.final) r.unresolved = true;   // a forward reference in the value; settles on a later pass
                 }
                 else {
-                    semantic_error_payload(b, flags, e.value.error.code, cursor_at(at, eq.next),
-                                           e.value.error.detail);   // e.g. x = 1/0
+                    semantic_error_cause(b, flags, e.value.error.code, cursor_at(at, eq.next),
+                                         e.value.error);   // e.g. x = 1/0
                 }
             }
             if (st == symbol_status_changed) {
@@ -2390,13 +2403,13 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
         value seq = e.value;
         if (value_is_error(seq)) {
             if (seq.error.code == error_type_unknown_symbol) {
-                semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
-                                       seq.error.detail);
+                semantic_error_cause(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
+                                     seq.error);
                 if (!flags.final) unresolved = true;   // the count is not known yet; defer and try again next pass
             }
             else {
-                semantic_error_payload(b, flags, seq.error.code, cursor_at(at, eq.next),
-                                       seq.error.detail);   // e.g. the sequence expression divided by zero
+                semantic_error_cause(b, flags, seq.error.code, cursor_at(at, eq.next),
+                                     seq.error);   // e.g. the sequence expression divided by zero
             }
         }
         else {
@@ -2517,8 +2530,8 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
             // A forward-referenced filename defers exactly like a forward address: nothing loads
             // this pass; still unknown on the final one, it never will be.
             if (flags.final) {
-                semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
-                                       e.value.error.detail);
+                semantic_error_cause(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
+                                     e.value.error);
             }
             else {
                 pulled.unresolved = true;
@@ -2575,8 +2588,8 @@ static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t sco
         else if (value_is_error(e.value) && e.value.error.code == error_type_unknown_symbol) {
             // A forward-referenced filename defers, like INCLUDE's.
             if (flags.final) {
-                semantic_error_payload(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
-                                       e.value.error.detail);
+                semantic_error_cause(b, flags, error_type_undefined_symbol, cursor_at(at, at.pos),
+                                     e.value.error);
             }
             else {
                 pulled.unresolved = true;
@@ -3143,13 +3156,13 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
     else {
         if (value_is_error(e.value)) {
             if (e.value.error.code == error_type_unknown_symbol) {
-                semantic_error_payload(b, flags, error_type_undefined_symbol,
-                                       (cursor) {.source = src, .pos = eq.next}, e.value.error.detail);
+                semantic_error_cause(b, flags, error_type_undefined_symbol,
+                                     (cursor) {.source = src, .pos = eq.next}, e.value.error);
                 if (!flags.final) r.unresolved = true;   // a forward reference into the source; settles on a later pass
             }
             else {
-                semantic_error_payload(b, flags, e.value.error.code,
-                                       (cursor) {.source = src, .pos = eq.next}, e.value.error.detail);
+                semantic_error_cause(b, flags, e.value.error.code,
+                                     (cursor) {.source = src, .pos = eq.next}, e.value.error);
             }
         }
         r.changed = (st == symbol_status_changed);
