@@ -58,9 +58,8 @@ into its own:
   never leak between them.
 
 A few BeebAsm conveniences are spelled differently here: `MAPCHAR` is a one-line user function (the
-recipe is in [Strings and character codes](#strings-and-character-codes)), `COPYBLOCK` is now better
-done with a nested, rephased section (see [Sections](#sections)), and `ASSERT` is spelled with the
-tools you have: `IF weird : ERROR "oh frak" : ENDIF`.
+recipe is in [Strings and character codes](#strings-and-character-codes)), and `COPYBLOCK` is now
+better done with a nested, rephased section (see [Sections](#sections)).
 
 ## A first program ##
 
@@ -699,8 +698,20 @@ recursion is the loop). Assigning the same name in an `IF` and its `ELSE` is fin
 An error inside a body is reported on the body line that caused it, followed by a note at the call it
 came from. A bad argument is the caller's mistake, so that one is reported at the call.
 
-To refuse bad input, `ERROR(...)` is also a *function*: it returns an error value carrying your message,
-which surfaces as a proper diagnostic once the result is used:
+To refuse bad input, put an `ASSERT` in the body. When its condition is false, the call's result is an
+error carrying your message - the values joined, as `ERROR` joins them - reported at the `ASSERT`:
+
+```
+FUNCTION checked(w)
+    ASSERT w >= 0, "bad width: ", w
+= w
+```
+
+The message is optional: a bare `ASSERT w < 100` just reports "Assertion failed". It is only
+evaluated when the assertion fails.
+
+When the refusal is one outcome among several, `ERROR(...)` is also a *function*: it returns an error
+value carrying your message, which surfaces as a proper diagnostic once the result is used:
 
 ```
 FUNCTION checked(w)
@@ -752,7 +763,16 @@ build (though assembly carries on, so you still get the full report):
 IF * > &3000 : ERROR "code overran the screen by ", * - &3000, " bytes" : ENDIF
 ```
 
-The same name doubles as a *function* in expression position - `ERROR("bad width: ", w)` returns an
+`ASSERT` says the same thing the other way round, in one line - this is the `IF` above:
+
+```
+ASSERT * <= &3000, "code overran the screen by ", * - &3000, " bytes"
+```
+
+The message is only evaluated when the assertion fails, and it is optional: without one you get
+"Assertion failed". `ASSERT` works inside a [`FUNCTION` body](#functions) too.
+
+The name `ERROR` doubles as a *function* in expression position - `ERROR("bad width: ", w)` returns an
 error value that reports once it is used, which is how a [`FUNCTION` body](#functions) refuses bad
 input.
 

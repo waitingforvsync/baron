@@ -117,6 +117,7 @@ typedef enum error_type {
 
     // The ERROR statement: the user's own message, carried whole in the diagnostic's payload.
     error_type_user_error,
+    error_type_assertion_failed,      // an ASSERT with no message whose condition was false
 
     // Driver.
     error_type_no_convergence,

@@ -192,6 +192,12 @@ RC_TEST_STEP(report, function_body_error_points_into_the_body, fix)
              RC_STR("t:2:3: error: Division by zero\n"
                     "t:3:5: error: Note: Called from here\n"));
 
+    // A failing ASSERT is placed at the ASSERT statement itself.
+    RC_CHECK(ASM("t", "FUNCTION a(x)\n  ASSERT x > 0, \"x is \", x\n= x\nequb a(0)"), ==, 0u);
+    RC_CHECK(RENDER(severity_warning), ==,
+             RC_STR("t:2:3: error: x is 0\n"
+                    "t:4:5: error: Note: Called from here\n"));
+
     // A bad argument is the caller's mistake, not the body's: reported at the use site alone.
     RC_CHECK(ASM("t", "FUNCTION h(x)\n  IF x == 1\n    r = 1\n  ELSE\n    r = 2\n  ENDIF\n= r\nequb h(n)"), ==, 0u);
     RC_CHECK(RENDER(severity_warning), ==, RC_STR("t:8:5: error: Undefined symbol: 'n'\n"));

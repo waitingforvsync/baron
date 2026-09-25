@@ -1751,12 +1751,13 @@ static token_table operand_table(const parser *p) {
 // The FUNCTION-body statement keywords - the minimum a body needs. Its own tiny table, so a body can lex only
 // these (plus intrinsic identifiers/terminators): an opcode or EQUB name is just an identifier here, an
 // assignment target, never code. The '=' return marker reuses lexeme_type_assign (statement-start position).
-typedef enum body_keyword { body_if, body_elif, body_else, body_endif } body_keyword;
+typedef enum body_keyword { body_if, body_elif, body_else, body_endif, body_assert } body_keyword;
 static const token function_body_entries[] = {
     {RC_STR_INIT("if"),    {.type = lexeme_type_closer, .closer = {body_if,    error_type_none}}},
     {RC_STR_INIT("elif"),  {.type = lexeme_type_closer, .closer = {body_elif,  error_type_none}}},
     {RC_STR_INIT("else"),  {.type = lexeme_type_closer, .closer = {body_else,  error_type_none}}},
     {RC_STR_INIT("endif"), {.type = lexeme_type_closer, .closer = {body_endif, error_type_none}}},
+    {RC_STR_INIT("assert"),{.type = lexeme_type_closer, .closer = {body_assert, error_type_none}}},
     {RC_STR_INIT("="),     {.type = lexeme_type_assign}},
 };
 static const token_table function_body_tokens = RC_VIEW(function_body_entries);
@@ -2052,7 +2053,61 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
 }
 
 
-// Run body statements (assignments, IFs) until the top-level '=' return, a branch closer (elif/else/endif),
+// A body ASSERT cond [, value...], from just after the keyword (whose start is stmt_at). A live, false
+// condition makes the call's result an error: the ERROR() message when there is one, else a plain
+// assertion failure, placed at the ASSERT. The message is only evaluated live on failure, like the
+// statement's dead ERROR; a condition in error is the call's result, as an IF's is.
+static body_result interpret_assert(const parser *p, uint32_t pos, bool active, uint32_t stmt_at)
+{
+    parser sp = body_sub(p, active);
+    expr_result cond = parse_precedence(&sp, pos, 0);
+    if (cond.error != expr_error_none) {
+        return body_fail(p, error_type_expression, cond.error_at);
+    }
+
+    if (active && value_is_error(cond.value)) {
+        return (body_result) {
+            .next     = cond.next,
+            .error    = place_error(p, cond.value, pos).error,
+            .error_at = pos,
+        };
+    }
+
+    if (active && !value_is_number(cond.value)) {
+        return body_fail(p, error_type_operand_not_numeric, lexer_skip_whitespace(p->text, pos));
+    }
+
+    bool failed = active && cond.value.numeric == 0.0;
+
+    // The optional message: comma-separated values, parsed dead unless they will be reported.
+    parser mp = body_sub(p, failed);
+    rc_array_value message = {0};
+    uint32_t next = cond.next;
+    lexer_result comma = lexer_next(p->text, next, odd_tokens);
+    while (comma.token.type == lexeme_type_comma) {
+        expr_result m = parse_precedence(&mp, comma.next, 0);
+        if (m.error != expr_error_none) {
+            return body_fail(p, error_type_expression, m.error_at);
+        }
+        rc_array_value_push(&message, m.value, p->arena);
+        next = m.next;
+        comma = lexer_next(p->text, next, odd_tokens);
+    }
+
+    if (!failed) {
+        return (body_result) {.next = next, .saw_statement = true};
+    }
+
+    value v = message.view.num ? fn_error(message.view, p->arena) : value_make_error(error_type_assertion_failed);
+    return (body_result) {
+        .next     = next,
+        .error    = place_error(p, v, stmt_at).error,
+        .error_at = stmt_at,
+    };
+}
+
+
+// Run body statements (assignments, IFs, ASSERTs) until the top-level '=' return, a branch closer (elif/else/endif),
 // or EOF. active gates whether assignments bind and IF branches execute (an inactive run just walks the
 // structure, for the definition scan and dead branches).
 static body_result interpret_statements(const parser *p, uint32_t pos, bool active)
@@ -2091,6 +2146,15 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
                         return ifr;
                     }
                     pos = ifr.next;
+                    saw = true;
+                    continue;
+                }
+                case body_assert: {
+                    body_result ar = interpret_assert(p, lr.next, active, pos);
+                    if (ar.error.code != error_type_none) {
+                        return ar;
+                    }
+                    pos = ar.next;
                     saw = true;
                     continue;
                 }

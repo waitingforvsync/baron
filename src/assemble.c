@@ -58,6 +58,7 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
 static parse_result handle_reserved_constant(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
+static parse_result handle_assert(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_block(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_file(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
 static parse_result parse_scope(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch);
@@ -504,6 +505,7 @@ static const token statement_token_entries[] = {
     {RC_STR_INIT("function"),{.type = lexeme_type_keyword, .keyword = {.handle = handle_function}}},
     {RC_STR_INIT("print"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_print}}},
     {RC_STR_INIT("error"),  {.type = lexeme_type_keyword, .keyword = {.handle = handle_error}}},
+    {RC_STR_INIT("assert"), {.type = lexeme_type_keyword, .keyword = {.handle = handle_assert}}},
 
     // The pure expression constants are reserved at statement start too, so pi = 5 is rejected rather than
     // quietly binding a shadowed symbol. Three near-identical rows, but it is only three tokens.
@@ -1870,19 +1872,20 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// ERROR [value[, value...]] - the user's own diagnostic: PRINT-formatted, recorded as a RECOVERABLE
-// error at the statement (parsing carries on). A forward reference defers like PRINT's; still
-// unknown on the final pass, the usual undefined symbol is reported and the ERROR stays silent.
-static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+// The ERROR statement's message and report, from at (the first value): the values PRINT-formatted into
+// a user_error at stmt, or `bare` when there are none. A forward reference defers like PRINT's; still
+// unknown on the final pass, the usual undefined symbol is reported and the message stays silent.
+static parse_result user_error_statement(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section,
+                                         parse_flags flags, rc_arena scratch, error_type bare)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
     uint32_t pos = at.pos;
 
-    // A bare ERROR still fires - there just is nothing to say beyond the location.
+    // No message still fires - there just is nothing to say beyond the location.
     lexer_result peek = lexer_next(src, pos, statement_tokens(b));
     if (peek.token.type == lexeme_type_terminator ||
         (peek.token.type == lexeme_type_closer && peek.token.closer.id == closer_brace)) {
-        semantic_error(b, flags, error_type_user_error, stmt);
+        semantic_error(b, flags, bare, stmt);
         return require_separator(b, cursor_at(at, pos));
     }
 
@@ -1932,6 +1935,62 @@ static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scop
         r.unresolved = unresolved;
         return r;
     }
+}
+
+
+// ERROR [value[, value...]] - the user's own diagnostic, recorded as a RECOVERABLE error at the
+// statement (parsing carries on).
+static parse_result handle_error(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    return user_error_statement(b, stmt, at, scope, section, flags, scratch, error_type_user_error);
+}
+
+
+// ASSERT cond [, value[, value...]] - IF NOT(cond) : ERROR value... : ENDIF in one line. The condition is
+// judged as IF judges it; the message is ERROR's, live only when the assertion has failed, so a passing
+// ASSERT owes nothing for its message (it may even name symbols that exist only on failure).
+static parse_result handle_assert(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    rc_str src = source_files_text(&b->source_files, at.source);
+
+    expr_result e = eval(b, at, scope, section, scratch);
+    if (e.error != expr_error_none) {
+        return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
+    }
+
+    bool failed = false;
+    bool unresolved = false;
+    if (flags.active) {
+        int_argument cond = int_argument_no_za_auto(int_argument_make(e.value, flags.final, at.pos), at.pos);
+        switch (cond.type) {
+            case int_argument_type_known:
+                failed = (cond.value == 0);
+                break;
+            case int_argument_type_unresolved:
+                unresolved = true;   // undecidable yet; owe another pass
+                break;
+            case int_argument_type_error:
+                semantic_error_cause(b, flags, cond.error, cursor_at(at, cond.error_at), cond.cause);
+                break;
+        }
+    }
+
+    parse_flags message_flags = flags;
+    message_flags.active = failed;
+
+    parse_result r;
+    lexer_result comma = lexer_next(src, e.next, statement_tokens(b));
+    if (comma.token.type == lexeme_type_comma) {
+        r = user_error_statement(b, stmt, cursor_at(at, comma.next), scope, section, message_flags, scratch,
+                                 error_type_assertion_failed);
+    }
+    else {
+        semantic_error(b, message_flags, error_type_assertion_failed, stmt);
+        r = require_separator(b, cursor_at(at, e.next));
+    }
+
+    r.unresolved = r.unresolved || unresolved;
+    return r;
 }
 
 
@@ -7053,6 +7112,58 @@ RC_TEST_STEP(assemble, error_statement, fix)
     RC_CHECK_TRUE(ERR("ERROR nosuch") == error_type_undefined_symbol);
     RC_CHECK_FALSE(has_diag(&fix->r, error_type_user_error));
     RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("nosuch"));
+}
+
+RC_TEST_STEP(assemble, assert_statement, fix)
+{
+    // ASSERT is IF NOT(cond) : ERROR ... : ENDIF: a false condition reports the message as a user_error
+    // (recoverable - later statements still parse); with no message it is a plain assertion failure.
+    RC_CHECK(ASM("ASSERT 2 > 3, \"too small: \", 2\nLDA nosuch"), ==, 0u);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_user_error);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("too small: 2"));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_undefined_symbol));
+    RC_CHECK_TRUE(ERR("ASSERT FALSE") == error_type_assertion_failed);
+    RC_CHECK_TRUE(ERR("ASSERT 0,") == error_type_assertion_failed);
+
+    // A passing ASSERT owes nothing for its message - not even symbols that do not exist - and a
+    // dead branch owes nothing at all.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("ASSERT 1 == 1, \"never \", nosuch\nRTS"), (uint8_t[]) {0x60}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF FALSE\nASSERT FALSE\nENDIF\nRTS"), (uint8_t[]) {0x60}, 1));
+
+    // A forward-referenced condition settles before it is judged, both ways.
+    RC_CHECK_TRUE(ASM("ASSERT size < 10\nSKIP 3\n.size") != 0);
+    RC_CHECK_TRUE(ERR("ASSERT size < 2, \"size is \", size\nSKIP 3\n.size") == error_type_user_error);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("size is 3"));
+
+    // The condition is judged as IF's is: a non-number is refused, an undefined name named.
+    RC_CHECK_TRUE(ERR("ASSERT \"x\"") == error_type_operand_not_numeric);
+    RC_CHECK_TRUE(ERR("ASSERT nosuch") == error_type_undefined_symbol);
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_assertion_failed));
+}
+
+RC_TEST_STEP(assemble, function_assert, fix)
+{
+    // In a FUNCTION body, a failing ASSERT makes the call's result that error, reported at the
+    // ASSERT with the use site as its companion note; a passing one lets the body carry on.
+    #define CHECKED_FN \
+        "FUNCTION checked(w)\n" \
+        "    ASSERT w >= 0, \"bad width: \", w\n" \
+        "    ASSERT w < 100\n" \
+        "= w\n"
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(CHECKED_FN "EQUB checked(5)"), (uint8_t[]) {5}, 1));
+    RC_CHECK_TRUE(ERR(CHECKED_FN "EQUB checked(0-3)") == error_type_user_error);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("bad width: -3"));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_called_from));
+    RC_CHECK_TRUE(ERR(CHECKED_FN "EQUB checked(200)") == error_type_assertion_failed);
+
+    // A forward-referenced argument defers through the ASSERT and settles.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(CHECKED_FN "EQUB checked(later)\nlater = 7"), (uint8_t[]) {7}, 1));
+
+    // A dead branch's ASSERT is walked, never judged; the message is only evaluated on failure.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION f(x)\nIF x\nASSERT FALSE\nENDIF\nASSERT TRUE, nosuch\n= 1\nEQUB f(FALSE)"),
+        (uint8_t[]) {1}, 1));
+    #undef CHECKED_FN
 }
 
 RC_TEST_STEP(assemble, diagnostics_carry_payloads, fix)
