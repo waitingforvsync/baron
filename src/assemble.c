@@ -8306,6 +8306,25 @@ RC_TEST_STEP(assemble, function_duplicate_local, fix)
         "EQUB pick(TRUE), pick(FALSE)"), (uint8_t[]) {2, 3}, 2));
 }
 
+RC_TEST_STEP(assemble, function_undefined_names_the_culprit, fix)
+{
+    // An undefined name used inside a body must be the one reported, not an innocent local it
+    // flowed through: a local bound to it, a parameter fed it, and an IF condition built from it
+    // all used to blame the returned 'r' instead (issue #9).
+    #define PICK_FN "FUNCTION pick(i)\nIF i == 1\nr = 10\nELSE\nr = 20\nENDIF\n= r\n"
+    RC_CHECK_TRUE(ERR("FUNCTION g(c)\nm = c + n\nr = m\n= r\nEQUB g(1)") == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("n"));
+    RC_CHECK_TRUE(ERR(PICK_FN "EQUB pick(n)") == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("n"));
+    RC_CHECK_TRUE(ERR(PICK_FN "EQUB pick({1, 2}[n])") == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("n"));
+
+    // A forward reference into the condition still defers and settles.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(PICK_FN "EQUB pick(k), pick(later)\nk = 1\nlater = 7"),
+                          (uint8_t[]) {10, 20}, 2));
+    #undef PICK_FN
+}
+
 RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
 {
     // Push the permanent arena past its reserves so the scope containers relocate mid-assembly,

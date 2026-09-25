@@ -831,7 +831,12 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
     }
     else if (value_is_list(index)) {
         for (uint32_t j = 0; j < index.list.num; j++) {
-            uint32_t i = selector_index(rc_view_value_get(index.list, j), s.len);
+            value si = rc_view_value_get(index.list, j);
+            if (value_is_error(si)) {
+                return si;
+            }
+
+            uint32_t i = selector_index(si, s.len);
 
             if (i == RC_INDEX_NONE) {
                 return value_make_error(error_type_subscript_range);
@@ -859,6 +864,10 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
 
     if (indices.num == 0) {
         return v;   // no more selectors: this axis and anything within it taken whole
+    }
+
+    if (value_is_error(rc_view_value_get(indices, 0))) {
+        return rc_view_value_get(indices, 0);   // an undefined index names itself, not "incompatible types"
     }
 
     if (value_is_string(v)) {
@@ -900,7 +909,12 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
     }
     else if (value_is_list(sel)) {
         for (uint32_t j = 0; j < sel.list.num; j++) {
-            uint32_t i = selector_index(rc_view_value_get(sel.list, j), len);
+            value si = rc_view_value_get(sel.list, j);
+            if (value_is_error(si)) {
+                return si;
+            }
+
+            uint32_t i = selector_index(si, len);
 
             if (i == RC_INDEX_NONE) {
                 return value_make_error(error_type_subscript_range);
@@ -1967,9 +1981,17 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
         return body_fail(error_type_expression, cond.error_at);
     }
 
-    // A live IF with a KNOWN condition (a number or a boolean) picks a branch; an unknown /
-    // non-numeric condition is undecidable, so no branch runs and the eventual return defers
-    // (resolves on a later pass).
+    // A live IF whose condition is an error value is the call's result: running neither branch would
+    // leave their bindings unmade and blame the return for an innocent local. A forward reference
+    // still defers, since unknown_symbol propagates.
+    if (active && value_is_error(cond.value)) {
+        body_result fail = body_fail(cond.value.error.code, pos);
+        fail.error_detail = cond.value.error.detail;
+        return fail;
+    }
+
+    // A live IF with a KNOWN condition (a number or a boolean) picks a branch; a non-numeric
+    // condition is undecidable, so no branch runs and the eventual return defers.
     bool decided     = active && value_is_number(cond.value);
     bool run_if      = decided && cond.value.numeric != 0.0;
     bool else_active = decided && !run_if;
@@ -2229,8 +2251,10 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
             // Not found is not a parse error: it becomes an error value that propagates, so a forward
             // reference can resolve on a later pass. This is the one place that still KNOWS the name,
             // so it rides as the detail ("Undefined symbol: 'x'") - stamped too on the detail-less
-            // unknown scopes hands back for a dotted path gone astray.
-            if (value_is_none(v) || (value_is_error(v) && v.error.code == error_type_unknown_symbol)) {
+            // unknown scopes hands back for a dotted path gone astray. A symbol BOUND to an unknown (a
+            // FUNCTION local or parameter fed an undefined name) keeps its detail, naming the true culprit.
+            if (value_is_none(v) ||
+                (value_is_error(v) && v.error.code == error_type_unknown_symbol && v.error.detail.len == 0)) {
                 v = value_make_error_detail(error_type_unknown_symbol, lex.identifier.name);
             }
             return ok(v, lr.next);
@@ -2604,6 +2628,12 @@ RC_TEST_STEP(expression, symbols, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("foo+1"), value_make_numeric(43.0)));
     RC_CHECK_TRUE(value_is_error(VAL("bar")));        // unknown symbol -> error value
     RC_CHECK_TRUE(value_is_error(VAL("bar+1")));      // and it propagates through arithmetic
+
+    // ... and through a subscript, still naming itself rather than becoming a type mismatch
+    RC_CHECK(VAL("{1,2}[bar]").error.detail, ==, RC_STR("bar"));
+    RC_CHECK(VAL("{1,2}[{0,bar}]").error.detail, ==, RC_STR("bar"));
+    RC_CHECK(VAL("\"ab\"[bar]").error.detail, ==, RC_STR("bar"));
+    RC_CHECK(VAL("\"ab\"[{0,bar}]").error.detail, ==, RC_STR("bar"));
 }
 
 RC_TEST_STEP(expression, eval_errors, fix)
