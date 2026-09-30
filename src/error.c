@@ -61,7 +61,7 @@ rc_str error_type_name(error_type e)
         case error_type_var_without_reserve:     return RC_STR("ZA_AUTO needs a prior ZA_POOL");
         case error_type_zeropage_full:           return RC_STR("No free zero-page byte for ZA_AUTO variable: '%'");
         case error_type_za_auto_across_call:     return RC_STR("ZA_AUTO variable live across an unanalysable JSR (annotate with ZA_CANCALL)");
-        case error_type_za_auto_recursion:       return RC_STR("ZA_AUTO variable freshly written and held live across recursion");
+        case error_type_za_auto_recursion:       return RC_STR("ZA_AUTO variable freshly written and held live across recursion: '%'");
         case error_type_za_auto_computed_flow:   return RC_STR("Computed jump reaches unknown code (annotate with ZA_CANJUMP)");
         case error_type_za_auto_register_name:   return RC_STR("ZA_AUTO variable cannot be named 'A'");
         case error_type_za_auto_indexed_access:  return RC_STR("Unchecked indexed access into ZA_AUTO variable: '%'");

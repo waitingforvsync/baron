@@ -285,6 +285,158 @@ static rc_bitset call_kill_bytes(call_targets ct, rc_view_bitset mwb, uint32_t n
 }
 
 
+// The bytes an instruction MAY write - the gate for the entry-input harvest and the return-edge mask.
+// The allocator's insn_window counts only PROVABLE redefinitions (an indexed store proves nothing, so it
+// kills nothing); the may questions are the opposite one - "could this have supplied a value?" - so
+// here an indexed / unknown-offset store counts for its WHOLE variable (it may have written any byte),
+// while a ZA_DISCARD counts for nothing at all: it declares the old value dead, it supplies no new one.
+static touch_window may_write_window(zp_insn n, uint16_t width)
+{
+    if (n.marker == zp_marker_discard || !(n.rw & vref_write)) {
+        return (touch_window) {0};
+    }
+
+    bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
+    return (touch_window) {
+        .write_first = direct ? n.var_offset : 0,
+        .write_count = direct ? 1u : width,
+    };
+}
+
+
+// The shared plumbing of the may-write flow (the entry-input walk's two phases, and the return-edge
+// mask in liveness_analyze): the graph and stream, the may-write summaries the flow consumes, and the
+// working rows it fills (the footprint walk's context pattern).
+typedef struct rbw_ctx {
+    cfg                  g;
+    rc_view_zp_insn      insns;
+    rc_view_zp_var       vars;
+    rc_span_call_targets calls;    // per-insn call arms (empty rows for non-calls)
+    rc_view_bitset       mayb;     // per-entry may-write summaries (phase 1's product)
+    rc_view_u32          base;     // vreg -> first byte id
+    pred_lists           pl;
+    rc_bitset           *in_ext;   // the extent of the entry under analysis
+    rc_array_u32        *stack;    // the extent walk's worklist
+    rc_span_bitset       mayin, mayout;   // per-block "bytes some route may have written by here"
+    rc_bitset           *row;      // one scratch row
+    const rc_bitset     *full;     // every byte id, for a ZA_WIPE's whole-pool write
+    rc_arena            *scratch;  // backs the worklist's (never-needed) growth
+} rbw_ctx;
+
+// One entry's forward may-write flow: walk its extent into in_ext, then run the union fixpoint into
+// mayin/mayout - a byte is in mayin[b] once ANY route from the entry to b contains a write of it. The
+// union meet needs no entry special case (an entry with no in-extent predecessors meets nothing = empty)
+// and deliberately includes loop back edges. gen(b) = the block's own may-writes plus its callees'
+// summaries (union over a call's arms - one writing arm is enough for "may"). Returns whether the
+// extent is tainted by an unknown successor.
+static bool may_write_flow(rbw_ctx *c, uint32_t e)
+{
+    uint32_t nb = c->g.blocks.num;
+    bool tainted = extent_walk(c->g, e, c->in_ext, c->stack, c->scratch);
+    for (uint32_t b = 0; b < nb; b++) {
+        if (rc_bitset_is_set(c->in_ext, b)) {
+            rc_bitset_reset(rc_span_bitset_at(c->mayin, b));
+            rc_bitset_reset(rc_span_bitset_at(c->mayout, b));
+        }
+    }
+
+    bool pass = true;
+    while (pass) {
+        pass = false;
+        for (uint32_t b = 0; b < nb; b++) {
+            if (!rc_bitset_is_set(c->in_ext, b)) {
+                continue;
+            }
+            rc_bitset_reset(c->row);
+            uint32_t p0 = rc_span_u32_get(c->pl.first, b);
+            for (uint32_t p = 0; p < rc_span_u32_get(c->pl.count, b); p++) {
+                uint32_t pb = rc_span_u32_get(c->pl.preds, p0 + p);
+                if (rc_bitset_is_set(c->in_ext, pb)) {
+                    rc_bitset_union(c->row, rc_span_bitset_at(c->mayout, pb));
+                }
+            }
+            if (!rc_bitset_is_equal(c->row, rc_span_bitset_at(c->mayin, b))) {
+                rc_bitset_copy(rc_span_bitset_at(c->mayin, b), c->row);
+                pass = true;
+            }
+            basic_block blk = rc_view_basic_block_get(c->g.blocks, b);
+            for (uint32_t k = 0; k < blk.num_insns; k++) {
+                uint32_t ni = blk.first_insn + k;
+                zp_insn  n  = rc_view_zp_insn_get(c->insns, ni);
+                if (n.flow == zp_flow_call) {
+                    call_targets ct = rc_span_call_targets_get(c->calls, ni);
+                    for (uint32_t a = 0; a < ct.blocks.num; a++) {
+                        rc_bitset_union(c->row, rc_view_bitset_at(c->mayb, rc_view_u32_get(ct.blocks, a)));
+                    }
+                }
+                if (n.marker == zp_marker_wipe) {
+                    rc_bitset_union(c->row, c->full);   // a ZA_WIPE may (indeed does) write every byte
+                    continue;
+                }
+                if (n.vreg == RC_INDEX_NONE) {
+                    continue;
+                }
+                touch_window w = may_write_window(n, rc_view_zp_var_get(c->vars, n.vreg).width);
+                for (uint32_t i = 0; i < w.write_count; i++) {
+                    rc_bitset_set(c->row, rc_view_u32_get(c->base, n.vreg) + w.write_first + i);
+                }
+            }
+            if (!rc_bitset_is_equal(c->row, rc_span_bitset_at(c->mayout, b))) {
+                rc_bitset_copy(rc_span_bitset_at(c->mayout, b), c->row);
+                pass = true;
+            }
+        }
+    }
+
+    return tainted;
+}
+
+
+// Phase 1 of both may-write questions, to its fixpoint: mayb[e] = the bytes routine e MAY have written
+// by the time it returns - the union over its RETURNING exits (a write on a never-returning path cannot
+// precede a post-call read). Monotone, since a callee's growing summary only ever grows its callers'
+// flows. No returning path at all vacuously covers everything (the caller's continuation never runs). A
+// tainted extent takes tainted_row: the entry-input walk passes empty (Guard 1 refuses the program
+// anyway, no point stacking warnings on top of its error), the return-edge mask passes full (a mask must
+// never under-approximate what a routine may write). c->mayb must view the same rows as mayb.
+static void may_write_summaries(rbw_ctx *c, rc_span_bitset mayb, const rc_bitset *is_entry, rc_view_zp_cflow cflows,
+                                const rc_bitset *tainted_row, rc_bitset *acc)
+{
+    uint32_t nb = c->g.blocks.num;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (uint32_t e = 0; e < nb; e++) {
+            if (!rc_bitset_is_set(is_entry, e)) {
+                continue;
+            }
+            bool tainted = may_write_flow(c, e);
+            rc_bitset_reset(acc);
+            if (tainted) {
+                rc_bitset_copy(acc, tainted_row);
+            }
+            else {
+                bool any_return = false;
+                for (uint32_t b = 0; b < nb; b++) {
+                    basic_block blk = rc_view_basic_block_get(c->g.blocks, b);
+                    if (rc_bitset_is_set(c->in_ext, b) && block_returns(c->g, c->insns, cflows, blk)) {
+                        rc_bitset_union(acc, rc_span_bitset_at(c->mayout, b));
+                        any_return = true;
+                    }
+                }
+                if (!any_return) {
+                    rc_bitset_copy(acc, c->full);
+                }
+            }
+            if (!rc_bitset_is_equal(acc, rc_span_bitset_at(mayb, e))) {
+                rc_bitset_copy(rc_span_bitset_at(mayb, e), acc);
+                changed = true;
+            }
+        }
+    }
+}
+
+
 liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_var vars,
                           uint32_t entry_block, rc_arena *arena, rc_arena scratch)
 {
@@ -475,11 +627,53 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     }
 
     // ---- return edges ----
-    // The dual of the call-input injection: a routine's RETURNING exits see everything live AFTER
-    // each of its call sites, so an escaping result stays live from its store to the RTS and the
-    // routine's later writes cannot land on its byte (its only reads are in the caller, invisible to
+    // The dual of the call-input injection: a routine's RETURNING exits see what is live AFTER each of
+    // its call sites, so an escaping result stays live from its store to the RTS and the routine's
+    // later writes cannot land on its byte (its only reads are in the caller, invisible to
     // intraprocedural liveness). ret_from[b] lists the call sites whose callees' extents contain
     // returning block b; after[i] snapshots the live set just after call i, kept inside the fixpoint.
+    //
+    // Only a byte the routine MAY write can be a result, so each snapshot is masked by retmask[i], the
+    // union of call i's callees' may-write summaries. A byte the routine never writes merely passes
+    // through it and needs nothing inside it: the call-site guard (a variable live across a JSR
+    // interferes with everything the callee transitively touches) already keeps the routine's own
+    // variables off it. Unmasked, a pass-through byte would ride the edge into the routine's live-in,
+    // and the call transfer would then make it live before EVERY call of the routine - one call site's
+    // context smeared into all the others, costing bytes, and refusing recursion that is sound.
+    rc_span_bitset mayb   = make_rows(nb, nbytes, &scratch);
+    rc_span_bitset mayin  = make_rows(nb, nbytes, &scratch);
+    rc_span_bitset mayout = make_rows(nb, nbytes, &scratch);
+    rbw_ctx mc = {
+        .g       = g,
+        .insns   = insns,
+        .vars    = vars,
+        .calls   = calls,
+        .mayb    = mayb.view,
+        .base    = ids.base.view,
+        .pl      = pl,
+        .in_ext  = &in_ext,
+        .stack   = &stack,
+        .mayin   = mayin,
+        .mayout  = mayout,
+        .row     = &mrow,
+        .full    = &full,
+        .scratch = &scratch,
+    };
+    may_write_summaries(&mc, mayb, &is_entry, cflows, &full, &acc);
+
+    rc_array_bitset retmask_a = {0};
+    rc_span_bitset retmask = rc_array_bitset_resize_zero(&retmask_a, insns.num, &scratch);   // zeroed = empty bitsets
+    for (uint32_t i = 0; i < insns.num; i++) {
+        if (rc_view_zp_insn_get(insns, i).flow != zp_flow_call) {
+            continue;
+        }
+        rc_bitset m = rc_bitset_make(nbytes, &scratch);
+        call_targets ct = rc_span_call_targets_get(calls, i);
+        for (uint32_t a = 0; a < ct.blocks.num; a++) {
+            rc_bitset_union(&m, rc_span_bitset_at(mayb, rc_view_u32_get(ct.blocks, a)));
+        }
+        rc_span_bitset_set(retmask, i, m);
+    }
     rc_array_u32_list ret_from_a = {0};
     rc_span_u32_list ret_from = rc_array_u32_list_resize_zero(&ret_from_a, nb, &scratch);
     for (uint32_t i = 0; i < insns.num; i++) {
@@ -528,6 +722,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     rc_span_bitset bout  = make_rows(nb, nbytes, &scratch);
     rc_bitset new_out = rc_bitset_make(nbytes, &scratch);
     rc_bitset new_in  = rc_bitset_make(nbytes, &scratch);
+    rc_bitset edge    = rc_bitset_make(nbytes, &scratch);   // one return edge's masked snapshot
     bool changed = true;
     while (changed) {
         changed = false;
@@ -542,9 +737,13 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
             }
             rc_array_u32 rf = rc_span_u32_list_get(ret_from, bi);
             for (uint32_t r = 0; r < rf.num; r++) {
-                // A returning block hands control back to each caller: what is live after those calls is
-                // live here - the return edge that keeps an escaping result alive inside its producer.
-                rc_bitset_union(&new_out, rc_span_bitset_at(after, rc_array_u32_get(&rf, r)));
+                // A returning block hands control back to each caller: what is live after those calls,
+                // and may have been written in here, is live here - the return edge that keeps an
+                // escaping result alive inside its producer.
+                uint32_t site = rc_array_u32_get(&rf, r);
+                rc_bitset_copy(&edge, rc_span_bitset_at(after, site));
+                rc_bitset_intersection(&edge, rc_span_bitset_at(retmask, site));
+                rc_bitset_union(&new_out, &edge);
             }
             rc_bitset_copy(&new_in, &new_out);
             for (uint32_t k = block.num_insns; k-- > 0; ) {
@@ -750,113 +949,6 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
 }
 
 
-// The bytes an instruction MAY write - the gate for the entry-input harvest below. The allocator's
-// insn_window counts only PROVABLE redefinitions (an indexed store proves nothing, so it kills nothing);
-// the input question is the opposite one - "could anything in the program have supplied this value?" -
-// so here an indexed / unknown-offset store counts for its WHOLE variable (it may have written any
-// byte), while a ZA_DISCARD counts for nothing at all: it declares the old value dead, it supplies no
-// new one.
-static touch_window may_write_window(zp_insn n, uint16_t width)
-{
-    if (n.marker == zp_marker_discard || !(n.rw & vref_write)) {
-        return (touch_window) {0};
-    }
-
-    bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
-    return (touch_window) {
-        .write_first = direct ? n.var_offset : 0,
-        .write_count = direct ? 1u : width,
-    };
-}
-
-
-// The shared plumbing of the entry-input walk's two phases: the graph and stream, the may-write
-// summaries the flow consumes, and the working rows it fills (the footprint walk's context pattern).
-typedef struct rbw_ctx {
-    cfg                  g;
-    rc_view_zp_insn      insns;
-    rc_view_zp_var       vars;
-    rc_span_call_targets calls;    // per-insn call arms (empty rows for non-calls)
-    rc_view_bitset       mayb;     // per-entry may-write summaries (phase 1's product)
-    rc_view_u32          base;     // vreg -> first byte id
-    pred_lists           pl;
-    rc_bitset           *in_ext;   // the extent of the entry under analysis
-    rc_array_u32        *stack;    // the extent walk's worklist
-    rc_span_bitset       mayin, mayout;   // per-block "bytes some route may have written by here"
-    rc_bitset           *row;      // one scratch row
-    const rc_bitset     *full;     // every byte id, for a ZA_WIPE's whole-pool write
-    rc_arena            *scratch;  // backs the worklist's (never-needed) growth
-} rbw_ctx;
-
-// One entry's forward may-write flow: walk its extent into in_ext, then run the union fixpoint into
-// mayin/mayout - a byte is in mayin[b] once ANY route from the entry to b contains a write of it. The
-// union meet needs no entry special case (an entry with no in-extent predecessors meets nothing = empty)
-// and deliberately includes loop back edges. gen(b) = the block's own may-writes plus its callees'
-// summaries (union over a call's arms - one writing arm is enough for "may"). Returns whether the
-// extent is tainted by an unknown successor.
-static bool may_write_flow(rbw_ctx *c, uint32_t e)
-{
-    uint32_t nb = c->g.blocks.num;
-    bool tainted = extent_walk(c->g, e, c->in_ext, c->stack, c->scratch);
-    for (uint32_t b = 0; b < nb; b++) {
-        if (rc_bitset_is_set(c->in_ext, b)) {
-            rc_bitset_reset(rc_span_bitset_at(c->mayin, b));
-            rc_bitset_reset(rc_span_bitset_at(c->mayout, b));
-        }
-    }
-
-    bool pass = true;
-    while (pass) {
-        pass = false;
-        for (uint32_t b = 0; b < nb; b++) {
-            if (!rc_bitset_is_set(c->in_ext, b)) {
-                continue;
-            }
-            rc_bitset_reset(c->row);
-            uint32_t p0 = rc_span_u32_get(c->pl.first, b);
-            for (uint32_t p = 0; p < rc_span_u32_get(c->pl.count, b); p++) {
-                uint32_t pb = rc_span_u32_get(c->pl.preds, p0 + p);
-                if (rc_bitset_is_set(c->in_ext, pb)) {
-                    rc_bitset_union(c->row, rc_span_bitset_at(c->mayout, pb));
-                }
-            }
-            if (!rc_bitset_is_equal(c->row, rc_span_bitset_at(c->mayin, b))) {
-                rc_bitset_copy(rc_span_bitset_at(c->mayin, b), c->row);
-                pass = true;
-            }
-            basic_block blk = rc_view_basic_block_get(c->g.blocks, b);
-            for (uint32_t k = 0; k < blk.num_insns; k++) {
-                uint32_t ni = blk.first_insn + k;
-                zp_insn  n  = rc_view_zp_insn_get(c->insns, ni);
-                if (n.flow == zp_flow_call) {
-                    call_targets ct = rc_span_call_targets_get(c->calls, ni);
-                    for (uint32_t a = 0; a < ct.blocks.num; a++) {
-                        rc_bitset_union(c->row, rc_view_bitset_at(c->mayb, rc_view_u32_get(ct.blocks, a)));
-                    }
-                }
-                if (n.marker == zp_marker_wipe) {
-                    rc_bitset_union(c->row, c->full);   // a ZA_WIPE may (indeed does) write every byte
-                    continue;
-                }
-                if (n.vreg == RC_INDEX_NONE) {
-                    continue;
-                }
-                touch_window w = may_write_window(n, rc_view_zp_var_get(c->vars, n.vreg).width);
-                for (uint32_t i = 0; i < w.write_count; i++) {
-                    rc_bitset_set(c->row, rc_view_u32_get(c->base, n.vreg) + w.write_first + i);
-                }
-            }
-            if (!rc_bitset_is_equal(c->row, rc_span_bitset_at(c->mayout, b))) {
-                rc_bitset_copy(rc_span_bitset_at(c->mayout, b), c->row);
-                pass = true;
-            }
-        }
-    }
-
-    return tainted;
-}
-
-
 // The entry-input walk: which variables can a routine read while NOTHING in the program could yet
 // have written them - values that can only have come from outside, which is fatal at an
 // allocator-chosen address. Deliberately gated on MAY-write, not the sibling engine's must-write: a
@@ -922,39 +1014,9 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
         .scratch = &scratch,
     };
 
-    // Phase 1: the may-write summaries, to their fixpoint - monotone, since a callee's growing summary
-    // only ever grows its callers' flows. A routine's summary is the union over its RETURNING exits
-    // (a write on a never-returning path cannot precede a post-call read); no returning path at all
-    // vacuously covers everything (the caller's continuation never runs). A tainted extent contributes
-    // nothing - Guard 1 refuses the program anyway, no point stacking warnings on top of its error.
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (uint32_t e = 0; e < nb; e++) {
-            if (!rc_bitset_is_set(&is_entry, e)) {
-                continue;
-            }
-            bool tainted = may_write_flow(&c, e);
-            rc_bitset_reset(&acc);
-            if (!tainted) {
-                bool any_return = false;
-                for (uint32_t b = 0; b < nb; b++) {
-                    basic_block blk = rc_view_basic_block_get(g.blocks, b);
-                    if (rc_bitset_is_set(&in_ext, b) && block_returns(g, insns, cflows, blk)) {
-                        rc_bitset_union(&acc, rc_span_bitset_at(mayout, b));
-                        any_return = true;
-                    }
-                }
-                if (!any_return) {
-                    rc_bitset_copy(&acc, &full);
-                }
-            }
-            if (!rc_bitset_is_equal(&acc, rc_span_bitset_at(mayb, e))) {
-                rc_bitset_copy(rc_span_bitset_at(mayb, e), &acc);
-                changed = true;
-            }
-        }
-    }
+    // Phase 1: the may-write summaries (see may_write_summaries; a tainted extent contributes nothing).
+    rc_bitset none = rc_bitset_make(nbytes, &scratch);
+    may_write_summaries(&c, mayb, &is_entry, cflows, &none, &acc);
 
     // Phase 2: the input harvest, to its own fixpoint with the coverage frozen - the freeze is why the
     // phases cannot interleave: an early under-covered harvest could flag a read the final coverage
@@ -964,7 +1026,7 @@ rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cf
     // contributes its own input set, filtered by what this caller may already have covered, then
     // extends the running set with its may-writes. Reads come from insn_window (its read side is the
     // consumption question, unchanged); only the coverage side uses the may window.
-    changed = true;
+    bool changed = true;
     while (changed) {
         changed = false;
         for (uint32_t e = 0; e < nb; e++) {
@@ -1362,7 +1424,9 @@ RC_TEST(liveness, za_return_block_is_returning_exit)
     RC_CHECK_TRUE(callee != RC_INDEX_NONE);
     RC_CHECK_TRUE(rc_bitset_is_set(rc_view_bitset_at(lv.must_write, callee), 1));   // the exit counts as a returning path
     RC_CHECK_TRUE(liveness_is_live_out(&lv, callee, 1));          // res rides the return edge to the caller
-    RC_CHECK_TRUE(liveness_is_live_out(&lv, callee, 0));          // keep is live after the call, so here too
+    RC_CHECK_FALSE(liveness_is_live_out(&lv, callee, 0));         // keep is live after the call, but the callee
+                                                                  // never writes it: it passes through, and the
+                                                                  // call-site guard fences it (return_edge_masks_pass_through)
 
     // Without the annotation the computed exit taints: must-write forfeits the lot (the contrast that
     // proves ZA_RETURN is doing the work).
@@ -1394,6 +1458,55 @@ RC_TEST(liveness, za_return_block_is_returning_exit)
     RC_CHECK_FALSE(cb.unknown_succ);   // ...and the self-modified operand does not taint
     RC_CHECK_TRUE(rc_bitset_is_set(rc_view_bitset_at(lc.must_write, centry), 1));
     RC_CHECK_TRUE(liveness_is_live_out(&lc, centry, 1));   // res live at the conditional exit too
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(liveness, return_edge_masks_pass_through)
+{
+    // A return edge carries only what the routine may WRITE - its possible results. p passes through
+    // the helper untouched at one call site; q does at another, where the helper is also called before
+    // q exists. Neither may ride into the helper: its live-in would then make p live before EVERY call
+    // of it, q's included, smearing a's context into b's (and p and q could never share a byte). res is
+    // a real result and keeps its edge.
+    //   a 2000: STA p ; JSR 3000 ; LDA p ; LDA res ; RTS          (p = v0, q = v1, t = v2, res = v3)
+    //   b 2100: JSR 3000 ; STA q ; JSR 3000 ; LDA q ; RTS
+    //   helper 3000: STA t ; LDA t ; STA res ; RTS
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();   // distinct from arena: by-value scratch must not share backing
+    rc_array_zp_insn insns = rc_array_zp_insn_make(16, &arena);
+    uint32_t pc = 0x2000;
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_write, &arena);   // STA p
+    pc = touch(&insns, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena); // JSR 3000
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read,  &arena);   // LDA p
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 3, vref_read,  &arena);   // LDA res
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    pc = 0x2100;
+    pc = touch(&insns, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena); // JSR 3000
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 1, vref_write, &arena);   // STA q
+    pc = touch(&insns, pc, 3, zp_flow_call, 0x3000, RC_INDEX_NONE, vref_none, &arena); // JSR 3000
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 1, vref_read,  &arena);   // LDA q
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    pc = 0x3000;
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 2, vref_write, &arena);   // STA t
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 2, vref_read,  &arena);   // LDA t
+    pc = touch(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, 3, vref_write, &arena);   // STA res
+    pc = touch(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, RC_INDEX_NONE, vref_none, &arena);
+    (void) pc;
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    liveness lv = liveness_analyze(g, insns.view, (rc_view_zp_cflow) {0}, width1_vars(4, &arena), RC_INDEX_NONE, &arena, scratch);
+    uint32_t helper = cfg_block_at(g, 0, 0x3000);
+    uint32_t b_entry = cfg_block_at(g, 0, 0x2100);
+    RC_CHECK_TRUE(helper != RC_INDEX_NONE && b_entry != RC_INDEX_NONE);
+    RC_CHECK_TRUE(liveness_is_live_out(&lv, helper, 3));    // res rides the return edge to a
+    RC_CHECK_FALSE(liveness_is_live_out(&lv, helper, 0));   // p passes through: no edge...
+    RC_CHECK_FALSE(liveness_is_live_out(&lv, helper, 1));   // ...nor q
+    RC_CHECK_FALSE(liveness_is_live_in(&lv, helper, 0));    // so neither is an input of the helper
+    RC_CHECK_FALSE(liveness_is_live_in(&lv, helper, 1));
+    RC_CHECK_FALSE(liveness_is_live_in(&lv, b_entry, 0));   // and a's p never reaches b
+    RC_CHECK_FALSE(liveness_interferes(&lv, 0, 1));         // p and q may share a byte
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);

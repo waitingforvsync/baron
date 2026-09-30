@@ -3754,7 +3754,18 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         // live across itself (each level would want its own byte); a value merely
                         // read or accumulated (DEC/INC) shares one byte safely. Judged on the
                         // UNREDUCED live set: read-after-recursive-rewrite IS the per-level pattern.
-                        baron_error(b, error_type_za_auto_recursion, n.at);
+                        // The message names every culprit, 'a', 'b' (the template quotes the ends).
+                        rc_mstr names = rc_mstr_make(64, &scratch);
+                        for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
+                             c = rc_bitset_get_next_set(&live, c + 1)) {
+                            if (rc_bitset_is_set(&fp.killed, c)) {
+                                if (names.view.len != 0) {
+                                    rc_mstr_append(&names, RC_STR("', '"), &scratch);
+                                }
+                                rc_mstr_append(&names, zeropage_var_get(&b->zeropage, c).name, &scratch);
+                            }
+                        }
+                        baron_error_payload(b, error_type_za_auto_recursion, n.at, names.view);
                         refused = true;
                     }
                     else {
@@ -5153,6 +5164,72 @@ RC_TEST_STEP(assemble, za_auto_recursion_shared_vs_per_level, fix)
                       "LDA #10 : STA keep : LDA #5 : STA n : JSR a : LDA keep : CLC : ADC n : RTS\n"
                       ".a { DEC n : BEQ done : JSR b : .done RTS } : .b { JSR a : RTS }") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, za_auto_pass_through_is_fenced_not_smeared, fix)
+{
+    // A value held across a call to a shared helper is fenced off the helper's workspace at THAT call,
+    // and nowhere else: va and vb are never live at once, so they share a byte, even though b calls the
+    // helper before vb exists (where va, were it smeared through the helper, would look live).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      "JSR a : JSR b : RTS\n"
+                      ".helper RTS\n"
+                      ".a { ZA_AUTO1 va : LDA #1 : STA va : JSR helper : LDA va : RTS }\n"
+                      ".b { ZA_AUTO1 vb : JSR helper : LDA #2 : STA vb : JSR helper : LDA vb : RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "a.va"), ==, 0x70);
+    RC_CHECK(zp_addr(&fix->r, "b.vb"), ==, 0x70);
+
+    // The fence itself: keep passes through helper, which holds t across its own call to inner - keep
+    // must stay off both, however deep the callee's workspace goes.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      "LDA #1 : STA keep : JSR helper : LDA keep : RTS\n"
+                      ".helper { ZA_AUTO1 t : LDA #2 : STA t : JSR inner : LDA t : RTS }\n"
+                      ".inner { ZA_AUTO1 u : LDA #3 : STA u : LDA u : RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    int64_t keep = zp_addr(&fix->r, "keep");
+    RC_CHECK(keep, !=, zp_addr(&fix->r, "helper.t"));
+    RC_CHECK(keep, !=, zp_addr(&fix->r, "inner.u"));
+    RC_CHECK(zp_addr(&fix->r, "helper.t"), !=, zp_addr(&fix->r, "inner.u"));
+}
+
+RC_TEST_STEP(assemble, za_auto_recursion_saved_round_the_call, fix)
+{
+    // A per-level value saved round the recursive call - LDA v : PHA : JSR rec : PLA : STA v - is one
+    // byte, rewritten before it is read again: allowed.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      ".main LDA #4 : STA rec.v : JSR rec : JMP main\n"
+                      ".rec { ZA_AUTO1 v : LDA v : BEQ out\n"
+                      "  PHA : SEC : SBC #1 : STA v : JSR rec : PLA : STA v\n"
+                      "  LDA v : STA &2F0\n"
+                      ".out RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // The same with a shared helper called before the local is first written, and again while it is live
+    // across it: the helper must not carry s into its own live-in (and so into rec's, and round the main
+    // loop into the recursive call), which once refused this sound shape.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      ".main LDA #3 : STA &2F0 : JSR rec : JMP main\n"
+                      ".helper RTS\n"
+                      ".rec { ZA_AUTO1 s : JSR helper : LDA #3 : STA s\n"
+                      "  LDA &2F0 : BEQ out : DEC &2F0\n"
+                      "  LDA s : PHA : JSR rec : PLA : STA s\n"
+                      "  JSR helper : LDA s : STA &2F1\n"
+                      ".out RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, za_auto_recursion_error_names_the_variables, fix)
+{
+    // The refusal names its culprits: one...
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : .r { ZA_AUTO1 cnt : STA cnt : JSR r : LDA cnt : RTS }")
+                  == error_type_za_auto_recursion);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_auto_recursion), ==, RC_STR("cnt"));
+
+    // ...or several, which the template's quotes turn into 'lo', 'hi'.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : .r { ZA_AUTO1 lo, hi : STA lo : STA hi : JSR r : LDA lo : LDA hi : RTS }")
+                  == error_type_za_auto_recursion);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_auto_recursion), ==, RC_STR("lo', 'hi"));
 }
 
 RC_TEST_STEP(assemble, za_auto_indexed_access_warns, fix)

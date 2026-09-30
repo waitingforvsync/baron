@@ -676,6 +676,18 @@ What the allocator will not accept, and what it trusts you with:
   .@  RTS
   ```
 
+  A per-level value is fine too if each level saves it round the call and restores it before reading
+  it again - then it is never live across the recursion at all:
+
+  ```
+      LDA v : PHA
+      JSR rec
+      PLA : STA v             ; rewritten before anything reads it
+  ```
+
+  "Running" means updated in place: a value rebuilt through A (`LDA sum : EOR x : STA sum`) is a
+  fresh store as far as Baron can tell, and is refused just like a per-level one.
+
 - **Cross-section transfers go through labels**, so Baron knows which bank you mean.
 - **`STA arr,X` proves nothing.** An indexed store cannot say which byte it wrote, so an array rebuilt
   only that way looks permanently live. `ZA_DISCARD` it where the old value dies.
@@ -723,7 +735,7 @@ fall back to a hand-placed address.
 | `No free zero-page byte for ZA_AUTO variable: '...'` | More variables needed at once than the pool has bytes. Reserve more, or shorten a lifetime. |
 | `ZA_AUTO variable live across an unanalysable JSR (annotate with ZA_CANCALL)` | A variable held across a call whose destination Baron cannot follow. |
 | `Computed jump reaches unknown code (annotate with ZA_CANJUMP)` | A jump table or indirect `JMP` the analysis cannot follow. |
-| `ZA_AUTO variable freshly written and held live across recursion` | A per-level value in a call cycle - one byte cannot hold a value per level. |
+| `ZA_AUTO variable freshly written and held live across recursion: '...'` | A per-level value in a call cycle - one byte cannot hold a value per level. Every culprit is named. |
 | `ZA_AUTO1 dereferenced as a pointer (declare it ZA_AUTO2)` | `(var),Y` on a one-byte variable. |
 | `Access past the end of ZA_AUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
 | `ZA_DISCARD needs a whole ZA_AUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZA_AUTO` variable, whole. |

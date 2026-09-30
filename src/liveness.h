@@ -34,7 +34,9 @@ typedef struct liveness {
 // Run the backward liveness fixpoint over g, build the interference graph, and classify each vreg
 // (entry_block seeds the classification; RC_INDEX_NONE for none). A call is treated as a USE of its
 // callees' live-in (cflows supplies the ZA_CANCALL overrides), so an argument stored by the caller
-// stays live up to the JSR; vars' WIDTHS drive the partial-def rule (see zp_insn_write_kills). A
+// stays live up to the JSR; a routine's returning exits see each call site's live-after, masked to the
+// bytes the routine may write (its possible results - a value that merely passes through a call is
+// fenced at the call site instead); vars' WIDTHS drive the partial-def rule (see zp_insn_write_kills). A
 // block flagged unknown_succ contributes ALL vars to its live-out - the conservative taint that
 // keeps a computed exit from shrinking a live range. Results in arena; scratch backs the transients.
 liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_var vars,
@@ -51,9 +53,11 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg);
 
 // May-read-before-write from root: the variables some real control path starting at root READS
 // before any write covers the byte read - the routine's true inputs. The precise form of "live-in at
-// the root": the backward liveness above smears one call site's live-after through a shared callee
-// into another (context-insensitive return edges); this walk follows calls with per-callee summaries
-// instead. Unknown/external arms contribute nothing. Returns a var-level bitset in arena.
+// the root": the backward liveness above can still smear a RESULT through a shared callee (a byte the
+// callee may write, live after one call site, reaches its live-in along a path that skips the write,
+// and so every other call site - the return edges are masked, not context-sensitive); this walk
+// follows calls with per-callee summaries instead. Unknown/external arms contribute nothing. Returns a
+// var-level bitset in arena.
 rc_bitset liveness_read_before_write(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
                                      rc_view_zp_var vars, uint32_t root, rc_arena *arena, rc_arena scratch);
 

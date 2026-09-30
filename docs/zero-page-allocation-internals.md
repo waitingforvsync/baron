@@ -652,6 +652,23 @@ routine (the `ret_from` map and per-call `after` snapshots, maintained inside th
 live from its store to the `RTS`, and `t` gets its own byte (test
 `za_auto_result_survives_producer_tail`).
 
+But only a byte the routine may *write* can be a result, so each call site's snapshot is masked to
+its callees' may-write summaries (`retmask`) before it rides the edge. Anything else live after the
+call merely passes through the routine, and rule 1 already fences it off the routine's whole
+footprint at that call site; letting it ride the edge too would reopen exactly the smear a call-as-
+instruction avoids. Unmasked, a variable held across one `JSR helper` became live inside `helper`, so
+live-in to it, so live before *every* `JSR helper` in the program:
+
+```
+.a { ZA_AUTO1 va : LDA #1 : STA va : JSR helper : LDA va : RTS }
+.b { ZA_AUTO1 vb : JSR helper : LDA #2 : STA vb : JSR helper : LDA vb : RTS }
+                   ^ va looked live here, so va and vb could never share a byte
+```
+
+They share `&70` now (test `za_auto_pass_through_is_fenced_not_smeared`). The smear also reached the
+recursion check below, refusing sound code: a local of a recursive routine, held across a helper call,
+looked like a value carried into the routine and round the caller's loop.
+
 **Recursion** gets one extra check: a value the cycle writes *afresh* at each level and reads back
 after the recursive call would need a byte per level, which one static address cannot give - so it
 is refused (`za_auto_recursion`). The check keys on the footprint's write-only `killed` set against
@@ -739,21 +756,23 @@ exactly the comm-var pattern the pinning supports.
 
 #### Why not just read live-in at the root? ####
 
-Because the backward fixpoint's return edges are context-insensitive. Consider a helper called
-both before initialisation and inside the main loop:
+Because the backward fixpoint's return edges are not context-sensitive. They are masked to what the
+routine may write (rule 4 above), so a value that merely passes through a call no longer smears - but
+a result still can. Consider a helper called both before initialisation and inside the main loop,
+which updates a loop-carried `count` on some of its paths:
 
 ```
     .entry
         JSR helper       ; call site A - nothing initialised yet
         ...init...
     .loop
-        JSR helper       ; call site B - loop state live all around it
+        JSR helper       ; call site B - count live all around it
         JMP loop
 ```
 
-The helper's one `RTS` sees the live-after of BOTH call sites, so everything live around the loop
-smears through the shared return into call site A - and every loop-carried variable looks live at
-the root along a path that cannot execute.
+The helper's one `RTS` sees B's live-after for every byte the helper may write, `count` among them;
+along the helper's paths that leave `count` alone it reaches the helper's live-in, and so call site A -
+and `count` looks live at the root along a path that cannot execute.
 
 #### The forward may-write walk ####
 
