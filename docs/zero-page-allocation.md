@@ -627,7 +627,9 @@ ZA_AUTO1 vsync
 Without the marker, `vsync` looks dead nearly everywhere - only the handler and one wait loop touch
 it - so some innocent temporary gets packed onto its byte, and the next interrupt increments your
 temporary. With it, Baron keeps the handler's world apart: `vsync` gets a byte all to itself, and
-nothing the handler touches can land on a byte the main program might be using when it fires.
+nothing the handler touches can land on a byte the main program might be using when it fires. The
+same goes the other way: a result the handler writes for the main program - even one it only
+writes on some interrupts - gets a byte of its own.
 Temporaries *inside* the handler still share with each other as usual, and two marked handlers are
 kept apart from each other too (an NMI can land mid-IRQ).
 

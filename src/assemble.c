@@ -3828,8 +3828,11 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
 
     // Guard 3 / interrupt pinning: a handler preempts at ARBITRARY instructions, so nothing is
     // provably dead around it. (i) its communication vars (live-in at entry) pin against
-    // everything; (ii) its transitive footprint interferes with every var outside it. Among its
-    // own temps ordinary liveness still governs, so intra-handler reuse survives.
+    // everything; (ii) its transitive footprint interferes with every var outside it; (iii) a var
+    // it touches that the rest of the program still needs - live anywhere outside the handler's
+    // blocks, typically a result the handler writes on only some interrupts - pins too, or the
+    // handler's own temps could take its byte and clobber it on the interrupts that skip the write.
+    // Among its pure temps ordinary liveness still governs, so intra-handler reuse survives.
     for (uint32_t h = 0; h < handlers.num; h++) {
         zp_handler hd = rc_array_zp_handler_get(&handlers, h);
         footprint fp = footprint_compute(g, insns, cflows, hd.block, nv, &work, scratch);
@@ -3841,6 +3844,18 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         for (uint32_t v = 0; v < nv; v++) {
             if (liveness_is_live_in(&lv, hd.block, v)) {
                 pin_var(&lv, v, nv);
+            }
+        }
+        rc_bitset region = rc_bitset_make(nb, &scratch);   // the handler's blocks, its callees' included
+        reach_from(g, insns, cflows, hd.block, NULL, &region, scratch);
+        for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
+             t = rc_bitset_get_next_set(&fp.touched, t + 1)) {
+            for (uint32_t bi = 0; bi < nb; bi++) {
+                if (!rc_bitset_is_set(&region, bi)
+                    && (liveness_is_live_in(&lv, bi, t) || liveness_is_live_out(&lv, bi, t))) {
+                    pin_var(&lv, t, nv);
+                    break;
+                }
             }
         }
         for (uint32_t t = rc_bitset_get_first_set(&fp.touched); t != RC_INDEX_NONE;
@@ -6356,6 +6371,39 @@ RC_TEST_STEP(assemble, za_interrupt_pins_comm_var, fix)
     RC_CHECK_TRUE(flag != t);
     RC_CHECK_TRUE(flag != ht);
     RC_CHECK_TRUE(t != ht);   // footprint isolation separates the handler temp from the mainline temp too
+}
+
+RC_TEST_STEP(assemble, za_interrupt_pins_handler_output, fix)
+{
+    // stamp is written by the handler - on some interrupts only - and read by the mainline. Not live-in
+    // at the handler entry, so rule (i) misses it, and it is inside the footprint, so rule (ii) does not
+    // separate it from the handler's own temp h. Without rule (iii) h took stamp's byte, and every
+    // interrupt that skipped the write left the mainline reading h.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 stamp, h\n"
+                      ".main LDA stamp : STA &2F0 : JMP main\n"
+                      ".irq ZA_INTERRUPT : LDA &FE69 : STA h : LDA h : STA &2F1\n"
+                      "LDA &FE4D : AND #2 : BEQ out : LDA &2F2 : STA stamp\n"
+                      ".out RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "stamp") != zp_addr(&fix->r, "h"));
+
+    // The same result written a call deep in the handler: the rule covers the whole footprint.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 stamp, h\n"
+                      ".main LDA stamp : STA &2F0 : JMP main\n"
+                      ".irq ZA_INTERRUPT : LDA &FE69 : STA h : LDA h : STA &2F1 : JSR mark : RTI\n"
+                      ".mark LDA &FE4D : AND #2 : BEQ out : LDA &2F2 : STA stamp : .out RTS\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "stamp") != zp_addr(&fix->r, "h"));
+
+    // The control: when nothing outside the handler reads stamp, its store is dead and the byte is fair
+    // game - the rule pins only what the rest of the program needs.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 stamp, h\n"
+                      ".main LDA &2F0 : JMP main\n"
+                      ".irq ZA_INTERRUPT : LDA &FE69 : STA h : LDA h : STA &2F1\n"
+                      "LDA &FE4D : AND #2 : BEQ out : LDA &2F2 : STA stamp\n"
+                      ".out RTI\n") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "stamp"), ==, zp_addr(&fix->r, "h"));
 }
 
 RC_TEST_STEP(assemble, za_entry_input_warns, fix)

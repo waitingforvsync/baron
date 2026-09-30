@@ -718,7 +718,7 @@ Warnings never refuse - unreachable code is still fully analysed and coloured.
 ### Interrupt pinning ###
 
 A `ZA_INTERRUPT` handler preempts between *any* two instructions, so there is no safe moment the
-analysis could reason about. Instead, two blanket rules are injected as plain edges into the
+analysis could reason about. Instead, three blanket rules are injected as plain edges into the
 interference graph (exactly like the across-call check's):
 
 - **the handler's live-in is pinned against everything**, its own temps included. Live-in is the
@@ -726,9 +726,24 @@ interference graph (exactly like the across-call check's):
   rewrite it at any moment relative to the handler, so no instant of "dead" is reusable;
 - **the handler's transitive [footprint](#calls)** (`footprint_compute` at its entry) **interferes
   with every variable outside it** - the handler may run, and touch all of it, between any two
-  mainline instructions.
+  mainline instructions;
+- **anything in the footprint that is live outside the handler is pinned too** - live in or out of
+  any block the handler cannot reach (`reach_from` at its entry). This is the state the handler feeds
+  the mainline: a result it writes on only *some* interrupts, like a "last swap shown at" stamp.
+  Not live-in, so the first rule misses it; inside the footprint, so the second does not separate
+  it from the handler's own temps. Without this rule a temp took its byte, and every interrupt that
+  skipped the write handed the mainline the temp:
 
-What the pinning leaves alone: reuse *inside* the handler (ordinary liveness governs its own
+  ```
+  .main  LDA stamp ...                    ; the mainline reads stamp
+  .irq   ZA_INTERRUPT : STA h ...         ; every interrupt writes h
+         BEQ out : STA stamp              ; only some write stamp - h and stamp shared &70
+  ```
+
+  (test `za_interrupt_pins_handler_output`). A result nothing outside reads is dead once stored,
+  and still shares.
+
+What the pinning leaves alone: reuse *inside* the handler (ordinary liveness governs its own pure
 temps), and two handlers separate each other for free (each is outside the other's footprint). A
 footprint the walk cannot bound - an unannotated computed call in the handler - is refused with
 the usual `za_auto_across_call`, at the marker.
