@@ -687,8 +687,10 @@ What the allocator will not accept, and what it trusts you with:
       PLA : STA v             ; rewritten before anything reads it
   ```
 
-  "Running" means updated in place: a value rebuilt through A (`LDA sum : EOR x : STA sum`) is a
-  fresh store as far as Baron can tell, and is refused just like a per-level one.
+  "Running" means the routine reads it before it writes it: the value comes in from the caller and
+  every level carries it on, however it is updated - `INC n`, `LDX n : INX : STX n`,
+  `LDA sum : EOR x : STA sum`. A variable the routine writes before anything reads it is a per-level
+  value, and that is what gets refused.
 
 - **Cross-section transfers go through labels**, so Baron knows which bank you mean.
 - **`STA arr,X` proves nothing.** An indexed store cannot say which byte it wrote, so an array rebuilt

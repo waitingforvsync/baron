@@ -3745,25 +3745,41 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 if (rc_bitset_get_first_set(&live) != RC_INDEX_NONE) {
                     // What this call reaches - ZA_CANCALL overrides an untrackable literal target with a declared set.
                     footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, scratch);
+
+                    // Recursion is fatal only for a value the cycle FRESHLY writes and carries
+                    // live across itself (each level would want its own byte); a value merely
+                    // read or accumulated shares one byte safely. Judged on the UNREDUCED live
+                    // set: read-after-recursive-rewrite IS the per-level pattern. A variable live
+                    // into the callee - some path from its entry reads it before writing it - is
+                    // flowing in from its caller: one running value shared by every level,
+                    // however it is updated (INC n, LDX n : INX : STX n). So the callee's inputs
+                    // are never culprits: only a value it writes before any read is per-level.
+                    rc_bitset culprits = rc_bitset_make(nv, &scratch);
+                    if (fp.recursive && !fp.unknown_call && rc_bitset_intersects(&live, &fp.killed)) {
+                        rc_bitset_copy(&culprits, &live);
+                        rc_bitset_intersection(&culprits, &fp.killed);
+                        for (uint32_t a = 0; a < ct.blocks.num; a++) {
+                            for (uint32_t v = 0; v < nv; v++) {
+                                if (liveness_is_live_in(&lv, rc_view_u32_get(ct.blocks, a), v)) {
+                                    rc_bitset_clear(&culprits, v);
+                                }
+                            }
+                        }
+                    }
+
                     if (fp.unknown_call) {
                         baron_error(b, error_type_za_auto_across_call, n.at);
                         refused = true;
                     }
-                    else if (fp.recursive && rc_bitset_intersects(&live, &fp.killed)) {
-                        // Recursion is fatal only for a value the cycle FRESHLY writes and carries
-                        // live across itself (each level would want its own byte); a value merely
-                        // read or accumulated (DEC/INC) shares one byte safely. Judged on the
-                        // UNREDUCED live set: read-after-recursive-rewrite IS the per-level pattern.
+                    else if (rc_bitset_get_first_set(&culprits) != RC_INDEX_NONE) {
                         // The message names every culprit, 'a', 'b' (the template quotes the ends).
                         rc_mstr names = rc_mstr_make(64, &scratch);
-                        for (uint32_t c = rc_bitset_get_first_set(&live); c != RC_INDEX_NONE;
-                             c = rc_bitset_get_next_set(&live, c + 1)) {
-                            if (rc_bitset_is_set(&fp.killed, c)) {
-                                if (names.view.len != 0) {
-                                    rc_mstr_append(&names, RC_STR("', '"), &scratch);
-                                }
-                                rc_mstr_append(&names, zeropage_var_get(&b->zeropage, c).name, &scratch);
+                        for (uint32_t c = rc_bitset_get_first_set(&culprits); c != RC_INDEX_NONE;
+                             c = rc_bitset_get_next_set(&culprits, c + 1)) {
+                            if (names.view.len != 0) {
+                                rc_mstr_append(&names, RC_STR("', '"), &scratch);
                             }
+                            rc_mstr_append(&names, zeropage_var_get(&b->zeropage, c).name, &scratch);
                         }
                         baron_error_payload(b, error_type_za_auto_recursion, n.at, names.view);
                         refused = true;
@@ -5232,6 +5248,39 @@ RC_TEST_STEP(assemble, za_auto_recursion_saved_round_the_call, fix)
                       "  JSR helper : LDA s : STA &2F1\n"
                       ".out RTS }") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, za_auto_recursion_running_value, fix)
+{
+    // A variable the recursive routine reads before it writes flows in from its caller: one running value
+    // shared by every level, whatever instructions update it - INC n, or through a register, even with a
+    // branch between the load and the store (the allocate idiom). Each shape runs on the way down and
+    // again on the way back, with the variables read after the recursion.
+    #define REC_SHAPE(body) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 n, w\n" \
+        ".main LDA #0 : STA n : STA w : JSR rec : LDA n : LDA w : JMP main\n" \
+        ".helper RTS\n" \
+        ".rec " body " : DEC &2F0 : BEQ out : JSR rec : " body " : .out RTS\n"
+    #define ALLOWED(body) \
+        RC_CHECK_TRUE(ASM(REC_SHAPE(body)) != 0); \
+        RC_CHECK_TRUE(first_error(&fix->r) == error_type_none)
+    ALLOWED("INC n");
+    ALLOWED("LDX n : INX : STX n");
+    ALLOWED("LDA n : EOR #&55 : STA n");
+    ALLOWED("LDA #3 : EOR n : STA n");
+    ALLOWED("LDA n : CLC : ADC #5 : STA n");
+    ALLOWED("LDX n : INX : BEQ @+ : STX n : .@");
+    ALLOWED("LDX n : JSR helper : STX n");
+
+    // Written before anything reads it, it is a per-level value, and one byte cannot hold one per level.
+    #define REFUSED(body, name) \
+        RC_CHECK_TRUE(ERR(REC_SHAPE(body)) == error_type_za_auto_recursion); \
+        RC_CHECK(diag_payload(&fix->r, error_type_za_auto_recursion), ==, RC_STR(name))
+    REFUSED("LDA #0 : STA n", "n");
+    REFUSED("LDX w : INX : STX n", "n");
+    #undef ALLOWED
+    #undef REFUSED
+    #undef REC_SHAPE
 }
 
 RC_TEST_STEP(assemble, za_auto_recursion_error_names_the_variables, fix)

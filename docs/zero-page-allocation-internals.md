@@ -675,6 +675,20 @@ is refused (`za_auto_recursion`). The check keys on the footprint's write-only `
 the live set *before* the must-write reduction, so the kill cannot hide the pattern. A counter
 merely `DEC`ed through the recursion is a single running value and rides one byte happily.
 
+So is any variable the recursive callee reads before it writes. If some path from its entry reads v
+before writing it - v is live-in at the callee's entry - then v's value flows in from the caller, and
+every level carries the one value on, however it is spelt:
+
+```
+.rec
+    LDX n : INX : BEQ full      ; n is read before it is written: live into rec
+    STX n                       ; so this store updates the running value
+```
+
+So the callee's live-in is subtracted from the culprits (test `za_auto_recursion_running_value`);
+only a variable the callee writes before any read is per-level. `killed` feeds nothing but this
+check, so the subtraction changes which programs are refused, never an allocation.
+
 ## Roots, reachability and interrupts ##
 
 Everything so far analyses the stream as it lies; nothing asks *where control can enter it*. Two
