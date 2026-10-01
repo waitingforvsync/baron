@@ -12,6 +12,7 @@ typedef struct fp_ctx {
     rc_view_zp_cflow cflows;    // ZA_CANCALL overrides: a JSR's declared target set
     rc_bitset       *touched;   // accumulate vregs here (in the caller's arena)
     rc_bitset       *killed;    // vregs given a write-only def here (a fresh value, per the footprint doc)
+    rc_bitset       *reached;   // blocks visited, transitively (in the caller's arena)
     rc_bitset       *on_stack;  // routine-entry blocks currently being computed - a revisit is recursion
     bool            *unknown;
     bool            *recursive;
@@ -56,6 +57,7 @@ static void fp_visit(fp_ctx *c, uint32_t entry, rc_arena scratch)
 
     while (stack.num > 0) {
         uint32_t bi = rc_array_u32_pop(&stack);
+        rc_bitset_set(c->reached, bi);
         basic_block blk = rc_view_basic_block_get(c->g.blocks, bi);
         if (blk.unknown_succ) {
             *c->unknown = true;   // a callee that leaves via a computed jump: footprint cannot be bounded
@@ -105,6 +107,7 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
 {
     rc_bitset touched = rc_bitset_make(num_vars, arena);
     rc_bitset killed  = rc_bitset_make(num_vars, arena);
+    rc_bitset reached = rc_bitset_make(g.blocks.num ? g.blocks.num : 1, arena);
     bool unknown   = false;
     bool recursive = false;
 
@@ -116,6 +119,7 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
             .cflows    = cflows,
             .touched   = &touched,
             .killed    = &killed,
+            .reached   = &reached,
             .on_stack  = &on_stack,
             .unknown   = &unknown,
             .recursive = &recursive,
@@ -126,6 +130,7 @@ footprint footprint_compute(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
     return (footprint) {
         .touched      = touched,
         .killed       = killed,
+        .reached      = reached,
         .unknown_call = unknown,
         .recursive    = recursive,
     };
@@ -137,6 +142,7 @@ footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
 {
     rc_bitset touched = rc_bitset_make(num_vars, arena);
     rc_bitset killed  = rc_bitset_make(num_vars, arena);
+    rc_bitset reached = rc_bitset_make(g.blocks.num ? g.blocks.num : 1, arena);
     bool unknown   = false;
     bool recursive = false;
 
@@ -148,6 +154,7 @@ footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
             .cflows    = cflows,
             .touched   = &touched,
             .killed    = &killed,
+            .reached   = &reached,
             .on_stack  = &on_stack,
             .unknown   = &unknown,
             .recursive = &recursive,
@@ -158,6 +165,7 @@ footprint footprint_of_call(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflow
     return (footprint) {
         .touched      = touched,
         .killed       = killed,
+        .reached      = reached,
         .unknown_call = unknown,
         .recursive    = recursive,
     };

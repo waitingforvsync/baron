@@ -28,6 +28,9 @@ typedef struct liveness {
     rc_span_bitset interfere;    // [num_vars]: row a has bit b set iff a and b's live ranges overlap (symmetric)
     rc_view_bitset must_write;   // [num_blocks] var-level: a call entering this block definitely rewrites these
                                  //   in full on every returning path, so it KILLS them (empty off entry blocks)
+    rc_view_bitset local_in;     // [num_blocks] live_in and live_out without the return edges: what the
+    rc_view_bitset local_out;    //   routine's own continuation (and what it calls) reads before rewriting,
+                                 //   not what some caller reads after it returns - the recursion check's view
     rc_view_u8     classes;      // [num_vars] vreg_class values (u8 storage; members never take enum types)
 } liveness;
 
@@ -50,6 +53,10 @@ vreg_class liveness_class_of(const liveness *lv, uint32_t vreg);
 // Test/inspection helpers: is vreg live on entry to / exit from block?
 bool liveness_is_live_in(const liveness *lv, uint32_t block, uint32_t vreg);
 bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg);
+
+// The same, activation-local: no return edges (see local_in / local_out).
+bool liveness_is_local_live_in(const liveness *lv, uint32_t block, uint32_t vreg);
+bool liveness_is_local_live_out(const liveness *lv, uint32_t block, uint32_t vreg);
 
 // May-read-before-write from root: the variables some real control path starting at root READS
 // before any write covers the byte read - the routine's true inputs. The precise form of "live-in at

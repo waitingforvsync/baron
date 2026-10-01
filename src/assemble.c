@@ -3729,13 +3729,19 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // every vreg the callee (transitively) touches. Sweep each block backward; at a call the
     // current live set is exactly what is live across it. An unboundable or recursive callee
     // refuses - a value live across either cannot be statically placed.
-    rc_bitset live = rc_bitset_make(nv, &scratch);
+    // llive runs alongside live, activation-local (no return edges): the recursion check's view.
+    rc_bitset live  = rc_bitset_make(nv, &scratch);
+    rc_bitset llive = rc_bitset_make(nv, &scratch);
     for (uint32_t bi = 0; bi < g.blocks.num; bi++) {
         basic_block blk = rc_view_basic_block_get(g.blocks, bi);
         rc_bitset_reset(&live);
+        rc_bitset_reset(&llive);
         for (uint32_t v = 0; v < nv; v++) {
             if (liveness_is_live_out(&lv, bi, v)) {
                 rc_bitset_set(&live, v);
+            }
+            if (liveness_is_local_live_out(&lv, bi, v)) {
+                rc_bitset_set(&llive, v);
             }
         }
         for (uint32_t k = blk.num_insns; k-- > 0; ) {
@@ -3746,21 +3752,26 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     // What this call reaches - ZA_CANCALL overrides an untrackable literal target with a declared set.
                     footprint fp = footprint_of_call(g, insns, cflows, n, nv, &work, scratch);
 
-                    // Recursion is fatal only for a value the cycle FRESHLY writes and carries
-                    // live across itself (each level would want its own byte); a value merely
-                    // read or accumulated shares one byte safely. Judged on the UNREDUCED live
-                    // set: read-after-recursive-rewrite IS the per-level pattern. A variable live
-                    // into the callee - some path from its entry reads it before writing it - is
-                    // flowing in from its caller: one running value shared by every level,
-                    // however it is updated (INC n, LDX n : INX : STX n). So the callee's inputs
-                    // are never culprits: only a value it writes before any read is per-level.
+                    // Recursion is fatal only for a value a LEVEL freshly writes and then reads back
+                    // after its own recursive call (each level would want its own byte); a value
+                    // merely read or accumulated shares one byte safely. So it is judged only at a
+                    // call that can come back round to itself - its own block is in the callee's
+                    // reach - and on the activation-local live set, UNREDUCED by the call: what this
+                    // level goes on to read before rewriting it. Not what a caller reads after the
+                    // whole recursion has returned: a seed stored before the recursion is entered,
+                    // or a result read after the outermost return, is one value whatever the levels
+                    // between wrote. A variable live into the callee - some path from its entry reads
+                    // it before writing it - flows in from its caller: one running value shared by
+                    // every level, however it is updated (INC n, LDX n : INX : STX n). So the
+                    // callee's inputs are never culprits: only a value it writes before any read is.
                     rc_bitset culprits = rc_bitset_make(nv, &scratch);
-                    if (fp.recursive && !fp.unknown_call && rc_bitset_intersects(&live, &fp.killed)) {
-                        rc_bitset_copy(&culprits, &live);
+                    bool reenters = fp.recursive && rc_bitset_is_set(&fp.reached, bi);
+                    if (reenters && !fp.unknown_call && rc_bitset_intersects(&llive, &fp.killed)) {
+                        rc_bitset_copy(&culprits, &llive);
                         rc_bitset_intersection(&culprits, &fp.killed);
                         for (uint32_t a = 0; a < ct.blocks.num; a++) {
                             for (uint32_t v = 0; v < nv; v++) {
-                                if (liveness_is_live_in(&lv, rc_view_u32_get(ct.blocks, a), v)) {
+                                if (liveness_is_local_live_in(&lv, rc_view_u32_get(ct.blocks, a), v)) {
                                     rc_bitset_clear(&culprits, v);
                                 }
                             }
@@ -3810,6 +3821,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 for (uint32_t v = 0; v < nv; v++) {
                     if (call_rewrites(&lv, ct, v)) {
                         rc_bitset_clear(&live, v);
+                        rc_bitset_clear(&llive, v);
                     }
                 }
                 for (uint32_t c = 0; c < ct.blocks.num; c++) {
@@ -3818,11 +3830,15 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         if (liveness_is_live_in(&lv, e, v)) {
                             rc_bitset_set(&live, v);
                         }
+                        if (liveness_is_local_live_in(&lv, e, v)) {
+                            rc_bitset_set(&llive, v);
+                        }
                     }
                 }
             }
             if (n.marker == zp_marker_wipe) {
                 rc_bitset_reset(&live);   // a ZA_WIPE rewrites the whole pool: nothing survives it
+                rc_bitset_reset(&llive);
             }
             else if (n.vreg != RC_INDEX_NONE) {
                 // A write ends the range only when it covers the whole variable on its own
@@ -3830,14 +3846,20 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 // store PAIR conservatively stays live - extra edges only, never missed ones.
                 if (n.marker == zp_marker_discard) {
                     rc_bitset_clear(&live, n.vreg);   // a ZA_DISCARD ends the whole variable's range, pinning nothing
+                    rc_bitset_clear(&llive, n.vreg);
                 }
                 else if (zp_insn_write_kills(n, zeropage_var_get(&b->zeropage, n.vreg).width)) {
                     rc_bitset_clear(&live, n.vreg);
+                    rc_bitset_clear(&llive, n.vreg);
                 }
                 else if (n.rw & vref_write) {
                     rc_bitset_set(&live, n.vreg);
+                    rc_bitset_set(&llive, n.vreg);
                 }
-                if (n.rw & vref_read) { rc_bitset_set(&live, n.vreg); }
+                if (n.rw & vref_read) {
+                    rc_bitset_set(&live, n.vreg);
+                    rc_bitset_set(&llive, n.vreg);
+                }
             }
         }
     }
@@ -5272,15 +5294,54 @@ RC_TEST_STEP(assemble, za_auto_recursion_running_value, fix)
     ALLOWED("LDX n : INX : BEQ @+ : STX n : .@");
     ALLOWED("LDX n : JSR helper : STX n");
 
-    // Written before anything reads it, it is a per-level value, and one byte cannot hold one per level.
+    // Written before anything reads it, but read only by main once the whole recursion has returned: the
+    // last level's write is the one main sees, so it is one value too.
+    ALLOWED("LDA #0 : STA n");
+    ALLOWED("LDX w : INX : STX n");
+
+    // Written before anything reads it, and read back by the same level after its own recursive call: a
+    // per-level value, and one byte cannot hold one per level.
+    #define REC_READ_BACK(body) \
+        "ZA_POOL &70..&7F : ZA_AUTO1 n, w\n" \
+        ".main LDA #0 : STA n : STA w : JSR rec : JMP main\n" \
+        ".rec " body " : DEC &2F0 : BEQ out : JSR rec : LDA n : STA &2F1 : .out RTS\n"
     #define REFUSED(body, name) \
-        RC_CHECK_TRUE(ERR(REC_SHAPE(body)) == error_type_za_auto_recursion); \
+        RC_CHECK_TRUE(ERR(REC_READ_BACK(body)) == error_type_za_auto_recursion); \
         RC_CHECK(diag_payload(&fix->r, error_type_za_auto_recursion), ==, RC_STR(name))
     REFUSED("LDA #0 : STA n", "n");
     REFUSED("LDX w : INX : STX n", "n");
     #undef ALLOWED
     #undef REFUSED
+    #undef REC_READ_BACK
     #undef REC_SHAPE
+}
+
+RC_TEST_STEP(assemble, za_auto_recursion_judged_per_level, fix)
+{
+    // A seed stored by a routine that is not itself recursive, before it enters the recursion, and read
+    // by its caller after: one value, carried through every level.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 n\n"
+                      ".main JSR outer : LDA n : STA &2F0 : JMP main\n"
+                      ".outer LDA #0 : STA n : LDA #5 : STA rec.d : JSR rec : RTS\n"
+                      ".rec { ZA_AUTO1 d : INC n : DEC d : BEQ done : JSR rec : .done RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // A helper's result, written and used within one level, and read once more by main after the
+    // recursion: main sees the last level's, and no level holds its own across its recursive call.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      ".main LDA #5 : STA rec.d : JSR rec : LDA helper.r : STA &2F0 : JMP main\n"
+                      ".helper { ZA_AUTO1 r : LDA #7 : STA r : RTS }\n"
+                      ".rec { ZA_AUTO1 d : JSR helper : LDA helper.r : STA &2F1\n"
+                      "  DEC d : BEQ done : JSR rec : .done RTS }") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // A per-level value on a guarded path: the path that skips the store reaches the RTS, where v is live
+    // only through the return edge into the level above - which is not this level's input, so v is
+    // refused all the same.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : .main JSR rec : JMP main\n"
+                      ".rec { ZA_AUTO1 v : LDA &2F0 : BEQ out : DEC &2F0 : STA v : JSR rec : LDA v : STA &2F1\n"
+                      ".out RTS }") == error_type_za_auto_recursion);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_auto_recursion), ==, RC_STR("v"));
 }
 
 RC_TEST_STEP(assemble, za_auto_recursion_error_names_the_variables, fix)

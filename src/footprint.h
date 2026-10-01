@@ -16,6 +16,8 @@
 typedef struct footprint {
     rc_bitset touched;        // vregs, width num_vars
     rc_bitset killed;         // vregs given a write-only def (a fresh value, not an accumulation) somewhere within
+    rc_bitset reached;        // blocks, width num_blocks: every block the walk visits - a call whose own block
+                              //   is in its callee's reached set can come back round to itself (recursion)
     bool      unknown_call;
     bool      recursive;
 } footprint;

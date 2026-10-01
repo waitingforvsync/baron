@@ -689,8 +689,19 @@ What the allocator will not accept, and what it trusts you with:
 
   "Running" means the routine reads it before it writes it: the value comes in from the caller and
   every level carries it on, however it is updated - `INC n`, `LDX n : INX : STX n`,
-  `LDA sum : EOR x : STA sum`. A variable the routine writes before anything reads it is a per-level
-  value, and that is what gets refused.
+  `LDA sum : EOR x : STA sum`. A variable a level writes before anything reads it, and then reads
+  back after its own recursive call, is a per-level value, and that is what gets refused.
+
+  Only the level's own reads count. A seed stored before the recursion is entered, by a routine that
+  isn't itself part of it, and a result read once the outermost call has returned, are one value each
+  - whatever the levels in between wrote, the last write is the one that's read:
+
+  ```
+  .outer
+      LDA #0 : STA n          ; seeded here, outside the cycle
+      JSR rec
+      RTS                     ; and the caller reads n after: fine
+  ```
 
 - **Cross-section transfers go through labels**, so Baron knows which bank you mean.
 - **`STA arr,X` proves nothing.** An indexed store cannot say which byte it wrote, so an array rebuilt

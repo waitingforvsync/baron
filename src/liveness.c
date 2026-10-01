@@ -449,6 +449,8 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     rc_span_bitset live_out   = make_rows(nb, num_vars, arena);
     rc_span_bitset interfere  = make_rows(num_vars, num_vars, arena);
     rc_span_bitset must_write = make_rows(nb, num_vars, arena);
+    rc_span_bitset local_in   = make_rows(nb, num_vars, arena);
+    rc_span_bitset local_out  = make_rows(nb, num_vars, arena);
 
     rc_array_u8 classes_a = {0};
     rc_span_u8 classes = rc_array_u8_resize_zero(&classes_a, num_vars, arena);   // all unused until classified
@@ -458,12 +460,15 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         .live_out   = live_out.view,
         .interfere  = interfere,
         .must_write = must_write.view,
+        .local_in   = local_in.view,
+        .local_out  = local_out.view,
         .classes    = classes.view,
     };
 
     // The containers carry the counts now, so pin the shape once: one row per block, one interference
     // row and one class per vreg. Every accessor's bound then has exactly one authority.
     RC_ASSERT(lv.live_in.num == nb && lv.live_out.num == nb && lv.must_write.num == nb);
+    RC_ASSERT(lv.local_in.num == nb && lv.local_out.num == nb);
     RC_ASSERT(lv.interfere.num == num_vars && lv.classes.num == num_vars);
 
     if (nb == 0 || num_vars == 0) {
@@ -791,6 +796,63 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
     }
 
+    // The same fixpoint again with the return edges left out: activation-local liveness. A byte live here
+    // is read by the routine's own continuation, or by something it goes on to call, before anything
+    // rewrites it - not merely by a caller once the routine has returned. The recursion check judges on
+    // this: a value read only after the outermost return of a recursion is one value, whatever the
+    // levels in between wrote, but one a level reads back after its own recursive call is per-level.
+    rc_span_bitset lbin  = make_rows(nb, nbytes, &scratch);
+    rc_span_bitset lbout = make_rows(nb, nbytes, &scratch);
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (uint32_t bi = nb; bi-- > 0; ) {
+            basic_block block = rc_view_basic_block_get(g.blocks, bi);
+            rc_bitset_reset(&new_out);
+            for (uint32_t k = 0; k < block.succ_count; k++) {
+                rc_bitset_union(&new_out, rc_span_bitset_at(lbin, cfg_succ(g, block, k)));
+            }
+            if (block.unknown_succ) {
+                rc_bitset_union(&new_out, &full);
+            }
+            rc_bitset_copy(&new_in, &new_out);
+            for (uint32_t k = block.num_insns; k-- > 0; ) {
+                uint32_t ni = block.first_insn + k;
+                zp_insn  n  = rc_view_zp_insn_get(insns, ni);
+                if (n.flow == zp_flow_call) {
+                    for (uint32_t i = rc_bitset_get_first_set(rc_span_bitset_at(ckills, ni)); i != RC_INDEX_NONE;
+                         i = rc_bitset_get_next_set(rc_span_bitset_at(ckills, ni), i + 1)) {
+                        rc_bitset_clear(&new_in, i);
+                    }
+                    call_targets ct = rc_span_call_targets_get(calls, ni);
+                    for (uint32_t c = 0; c < ct.blocks.num; c++) {
+                        rc_bitset_union(&new_in, rc_span_bitset_at(lbin, rc_view_u32_get(ct.blocks, c)));
+                    }
+                }
+                if (n.marker == zp_marker_wipe) {
+                    rc_bitset_reset(&new_in);
+                    continue;
+                }
+                if (n.vreg == RC_INDEX_NONE) {
+                    continue;
+                }
+                touch_window w  = insn_window(n, rc_view_zp_var_get(vars, n.vreg).width);
+                uint32_t     vb = rc_span_u32_get(ids.base, n.vreg);
+                for (uint32_t i = 0; i < w.write_count; i++) {
+                    rc_bitset_clear(&new_in, vb + w.write_first + i);
+                }
+                for (uint32_t i = 0; i < w.read_count; i++) {
+                    rc_bitset_set(&new_in, vb + w.read_first + i);
+                }
+            }
+            if (!rc_bitset_is_equal(&new_out, rc_span_bitset_at(lbout, bi)) || !rc_bitset_is_equal(&new_in, rc_span_bitset_at(lbin, bi))) {
+                changed = true;
+                rc_bitset_copy(rc_span_bitset_at(lbout, bi), &new_out);
+                rc_bitset_copy(rc_span_bitset_at(lbin, bi), &new_in);
+            }
+        }
+    }
+
     // Project the byte sets to the VARIABLE-level results the callers consume: a variable is live iff any
     // of its bytes is.
     for (uint32_t b = 0; b < nb; b++) {
@@ -801,6 +863,14 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         for (uint32_t i = rc_bitset_get_first_set(rc_span_bitset_at(bout, b)); i != RC_INDEX_NONE;
              i = rc_bitset_get_next_set(rc_span_bitset_at(bout, b), i + 1)) {
             rc_bitset_set(rc_span_bitset_at(live_out, b), rc_span_u32_get(ids.owner, i));
+        }
+        for (uint32_t i = rc_bitset_get_first_set(rc_span_bitset_at(lbin, b)); i != RC_INDEX_NONE;
+             i = rc_bitset_get_next_set(rc_span_bitset_at(lbin, b), i + 1)) {
+            rc_bitset_set(rc_span_bitset_at(local_in, b), rc_span_u32_get(ids.owner, i));
+        }
+        for (uint32_t i = rc_bitset_get_first_set(rc_span_bitset_at(lbout, b)); i != RC_INDEX_NONE;
+             i = rc_bitset_get_next_set(rc_span_bitset_at(lbout, b), i + 1)) {
+            rc_bitset_set(rc_span_bitset_at(local_out, b), rc_span_u32_get(ids.owner, i));
         }
     }
 
@@ -945,6 +1015,30 @@ bool liveness_is_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
     }
 
     const rc_bitset *row = rc_view_bitset_at(lv->live_out, block);
+    return vreg < row->num && rc_bitset_is_set(row, vreg);
+}
+
+
+bool liveness_is_local_live_in(const liveness *lv, uint32_t block, uint32_t vreg)
+{
+    RC_ASSERT(lv != NULL);
+    if (block >= lv->local_in.num) {
+        return false;
+    }
+
+    const rc_bitset *row = rc_view_bitset_at(lv->local_in, block);
+    return vreg < row->num && rc_bitset_is_set(row, vreg);
+}
+
+
+bool liveness_is_local_live_out(const liveness *lv, uint32_t block, uint32_t vreg)
+{
+    RC_ASSERT(lv != NULL);
+    if (block >= lv->local_out.num) {
+        return false;
+    }
+
+    const rc_bitset *row = rc_view_bitset_at(lv->local_out, block);
     return vreg < row->num && rc_bitset_is_set(row, vreg);
 }
 

@@ -669,11 +669,29 @@ They share `&70` now (test `za_auto_pass_through_is_fenced_not_smeared`). The sm
 recursion check below, refusing sound code: a local of a recursive routine, held across a helper call,
 looked like a value carried into the routine and round the caller's loop.
 
-**Recursion** gets one extra check: a value the cycle writes *afresh* at each level and reads back
-after the recursive call would need a byte per level, which one static address cannot give - so it
-is refused (`za_auto_recursion`). The check keys on the footprint's write-only `killed` set against
-the live set *before* the must-write reduction, so the kill cannot hide the pattern. A counter
-merely `DEC`ed through the recursion is a single running value and rides one byte happily.
+**Recursion** gets one extra check: a value a level writes *afresh* and reads back after its own
+recursive call would need a byte per level, which one static address cannot give - so it is refused
+(`za_auto_recursion`). The check keys on the footprint's write-only `killed` set against the live set
+*before* the must-write reduction, so the kill cannot hide the pattern. A counter merely `DEC`ed
+through the recursion is a single running value and rides one byte happily.
+
+It runs only at a call that can come back round to itself: the footprint walk records every block it
+`reached`, and the call's own block must be among them. A call *into* a recursion from outside it is
+an ordinary call - a seed its caller stored first, and read again after, is one value. And it judges
+on activation-local liveness: `local_in` and `local_out`, the same backward fixpoint run again
+without the return edges. A byte is live there only if the level's own continuation (or something it
+goes on to call) reads it before rewriting it, not merely some caller after the whole recursion has
+returned - a result read after the outermost return is the last level's, and that is one value too:
+
+```
+.main JSR rec : LDA helper.r : ...           ; reads the deepest level's r: fine
+.rec  JSR helper : LDA helper.r : ... : JSR rec : RTS
+```
+
+Without the return edges, liveness also stops flowing a level's own read back round into its entry:
+a per-level value stored only on a guarded path (`BEQ out : STA v : JSR rec : LDA v : .out RTS`)
+reaches the RTS live on the full fixpoint, through the return edge into the level above, which made
+it look like an input. Locally it isn't one, so it is refused.
 
 So is any variable the recursive callee reads before it writes. If some path from its entry reads v
 before writing it - v is live-in at the callee's entry - then v's value flows in from the caller, and
@@ -685,8 +703,8 @@ every level carries the one value on, however it is spelt:
     STX n                       ; so this store updates the running value
 ```
 
-So the callee's live-in is subtracted from the culprits (test `za_auto_recursion_running_value`);
-only a variable the callee writes before any read is per-level. `killed` feeds nothing but this
+So the callee's (activation-local) live-in is subtracted from the culprits (test
+`za_auto_recursion_running_value`); only a variable the callee writes before any read is per-level. `killed` feeds nothing but this
 check, so the subtraction changes which programs are refused, never an allocation.
 
 ## Roots, reachability and interrupts ##
