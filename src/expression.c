@@ -2227,12 +2227,19 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     // params and the def scope's globals, never the caller's locals), but KEYED on the caller's scope
     // index + call site: the caller's frame is unique per call chain, so two chains never alias one
     // frame (keying on site + depth alone did, and corrupted deep recursion). Stable pass-to-pass.
+    // The site is '@' source ':' pos, as for an anonymous block, with the caller frame in parentheses
+    // after it: a bare pos let two files' calls at the same offset share a frame, and '@' scope ':' pos
+    // could spell a macro / block / FOR key ('@' source ':' pos) in the same parent - either way the
+    // second binding of each parameter was a duplicate, and the body read the stale first one.
     char storage[80];
     rc_mstr key = {.data = storage, .len = 0, .cap = sizeof storage};
     rc_mstr_append_char(&key, '@', NULL);
-    rc_mstr_append_u32(&key, p->env->scope_index, NULL);   // the caller frame - names this call chain
+    rc_mstr_append_u32(&key, p->env->source, NULL);
     rc_mstr_append_char(&key, ':', NULL);
     rc_mstr_append_u32(&key, call_pos, NULL);
+    rc_mstr_append_char(&key, '(', NULL);
+    rc_mstr_append_u32(&key, p->env->scope_index, NULL);   // the caller frame - names this call chain
+    rc_mstr_append_char(&key, ')', NULL);
     uint32_t child = scopes_get_or_make_child(p->env->scopes, sig->def_scope, key.view);
 
     // An error argument is the caller's doing, never the body's: placed at this call inside a body,
