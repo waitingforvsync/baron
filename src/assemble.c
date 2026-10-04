@@ -8231,6 +8231,23 @@ RC_TEST_STEP(assemble, include_splices_file, fix)
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("child")), value_make_numeric(0)));
 }
 
+RC_TEST_STEP(assemble, function_frames_are_per_source, fix)
+{
+    // fn_frame_child.6502's f(5) is padded to sit at the same byte offset as this f(1), both called from
+    // the root scope. Each call needs its own frame: when they shared one, n stayed bound to 5.
+    uint32_t passes = INC("include \"fn_frame_child.6502\" : equb f(1)");
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){10, 2}, 2));
+}
+
+RC_TEST_STEP(assemble, function_frame_never_aliases_a_macro_scope, fix)
+{
+    // fn_frame_macro_child.6502 (source 1) calls f from scope 0 at the offset of m's arguments here
+    // (source 0). The frame key once spelled '@' scope ':' pos, the same '@0:72' as the macro's
+    // '@' source ':' pos, so the macro got the frame as its scope and its n stayed bound to 5.
+    uint32_t passes = INC("macro m n : equb n : endmacro : include \"fn_frame_macro_child.6502\" : m 1");
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){10, 1}, 2));
+}
+
 RC_TEST_STEP(assemble, include_resolves_relative_to_includer, fix)
 {
     // sub/mid.6502 does its own INCLUDE "leaf.6502" - resolved against sub/, not the top file's directory.
