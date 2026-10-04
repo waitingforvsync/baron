@@ -185,8 +185,8 @@ value value_make_range_pair(value lhs, value rhs, bool exclusive)
                 .has_start = true,
             });
         }
-        if (sign64(r.end - r.start) != sign64(step)) {
-            return value_make_error(error_type_domain);   // the end does not continue the same way
+        if (sign64(r.end - r.start) == -sign64(step)) {
+            return value_make_error(error_type_domain);   // the limit stops short of the second element
         }
         int64_t end = start + step * ((r.end - start) / step);   // canonical last element
         return value_make_range((value_range) {
@@ -365,10 +365,10 @@ static void format_value(rc_mstr *out, value v, uint32_t max_list_elements, rc_a
                 rc_mstr_append_i64(out, v.range.start, arena);
             }
             rc_mstr_append(out, RC_STR(".."), arena);
-            // A stored 0 means "infer the direction" - the plain spelling re-infers it, so only a
-            // genuine explicit step earns its segment.
+            // The middle segment is the SECOND ELEMENT, which implies the step. A stored 0 means
+            // "infer the direction" and +1 is what the plain spelling infers, so neither needs one.
             if (v.range.step != 0 && v.range.step != 1) {
-                rc_mstr_append_i64(out, v.range.step, arena);
+                rc_mstr_append_i64(out, v.range.start + v.range.step, arena);
                 rc_mstr_append(out, RC_STR(".."), arena);
             }
             if (v.range.has_end) {
@@ -644,11 +644,27 @@ RC_TEST(value, formatting)
     value_format(&out, value_make_error(error_type_type_mismatch), &arena);
     RC_CHECK(out.view, ==, RC_STR("<error: Incompatible types>"));
 
-    // Stepped, fully-bounded range.
+    // Stepped, fully-bounded range: the middle segment is the second element, not the step
+    // (issue #13 - a start of 0 hides the difference).
     out = rc_mstr_make(16, &arena);
     value_range stepped = {.start = 0, .end = 10, .step = 2, .has_start = true, .has_end = true};
     value_format(&out, value_make_range(stepped), &arena);
     RC_CHECK(out.view, ==, RC_STR("0..2..10"));
+
+    out = rc_mstr_make(16, &arena);
+    value_range odd = {.start = 1, .end = 9, .step = 2, .has_start = true, .has_end = true};
+    value_format(&out, value_make_range(odd), &arena);
+    RC_CHECK(out.view, ==, RC_STR("1..3..9"));
+
+    out = rc_mstr_make(16, &arena);
+    value_range down = {.start = 10, .end = 2, .step = -2, .has_start = true, .has_end = true};
+    value_format(&out, value_make_range(down), &arena);
+    RC_CHECK(out.view, ==, RC_STR("10..8..2"));
+
+    out = rc_mstr_make(16, &arena);
+    value_range open = {.start = 1, .step = 2, .has_start = true};
+    value_format(&out, value_make_range(open), &arena);
+    RC_CHECK(out.view, ==, RC_STR("1..3.."));
 
     // Boundless start, step 1.
     out = rc_mstr_make(16, &arena);

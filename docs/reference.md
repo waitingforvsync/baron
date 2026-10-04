@@ -154,11 +154,21 @@ refused with its own message.
 
 | Kind | Examples |
 |------|----------|
-| Number | `42`, `1.5`, `&FF` or `$FF` (hex), `%1010` (binary). All numbers are one type. |
+| Number | `42`, `1.5`, `&FF` or `$FF` (hex), `%1010` (binary), `'A'` (a [character literal](#character-literals): 65). All numbers are one type. |
 | Boolean | `TRUE`, `FALSE` - what comparisons and the predicates return. Coerces to 1 / 0 in any numeric context (`(x>5)*10`, `EQUB flag`), so a boolean goes anywhere a number does; only `AND`/`OR`/`EOR`/`NOT` care about the difference (logical on booleans, bitwise on numbers, a mixed pair refused). **Note: This is a breaking change from BeebAsm, which represents TRUE as -1, not 1.** The switch `--beebasm-true` can be used to restore TRUE as -1. |
 | String | `"hello"` - write `""` for a literal quote. |
 | List | `{1, 2, 3}` - nestable, mixed types welcome, newlines allowed inside the braces. Nested equal-length lists act as higher-rank arrays; `SHAPE`/`RANK` report the axes all elements agree on (ragged lists keep only their uniform leading axes). |
 | Range | A compact list of consecutive integers - see [Range forms](#range-forms). |
+
+### Character literals ###
+
+A character literal is exactly one character between single quotes, and it is simply a number: the
+character's code. It goes anywhere a number does - `LDA #'A'` loads 65, `'z'-'a'` is 25, and
+`EQUB 'h', 'i'` emits two bytes.
+
+Any character except a newline or the single quote itself may sit between the quotes, `';'` and `':'`
+included. There are no escape sequences, so write `39` for a quote. For the codes of a whole string,
+see `CODES` under [Element-wise functions](#element-wise-functions).
 
 ### Range forms ###
 
@@ -169,7 +179,7 @@ arithmetic and comparisons, so `0..n-1` needs no parentheses.
 |------|---------|
 | `a..b` | Inclusive at both ends. Direction is inferred: `5..1` is `{5, 4, 3, 2, 1}`. |
 | `a..<b` | Excludes the end. Ascending only; `a..<b` with `a >= b` (e.g. `5..<5`) is the legal empty list `{}`. |
-| `a..b..c` | Stepped: `b` is the *second element*, fixing the step at `b-a`; `c` is a limit, not a promise (`1..3..10` is `{1, 3, 5, 7, 9}`). Steps down too: `10..8..1` is `{10, 8, 6, 4, 2}`. |
+| `a..b..c` | Stepped: `b` is the *second element*, fixing the step at `b-a`; `c` is a limit, not a promise (`1..3..10` is `{1, 3, 5, 7, 9}`), though it must reach `b` (`0..2..2` is `{0, 2}`; `0..2..1` is an error). Steps down too: `10..8..1` is `{10, 8, 6, 4, 2}`. |
 | `a..b..<c` | As above, excluding `c`. The `<` goes on the final separator only. |
 | `a..` / `..b` / `a..b..` / `..` | Unbounded: one or both ends left off. Not enumerable as data - used as [subscript](#subscripts) selectors, where the axis supplies the missing end (`..b` runs from the start, `a..` to the end). |
 
@@ -236,7 +246,7 @@ All broadcast; trigonometry is in radians.
 | `LOG(n)`, `LN(n)`, `EXP(n)` | Log base 10, natural log, e^n. |
 | `NOT(x)` | Logical NOT on a boolean (`NOT(TRUE)` is `FALSE`); bitwise complement (32-bit) on a number. |
 | `RND(n)` | A random integer in 0..n-1. `RND(REPEATED(k, n))` makes k draws. Deterministically reseeded each pass, so it converges. |
-| `CODES(s)` | A string's character codes as a rank-1 list: `CODES("AB")` is `{65, 66}`, `CODES("")` is `{}`. The bridge from text to arithmetic - `CODES("A")[0]` is a character literal, and a length-1 result broadcasts (`CODES(s) - CODES(" ")`). |
+| `CODES(s)` | A string's character codes as a rank-1 list: `CODES("AB")` is `{65, 66}`, `CODES("")` is `{}`. The bridge from text to arithmetic (a lone character is simpler as a [character literal](#character-literals), `'A'`). The result broadcasts like any list: `CODES(s) - ' '` offsets every code. |
 
 ### String, search and type functions ###
 

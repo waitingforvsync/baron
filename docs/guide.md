@@ -148,7 +148,8 @@ Here are the basics:
 - Comments run from `;` or `\` to the end of the line.
 - `:` separates statements, so `LDA #0 : STA &70` is two statements on one line.
 - Keywords are case-insensitive: `lda`, `LDA` and `Lda` are all the same instruction.
-- Numbers are decimal (`42`, `1.5`), hex (`&FF` or `$FF`) or binary (`%1010`).
+- Numbers are decimal (`42`, `1.5`), hex (`&FF` or `$FF`) or binary (`%1010`). A character literal
+  is a number too: `'A'` is 65, the character's code, so `CMP #'Z'+1` just works.
 - Strings are double-quoted; write `""` inside one for a literal quote.
 - `name = expr` binds a case-sensitive symbol. Symbols are immutable - one name, one value -
   which is what lets Baron re-run passes freely. (Loops that want a changing variable use `FOR`.)
@@ -505,7 +506,6 @@ A full 256-entry sine table, one line.
 
 ```
 CODES("AB")             ; {65, 66}
-CODES("A")[0]           ; 65 - a character literal, e.g. CMP #CODES("Z")[0]
 CHR(72)                 ; "H"
 CHR({72, 73})           ; "HI" - every code becomes a character of ONE string
 ```
@@ -534,10 +534,11 @@ to   = {&80, &90, &A0}
 FUNCTION remap(s) = to[FIND(from, CODES(s))]
 ```
 
-Or, when the mapping is just an offset, skip the function entirely - a length-1 list broadcasts:
+Or, when the mapping is just an offset, skip the function entirely - a character literal is a
+number, so it broadcasts across the codes:
 
 ```
-EQUS CODES("HELLO WORLD") - CODES(" ")   ; font starts at space = 0
+EQUS CODES("HELLO WORLD") - ' '   ; font starts at space = 0
 ```
 
 A character missing from the set fails the assemble with `Not found: '81'` naming the stray code -

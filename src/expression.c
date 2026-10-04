@@ -3040,6 +3040,26 @@ RC_TEST_STEP(expression, ranges_stepped, fix)
     RC_CHECK_TRUE(range_is(VAL("0..2..4..10"), 0,  10, 2));
     // same elements, however spelled, compare equal (canonical end)
     RC_CHECK_TRUE(value_is_equal(VAL("4..6..8"), VAL("4..6..<10")));
+
+    // A limit landing exactly on the second element keeps it (issue #13), so the canonical
+    // spelling a range prints itself as always reads back in.
+    RC_CHECK_TRUE(range_is(VAL("0..2..2"),     0,  2,  2));
+    RC_CHECK_TRUE(range_is(VAL("1..3..3"),     1,  3,  2));
+    RC_CHECK_TRUE(range_is(VAL("10..8..8"),    10, 8, -2));   // descending too
+    RC_CHECK_TRUE(range_is(VAL("0..2..<3"),    0,  2,  2));   // exclusive
+    RC_CHECK_TRUE(range_is(VAL("0..2..4..4"),  0,  4,  2));   // chained
+    RC_CHECK_TRUE(value_is_equal(VAL("0..2..2"), VAL("0..2..3")));
+
+    // Whatever a stepped range prints as reads back in as that same range.
+    rc_str spelled[] = {RC_STR("1..3..3"), RC_STR("10..8..8"), RC_STR("1..3..10"), RC_STR("5..2..-4"), RC_STR("1..3..")};
+    rc_view_str spellings = RC_VIEW(spelled);
+    for (uint32_t i = 0; i < spellings.num; i++) {
+        expr_env env = {.scopes = &fix->scopes};
+        value v = expression_parse(rc_view_str_get(spellings, i), 0, &env, &fix->arena).value;
+        rc_mstr text = rc_mstr_make(16, &fix->arena);
+        value_format(&text, v, &fix->arena);
+        RC_CHECK_TRUE(value_is_range(v) && value_is_equal(expression_parse(text.view, 0, &env, &fix->arena).value, v));
+    }
 }
 
 RC_TEST_STEP(expression, ranges_precedence, fix)
@@ -3068,6 +3088,8 @@ RC_TEST_STEP(expression, ranges_unbounded, fix)
 RC_TEST_STEP(expression, ranges_errors, fix)
 {
     RC_CHECK_TRUE(value_is_error(VAL("1..3..0")));      // not monotonic
+    RC_CHECK_TRUE(value_is_error(VAL("0..2..1")));      // limit stops short of the second element
+    RC_CHECK_TRUE(value_is_error(VAL("10..8..9")));     // ... descending
     RC_CHECK_TRUE(value_is_error(VAL("0..3.5")));       // non-integer endpoint
     RC_CHECK_TRUE(value_is_error(VAL("0..<2..6")));     // '<' on the wrong separator
     RC_CHECK_TRUE(value_is_error(VAL("(1..2)..3")));    // a range can't be a start
