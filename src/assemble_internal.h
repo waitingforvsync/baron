@@ -46,6 +46,10 @@ void semantic_error_cause(baron *b, parse_flags flags, error_type code, cursor a
 // Like semantic_error at a positive severity level; does not fail the assemble.
 void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity);
 
+// Whether a statement in section feeds the zero-page IR: the final pass of a live branch with the
+// allocator on - and never from a virtual section, whose code exists nowhere to analyse.
+bool zp_recording(const baron *b, parse_flags flags, uint32_t section);
+
 // Discriminates an int_argument.
 typedef enum int_argument_type {
     int_argument_type_error,        // 0/default: a value that can never be an address (fail-safe)

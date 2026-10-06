@@ -236,7 +236,8 @@ ENDSECTION
 - `cmos = TRUE` enables the 65C02 instruction set for the section: `PHX`, `STZ`, `BRA`, `LDA (zp)`
   and friends. Everywhere else is plain NMOS 6502, and a CMOS instruction there says so: `CMOS-only
   instruction (needs cmos=TRUE on the section)`.
-- Section names don't clash with symbol/label names, but must be unique.
+- Section names don't clash with symbol/label names, but must be unique - except that a
+  [virtual section](#virtual-sections) can be reopened.
 - Two sections may sit at the *same* address - sideways banks, swap-in overlays - without complaint;
   each keeps its own instruction pointer.
 
@@ -271,6 +272,66 @@ ENDSECTION
 Labels around the child live in the loader's address space (`payload` is where the bytes sit in the
 file's memory image, `entry - payload` their length), while labels inside it live in the child's
 (`start` = `&400`) - which is exactly what the stub needs on each side of the copy.
+
+### Virtual sections ###
+
+`virtual = TRUE` makes a section that hands out addresses but keeps no bytes. Everything in it -
+`SKIP`, `EQUB`, even instructions - moves its address on and lands nowhere, and the section takes no
+room in whatever encloses it.
+
+That makes it a pool of workspace. Unlike any other section, a virtual one can be opened again by
+name, carrying on from where it stopped. So each routine can claim its variables right where it
+uses them:
+
+```
+SECTION workspace, org = &400, guard = &800, virtual = TRUE
+ENDSECTION
+
+SECTION Code, org = &1900, filename = "CODE"
+.draw
+{
+    SECTION workspace           ; carries on from the last claim
+    .xpos   SKIP 1
+    .buffer SKIP 32
+    ENDSECTION
+
+    LDX xpos
+    LDA buffer,X
+    RTS
+}
+
+.sound
+{
+    SECTION workspace
+    .freq   EQUW 0              ; EQUW 0 says "two bytes" as well as SKIP 2 does
+    ENDSECTION
+
+    LDA freq
+    RTS
+}
+ENDSECTION
+```
+
+`draw.xpos` lands at `&400`, `draw.buffer` at `&401` and `sound.freq` at `&421`, while `CODE` holds
+only the code. A section opens no scope, so each label belongs to the routine that claims it,
+reachable from outside by its dotted path like any other scoped name.
+
+The rules:
+
+- Attributes belong on the first `SECTION` line; a reopening takes none. Write that first line
+  before any reopening: the other way round, the early one makes an ordinary section and the
+  declaration becomes a duplicate.
+- `guard` is the pool's limit. It is checked as each piece closes, so an overrun is reported at the
+  piece that crossed it.
+- A virtual section has nothing to save, so a `filename` on it is an error.
+- A section nested inside a virtual one keeps no bytes either, but otherwise behaves as usual: it
+  continues the enclosing address and is stepped past at its `ENDSECTION`. A virtual section opened
+  inside another is a separate pool, so it never moves the outer one on.
+- Code in a virtual section never runs, so the [zero-page allocator](#zero-page-allocation) ignores
+  it.
+
+The same idea gives plain zero-page bytes when you want them never shared (`org = &70, guard =
+&90`), and with `org = 0` it lays out the field offsets of a structure.
 
 ## Includes ##
 

@@ -108,6 +108,20 @@ uint32_t sections_guard(const sections *sec, uint32_t id)
 }
 
 
+bool sections_is_virtual(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+    return rc_array_section_get(&sec->nodes, id).is_virtual;
+}
+
+
+bool sections_discards(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+    return rc_array_section_get(&sec->nodes, id).discards;
+}
+
+
 // ---- mutation ----
 
 uint32_t sections_make(sections *sec, rc_str name, uint32_t parent)
@@ -119,13 +133,15 @@ uint32_t sections_make(sections *sec, rc_str name, uint32_t parent)
         return RC_INDEX_NONE;
     }
 
+    // Discarding by containment, not inheritance: a child's bytes land in its parent, which drops them
     return rc_array_section_push(
         &sec->nodes,
         (section) {
-            .name   = name,
-            .parent = parent,
-            .begin  = sec->stream.num,
-            .end    = sec->stream.num,
+            .name     = name,
+            .parent   = parent,
+            .discards = sections_discards(sec, parent),
+            .begin    = sec->stream.num,
+            .end      = sec->stream.num,
         },
         sec->arena);
 }
@@ -190,15 +206,30 @@ void sections_set_guard(sections *sec, uint32_t id, uint32_t addr)
 }
 
 
+void sections_set_virtual(sections *sec, uint32_t id, bool is_virtual)
+{
+    RC_ASSERT(sec != NULL && id != sections_default);
+
+    // virtual = FALSE cannot rescue a section from a discarding parent: its bytes would still be dropped
+    section *s = rc_array_section_at(&sec->nodes, id);
+    s->is_virtual = is_virtual;
+    s->discards   = is_virtual || sections_discards(sec, s->parent);
+}
+
+
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
 {
     RC_ASSERT(sec != NULL);
 
-    // Emission only ever happens in the innermost open section, so its window tail IS the stream tail
-    rc_array_bytes_push(&sec->stream, b, sec->arena);
+    // Emission only ever happens in the innermost open section, so its window tail IS the stream tail.
+    // A discarding section keeps its window empty: the byte only claims its address.
     section *s = rc_array_section_at(&sec->nodes, id);
-    s->end = sec->stream.num;
-    s->pc += 1;
+    if (!s->discards) {
+        rc_array_bytes_push(&sec->stream, b, sec->arena);
+        s->end = sec->stream.num;
+    }
+    s->size += 1;
+    s->pc   += 1;
 }
 
 
@@ -213,10 +244,13 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count)
 {
     RC_ASSERT(sec != NULL);
 
-    rc_array_bytes_push_n_zero(&sec->stream, count, sec->arena);
     section *s = rc_array_section_at(&sec->nodes, id);
-    s->end = sec->stream.num;
-    s->pc += count;
+    if (!s->discards) {
+        rc_array_bytes_push_n_zero(&sec->stream, count, sec->arena);
+        s->end = sec->stream.num;
+    }
+    s->size += count;
+    s->pc   += count;
 }
 
 
@@ -224,12 +258,22 @@ void sections_close(sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL && id != sections_default);
 
+    // A virtual child is a pool of its own, taking no room in its parent (and a reopened one's recorded
+    // parent need not even enclose it)
+    section c = rc_array_section_get(&sec->nodes, id);
+    if (c.is_virtual) {
+        return;
+    }
+
     // The child's window is contiguous and sits at the parent's tail, so absorbing it is just
-    // bookkeeping: extend the window, advance the pc by the child's size
-    section c  = rc_array_section_get(&sec->nodes, id);
+    // bookkeeping: extend the window, advance the pc by the child's size. A discarding child still
+    // takes its room; it just has no window to hand over.
     section *p = rc_array_section_at(&sec->nodes, c.parent);
-    p->end = c.end;
-    p->pc += c.end - c.begin;
+    if (!c.discards) {
+        p->end = c.end;
+    }
+    p->size += c.size;
+    p->pc   += c.size;
 }
 
 
@@ -330,7 +374,10 @@ section section_make_copy(section s, rc_arena *arena)
         .name       = str_make_copy(s.name, arena),
         .parent     = s.parent,
         .pc         = s.pc,
+        .size       = s.size,
         .cmos       = s.cmos,
+        .is_virtual = s.is_virtual,
+        .discards   = s.discards,
         .is_guarded = s.is_guarded,
         .guard      = s.guard,
         .begin      = 0,
@@ -501,6 +548,58 @@ RC_TEST(sections, close_folds_child_into_parent)
     // The default is the root: its window covers the whole stream, its pc advanced with everything
     RC_CHECK(sections_pc(&sec, sections_default), ==, 4u);
     RC_CHECK(sections_code(&sec, sections_default).num, ==, 4u);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, virtual_moves_pc_only)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+    sections_reset(&sec);
+
+    // A virtual child's bytes and skips advance its pc and nothing else: the stream stays put, and
+    // closing it leaves the parent's window and pc exactly as they were.
+    uint32_t parent = sections_make(&sec, RC_STR("code"), sections_default);
+    sections_org(&sec, parent, 0x2000);
+    sections_emit_u8(&sec, parent, 0x01);
+    uint32_t ws = sections_make(&sec, RC_STR("ws"), parent);
+    sections_set_virtual(&sec, ws, true);
+    sections_org(&sec, ws, 0x400);
+    sections_emit_u16(&sec, ws, 0x1234);
+    sections_skip(&sec, ws, 3);
+
+    // A grandchild discards by containment, and asking otherwise cannot change that - but not being
+    // virtual itself, it still takes its room in ws, like any nested section
+    uint32_t inner = sections_make(&sec, RC_STR("inner"), ws);
+    RC_CHECK_TRUE(sections_discards(&sec, inner));
+    sections_set_virtual(&sec, inner, false);
+    RC_CHECK_TRUE(sections_discards(&sec, inner));
+    RC_CHECK_FALSE(sections_is_virtual(&sec, inner));
+    sections_emit_u8(&sec, inner, 0x09);
+    sections_close(&sec, inner);
+    RC_CHECK(sections_pc(&sec, ws), ==, 0x406u);
+
+    // A second virtual pool inside ws takes no room there: its addresses are its own
+    uint32_t zp = sections_make(&sec, RC_STR("zp"), ws);
+    sections_set_virtual(&sec, zp, true);
+    sections_org(&sec, zp, 0x70);
+    sections_skip(&sec, zp, 2);
+    sections_close(&sec, zp);
+    sections_close(&sec, ws);
+
+    sections_emit_u8(&sec, parent, 0x02);
+    sections_close(&sec, parent);
+
+    RC_CHECK_FALSE(sections_discards(&sec, parent));
+    RC_CHECK(sections_pc(&sec, ws), ==, 0x406u);
+    RC_CHECK(sections_pc(&sec, zp), ==, 0x72u);
+    RC_CHECK(sections_code(&sec, ws).num, ==, 0u);
+    RC_CHECK(sections_code(&sec, inner).num, ==, 0u);
+    RC_CHECK(sections_pc(&sec, parent), ==, 0x2002u);
+    RC_CHECK(sections_code(&sec, parent).num, ==, 2u);
+    RC_CHECK(sec.stream.num, ==, 2u);
 
     rc_arena_deinit(&arena);
 }

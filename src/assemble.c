@@ -175,6 +175,13 @@ void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, u
 }
 
 
+bool zp_recording(const baron *b, parse_flags flags, uint32_t section)
+{
+    return flags.final && flags.active && zeropage_is_enabled(&b->zeropage)
+        && !sections_discards(&b->sections, section);
+}
+
+
 // Remember the pass's FIRST binding that would not settle; if we hit the pass cap, this is the
 // culprit we point at (changes cascade down the file, so the earliest is nearest the root cause).
 static void note_unsettled(baron *b, cursor at, rc_str name, value from, value to)
@@ -809,18 +816,27 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         return syntax_error(b, error_type_expected_section_name, cursor_at(at, at.pos));
     }
 
-    // Create the section (only when live); the child is threaded to the body's parse_block.
-    uint32_t child = RC_INDEX_NONE;
+    // Create the section (only when live); the child is threaded to the body's parse_block. Naming a
+    // virtual section again reopens it, carrying on where its pc stopped.
+    rc_str   name     = nm.token.identifier.name;
+    uint32_t child    = RC_INDEX_NONE;
+    bool     reopened = false;
     if (flags.active) {
-        child = sections_make(&b->sections, nm.token.identifier.name, section);
-        if (child == RC_INDEX_NONE) {
-            return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos),
-                                        nm.token.identifier.name);   // names are unique
+        uint32_t existing = sections_find(&b->sections, name);
+        reopened = existing != RC_INDEX_NONE && sections_is_virtual(&b->sections, existing);
+        if (reopened) {
+            child = existing;
         }
+        else {
+            child = sections_make(&b->sections, name, section);
+            if (child == RC_INDEX_NONE) {
+                return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos), name);
+            }
 
-        // Continue the enclosing section's address unless an explicit org below rephases; cmos and
-        // guard keep sections_make's defaults - nothing is inherited.
-        sections_org(&b->sections, child, sections_pc(&b->sections, section));
+            // Continue the enclosing section's address unless an explicit org below rephases; cmos and
+            // guard keep sections_make's defaults - nothing is inherited.
+            sections_org(&b->sections, child, sections_pc(&b->sections, section));
+        }
     }
 
     // The attribute list: , key = expr pairs to the end of the SECTION line. Parsed structurally even in a
@@ -847,12 +863,17 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        if (child != RC_INDEX_NONE) {
+        if (reopened) {
+            // A reopening only continues: the section was described once, on its first SECTION line
+            semantic_error_payload(b, flags, error_type_virtual_reopen_attribute, cursor_at(at, comma.next), name);
+        }
+        else if (child != RC_INDEX_NONE) {
             sections_add_attribute(&b->sections, child, key.token.identifier.name, e.value, cursor_at(at, comma.next));
-            bool is_org   = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"));
-            bool is_cmos  = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("cmos"));
-            bool is_guard = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("guard"));
-            if (is_org || is_cmos || is_guard) {
+            bool is_org     = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"));
+            bool is_cmos    = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("cmos"));
+            bool is_guard   = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("guard"));
+            bool is_virtual = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("virtual"));
+            if (is_org || is_cmos || is_guard || is_virtual) {
                 int_argument arg = int_argument_no_za_auto(int_argument_make(e.value, flags.final, eq.next), eq.next);
                 switch ((int_argument_type) arg.type) {
                     case int_argument_type_known:
@@ -864,12 +885,15 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                         else if (is_cmos) {
                             sections_set_cmos(&b->sections, child, arg.value != 0);
                         }
+                        else if (is_virtual) {
+                            sections_set_virtual(&b->sections, child, arg.value != 0);
+                        }
                         else {
                             sections_set_guard(&b->sections, child, (uint32_t) arg.value);
                         }
                         break;
                     case int_argument_type_unresolved:
-                        unresolved = true;   // a forward-referenced org/cmos owes another pass
+                        unresolved = true;   // a forward-referenced org/cmos/guard/virtual owes another pass
                         break;
                     case int_argument_type_error:
                         semantic_error_cause(b, flags, arg.error, cursor_at(at, eq.next), arg.cause);
@@ -878,6 +902,18 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             }
         }
         pos = e.next;
+    }
+
+    // A virtual section has no bytes to save, so a filename on it (or anywhere inside one) can only be
+    // a mistake. The check waits for the whole line: virtual may come after the filename.
+    if (child != RC_INDEX_NONE && !reopened && sections_discards(&b->sections, child)) {
+        rc_view_attribute attrs = sections_attributes(&b->sections, child);
+        for (uint32_t i = 0; i < attrs.num; i++) {
+            attribute a = rc_view_attribute_get(attrs, i);
+            if (rc_str_is_equal(a.key, RC_STR("filename"))) {
+                semantic_error_payload(b, flags, error_type_virtual_filename, a.at, name);
+            }
+        }
     }
 
     // Close the SECTION line, parse the body up to ENDSECTION (in the child section), then thread the cursor
@@ -894,6 +930,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 
     // A dead branch has no child section: the body parses for extent in the parent, emitting nothing.
     uint32_t body_section = (child != RC_INDEX_NONE) ? child : section;
+    uint32_t pc_open      = sections_pc(&b->sections, body_section);
     parse_result body = parse_block(b, cursor_at(at, sep.next), scope, body_section, flags, scratch);
     body.unresolved |= unresolved;
 
@@ -904,10 +941,11 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
     if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
         if (child != RC_INDEX_NONE) {
-            // The guard check, once the section is complete:
-            // pc past the guard means the guarded address was written. Recoverable.
+            // The guard check, once the section is complete: pc past the guard means the guarded
+            // address was written - by this block only if it placed anything (a reopened virtual
+            // section may already be past it). Recoverable.
             uint32_t pc = sections_pc(&b->sections, child);
-            if (sections_is_guarded(&b->sections, child) && pc > sections_guard(&b->sections, child)) {
+            if (sections_is_guarded(&b->sections, child) && pc > sections_guard(&b->sections, child) && pc > pc_open) {
                 char storage[16];
                 rc_mstr over = {.data = storage, .cap = sizeof storage};
                 rc_mstr_append_u32(&over, pc - sections_guard(&b->sections, child), NULL);
@@ -1217,7 +1255,7 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
     (void) stmt;
     (void) scope;
     (void) scratch;
-    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+    if (zp_recording(b, flags, section)) {
         zeropage_add_cflow(&b->zeropage, (zp_cflow) {
             .site   = sections_pc(&b->sections, section),
             .target = RC_INDEX_NONE,
@@ -1320,7 +1358,7 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
 
-        if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage) && site != RC_INDEX_NONE) {
+        if (zp_recording(b, flags, section) && site != RC_INDEX_NONE) {
             parse_result rec = record_cflow_targets(b, e.value, site, kind, flags, cursor_at(at, pos));
             unresolved |= rec.unresolved;
         }
@@ -1361,9 +1399,8 @@ static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t 
 {
     (void) stmt;
     (void) scope;
-    (void) section;
     (void) scratch;
-    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+    if (zp_recording(b, flags, section)) {
         uint32_t site = annotation_site(b, zp_cflow_za_return);
         if (site != RC_INDEX_NONE) {
             zeropage_add_cflow(&b->zeropage, (zp_cflow) {
@@ -1410,7 +1447,7 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
                     semantic_error_payload(b, flags, error_type_za_discard_needs_var, cursor_at(at, pos),
                                            arg.za_auto ? arg.zp_name : (rc_str) {0});
                 }
-                else if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+                else if (zp_recording(b, flags, section)) {
                     zeropage_add_insn(&b->zeropage, (zp_insn) {
                         .pc           = sections_pc(&b->sections, section),
                         .size         = 0,
@@ -1460,7 +1497,7 @@ static parse_result handle_za_wipe(baron *b, cursor stmt, cursor at, uint32_t sc
     (void) stmt;
     (void) scope;
     (void) scratch;
-    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+    if (zp_recording(b, flags, section)) {
         zeropage_add_insn(&b->zeropage, (zp_insn) {
             .pc           = sections_pc(&b->sections, section),
             .size         = 0,
@@ -1539,7 +1576,7 @@ static parse_result handle_za_indexedby(baron *b, cursor stmt, cursor at, uint32
     // instruction, which must be an indexed ZA_AUTO access (only the final pass records, so only
     // then is there anything to bind to).
     uint32_t site = RC_INDEX_NONE;
-    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+    if (zp_recording(b, flags, section)) {
         uint32_t ni = zeropage_insn_count(&b->zeropage);
         while (ni > 0 && zeropage_insn_get(&b->zeropage, ni - 1).size == 0) {
             ni--;
@@ -1585,7 +1622,7 @@ static parse_result handle_entry_mark(baron *b, cursor stmt, cursor at, uint32_t
     (void) stmt;
     (void) scope;
     (void) scratch;
-    if (flags.final && flags.active && zeropage_is_enabled(&b->zeropage)) {
+    if (zp_recording(b, flags, section)) {
         zeropage_add_entry(&b->zeropage, (zp_entry) {
             .section   = section,
             .pc        = sections_pc(&b->sections, section),
@@ -1736,7 +1773,7 @@ static parse_result handle_bit_skip(baron *b, cursor stmt, cursor at, uint32_t s
         uint32_t pc0   = sections_pc(&b->sections, section);
         uint32_t code0 = sections_code(&b->sections, section).num;
         sections_emit_u8(&b->sections, section, swallow == 2 ? 0x2C : 0x24);
-        if (flags.final && zeropage_is_enabled(&b->zeropage)) {
+        if (zp_recording(b, flags, section)) {
             zeropage_add_insn(&b->zeropage, (zp_insn) {
                 .pc           = pc0,
                 .size         = 1,
@@ -2078,7 +2115,7 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         // Tie the label's identity (scope, def) to its placement, so a transfer that names it finds
         // the right block even where banks share the address - and mark the stream, so markers know
         // which side of the label they were written on.
-        if (flags.final && zeropage_is_enabled(&b->zeropage)) {
+        if (zp_recording(b, flags, section)) {
             zeropage_add_label(&b->zeropage, scope, at, section, sections_pc(&b->sections, section));
             record_label_marker(b, at, section);
         }
@@ -2173,7 +2210,7 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
 
         // No zeropage_add_label (@+/@- resolve by value, never by identity), but the stream marker
         // still matters: a .@ is a branch target markers may need to sit on the right side of.
-        if (flags.final && zeropage_is_enabled(&b->zeropage)) {
+        if (zp_recording(b, flags, section)) {
             record_label_marker(b, at, section);
         }
     }
@@ -4623,6 +4660,98 @@ RC_TEST_STEP(assemble, section_nesting_converges, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xAD, 0x34, 0x12}, 3));
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("endlab")), value_make_numeric(0x3003)));
+}
+
+RC_TEST_STEP(assemble, section_virtual_emits_nothing, fix)
+{
+    // Everything in a virtual section claims its addresses and lands nowhere: the parent neither
+    // carries the bytes nor moves past them. A child inside drops its bytes too, even when it asks
+    // not to - they would only land in a parent that drops them - but takes its room like any
+    // nested section. A second virtual pool inside is the exception: its addresses are its own.
+    RC_CHECK_TRUE(ASM("SECTION code, org=&2000\nEQUB 1\n"
+                      "SECTION ws, org=&400, virtual=TRUE\n"
+                      ".v1 SKIP 3\n.v2 EQUW 0\nLDA #1\n"
+                      "SECTION inner, virtual=FALSE\n.v3 EQUB 9\nENDSECTION\n"
+                      "SECTION zp, org=&70, virtual=TRUE\n.p SKIP 2\nENDSECTION\n"
+                      ".v4\nENDSECTION\n"
+                      ".after EQUB 2\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v1")), value_make_numeric(0x400)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x403)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v3")), value_make_numeric(0x407)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("p")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v4")), value_make_numeric(0x408)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("after")), value_make_numeric(0x2001)));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"), (uint8_t[]) {1, 2}, 2));
+    RC_CHECK(result_section(&fix->r, RC_STR("ws")).code.num, ==, 0u);
+    RC_CHECK(result_section(&fix->r, RC_STR("inner")).code.num, ==, 0u);
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 2u);
+}
+
+RC_TEST_STEP(assemble, section_virtual_reopens, fix)
+{
+    // The workspace idiom: a virtual section declared once, then reopened inside each routine, so
+    // every routine's variables sit in its own scope while the pool hands out addresses in turn.
+    RC_CHECK_TRUE(ASM("SECTION ws, org=&400, guard=&800, virtual=TRUE\nENDSECTION\n"
+                      "SECTION main, org=&8000\n"
+                      ".r1 {\nSECTION ws\n.foo SKIP 10\nENDSECTION\nLDA foo,X\n}\n"
+                      ".r2 {\nSECTION ws\n.foo SKIP 2\nENDSECTION\nLDA foo\n}\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r1.foo")), value_make_numeric(0x400)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r2.foo")), value_make_numeric(0x40A)));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("main"), (uint8_t[]) {0xBD, 0x00, 0x04, 0xAD, 0x0A, 0x04}, 6));
+    RC_CHECK(result_section(&fix->r, RC_STR("ws")).pc, ==, 0x40Cu);
+
+    // Reopening is for virtual sections only: an ordinary one keeps its unique name, and a reopening
+    // written before the declaration makes an ordinary section, so the declaration is the duplicate.
+    RC_CHECK_TRUE(ERR("SECTION ws\nENDSECTION\nSECTION ws, virtual=TRUE\nENDSECTION") == error_type_duplicate_section);
+
+    // Only the pool itself reopens: a section merely nested inside one keeps its unique name.
+    RC_CHECK_TRUE(ERR("SECTION ws, virtual=TRUE\nSECTION inner\nENDSECTION\nENDSECTION\nSECTION inner\nENDSECTION")
+                  == error_type_duplicate_section);
+}
+
+RC_TEST_STEP(assemble, section_virtual_errors, fix)
+{
+    // A reopening only continues: attributes belong on the first SECTION line.
+    RC_CHECK_TRUE(ERR("SECTION ws, org=&400, virtual=TRUE\nENDSECTION\nSECTION ws, org=&500\nENDSECTION")
+                  == error_type_virtual_reopen_attribute);
+    RC_CHECK(diag_payload(&fix->r, error_type_virtual_reopen_attribute), ==, RC_STR("ws"));
+
+    // There is nothing to save, whichever order the attributes come in, and inside a virtual section.
+    RC_CHECK_TRUE(ERR("SECTION ws, filename=\"WS\", virtual=TRUE\nENDSECTION") == error_type_virtual_filename);
+    RC_CHECK(diag_payload(&fix->r, error_type_virtual_filename), ==, RC_STR("ws"));
+    RC_CHECK_TRUE(ERR("SECTION ws, virtual=TRUE\nSECTION inner, filename=\"IN\"\nENDSECTION\nENDSECTION")
+                  == error_type_virtual_filename);
+    RC_CHECK(diag_payload(&fix->r, error_type_virtual_filename), ==, RC_STR("inner"));
+
+    // The guard is the pool's limit, checked per fragment: the fragment that crosses it reports,
+    // and a later one that places nothing does not repeat it.
+    RC_CHECK_TRUE(ERR("SECTION ws, org=0, guard=4, virtual=TRUE\nENDSECTION\n"
+                      "SECTION ws\nSKIP 3\nENDSECTION\n"
+                      "SECTION ws\nSKIP 3\nENDSECTION\n"
+                      "SECTION ws\nENDSECTION") == error_type_guard_exceeded);
+    RC_CHECK(diag_count(&fix->r, error_type_guard_exceeded), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_guard_exceeded), ==, RC_STR("2"));
+}
+
+RC_TEST_STEP(assemble, section_virtual_invisible_to_allocator, fix)
+{
+    // Virtual code exists nowhere, so the zero-page analysis never sees it. Here it would hold v1
+    // live across v2's write, forcing them apart; as virtual code it costs them nothing.
+    #define VIRTUAL_ZP(attrs) \
+        "ZA_POOL &70..&71\nZA_AUTO1 v1\nZA_AUTO1 v2\n" \
+        "SECTION code, org=&2000\nLDA #1 : STA v1 : LDA v1\nLDA #2 : STA v2 : LDA v2\nRTS\nENDSECTION\n" \
+        "SECTION ghost, org=&3000" attrs "\nSTA v1 : STA v2 : LDA v1 : LDA v2 : RTS\nENDSECTION"
+    RC_CHECK_TRUE(ASM(VIRTUAL_ZP(", virtual=TRUE")) != 0);
+    RC_CHECK_TRUE(fix->r.diagnostics.num == 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v1")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x70)));
+
+    RC_CHECK_TRUE(ASM(VIRTUAL_ZP("")) != 0);   // the control: the same code made real keeps them apart
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x71)));
+    #undef VIRTUAL_ZP
 }
 
 RC_TEST_STEP(assemble, basic_block_emits_program, fix)

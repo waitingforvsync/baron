@@ -97,13 +97,17 @@ to the end of the line.
 | Syntax | Meaning |
 |--------|---------|
 | `SECTION name [, attr = e ...]` ... `ENDSECTION` | A named, uniquely-named block of output. Nesting is containment: a child's bytes land inline in its parent, and a child with an explicit `org` is rephased (its labels resolve at the runtime address while its bytes stay put - the relocation workflow). Attributes are never inherited. |
+| `SECTION name` ... `ENDSECTION` (again) | Reopens a virtual section, carrying on from its address so far. A reopening takes no attributes, and must come after the section's first `SECTION` line. |
 
 Attributes Baron acts on: `org` (assembly address; default: continue the enclosing section - the
 default section starts at 0), `filename` (the request to save; an empty filename is a config error),
 `load` (default `org`), `exec` (default `load`),
 `cmos` (truthy enables the 65C02 instruction set for this section - see the note under Reserved names),
-and `guard` (an address the section's emission must not reach; overrunning it is a non-halting error
-reporting the overshoot). Other keys are carried through untouched.
+`guard` (an address the section's emission must not reach; overrunning it is a non-halting error
+reporting the overshoot - checked at each `ENDSECTION`, so per piece of a reopened virtual section),
+and `virtual` (truthy makes the section assign addresses but keep no bytes: it takes no room in its
+parent, can be reopened, cannot be saved, and its code is ignored by the zero-page allocator; a
+section nested inside a virtual one keeps no bytes either). Other keys are carried through untouched.
 
 The address attributes take the BBC's full 32-bit host addresses (`&FFFFxxxx` = the I/O processor,
 `&0000xxxx` = the second processor): `load` and `exec` keep the whole value for the catalogue, while

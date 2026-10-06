@@ -550,7 +550,7 @@ static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_m
 static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, mnemonic m,
                         addr_mode mode, uint16_t cell, int_argument arg, uint32_t operand_base, uint32_t pc)
 {
-    if (!flags.final || !flags.active || !zeropage_is_enabled(&b->zeropage)) {
+    if (!zp_recording(b, flags, section)) {
         return;
     }
 

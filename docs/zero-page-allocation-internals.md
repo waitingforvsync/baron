@@ -127,8 +127,10 @@ analysable, colourable program gets real addresses.
 
 ## Recording: what the analyses see ##
 
-Only the final pass records anything - earlier passes exist to let the layout settle. The IR
-(`src/zeropage.c`, filled by `record_insn` in `src/opcodes.c`) is four flat arrays:
+Only the final pass records anything - earlier passes exist to let the layout settle. Nothing is
+recorded from a virtual section either: its code is assembled for its addresses but never stored,
+so it never runs. The IR (`src/zeropage.c`, filled by `record_insn` in `src/opcodes.c`) is four flat
+arrays:
 
 - `zp_var` - one per declaration: name, owning scope, width (1-256), and its **def cursor** (the source
   position of the `ZA_AUTO` statement).

@@ -23,12 +23,16 @@ typedef struct attribute {
 
 // One section: a window onto the manager's shared emission stream, with its own pc, a unique name
 // and a resolved attribute bag. The window is contiguous because nesting is lexical and emission
-// sequential; an explicit org repositions later labels without moving where code lands.
+// sequential; an explicit org repositions later labels without moving where code lands. A virtual
+// section emits nothing, so its window stays empty - which is what lets it be reopened by name.
 typedef struct section {
     rc_str              name;         // own namespace, separate from symbols and scopes; a view into source text
     uint32_t            parent;       // the enclosing section; RC_INDEX_NONE for the default
     uint32_t            pc;           // effective address of the next byte - the value a label takes
+    uint32_t            size;         // bytes placed here, children included - the window's length, unless discarded
     bool                cmos;         // consumed cmos attribute: 65C02 encodings allowed here (never inherited)
+    bool                is_virtual;   // consumed virtual attribute: a pool of its own, taking no room in its parent
+    bool                discards;     // virtual, or inside a virtual section: bytes advance pc but land nowhere
     bool                is_guarded;   // consumed guard attribute present? (never inherited)
     uint32_t            guard;        // the guarded 16-bit address: first address emission must not reach (meaningful only when is_guarded)
     uint32_t            begin;        // window into the shared stream: stream.num at creation
@@ -108,13 +112,21 @@ bool sections_is_guarded(const sections *sec, uint32_t id);
 // Section id's guarded 16-bit address. Only a guarded section has one - ask sections_is_guarded first.
 uint32_t sections_guard(const sections *sec, uint32_t id);
 
+// Is section id virtual (the consumed virtual attribute) - a pool that takes no room in its parent
+// and may be reopened by name?
+bool sections_is_virtual(const sections *sec, uint32_t id);
+
+// Does section id discard its bytes - virtual itself, or nested inside a virtual section?
+bool sections_discards(const sections *sec, uint32_t id);
+
 
 // ---- mutation ----
 
 // Create the named section inside parent (an empty window at the stream tail, pc 0 - the caller seeds
 // it from the enclosing section - and empty attributes) and return its stable index, or RC_INDEX_NONE
-// if the name already exists this pass (names are unique; the caller raises the error). Indices are
-// stable across passes because creation order is first-sighting parse order, identical each pass.
+// if the name already exists this pass (names are unique; the caller raises the error, or reopens a
+// virtual section). Indices are stable across passes because creation order is first-sighting parse
+// order, identical each pass. A section made inside a virtual one discards its bytes too.
 uint32_t sections_make(sections *sec, rc_str name, uint32_t parent);
 
 // Add (or, for an already-present key, replace) one attribute on section id: a key repeated on one
@@ -133,18 +145,22 @@ void sections_set_cmos(sections *sec, uint32_t id, bool cmos);
 // sections_org, addr may be a full 32-bit host address; the guard keeps the low 16 bits.
 void sections_set_guard(sections *sec, uint32_t id, uint32_t addr);
 
-// Append a byte, pc += 1.
+// Set the consumed virtual attribute. Inside a virtual parent the section discards its bytes whatever
+// it asks for: they would land in a parent that drops them.
+void sections_set_virtual(sections *sec, uint32_t id, bool is_virtual);
+
+// Append a byte, pc += 1 (a discarding section only advances the pc).
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b);
 
 // Append a little-endian word, pc += 2.
 void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);
 
-// Append count zero bytes, pc += count.
+// Append count zero bytes, pc += count (a discarding section only advances the pc).
 void sections_skip(sections *sec, uint32_t id, uint32_t count);
 
 // ENDSECTION bookkeeping: fold the closed child into its parent - the parent's window absorbs the
 // child's extent and its pc advances by the child's size, so bytes propagate all the way up to the
-// default section at index 0.
+// default section at index 0. A virtual section folds nothing: it takes no room in its parent.
 void sections_close(sections *sec, uint32_t id);
 
 // End-of-pass: fill every section's code view as a slice of the stream. Views are only stable once
