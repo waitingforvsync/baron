@@ -41,6 +41,7 @@ typedef struct expr_env {
     scopes             *scopes;         // MUTABLE: a FUNCTION body binds locals / makes its child scope
     uint32_t            scope_index;
     uint32_t            pc;             // current program counter, for * / P%
+    uint32_t            section;        // current section, recorded on a FUNCTION body's bindings
     uint32_t            source;         // the reference's source, and...
     uint32_t            offset;         // ...its position, together the use site - for the local labels @- / @+
     token_table         operand_tokens; // dynamic operand (even) table: static base + a token per FUNCTION; {0} = the static base

@@ -3,6 +3,7 @@
 #include "output.h"
 #include "disc_ssd.h"
 #include "symdump.h"
+#include "version.h"
 
 #include "richc/file.h"
 #include "richc/mstr.h"
@@ -13,9 +14,6 @@
 #ifdef BARON_TESTS
 #include "richc/test.h"
 #endif
-
-
-#define BARON_VERSION "0.4.2.0"
 
 
 static void display_version(void)
@@ -37,7 +35,7 @@ static void display_help(void)
     puts("  -v               Output listing for assembled source code");
     puts("  -vv              As -v, but dump every emitted byte (8 per line) and whole list values");
     puts("  --beebasm-true   BeebAsm compatibility: TRUE coerces to -1 rather than 1");
-    puts("  --symbols <file> Write every source file's resolved symbols to a JSON file");
+    puts("  --symbols <file> Write each source file's sections and symbols to a JSON file");
     puts("  --warn <n>       Show warnings up to level n (default 1; 2 adds the opt-in checks)");
     puts("");
     puts("Options for generating a .ssd disk image:");
@@ -253,7 +251,7 @@ int main(int argc, char **argv)
     bool listed_any = false;
 
     rc_mstr logs[baron_num_channels] = {0};   // the redirected channels, accumulated across files
-    rc_mstr symjson = {0};                    // --symbols: one member per file, accumulated across files
+    rc_mstr symjson = {0};                    // --symbols: one entry per file, accumulated across files
 
     for (int i = 1; i < argc; i++) {
         if (option_takes_value(argv[i])) {
@@ -296,10 +294,7 @@ int main(int argc, char **argv)
             if (symbols_path != NULL) {
                 // Rendered NOW, not kept as a view: the next assemble reuses the arenas the
                 // scopes live in (the same reason the sections are deep-copied).
-                if (symjson.len != 0) {
-                    rc_mstr_append(&symjson, RC_STR(",\n"), &cli);
-                }
-                symdump_append_file(&symjson, path, r.scopes, &cli, desc.scratch);
+                symdump_append_assembly(&symjson, &r, &cli, desc.scratch);
             }
         }
         else {
@@ -324,15 +319,11 @@ int main(int argc, char **argv)
         }
     }
 
-    // The --symbols file: one JSON document, an object per source file keyed by its path, every
-    // resolved symbol inside. Same rule as the other writes - only when the whole batch assembled,
-    // and --check skips it.
+    // The --symbols file: one JSON document with an entry per source file. Same rule as the other
+    // writes - only when the whole batch assembled, and --check skips it.
     if (!failed && !check && symbols_path != NULL) {
-        rc_mstr doc = rc_mstr_make(symjson.len + 8, &cli);
-        rc_mstr_append(&doc, RC_STR("{\n"), &cli);
-        rc_mstr_append(&doc, symjson.view, &cli);
-        rc_mstr_append(&doc, RC_STR("\n}\n"), &cli);
-        if (rc_file_save_text(rc_str_from_cstr(symbols_path), doc.view) != RC_FILE_OK) {
+        rc_str doc = symdump_document(symjson.view, &cli);
+        if (rc_file_save_text(rc_str_from_cstr(symbols_path), doc) != RC_FILE_OK) {
             fprintf(stderr, "baron: cannot write '%s'\n", symbols_path);
             failed = true;
         }

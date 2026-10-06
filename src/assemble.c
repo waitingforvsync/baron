@@ -623,6 +623,7 @@ expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena
         .scopes         = &b->scopes,
         .scope_index    = scope,
         .pc             = sections_pc(&b->sections, section),
+        .section        = section,
         .source         = at.source,
         .offset         = at.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),   // base + a token per FUNCTION name
@@ -811,7 +812,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     // Create the section (only when live); the child is threaded to the body's parse_block.
     uint32_t child = RC_INDEX_NONE;
     if (flags.active) {
-        child = sections_make(&b->sections, nm.token.identifier.name);
+        child = sections_make(&b->sections, nm.token.identifier.name, section);
         if (child == RC_INDEX_NONE) {
             return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos),
                                         nm.token.identifier.name);   // names are unique
@@ -922,7 +923,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 
             // Fold the child into its enclosing section: the parent's window absorbs the bytes and
             // its pc advances by the child's size, all the way up to the default section.
-            sections_close(&b->sections, child, section);
+            sections_close(&b->sections, child);
         }
         body.next = cl.next;
         return fold(body, require_separator(b, cursor_at(at, body.next)));
@@ -1110,9 +1111,12 @@ static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t sc
             // The output pass leaves the binding ALONE: finalize has rewritten it to the allocated
             // address, which is exactly what re-emission must see.
             if (!flags.output) {
-                symbol_status st = scopes_set_symbol(
-                    &b->scopes, scope, name,
-                    value_make_za_auto(scope, def, 0, name), def);
+                symbol_status st = scopes_set_symbol(&b->scopes, scope, name, (symbol) {
+                    .v       = value_make_za_auto(scope, def, 0, name),
+                    .def     = def,
+                    .section = section,
+                    .kind    = symbol_kind_za_auto,
+                });
 
                 if (st == symbol_status_duplicate) {
                     semantic_error_payload(b, flags, error_type_duplicate_symbol, def, name);
@@ -1124,7 +1128,7 @@ static parse_result handle_za_auto(baron *b, cursor stmt, cursor at, uint32_t sc
                 else if (flags.final) {
                     // The vreg's identity is the (scope, def) pair: a macro / FOR body shares one
                     // def, but each instantiation's own child scope makes it a distinct variable.
-                    zeropage_add_var(&b->zeropage, name, scope, width, def);
+                    zeropage_add_var(&b->zeropage, name, scope, section, width, def);
                 }
             }
             else if (flags.listing && cursor_is_equal(scopes_symbol_def(&b->scopes, scope, name), def)) {
@@ -2052,7 +2056,12 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
         if (!b->unsettled.seen) {
             was = scopes_get_symbol(&b->scopes, scope, name);   // grabbed before the set clobbers it
         }
-        symbol_status st = scopes_set_symbol(&b->scopes, scope, name, pc, at);
+        symbol_status st = scopes_set_symbol(&b->scopes, scope, name, (symbol) {
+            .v       = pc,
+            .def     = at,
+            .section = section,
+            .kind    = symbol_kind_label,
+        });
 
         if (st == symbol_status_duplicate) {
             semantic_error_payload(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos), name);
@@ -2151,7 +2160,12 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
         if (!b->unsettled.seen) {
             was = scopes_get_symbol(&b->scopes, scope, key.view);
         }
-        symbol_status st = scopes_set_symbol(&b->scopes, scope, key.view, pc, at);
+        symbol_status st = scopes_set_symbol(&b->scopes, scope, key.view, (symbol) {
+            .v       = pc,
+            .def     = at,
+            .section = section,
+            .kind    = symbol_kind_label,
+        });
         if (st == symbol_status_changed) {
             note_unsettled(b, at, RC_STR(".@"), was, pc);   // the key is unspellable - name it as written
         }
@@ -2354,7 +2368,12 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         if (!b->unsettled.seen) {
             was = scopes_get_symbol(&b->scopes, scope, name);
         }
-        symbol_status st = scopes_set_symbol(&b->scopes, scope, name, e.value, at);
+        symbol_status st = scopes_set_symbol(&b->scopes, scope, name, (symbol) {
+            .v       = e.value,
+            .def     = at,
+            .section = section,
+            .kind    = symbol_kind_assignment,
+        });
 
         if (st == symbol_status_duplicate) {
             semantic_error_payload(b, flags, error_type_duplicate_symbol, cursor_at(at, at.pos), name);
@@ -2502,7 +2521,12 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
         rc_mstr key = anon_for_scope_key(storage, sizeof storage, at, i);
         uint32_t child = scopes_get_or_make_child(&b->scopes, scope, key.view);
         if (iterate) {
-            scopes_set_symbol(&b->scopes, child, name, rc_view_value_get(items, i), at);
+            scopes_set_symbol(&b->scopes, child, name, (symbol) {
+                .v       = rc_view_value_get(items, i),
+                .def     = at,
+                .section = section,
+                .kind    = symbol_kind_loop_var,
+            });
         }
         acc = fold(acc, parse_block(b, cursor_at(at, body_start), child, section,
                                     (parse_flags) {
@@ -2858,6 +2882,7 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
         .scopes         = &b->scopes,
         .scope_index    = scope,
         .pc             = sections_pc(&b->sections, section),
+        .section        = section,
         .source         = at.source,
         .offset         = body.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),
@@ -3000,7 +3025,12 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
         }
         else {
             expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
-            scopes_set_symbol(&b->scopes, child, slot.name, e.value, at);
+            scopes_set_symbol(&b->scopes, child, slot.name, (symbol) {
+                .v       = e.value,
+                .def     = at,
+                .section = section,
+                .kind    = symbol_kind_param,
+            });
             pos = e.next;
         }
     }
@@ -3203,7 +3233,12 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
     // Bind it, mirroring handle_assignment: a duplicate is a second -D of the same name (a source
     // assignment to it collides at ITS site instead - we bound first).
     parse_result r = {.next = e.next};
-    symbol_status st = scopes_set_symbol(&b->scopes, 0, sym_name, e.value, def);
+    symbol_status st = scopes_set_symbol(&b->scopes, 0, sym_name, (symbol) {
+        .v       = e.value,
+        .def     = def,
+        .section = sections_default,
+        .kind    = symbol_kind_define,
+    });
 
     if (st == symbol_status_duplicate) {
         semantic_error_payload(b, flags, error_type_duplicate_symbol, def, sym_name);
@@ -3953,8 +3988,12 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     scopes_remove_symbol(&b->scopes, var.scope, var.name);
                 }
                 else {
-                    scopes_set_symbol(&b->scopes, var.scope, var.name,
-                                      value_make_numeric((double) rc_view_u32_get(col.base, v)), var.def);
+                    scopes_set_symbol(&b->scopes, var.scope, var.name, (symbol) {
+                        .v       = value_make_numeric((double) rc_view_u32_get(col.base, v)),
+                        .def     = var.def,
+                        .section = var.section,
+                        .kind    = symbol_kind_za_auto,
+                    });
                 }
             }
         }
@@ -7074,7 +7113,7 @@ RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
                   || rc_str_is_equal(e.path, RC_STR("routine"))
                   || rc_str_is_equal(e.path, RC_STR("routine.core"));
         RC_CHECK_TRUE(known);                                        // no stray / unspellable paths
-        RC_CHECK_TRUE(value_is_equal(e.v, value_make_numeric(0)));   // every one resolves to org 0
+        RC_CHECK_TRUE(value_is_equal(e.sym.v, value_make_numeric(0)));   // every one resolves to org 0
         seen++;
     }
     RC_CHECK(seen, ==, 3u);

@@ -82,16 +82,17 @@ uint32_t zeropage_reserved_count(const zeropage *zp)
 }
 
 
-uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint16_t width, cursor def)
+uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint32_t section, uint16_t width, cursor def)
 {
     RC_ASSERT(zp != NULL);
     return rc_array_zp_var_push(
         &zp->vars,
         (zp_var) {
-            .name  = name,
-            .scope = scope,
-            .width = width,
-            .def   = def,
+            .name    = name,
+            .scope   = scope,
+            .section = section,
+            .width   = width,
+            .def     = def,
         },
         zp->arena);
 }
@@ -313,8 +314,8 @@ RC_TEST(zeropage, var_registry)
 
     RC_CHECK(zeropage_var_count(&zp), ==, 0u);
 
-    uint32_t i0 = zeropage_add_var(&zp, RC_STR("foo"), 3, 1, (cursor) {.source = 0, .pos = 10});
-    uint32_t i1 = zeropage_add_var(&zp, RC_STR("ptr"), 3, 2, (cursor) {.source = 0, .pos = 20});
+    uint32_t i0 = zeropage_add_var(&zp, RC_STR("foo"), 3, 0, 1, (cursor) {.source = 0, .pos = 10});
+    uint32_t i1 = zeropage_add_var(&zp, RC_STR("ptr"), 3, 0, 2, (cursor) {.source = 0, .pos = 20});
     RC_CHECK(i0, ==, 0u);
     RC_CHECK(i1, ==, 1u);
     RC_CHECK(zeropage_var_count(&zp), ==, 2u);
@@ -427,7 +428,7 @@ RC_TEST(zeropage, reset_clears_for_next_pass)
 
     zeropage_reserve(&zp, 0x70);
     zeropage_reserve(&zp, 0x71);
-    zeropage_add_var(&zp, RC_STR("foo"), 0, 1, (cursor) {0});
+    zeropage_add_var(&zp, RC_STR("foo"), 0, 0, 1, (cursor) {0});
     zeropage_add_insn(&zp, (zp_insn) {.vreg = 0, .rw = vref_read, .target = RC_INDEX_NONE});
     zeropage_add_label(&zp, 0, (cursor) {0}, 0, 0x2000);
     zeropage_add_entry(&zp, (zp_entry) {.section = 0, .pc = 0x2000, .interrupt = true, .at = (cursor) {0}});

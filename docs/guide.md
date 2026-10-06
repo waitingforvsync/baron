@@ -779,40 +779,137 @@ input.
 
 ## The symbol dump ##
 
-`--symbols <file>` writes every resolved symbol - labels, computed constants, `ZA_AUTO` allocations -
-to one JSON file once the whole run has assembled:
+`--symbols <file>` writes everything Baron resolved - every symbol, where it was defined, and the
+section it belongs to - to one JSON file once the whole run has assembled:
 
 ```
 $ baron --symbols syms.json main.6502 tools.6502
 ```
 
+Take this `main.6502`, which includes a `zp.6502` holding the single line `ptr = &70`:
+
+```
+INCLUDE "zp.6502"
+
+width = 32
+
+SECTION game, org=&3000, filename="GAME"
+.start  LDA #width
+        SECTION handler, org=&0400
+.irq    RTI
+        ENDSECTION
+.done   RTS
+ENDSECTION
+```
+
+Its dump looks like this:
+
 ```json
 {
-  "main.6502": {
-    "PLAY_R7": 28,
-    "install_irq": 6400,
-    "msg": "HELLO",
-    "scroll": 112,
-    "table": [5, 6, 7, 8]
-  },
-  "tools.6502": {
-    "entry": 0,
-    "score": 2349
-  }
+  "format": 2,
+  "assemblies": [
+    {
+      "sources": ["main.6502", "zp.6502"],
+      "sections": [
+        {
+          "parent": null, "size": 4,
+          "assignments": {
+            "ptr": {"value": 112, "source": 1, "line": 1},
+            "width": {"value": 32, "source": 0, "line": 3}
+          }
+        },
+        {
+          "name": "game", "parent": 0, "size": 4,
+          "attributes": {
+            "org": 12288,
+            "filename": "GAME"
+          },
+          "labels": {
+            "done": {"value": 12291, "source": 0, "line": 10},
+            "start": {"value": 12288, "source": 0, "line": 6}
+          }
+        },
+        {
+          "name": "handler", "parent": 1, "size": 1,
+          "attributes": {
+            "org": 1024
+          },
+          "labels": {
+            "irq": {"value": 1024, "source": 0, "line": 8}
+          }
+        }
+      ]
+    }
+  ]
 }
 ```
 
-One object per command-line source file, keyed by the path as you spelt it - each file assembles in
-its own universe, so their symbols are never merged. Inside, every symbol sits under its full dotted
-path, sorted, one per line: `grep '"scroll"' syms.json` answers with its address, and two builds'
-dumps diff cleanly. Values keep their types - numbers as numbers (a `ZA_AUTO` variable is its
-allocated address, which is the one thing only the assembler can tell you), booleans as
-`true`/`false`, strings as strings, lists and ranges as arrays.
+### Assemblies ###
 
-Baron's internals are included too: symbols inside anonymous `{ }` scopes, per-iteration `FOR`
-frames and local labels appear under their unspellable `@` keys (`"@0:3:0.i"` is iteration 0's `i`).
-Filter out keys containing `@` if only the source-spellable names matter. Like every other output,
-the file is only written when every file assembled, and `--check` skips the write.
+`assemblies` has one entry per source file on the command line, in order. Each file assembles in its
+own universe, so their symbols are never merged.
+
+Indices are local to their entry: `"source"` indexes that entry's `sources`, and `"parent"` indexes
+its `sections`. Two files each have their own source 0 and their own section 0.
+
+### Sources ###
+
+`sources` lists every file the assembly read, each once, however many times it was included.
+`sources[0]` is the file named on the command line. A [predefined symbol](#predefined-symbols) gets a
+source of its own, named after its switch - `-D DEBUG=1`.
+
+### Sections ###
+
+`sections` lists every section in the order it opened. Entry 0 is the file's default section, which
+holds everything outside a `SECTION`: it has no name and no parent, and its `size` counts every byte
+the file assembled.
+
+A nested section's bytes are part of its parent's, so a parent's `size` includes its children - `game`
+above is 4 bytes, `handler`'s `RTI` among them.
+
+`attributes` holds the attributes exactly as the `SECTION` line wrote them, in order. A section with
+no attributes leaves it out.
+
+Since nothing is inherited, an `org` appears only on a section that set one. That tells you about
+addresses: a section with an `org` starts addresses of its own, while one without carries on from its
+parent's. To find which address space a label lives in, walk up `parent` to the nearest section with
+an `org`. Here, `irq` and `start` are in different spaces even though both sit inside `game`'s bytes.
+
+### Symbols ###
+
+Each symbol sits in the innermost section open where it was defined, keyed by its full dotted path.
+Within a section, symbols are grouped by kind:
+
+| Group | Holds |
+|---|---|
+| `labels` | `.name` and `.@` labels - always addresses |
+| `assignments` | `name = expr`, and the locals of a `FUNCTION` body |
+| `defines` | `-D` predefines |
+| `za_autos` | `ZA_AUTO` variables - each one's allocated address |
+| `loop_vars` | `FOR` variables, one per iteration |
+| `params` | macro and `FUNCTION` parameters |
+
+A group with nothing in it is left out. For a label, its section is the one whose bytes it addresses.
+Any other kind just lands in whichever section its line sits in.
+
+Each symbol gives its `value`, plus the `source` and `line` of the statement that defined it. For a
+label inside a macro, that is the line in the macro's body, while its section is wherever that
+expansion was assembled.
+
+Values keep their types: numbers as numbers, booleans as `true`/`false`, strings as strings, and lists
+and ranges as arrays.
+
+### Grepping and diffing ###
+
+Symbols are sorted within their group, one per line, so `grep '"start"' syms.json` answers with its
+address and line, and two builds' dumps diff cleanly.
+
+Baron's internals are included too: symbols inside anonymous `{ }` scopes, per-iteration `FOR` frames,
+macro and `FUNCTION` calls, and local labels appear under unspellable `@` keys (`"@0:3:0.i"` is
+iteration 0's `i`). Filter out keys containing `@` if only the names you wrote matter.
+
+Like every other output, the file is only written when every file assembled, and `--check` skips the
+write.
 
 ## Saving your work ##
 

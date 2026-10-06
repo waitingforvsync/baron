@@ -13,15 +13,6 @@
 // lexically enclosing parent. The scopes container owns the whole tree; the individual scopes are
 // scope_node records, which we hand around by index. Scope 0 is the root.
 
-// A bound symbol: its current value plus the source position that defined it. The position is the
-// binding's identity - the same statement re-walked on a later pass carries the same def (so we
-// re-evaluate and watch for a moved value), while a different statement defining the same name in
-// the same scope is a duplicate. Baron's source is immutable, so a name is bound exactly once.
-typedef struct symbol {
-    value  v;
-    cursor def;
-} symbol;
-
 // The outcome of binding a symbol: the first enumerator is the no-op default.
 typedef enum symbol_status {
     symbol_status_unchanged,   // brand new, or identical to last pass: no further pass needed
@@ -106,12 +97,13 @@ uint32_t scopes_make_child(scopes *s, uint32_t parent_index, rc_str name);
 // name's bytes are copied into the scopes' own arena, so the caller may pass a scratch view.
 uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name);
 
-// Bind leaf name (never a dotted path) to v in scope_index, def recording the defining position. The
-// value is deep-cloned into the permanent arena (only on a genuine change), so a scratch-built value
+// Bind leaf name (never a dotted path) to sym in scope_index, sym.def recording the defining position.
+// The value is deep-cloned into the permanent arena (only on a genuine change), so a scratch-built value
 // is safe. Outcomes: duplicate - a binding exists under a DIFFERENT def, nothing mutated, the caller
 // errors; changed - the same def re-evaluated to a different value (the convergence signal);
-// unchanged - a brand new symbol, or the same value again.
-symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v, cursor def);
+// unchanged - a brand new symbol, or the same value again. Only the value counts: a re-walk refreshes
+// the kind and section either way.
+symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, symbol sym);
 
 // Remove leaf name (a plain symbol name, not a path) from scope_index. Returns
 // whether it was there to remove.

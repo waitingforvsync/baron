@@ -1975,7 +1975,13 @@ static body_result interpret_assignment(const parser *p, rc_str name, uint32_t p
         // Bindings are single-assignment: a second live assignment to the same name in one call
         // (a parameter included) would otherwise be silently ignored, which reads like mutation
         // that never happens. Branches are fine - only the live one binds.
-        if (scopes_set_symbol(p->env->scopes, p->env->scope_index, name, rhs.value, at) == symbol_status_duplicate) {
+        symbol_status st = scopes_set_symbol(p->env->scopes, p->env->scope_index, name, (symbol) {
+            .v       = rhs.value,
+            .def     = at,
+            .section = p->env->section,
+            .kind    = symbol_kind_assignment,
+        });
+        if (st == symbol_status_duplicate) {
             body_result dup = body_fail(p, error_type_duplicate_symbol, name_at);
             dup.error.detail = name;
             return dup;
@@ -2251,7 +2257,12 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
             arg.error.origin_type = p->in_body ? value_origin_type_body : value_origin_type_caller;
             arg.error.origin      = (cursor) {p->env->source, lexer_skip_whitespace(p->text, call_pos)};
         }
-        scopes_set_symbol(p->env->scopes, child, rc_view_str_get(sig->params, i), arg, call_at);
+        scopes_set_symbol(p->env->scopes, child, rc_view_str_get(sig->params, i), (symbol) {
+            .v       = arg,
+            .def     = call_at,
+            .section = p->env->section,
+            .kind    = symbol_kind_param,
+        });
     }
 
     // Interpret the body in the child scope, in ITS source (a body may live in a different file than the call).
@@ -2701,7 +2712,7 @@ RC_TEST_STEP(expression, callable_syntax, fix)
 {
     // A named callable needs its '(': a bare name is now a plain identifier, so a function
     // and a like-named variable can coexist.
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("lo"), value_make_numeric(7.0), (cursor){0, 0});
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("lo"), (symbol) {.v = value_make_numeric(7.0), .def = (cursor){0, 0}});
     RC_CHECK_TRUE(value_is_equal(VAL("lo"),      value_make_numeric(7.0)));   // the variable
     RC_CHECK_TRUE(value_is_equal(VAL("lo(258)"), value_make_numeric(2.0)));   // the operator (low byte)
     RC_CHECK_TRUE(value_is_error(VAL("abs")));   // a bare function name is just an unknown symbol
@@ -2723,7 +2734,7 @@ RC_TEST_STEP(expression, callable_syntax, fix)
 
 RC_TEST_STEP(expression, symbols, fix)
 {
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (cursor){0, 0});
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), (symbol) {.v = value_make_numeric(42.0), .def = (cursor){0, 0}});
 
     RC_CHECK_TRUE(value_is_equal(VAL("foo+1"), value_make_numeric(43.0)));
     RC_CHECK_TRUE(value_is_error(VAL("bar")));        // unknown symbol -> error value
@@ -3232,7 +3243,7 @@ RC_TEST_STEP(expression, list_functions, fix)
 
 RC_TEST_STEP(expression, defined_lohi_strings, fix)
 {
-    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), value_make_numeric(42.0), (cursor){0, 0});
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("foo"), (symbol) {.v = value_make_numeric(42.0), .def = (cursor){0, 0}});
     RC_CHECK_TRUE(value_is_equal(VAL("defined(foo)"), value_make_bool(true)));    // resolves
     RC_CHECK_TRUE(value_is_equal(VAL("defined(bar)"), value_make_bool(false)));   // an unknown symbol
 

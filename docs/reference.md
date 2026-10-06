@@ -31,7 +31,7 @@ baron [-v | -vv] [--check] [-D <sym>=<expr>] [-p <path>] [--inf] [-o <image.ssd>
 | `--cycle <0-99>` | The catalogue cycle number. Needs `-o`. |
 | `--pad` | Pad the image out to a full 80-track disc (200K); every unused sector is filled with `&E5`, the single-density format filler. Without it the image is truncated after the last used sector. Needs `-o`. |
 | `-log<n> <file>` | Redirect `PRINT` channel *n* (0-9) to a file. Channel 0 otherwise goes to stdout; channels 1-9 are otherwise discarded. |
-| `--symbols <file>` | Write every source file's resolved symbols - labels, computed constants, `ZA_AUTO` allocations - to one JSON file: an object per source file, symbols under their full dotted paths, sorted, one per line. See [The symbol dump](guide.md#the-symbol-dump). |
+| `--symbols <file>` | Write every source file's sections and resolved symbols to one JSON file: an entry per source file listing the files it read and its sections (name, parent, size, attributes as written), each section holding the symbols defined in it, grouped by kind (`labels`, `assignments`, `defines`, `za_autos`, `loop_vars`, `params`) with each one's value, source and line. Sorted, one symbol per line. See [The symbol dump](guide.md#the-symbol-dump). |
 | `--warn <n>` | Show warnings up to level *n*. The default 1 shows the ordinary warnings; `--warn 2` adds the opt-in audits (a store into the `ZA_POOL` at a fixed address); `--warn 0` shows errors only. Warnings never affect the exit code. |
 | `--help` | Print the switch summary. |
 | `--version` | Print the version and author information. |

@@ -21,7 +21,8 @@
 typedef struct zp_var {
     rc_str   name;
     uint32_t scope;
-    uint16_t width;   // byte count: 1 (ZA_AUTO1), 2 (ZA_AUTO2), or a generic ZA_AUTO <n> table (up to 256)
+    uint32_t section;   // where it was declared, kept for the rewrite to its address
+    uint16_t width;     // byte count: 1 (ZA_AUTO1), 2 (ZA_AUTO2), or a generic ZA_AUTO <n> table (up to 256)
     cursor   def;
 } zp_var;
 
@@ -218,7 +219,7 @@ uint32_t zeropage_reserved_count(const zeropage *zp);
 
 // Record a declared variable (ZA_AUTO1/ZA_AUTO2). Returns its index in the var list. Called once per ZA_AUTO on the
 // final pass; the settling passes only need the placeholder symbol binding, not the registry.
-uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint16_t width, cursor def);
+uint32_t zeropage_add_var(zeropage *zp, rc_str name, uint32_t scope, uint32_t section, uint16_t width, cursor def);
 
 uint32_t         zeropage_var_count(const zeropage *zp);
 zp_var           zeropage_var_get(const zeropage *zp, uint32_t index);

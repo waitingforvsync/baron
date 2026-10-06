@@ -34,7 +34,7 @@ void sections_reset(sections *sec)
     // A fresh stream, and the default section at index 0: an empty window at its start
     sec->stream = rc_array_bytes_make(sections_stream_reserve, sec->arena);
     sec->nodes  = rc_array_section_make(sections_nodes_reserve, sec->arena);
-    rc_array_section_push(&sec->nodes, (section) {0}, sec->arena);
+    rc_array_section_push(&sec->nodes, (section) {.parent = RC_INDEX_NONE}, sec->arena);
 }
 
 
@@ -110,9 +110,9 @@ uint32_t sections_guard(const sections *sec, uint32_t id)
 
 // ---- mutation ----
 
-uint32_t sections_make(sections *sec, rc_str name)
+uint32_t sections_make(sections *sec, rc_str name, uint32_t parent)
 {
-    RC_ASSERT(sec != NULL);
+    RC_ASSERT(sec != NULL && parent < sec->nodes.num);
 
     // A repeated name is a duplicate: hand back RC_INDEX_NONE and let the caller diagnose it
     if (sections_find(sec, name) != RC_INDEX_NONE) {
@@ -121,7 +121,12 @@ uint32_t sections_make(sections *sec, rc_str name)
 
     return rc_array_section_push(
         &sec->nodes,
-        (section) { .name = name, .begin = sec->stream.num, .end = sec->stream.num },
+        (section) {
+            .name   = name,
+            .parent = parent,
+            .begin  = sec->stream.num,
+            .end    = sec->stream.num,
+        },
         sec->arena);
 }
 
@@ -215,14 +220,14 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count)
 }
 
 
-void sections_close(sections *sec, uint32_t id, uint32_t parent)
+void sections_close(sections *sec, uint32_t id)
 {
-    RC_ASSERT(sec != NULL && id != parent);
+    RC_ASSERT(sec != NULL && id != sections_default);
 
     // The child's window is contiguous and sits at the parent's tail, so absorbing it is just
     // bookkeeping: extend the window, advance the pc by the child's size
     section c  = rc_array_section_get(&sec->nodes, id);
-    section *p = rc_array_section_at(&sec->nodes, parent);
+    section *p = rc_array_section_at(&sec->nodes, c.parent);
     p->end = c.end;
     p->pc += c.end - c.begin;
 }
@@ -323,6 +328,7 @@ section section_make_copy(section s, rc_arena *arena)
     // The copied window is normalized to its own bytes: begin/end are meaningless without the stream
     return (section) {
         .name       = str_make_copy(s.name, arena),
+        .parent     = s.parent,
         .pc         = s.pc,
         .cmos       = s.cmos,
         .is_guarded = s.is_guarded,
@@ -367,14 +373,14 @@ RC_TEST(sections, emission_changed_tracks_content)
     sections_reset(&sec);
     sections_emit_u8(&sec, 0, 0xA9);
     sections_emit_u8(&sec, 0, 0x43);
-    sections_make(&sec, RC_STR("extra"));
+    sections_make(&sec, RC_STR("extra"), sections_default);
     RC_CHECK_TRUE(sections_emission_changed(&sec));
 
     // Pass 5, stable again.
     sections_reset(&sec);
     sections_emit_u8(&sec, 0, 0xA9);
     sections_emit_u8(&sec, 0, 0x43);
-    sections_make(&sec, RC_STR("extra"));
+    sections_make(&sec, RC_STR("extra"), sections_default);
     RC_CHECK_FALSE(sections_emission_changed(&sec));
 
     rc_arena_deinit(&arena);
@@ -428,7 +434,7 @@ RC_TEST(sections, guard_field)
 
     // Every section starts unguarded - the default and named ones alike.
     RC_CHECK_FALSE(sections_is_guarded(&sec, 0));
-    uint32_t s = sections_make(&sec, RC_STR("code"));
+    uint32_t s = sections_make(&sec, RC_STR("code"), sections_default);
     RC_CHECK_FALSE(sections_is_guarded(&sec, s));
 
     // Setting one takes a full 32-bit host address and keeps the 6502's 16 bits.
@@ -446,11 +452,11 @@ RC_TEST(sections, make_unique_and_attributes)
     sections_init(&sec, &arena, &arena);
     sections_reset(&sec);
 
-    uint32_t a = sections_make(&sec, RC_STR("code"));
+    uint32_t a = sections_make(&sec, RC_STR("code"), sections_default);
     RC_CHECK(a, ==, 1u);                                  // first named section after the default
-    uint32_t d = sections_make(&sec, RC_STR("data"));
+    uint32_t d = sections_make(&sec, RC_STR("data"), sections_default);
     RC_CHECK(d, ==, 2u);
-    RC_CHECK_TRUE(sections_make(&sec, RC_STR("code")) == RC_INDEX_NONE);   // a repeat is refused
+    RC_CHECK_TRUE(sections_make(&sec, RC_STR("code"), sections_default) == RC_INDEX_NONE);   // a repeat is refused
 
     sections_add_attribute(&sec, a, RC_STR("load"), value_make_numeric(0x1200), cursor_none());
     RC_CHECK(sections_attributes(&sec, a).num, ==, 1u);
@@ -471,17 +477,20 @@ RC_TEST(sections, close_folds_child_into_parent)
     // Parent at &2000 emits one byte, then a child rephased to &400 emits two, then the parent one
     // more: closing folds the child's window and size into the parent, so the parent's code carries
     // all four bytes in order and its pc advanced through the child's.
-    uint32_t parent = sections_make(&sec, RC_STR("outer"));
+    uint32_t parent = sections_make(&sec, RC_STR("outer"), sections_default);
     sections_org(&sec, parent, 0x2000);
     sections_emit_u8(&sec, parent, 0x01);
-    uint32_t child = sections_make(&sec, RC_STR("inner"));
+    uint32_t child = sections_make(&sec, RC_STR("inner"), parent);
     sections_org(&sec, child, 0x400);
     sections_emit_u8(&sec, child, 0x02);
     sections_emit_u8(&sec, child, 0x03);
-    sections_close(&sec, child, parent);
+    sections_close(&sec, child);
     sections_emit_u8(&sec, parent, 0x04);
-    sections_close(&sec, parent, sections_default);
+    sections_close(&sec, parent);
 
+    RC_CHECK(rc_array_section_get(&sec.nodes, child).parent, ==, parent);
+    RC_CHECK(rc_array_section_get(&sec.nodes, parent).parent, ==, (uint32_t) sections_default);
+    RC_CHECK(rc_array_section_get(&sec.nodes, sections_default).parent, ==, RC_INDEX_NONE);
     RC_CHECK(sections_pc(&sec, child), ==, 0x402u);
     RC_CHECK(sections_pc(&sec, parent), ==, 0x2004u);
     RC_CHECK(sections_code(&sec, child).num, ==, 2u);
@@ -504,10 +513,10 @@ RC_TEST(sections, seal_slices_the_stream)
     sections_reset(&sec);
 
     sections_emit_u8(&sec, sections_default, 0xEA);
-    uint32_t id = sections_make(&sec, RC_STR("code"));
+    uint32_t id = sections_make(&sec, RC_STR("code"), sections_default);
     sections_emit_u8(&sec, id, 0xA9);
     sections_emit_u8(&sec, id, 0x2A);
-    sections_close(&sec, id, sections_default);
+    sections_close(&sec, id);
     sections_seal(&sec);
 
     // The sealed views are slices of one stream: the named window inside the default's
@@ -536,7 +545,7 @@ RC_TEST(sections, make_copy_owns_its_backing)
     sections sec;
     sections_init(&sec, &original, &original);
     sections_reset(&sec);
-    uint32_t id = sections_make(&sec, name);
+    uint32_t id = sections_make(&sec, name, sections_default);
     sections_org(&sec, id, 0x1900);
     sections_emit_u8(&sec, id, 0xA9);
     sections_emit_u8(&sec, id, 0x2A);
@@ -550,6 +559,7 @@ RC_TEST(sections, make_copy_owns_its_backing)
     rc_arena_deinit(&original);
 
     RC_CHECK(copy.name, ==, RC_STR("code"));
+    RC_CHECK(copy.parent, ==, (uint32_t) sections_default);
     RC_CHECK(copy.pc, ==, 0x1902u);
     RC_CHECK(copy.code.num, ==, 2u);
     RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 0), ==, 0xA9u);

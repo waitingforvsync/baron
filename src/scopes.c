@@ -108,7 +108,7 @@ uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
 }
 
 
-symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, value v, cursor def)
+symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, symbol sym)
 {
     RC_ASSERT(s != NULL);
     RC_ASSERT(is_leaf_name(name));
@@ -120,25 +120,27 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, va
 
         // A different definition reaching the same name in the same scope is a duplicate -
         // immutable source means a name is bound exactly once. Leave the binding untouched.
-        if (!cursor_is_equal(existing.def, def)) {
+        if (!cursor_is_equal(existing.def, sym.def)) {
             return symbol_status_duplicate;
         }
 
         // The same definition, re-walked on a later pass: skip the clone when the value has
         // not actually shifted, both to answer the convergence question and to keep the value
         // arena from growing every pass. Only a genuine change pays for fresh permanent backing.
-        if (value_is_equal(existing.v, v)) {
-            return symbol_status_unchanged;
-        }
-        rc_trie_symbol_value_set(&s->symbol_pool, found, (symbol){ value_make_copy(v, s->arena), def });
-        return symbol_status_changed;
+        // The kind and section are stored either way - a section index can shift between passes
+        // while the value holds still.
+        bool unchanged = value_is_equal(existing.v, sym.v);
+        sym.v = unchanged ? existing.v : value_make_copy(sym.v, s->arena);
+        rc_trie_symbol_value_set(&s->symbol_pool, found, sym);
+        return unchanged ? symbol_status_unchanged : symbol_status_changed;
     }
 
     // First binding: own the key in the permanent arena too, so the caller may hand us a scratch view - a
     // local label's synthetic '@source:pos' key has no backing in the source text. Only the add path copies
     // (a later pass finds the key by content and reuses it), so this is one copy per symbol, not per pass.
     rc_str owned = rc_mstr_from_str(name, name.len, s->arena).view;
-    rc_trie_symbol_add(syms, &s->symbol_pool, owned, (symbol){ value_make_copy(v, s->arena), def }, s->arena);
+    sym.v = value_make_copy(sym.v, s->arena);
+    rc_trie_symbol_add(syms, &s->symbol_pool, owned, sym, s->arena);
     return symbol_status_unchanged;   // brand new, so there was nothing to converge from
 }
 
@@ -411,7 +413,7 @@ static void flatten_symbol(symbol_flatten *c, const rc_trie_symbol_pool *pool, u
     }
 
     rc_array_symbol_entry_push(c->out,
-        (symbol_entry) {.path = path, .v = rc_trie_symbol_value_get(pool, i).v}, c->arena);
+        (symbol_entry) {.path = path, .sym = rc_trie_symbol_value_get(pool, i)}, c->arena);
 }
 
 
@@ -482,30 +484,54 @@ RC_TEST_STEP(scopes, set_get_overwrite, fix)
     cursor pos = { 0, 10 };
 
     // A brand new symbol reports no change; get hands it straight back.
-    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), value_make_numeric(1234.0), pos) == symbol_status_unchanged);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), (symbol) {.v = value_make_numeric(1234.0), .def = pos}) == symbol_status_unchanged);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("snowy")), value_make_numeric(1234.0)));
 
     // Rewriting the same value from the same definition is not a change.
-    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), value_make_numeric(1234.0), pos) == symbol_status_unchanged);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), (symbol) {.v = value_make_numeric(1234.0), .def = pos}) == symbol_status_unchanged);
 
     // The same definition landing a different value is a change, and it sticks.
-    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), value_make_numeric(321.0), pos) == symbol_status_changed);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("snowy"), (symbol) {.v = value_make_numeric(321.0), .def = pos}) == symbol_status_changed);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("snowy")), value_make_numeric(321.0)));
 
     RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("penguin"))));
+}
+
+RC_TEST_STEP(scopes, rewalk_refreshes_section, fix)
+{
+    // The same label re-walked with the same value, but its section renumbered by a later pass
+    cursor pos = {0, 12};
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("moved"), (symbol) {
+        .v       = value_make_numeric(0x900),
+        .def     = pos,
+        .section = 1,
+        .kind    = symbol_kind_label,
+    }) == symbol_status_unchanged);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("moved"), (symbol) {
+        .v       = value_make_numeric(0x900),
+        .def     = pos,
+        .section = 2,
+        .kind    = symbol_kind_label,
+    }) == symbol_status_unchanged);
+
+    // Not a change for convergence, but the stored section is the latest one
+    rc_trie_symbol syms  = rc_array_scope_node_get(&fix->scopes.nodes, fix->root).symbols;
+    uint32_t       found = rc_trie_symbol_find(syms, &fix->scopes.symbol_pool, RC_STR("moved"));
+    symbol         sym   = rc_trie_symbol_value_get(&fix->scopes.symbol_pool, found);
+    RC_CHECK(sym.section, ==, 2u);
 }
 
 RC_TEST_STEP(scopes, duplicate_symbol, fix)
 {
     // First definition of dup takes; a SECOND definition (different source position) in the
     // same scope is a duplicate and leaves the original binding untouched.
-    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("dup"), value_make_numeric(1.0), (cursor){0, 5}) == symbol_status_unchanged);
-    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("dup"), value_make_numeric(2.0), (cursor){0, 9}) == symbol_status_duplicate);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("dup"), (symbol) {.v = value_make_numeric(1.0), .def = (cursor){0, 5}}) == symbol_status_unchanged);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("dup"), (symbol) {.v = value_make_numeric(2.0), .def = (cursor){0, 9}}) == symbol_status_duplicate);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("dup")), value_make_numeric(1.0)));
 
     // The same name in a CHILD scope is fine - inner scopes legitimately mirror outer names.
     uint32_t child = scopes_make_child(&fix->scopes, fix->root, RC_STR("inner"));
-    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, child, RC_STR("dup"), value_make_numeric(3.0), (cursor){0, 9}) == symbol_status_unchanged);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, child, RC_STR("dup"), (symbol) {.v = value_make_numeric(3.0), .def = (cursor){0, 9}}) == symbol_status_unchanged);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, child, RC_STR("dup")), value_make_numeric(3.0)));
 }
 
@@ -517,10 +543,10 @@ RC_TEST_STEP(scopes, find_local_label, fix)
     // Three local labels in one scope under the unspellable "@source:pos" keys, defined at ascending
     // positions. Their VALUES are deliberately not in position order (an ORG could do this), to prove the
     // scan orders by the definition cursor, not by the value. A plain symbol at pos 25 must be ignored.
-    scopes_set_symbol(sc, root, RC_STR("@0:10"), value_make_numeric(0x2000), (cursor){0, 10});
-    scopes_set_symbol(sc, root, RC_STR("@0:20"), value_make_numeric(0x1000), (cursor){0, 20});
-    scopes_set_symbol(sc, root, RC_STR("@0:30"), value_make_numeric(0x3000), (cursor){0, 30});
-    scopes_set_symbol(sc, root, RC_STR("plain"), value_make_numeric(0x9999), (cursor){0, 25});
+    scopes_set_symbol(sc, root, RC_STR("@0:10"), (symbol) {.v = value_make_numeric(0x2000), .def = (cursor){0, 10}});
+    scopes_set_symbol(sc, root, RC_STR("@0:20"), (symbol) {.v = value_make_numeric(0x1000), .def = (cursor){0, 20}});
+    scopes_set_symbol(sc, root, RC_STR("@0:30"), (symbol) {.v = value_make_numeric(0x3000), .def = (cursor){0, 30}});
+    scopes_set_symbol(sc, root, RC_STR("plain"), (symbol) {.v = value_make_numeric(0x9999), .def = (cursor){0, 25}});
 
     // From pos 25: nearest-before (@-) is @0:20 (value 0x1000); nearest-after (@+) is @0:30 (0x3000).
     RC_CHECK_TRUE(value_is_equal(scopes_find_local_label(sc, root, 0, 25, false), value_make_numeric(0x1000)));
@@ -540,7 +566,7 @@ RC_TEST_STEP(scopes, find_local_label, fix)
 
 RC_TEST_STEP(scopes, remove, fix)
 {
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("barn"), value_make_numeric(3141.0), (cursor){0, 20});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("barn"), (symbol) {.v = value_make_numeric(3141.0), .def = (cursor){0, 20}});
     RC_CHECK_TRUE(scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("barn")));    // was present
     RC_CHECK_FALSE(scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("barn")));   // now gone
     RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("barn"))));
@@ -550,7 +576,7 @@ RC_TEST_STEP(scopes, qualified_path, fix)
 {
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
 
-    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), value_make_numeric(0x2000), (cursor){0, 30});
+    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), (symbol) {.v = value_make_numeric(0x2000), .def = (cursor){0, 30}});
 
     // Bare name from inside the child, and the dotted path from the parent.
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, routine, RC_STR("core")), value_make_numeric(0x2000)));
@@ -567,7 +593,7 @@ RC_TEST_STEP(scopes, qualified_head_walks_up, fix)
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
     uint32_t other   = scopes_make_child(&fix->scopes, fix->root, RC_STR("other"));
 
-    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), value_make_numeric(42.0), (cursor){0, 40});
+    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), (symbol) {.v = value_make_numeric(42.0), .def = (cursor){0, 40}});
 
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, other, RC_STR("routine.core")), value_make_numeric(42.0)));
 }
@@ -580,7 +606,7 @@ RC_TEST_STEP(scopes, resolve_def_follows_dotted_paths, fix)
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
     uint32_t other   = scopes_make_child(&fix->scopes, fix->root, RC_STR("other"));
 
-    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), value_make_numeric(0x70), (cursor){0, 30});
+    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), (symbol) {.v = value_make_numeric(0x70), .def = (cursor){0, 30}});
 
     symbol_ref ref = scopes_resolve_symbol_def(&fix->scopes, other, RC_STR("routine.core"));
     RC_CHECK_TRUE(cursor_is_equal(ref.def, (cursor){0, 30}));
@@ -601,9 +627,9 @@ RC_TEST_STEP(scopes, nested_path_and_shadowing, fix)
     uint32_t a = scopes_make_child(&fix->scopes, fix->root, RC_STR("a"));
     uint32_t b = scopes_make_child(&fix->scopes, a, RC_STR("b"));
 
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("x"), value_make_numeric(1.0),  (cursor){0, 50});
-    scopes_set_symbol(&fix->scopes, b,         RC_STR("x"), value_make_numeric(2.0),  (cursor){0, 60});
-    scopes_set_symbol(&fix->scopes, b,         RC_STR("y"), value_make_numeric(99.0), (cursor){0, 70});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("x"), (symbol) {.v = value_make_numeric(1.0),  .def = (cursor){0, 50}});
+    scopes_set_symbol(&fix->scopes, b,         RC_STR("x"), (symbol) {.v = value_make_numeric(2.0),  .def = (cursor){0, 60}});
+    scopes_set_symbol(&fix->scopes, b,         RC_STR("y"), (symbol) {.v = value_make_numeric(99.0), .def = (cursor){0, 70}});
 
     // Three-component descent from the root.
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("a.b.y")), value_make_numeric(99.0)));
@@ -619,7 +645,7 @@ RC_TEST_STEP(scopes, set_symbol_clones_into_permanent, fix)
     rc_arena scratch = rc_arena_make_default();
     rc_mstr  m = rc_mstr_make(8, &scratch);
     rc_mstr_append(&m, RC_STR("zip"), &scratch);
-    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("s"), value_make_string(m.view), (cursor){0, 80}) == symbol_status_unchanged);
+    RC_CHECK_TRUE(scopes_set_symbol(&fix->scopes, fix->root, RC_STR("s"), (symbol) {.v = value_make_string(m.view), .def = (cursor){0, 80}}) == symbol_status_unchanged);
 
     rc_arena_reset(&scratch);
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("s")),
@@ -634,8 +660,8 @@ RC_TEST_STEP(scopes, copy_by_value_still_resolves, fix)
     // identically to the original - the copy's tries index the same pool blocks. This is what makes a
     // scopes (hence baron) safe to hand around / return by value once it is done being built.
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),  value_make_numeric(11.0), (cursor){0, 1});
-    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"), value_make_numeric(22.0), (cursor){0, 2});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),  (symbol) {.v = value_make_numeric(11.0), .def = (cursor){0, 1}});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"), (symbol) {.v = value_make_numeric(22.0), .def = (cursor){0, 2}});
 
     scopes copy = fix->scopes;   // a bitwise copy: just the nodes array header + two pool headers, all indices
 
@@ -657,7 +683,7 @@ RC_TEST_STEP(scopes, get_or_make_child_is_idempotent, fix)
     RC_CHECK_TRUE(p != scopes_get_or_make_child(&fix->scopes, fix->root, RC_STR("@0:99")));   // different site, different scope
 
     // Bindings in the reused scope persist (this is what keeps multi-pass convergence honest).
-    scopes_set_symbol(&fix->scopes, a, RC_STR("inner"), value_make_numeric(7), (cursor){0, 90});
+    scopes_set_symbol(&fix->scopes, a, RC_STR("inner"), (symbol) {.v = value_make_numeric(7), .def = (cursor){0, 90}});
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("blk.inner")),
                                  value_make_numeric(7)));
 }
@@ -668,7 +694,7 @@ static value flattened_lookup(rc_view_symbol_entry entries, rc_str path)
     for (uint32_t i = 0; i < entries.num; i++) {
         symbol_entry e = rc_view_symbol_entry_get(entries, i);
         if (rc_str_is_equal(e.path, path)) {
-            return e.v;
+            return e.sym.v;
         }
     }
     return value_make_none();
@@ -680,10 +706,10 @@ RC_TEST_STEP(scopes, flatten_snapshots_spellable_symbols, fix)
     // anonymous scope (synthetic '@' key), and a local label ('@' symbol) at the top level.
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
     uint32_t anon    = scopes_make_child(&fix->scopes, fix->root, RC_STR("@0:12"));
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),   value_make_numeric(1.0),  (cursor){0, 1});
-    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"),  value_make_numeric(2.0),  (cursor){0, 2});
-    scopes_set_symbol(&fix->scopes, anon,      RC_STR("hidden"),value_make_numeric(3.0),  (cursor){0, 3});
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("@0:20"), value_make_numeric(4.0),  (cursor){0, 4});   // a local label
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),    (symbol) {.v = value_make_numeric(1.0), .def = (cursor){0, 1}});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"),   (symbol) {.v = value_make_numeric(2.0), .def = (cursor){0, 2}});
+    scopes_set_symbol(&fix->scopes, anon,      RC_STR("hidden"), (symbol) {.v = value_make_numeric(3.0), .def = (cursor){0, 3}});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("@0:20"),  (symbol) {.v = value_make_numeric(4.0), .def = (cursor){0, 4}});   // a local label
 
     rc_arena scratch = rc_arena_make_default();
     rc_view_symbol_entry out = scopes_view_flatten(scopes_view_make(&fix->scopes), &fix->arena, scratch);
@@ -705,10 +731,10 @@ RC_TEST_STEP(scopes, flatten_all_includes_anonymous, fix)
     // anonymous scope's symbol under its '@' segment, and the top-level local label verbatim.
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
     uint32_t anon    = scopes_make_child(&fix->scopes, fix->root, RC_STR("@0:12"));
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),   value_make_numeric(1.0),  (cursor){0, 1});
-    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"),  value_make_numeric(2.0),  (cursor){0, 2});
-    scopes_set_symbol(&fix->scopes, anon,      RC_STR("hidden"),value_make_numeric(3.0),  (cursor){0, 3});
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("@0:20"), value_make_numeric(4.0),  (cursor){0, 4});   // a local label
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),    (symbol) {.v = value_make_numeric(1.0), .def = (cursor){0, 1}});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"),   (symbol) {.v = value_make_numeric(2.0), .def = (cursor){0, 2}});
+    scopes_set_symbol(&fix->scopes, anon,      RC_STR("hidden"), (symbol) {.v = value_make_numeric(3.0), .def = (cursor){0, 3}});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("@0:20"),  (symbol) {.v = value_make_numeric(4.0), .def = (cursor){0, 4}});   // a local label
 
     rc_arena scratch = rc_arena_make_default();
     rc_view_symbol_entry out = scopes_view_flatten_all(scopes_view_make(&fix->scopes), &fix->arena, scratch);
@@ -728,8 +754,8 @@ RC_TEST_STEP(scopes, view_get_symbol_from_root, fix)
     // a bare top-level name, a dotted path into a named child, and a miss all behave like scopes_get_symbol
     // from the root - proving the view carries everything a lookup needs (nodes + both pools).
     uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
-    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),  value_make_numeric(10.0), (cursor){0, 1});
-    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"), value_make_numeric(20.0), (cursor){0, 2});
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("top"),  (symbol) {.v = value_make_numeric(10.0), .def = (cursor){0, 1}});
+    scopes_set_symbol(&fix->scopes, routine,   RC_STR("core"), (symbol) {.v = value_make_numeric(20.0), .def = (cursor){0, 2}});
 
     scopes_view v = scopes_view_make(&fix->scopes);
     RC_CHECK_TRUE(value_is_equal(scopes_view_get_symbol(v, RC_STR("top")),          value_make_numeric(10.0)));

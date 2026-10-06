@@ -26,6 +26,7 @@ typedef struct attribute {
 // sequential; an explicit org repositions later labels without moving where code lands.
 typedef struct section {
     rc_str              name;         // own namespace, separate from symbols and scopes; a view into source text
+    uint32_t            parent;       // the enclosing section; RC_INDEX_NONE for the default
     uint32_t            pc;           // effective address of the next byte - the value a label takes
     bool                cmos;         // consumed cmos attribute: 65C02 encodings allowed here (never inherited)
     bool                is_guarded;   // consumed guard attribute present? (never inherited)
@@ -110,11 +111,11 @@ uint32_t sections_guard(const sections *sec, uint32_t id);
 
 // ---- mutation ----
 
-// Create the named section (an empty window at the stream tail, pc 0 - the caller seeds it from the
-// enclosing section - and empty attributes) and return its stable index, or RC_INDEX_NONE if the name
-// already exists this pass (names are unique; the caller raises the error). Indices are stable across
-// passes because creation order is first-sighting parse order, identical each pass.
-uint32_t sections_make(sections *sec, rc_str name);
+// Create the named section inside parent (an empty window at the stream tail, pc 0 - the caller seeds
+// it from the enclosing section - and empty attributes) and return its stable index, or RC_INDEX_NONE
+// if the name already exists this pass (names are unique; the caller raises the error). Indices are
+// stable across passes because creation order is first-sighting parse order, identical each pass.
+uint32_t sections_make(sections *sec, rc_str name, uint32_t parent);
 
 // Add (or, for an already-present key, replace) one attribute on section id: a key repeated on one
 // SECTION line, last wins.
@@ -144,7 +145,7 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count);
 // ENDSECTION bookkeeping: fold the closed child into its parent - the parent's window absorbs the
 // child's extent and its pc advances by the child's size, so bytes propagate all the way up to the
 // default section at index 0.
-void sections_close(sections *sec, uint32_t id, uint32_t parent);
+void sections_close(sections *sec, uint32_t id);
 
 // End-of-pass: fill every section's code view as a slice of the stream. Views are only stable once
 // the pass stops growing the stream, so they are sealed in one step, never maintained live.

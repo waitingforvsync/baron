@@ -190,7 +190,7 @@ RC_TEST(output, spec_from_sections)
 
     // "main": saved (a filename names the output), with an org attribute and its own exec. Its load
     // should come from org.
-    uint32_t a = sections_make(&sec, RC_STR("main"));
+    uint32_t a = sections_make(&sec, RC_STR("main"), sections_default);
     sections_add_attribute(&sec, a, RC_STR("filename"), value_make_string(RC_STR("main")), cursor_none());
     sections_add_attribute(&sec, a, RC_STR("org"), value_make_numeric(0x1900), cursor_none());
     sections_add_attribute(&sec, a, RC_STR("exec"), value_make_numeric(0x1903), cursor_none());
@@ -199,12 +199,12 @@ RC_TEST(output, spec_from_sections)
     sections_emit_u8(&sec, a, 0x2A);
 
     // "quiet": no filename attribute, so not an output at all.
-    uint32_t q = sections_make(&sec, RC_STR("quiet"));
+    uint32_t q = sections_make(&sec, RC_STR("quiet"), sections_default);
     sections_emit_u8(&sec, q, 0x60);
 
     // "data": saved under a directory-specified filename, no org ATTRIBUTE - load falls back to where
     // the code started (pc minus length), and exec follows load.
-    uint32_t d = sections_make(&sec, RC_STR("data"));
+    uint32_t d = sections_make(&sec, RC_STR("data"), sections_default);
     sections_add_attribute(&sec, d, RC_STR("filename"), value_make_string(RC_STR("X.tab")), cursor_none());
     sections_org(&sec, d, 0x2000);
     sections_emit_u8(&sec, d, 0x0D);
@@ -239,7 +239,7 @@ RC_TEST(output, spec_rejects_bad_attributes)
     sections_init(&sec, &arena, &arena);
     sections_reset(&sec);
 
-    uint32_t a = sections_make(&sec, RC_STR("code"));
+    uint32_t a = sections_make(&sec, RC_STR("code"), sections_default);
     sections_add_attribute(&sec, a, RC_STR("filename"), value_make_numeric(7), cursor_none());
     sections_seal(&sec);
     output_spec_result r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
