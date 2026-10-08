@@ -29,6 +29,8 @@ void scopes_init(scopes *s, rc_arena *permanent)
     s->nodes       = rc_array_scope_node_make(scopes_nodes_reserve, s->arena);
     s->symbol_pool = rc_trie_symbol_pool_make(scopes_symbol_blocks_reserve, s->arena);
     s->child_pool  = rc_trie_child_pool_make(scopes_child_blocks_reserve, s->arena);
+    s->edits        = 0;
+    s->num_resolved = 0;
 }
 
 
@@ -41,7 +43,8 @@ void scopes_reset(scopes *s)
     // failure-only path. We do NOT reset the arena: it is shared (source text, diagnostics live there too).
     s->nodes       = rc_array_scope_node_make(scopes_nodes_reserve, s->arena);
     s->symbol_pool = rc_trie_symbol_pool_make(scopes_symbol_blocks_reserve, s->arena);
-    s->child_pool  = rc_trie_child_pool_make(scopes_child_blocks_reserve, s->arena);
+    s->child_pool   = rc_trie_child_pool_make(scopes_child_blocks_reserve, s->arena);
+    s->num_resolved = 0;
     scopes_make_root(s);
 }
 
@@ -108,6 +111,14 @@ uint32_t scopes_get_or_make_child(scopes *s, uint32_t parent_index, rc_str name)
 }
 
 
+// 1 for a binding the resolved count includes - anything but an error (a forward reference
+// waiting on its name binds the error until the name arrives).
+static uint32_t resolved_count(value v)
+{
+    return value_is_error(v) ? 0 : 1;
+}
+
+
 symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, symbol sym)
 {
     RC_ASSERT(s != NULL);
@@ -132,6 +143,8 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, sy
         bool unchanged = value_is_equal(existing.v, sym.v);
         sym.v = unchanged ? existing.v : value_make_copy(sym.v, s->arena);
         rc_trie_symbol_value_set(&s->symbol_pool, found, sym);
+        s->edits       += unchanged ? 0 : 1;
+        s->num_resolved = s->num_resolved - resolved_count(existing.v) + resolved_count(sym.v);
         return unchanged ? symbol_status_unchanged : symbol_status_changed;
     }
 
@@ -141,6 +154,8 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, sy
     rc_str owned = rc_mstr_from_str(name, name.len, s->arena).view;
     sym.v = value_make_copy(sym.v, s->arena);
     rc_trie_symbol_add(syms, &s->symbol_pool, owned, sym, s->arena);
+    s->edits++;   // an add is no convergence signal, but it is still news to the next pass
+    s->num_resolved += resolved_count(sym.v);
     return symbol_status_unchanged;   // brand new, so there was nothing to converge from
 }
 
@@ -149,7 +164,30 @@ bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name)
 {
     RC_ASSERT(s != NULL);
     RC_ASSERT(is_leaf_name(name));
-    return rc_trie_symbol_delete(rc_array_scope_node_get(&s->nodes, scope_index).symbols, &s->symbol_pool, name);
+
+    rc_trie_symbol syms  = rc_array_scope_node_get(&s->nodes, scope_index).symbols;
+    uint32_t       found = rc_trie_symbol_find(syms, &s->symbol_pool, name);
+    if (found == RC_INDEX_NONE) {
+        return false;
+    }
+
+    s->edits++;
+    s->num_resolved -= resolved_count(rc_trie_symbol_value_get(&s->symbol_pool, found).v);
+    return rc_trie_symbol_delete(syms, &s->symbol_pool, name);
+}
+
+
+uint32_t scopes_edits(const scopes *s)
+{
+    RC_ASSERT(s != NULL);
+    return s->edits;
+}
+
+
+uint32_t scopes_num_resolved(const scopes *s)
+{
+    RC_ASSERT(s != NULL);
+    return s->num_resolved;
 }
 
 
@@ -570,6 +608,49 @@ RC_TEST_STEP(scopes, remove, fix)
     RC_CHECK_TRUE(scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("barn")));    // was present
     RC_CHECK_FALSE(scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("barn")));   // now gone
     RC_CHECK_TRUE(value_is_none(scopes_get_symbol(&fix->scopes, fix->root, RC_STR("barn"))));
+}
+
+RC_TEST_STEP(scopes, edits_and_num_resolved_track_bindings, fix)
+{
+    // The pass loop gives up on an unresolved name once a pass leaves the edit count alone, so every
+    // genuine move must bump it - and a replayed pass must not. The resolved count is its measure of
+    // progress: a forward reference binds its error first, and only a real value counts.
+    cursor pos     = {0, 30};
+    value  pending = value_make_error(error_type_unknown_symbol);
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 0u);
+    RC_CHECK(scopes_num_resolved(&fix->scopes), ==, 0u);
+
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("owl"), (symbol) {.v = pending, .def = pos});
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 1u);          // an add: not "changed", but still news
+    RC_CHECK(scopes_num_resolved(&fix->scopes), ==, 0u);   // ...and nothing resolved yet
+
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("owl"), (symbol) {.v = pending, .def = pos});
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 1u);          // the same error again: a replay
+
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("owl"), (symbol) {.v = value_make_numeric(1.0), .def = pos});
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 2u);          // the name it waited on arrived
+    RC_CHECK(scopes_num_resolved(&fix->scopes), ==, 1u);
+
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("owl"), (symbol) {.v = value_make_numeric(2.0), .def = pos});
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 3u);          // a value moving is a change...
+    RC_CHECK(scopes_num_resolved(&fix->scopes), ==, 1u);   // ...but not progress
+
+    scopes_set_symbol(&fix->scopes, fix->root, RC_STR("owl"), (symbol) {.v = value_make_numeric(3.0), .def = (cursor){0, 40}});
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 3u);          // a duplicate mutates nothing
+
+    uint32_t child = scopes_make_child(&fix->scopes, fix->root, RC_STR("nest"));
+    scopes_set_symbol(&fix->scopes, child, RC_STR("owl"), (symbol) {.v = value_make_numeric(4.0), .def = (cursor){0, 50}});
+    RC_CHECK(scopes_num_resolved(&fix->scopes), ==, 2u);   // the count spans the whole tree
+
+    scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("owl"));
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 5u);          // a removal
+    RC_CHECK(scopes_num_resolved(&fix->scopes), ==, 1u);
+
+    scopes_remove_symbol(&fix->scopes, fix->root, RC_STR("owl"));
+    RC_CHECK(scopes_edits(&fix->scopes), ==, 5u);          // nothing left to remove
+
+    scopes_set_symbol(&fix->scopes, child, RC_STR("owl"), (symbol) {.v = pending, .def = (cursor){0, 50}});
+    RC_CHECK(scopes_num_resolved(&fix->scopes), ==, 0u);   // a value falling back to an error
 }
 
 RC_TEST_STEP(scopes, qualified_path, fix)

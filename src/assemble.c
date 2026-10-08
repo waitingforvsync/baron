@@ -14,7 +14,8 @@
 #include "richc/macros.h"
 
 
-#define ASSEMBLE_MAX_PASSES 100u
+#define ASSEMBLE_MAX_PASSES 64u        // backstop for a program that keeps resolving new names forever
+#define ASSEMBLE_MAX_IDLE_PASSES 8u    // passes in a row that may resolve nothing new before we give up
 #define ASSEMBLE_MAX_INCLUDE_DEPTH 64u   // a runaway / cyclic INCLUDE is caught here before the C stack gives out
 #define ASSEMBLE_MAX_MACRO_DEPTH 64u     // a runaway macro expansion (a missing recursion base case) is caught here
 
@@ -182,7 +183,7 @@ bool zp_recording(const baron *b, parse_flags flags, uint32_t section)
 }
 
 
-// Remember the pass's FIRST binding that would not settle; if we hit the pass cap, this is the
+// Remember the pass's FIRST binding that would not settle; if we give up on settling, this is the
 // culprit we point at (changes cascade down the file, so the earliest is nearest the root cause).
 static void note_unsettled(baron *b, cursor at, rc_str name, value from, value to)
 {
@@ -4069,7 +4070,11 @@ static void report_no_convergence(baron *b, uint32_t source)
 // set. Returns the pass count, 0 on failure.
 static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
 {
+    uint32_t most_resolved = 0;   // the most bindings ever holding a real value at once
+    uint32_t idle          = 0;   // passes in a row that resolved nothing new
+
     for (uint32_t pass = 1; pass <= ASSEMBLE_MAX_PASSES; pass++) {
+        uint32_t edits = scopes_edits(&b->scopes);
         parse_result r = run_pass(b, source, (parse_flags) {.active = true}, scratch);
 
         if (r.fatal) {
@@ -4117,11 +4122,30 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
 
             return pass + 1;
         }
+
+        // Still waiting on a name, yet not one binding moved: every pass from here would replay this
+        // one, so the name can never arrive. No sense grinding on to the cap (expensive when the
+        // program computes big tables) - the diagnostic pass below names it now.
+        if (!r.changed && scopes_edits(&b->scopes) == edits) {
+            break;
+        }
+
+        // Progress is more bindings holding real values than ever before: a chain of definitions
+        // written in reverse order resolves one more link per pass, however long it is. Values
+        // merely moving (or a name that comes and goes) is layout settling - a few passes at most -
+        // or a program chasing its own tail, so a long run of those means it will never settle.
+        uint32_t num_resolved = scopes_num_resolved(&b->scopes);
+        idle          = num_resolved > most_resolved ? 0 : idle + 1;
+        most_resolved = num_resolved > most_resolved ? num_resolved : most_resolved;
+        if (idle == ASSEMBLE_MAX_IDLE_PASSES) {
+            break;
+        }
     }
 
-    // Did not settle within the cap. A final diagnostic pass names a concrete cause (an undefined
-    // symbol) where there is one; otherwise it is genuine oscillation, and the first binding that
-    // moved on that pass makes a decent culprit - point at it, with its flip in the payload.
+    // Stuck on a name, going round in circles, or still resolving new names at the cap. A final
+    // diagnostic pass names a concrete cause (an undefined symbol) where there is one; otherwise it
+    // is genuine oscillation, and the first binding that moved on that pass makes a decent culprit -
+    // point at it, with its flip in the payload.
     parse_result diag = run_pass(b, source, (parse_flags) {.final = true, .active = true}, scratch);
     if (!diag.fatal && !baron_has_errors(b)) {
         report_no_convergence(b, source);
@@ -8020,10 +8044,11 @@ RC_TEST_STEP(assemble, if_forward_ref_contradiction_does_not_converge, fix)
     // fwdlabel = 5 is a contradiction: skipping the block puts fwdlabel at 5 (so the condition is
     // true, contradicting the skip); taking it puts fwdlabel at 10 (so the condition is false). The
     // layout flips between the two forever and never settles - and the report names the flapping
-    // binding with its two values (the diagnostic pass sees the 10 -> 5 half of the cycle).
+    // binding with its two values. Which half of the cycle the diagnostic pass sees rides on the
+    // parity of ASSEMBLE_MAX_IDLE_PASSES (one binding pass, then the idle run, then diagnosis).
     RC_CHECK_TRUE(ERR("LDA #1 : IF fwdlabel = 5 : LDA #2 : JSR &FFEE : ENDIF : NOP : LDA fwdlabel : .fwdlabel : RTS")
                   == error_type_unsettled_symbol);
-    RC_CHECK(diag_payload(&fix->r, error_type_unsettled_symbol), ==, RC_STR("'fwdlabel' (10 -> 5)"));
+    RC_CHECK(diag_payload(&fix->r, error_type_unsettled_symbol), ==, RC_STR("'fwdlabel' (5 -> 10)"));
 }
 
 RC_TEST_STEP(assemble, unsettled_binding_flip_flop_names_the_symbol, fix)
@@ -8050,6 +8075,18 @@ RC_TEST_STEP(assemble, final_pass_flip_is_an_error, fix)
     RC_CHECK_TRUE(ERR("IF not(defined(owl)) : owl = FALSE : ENDIF : IF owl : NOP : ENDIF")
                   == error_type_undefined_symbol);
     RC_CHECK(diag_payload(&fix->r, error_type_unsettled_symbol), ==, RC_STR("'owl'"));
+}
+
+RC_TEST_STEP(assemble, reverse_chain_outlasts_idle_limit, fix)
+{
+    // A chain written backwards resolves one link per pass, so it needs more passes than the idle
+    // limit allows - and gets them, because every one of those passes resolves something new.
+    uint32_t passes = ASM("LDA #x0\n"
+                          "x0 = x1 + 1 : x1 = x2 + 1 : x2 = x3 + 1 : x3 = x4 + 1\n"
+                          "x4 = x5 + 1 : x5 = x6 + 1 : x6 = x7 + 1 : x7 = x8 + 1\n"
+                          "x8 = x9 + 1 : x9 = x10 + 1 : x10 = x11 + 1 : x11 = 5");
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x10}, 2));
+    RC_CHECK(passes, >, ASSEMBLE_MAX_IDLE_PASSES + 1);
 }
 
 RC_TEST_STEP(assemble, nested_if_forward_ref, fix)

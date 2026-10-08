@@ -63,6 +63,8 @@ typedef struct scopes {
     rc_array_scope_node nodes;        // scope index 0 is the root
     rc_trie_symbol_pool symbol_pool;  // shared by every node's symbols trie
     rc_trie_child_pool  child_pool;   // shared by every node's children trie
+    uint32_t            edits;        // bumped by every binding added, changed or removed
+    uint32_t            num_resolved; // live bindings holding a real value (not an error), every scope
 } scopes;
 
 // A read-only projection of a finished scopes: the scope-node array as a view, plus the two shared
@@ -108,6 +110,17 @@ symbol_status scopes_set_symbol(scopes *s, uint32_t scope_index, rc_str name, sy
 // Remove leaf name (a plain symbol name, not a path) from scope_index. Returns
 // whether it was there to remove.
 bool scopes_remove_symbol(scopes *s, uint32_t scope_index, rc_str name);
+
+// How many times the bindings have moved (an add, a changed value or a removal) since init. The
+// symbol table is all one pass hands the next, so a pass that leaves this alone would be replayed
+// exactly by the pass after it.
+uint32_t scopes_edits(const scopes *s);
+
+// How many bindings across the whole tree hold a real value rather than an error. A forward
+// reference binds its error until the name it waits on arrives, so a pass that pushes this past its
+// highest-ever mark has resolved something for the first time - progress, as opposed to values
+// shuffling around.
+uint32_t scopes_num_resolved(const scopes *s);
 
 // The source position that defined leaf name in scope_index ALONE (no parent walk, no dotted
 // path) - the def cursor scopes_set_symbol recorded - or cursor_none() if the name is not bound
