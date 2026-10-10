@@ -57,6 +57,33 @@ static target_loc resolve_target_loc(rc_view_zp_label labels, zp_insn n)
 }
 
 
+// The section a declared annotation target (ZA_CANJUMP / ZA_CANCALL / ZA_RETURNTO) lands in. Like a
+// literal operand (resolve_target_loc), a target that named a label sits in the label's OWN section -
+// so a declared set can reach code in another section, just as the JMP it annotates can. The marker
+// must sit at the target address itself: an offset from a label (lab+3), or a symbol bound to a target
+// table (handlers = {a, b}), names no label's position. Anything else is a bare address, resolved
+// within the annotated site's section.
+static uint32_t cflow_target_section(rc_view_zp_label labels, zp_cflow cf, uint32_t site_section)
+{
+    if (cf.target_scope != RC_INDEX_NONE) {
+        for (uint32_t i = 0; i < labels.num; i++) {
+            zp_label l = rc_view_zp_label_get(labels, i);
+            if (l.scope == cf.target_scope && cursor_is_equal(l.def, cf.target_def)) {
+                return l.pc == cf.target ? l.section : site_section;
+            }
+        }
+    }
+
+    return site_section;
+}
+
+
+uint32_t cfg_cflow_target_section(cfg g, zp_cflow cf, uint32_t site_section)
+{
+    return cflow_target_section(g.labels, cf, site_section);
+}
+
+
 // The leader-set index for (section, pc): one 64 KB span of bits per section. Callers only pass sections that
 // exist in the stream (< num_sections) and pcs < cfg_addr_space, so the index is always in range.
 static uint32_t leader_index(uint32_t section, uint32_t pc)
@@ -179,9 +206,9 @@ call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_aren
         if (cf.kind == zp_cflow_za_cancall && cf.site == n.pc) {
             annotated = true;
 
-            // ZA_CANCALL names a same-section address. Every declared target is a block leader, so an
-            // in-program address always has a block; one without is an external arm and contributes nothing.
-            uint32_t tb = cfg_block_at(g, n.section, cf.target);
+            // Every declared target is a block leader, so an in-program address always has a block; one
+            // without is an external arm and contributes nothing.
+            uint32_t tb = cfg_block_at(g, cfg_cflow_target_section(g, cf, n.section), cf.target);
             if (tb != RC_INDEX_NONE) {
                 rc_array_u32_push(&blocks, tb, arena);
             }
@@ -314,7 +341,11 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                                 ? cf.kind == zp_cflow_za_cancall || cf.kind == zp_cflow_za_returnto
                                 : cf.kind == zp_cflow_za_canjump;
                 if (fits && cf.site == insn.pc && cf.target != RC_INDEX_NONE) {
-                    mark_leader(&leaders, insn.section, cf.target);
+                    // A label's section may hold no recorded insns: no leader span, and no block to find.
+                    uint32_t sec = cflow_target_section(labels, cf, insn.section);
+                    if (sec < num_sections) {
+                        mark_leader(&leaders, sec, cf.target);
+                    }
                 }
             }
         }
@@ -428,7 +459,8 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
                     if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
                         annotated = true;
-                        uint32_t tb = block_at(blocks.view, last.section, cf.target);
+                        uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf, last.section),
+                                               cf.target);
                         if (tb != RC_INDEX_NONE) {
                             add_succ(&succs, block, tb, arena);
                         }
@@ -458,7 +490,8 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 for (uint32_t i = 0; i < cflows.num; i++) {
                     zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
                     if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
-                        uint32_t tb = block_at(blocks.view, last.section, cf.target);
+                        uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf, last.section),
+                                               cf.target);
                         if (tb != RC_INDEX_NONE) {
                             add_succ(&succs, block, tb, arena);
                         }
@@ -505,7 +538,8 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
                         if (cf.kind == zp_cflow_za_returnto && cf.site == last.pc) {
                             redirected = true;
-                            uint32_t tb = block_at(blocks.view, last.section, cf.target);
+                            uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf, last.section),
+                                                   cf.target);
                             if (tb != RC_INDEX_NONE) {
                                 add_succ(&succs, block, tb, arena);
                             }

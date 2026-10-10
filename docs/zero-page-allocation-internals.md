@@ -268,7 +268,9 @@ what it buys - over at the [Calls](#calls) section.
 
 A branch or jump to a label finds the label's block through the recorded `zp_label` markers
 (`cfg_target_block`) - which is how a transfer crosses sections and still lands in the right bank.
-A bare numeric target resolves within its own section only.
+A bare numeric target resolves within its own section only. A `ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO`
+target that names a label resolves the same way (`cfg_cflow_target_section`), so a declared set can
+reach another section just as the literal operand it replaces can.
 
 An indirect `JMP`'s operand is different: it names the vector *cell* the address will be fetched
 from, not the destination (`zp_insn.target_via`), so the cell's own address is never mistaken for
@@ -946,11 +948,12 @@ And the trust points - the deliberate holes in the proof, each an explicit contr
 
 Deliberate limitations, all soundness-safe or documented trust points:
 
-- **Annotation operands resolve in their own section.** Ordinary cross-section transfers resolve by
-  label, but a `ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO` *operand* is still a bare number resolved in
-  the annotating instruction's section, so it cannot yet name a target in a different bank.
+- **Only a bare label crosses sections in an annotation.** A `ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO`
+  target written as a label resolves by label, like a literal operand. A number, an offset from a
+  label, or a symbol bound to a target list (`handlers = {a, b}`) is a bare address resolved in the
+  annotating instruction's section, so it cannot name a target in a different bank.
   (`ZA_ENTRY`/`ZA_INTERRUPT` take no operand, so they are intrinsically in the right section.)
-- **Annotation sites are bare addresses too.** Two banks sharing an address would cross-talk on
+- **Annotation sites are bare addresses.** Two banks sharing an address would cross-talk on
   their annotations - and since `ZA_UNREACHABLE` can sever a call's fall-through, that cross-talk
   could *remove* an edge (the unsound direction) rather than merely add one. Keep annotations and
   their sites in one bank until sites carry a section.

@@ -246,7 +246,7 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
         if (cf.kind == zp_cflow_za_canjump) {
             annotated = true;
-            if (cfg_block_at(g, last.section, cf.target) == RC_INDEX_NONE) {
+            if (cfg_block_at(g, cfg_cflow_target_section(g, cf, last.section), cf.target) == RC_INDEX_NONE) {
                 return true;   // an external arm hands back, via the external routine's RTS
             }
         }

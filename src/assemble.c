@@ -1258,10 +1258,12 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
     (void) scratch;
     if (zp_recording(b, flags, section)) {
         zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-            .site   = sections_pc(&b->sections, section),
-            .target = RC_INDEX_NONE,
-            .kind   = zp_cflow_za_unreachable,
-            .at     = cursor_at(at, at.pos),
+            .site         = sections_pc(&b->sections, section),
+            .target       = RC_INDEX_NONE,
+            .target_scope = RC_INDEX_NONE,
+            .target_def   = cursor_none(),
+            .kind         = zp_cflow_za_unreachable,
+            .at           = cursor_at(at, at.pos),
         });
     }
 
@@ -1308,8 +1310,9 @@ static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 
 // Record one annotation target value as cflows sited at site: the operand flattens like EQUB's
 // data (flatten_to_list), so a symbol bound to a whole target table (handlers = {a, b}) annotates
-// in one word.
-static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cflow_kind kind,
+// in one word. ref is the symbol the operand names (cursor_none when it names none): like a JMP's
+// operand, a label's identity lets the CFG place a target in the label's own section.
+static parse_result record_cflow_targets(baron *b, value v, symbol_ref ref, uint32_t site, zp_cflow_kind kind,
                                          parse_flags flags, cursor at)
 {
     bool unresolved = false;
@@ -1320,10 +1323,12 @@ static parse_result record_cflow_targets(baron *b, value v, uint32_t site, zp_cf
         switch ((int_argument_type) arg.type) {
             case int_argument_type_known:
                 zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-                    .site   = site,
-                    .target = (uint32_t) (arg.value & 0xFFFF),
-                    .kind   = (uint8_t) kind,
-                    .at     = at,
+                    .site         = site,
+                    .target       = (uint32_t) (arg.value & 0xFFFF),
+                    .target_scope = cursor_is_none(ref.def) ? RC_INDEX_NONE : ref.scope,
+                    .target_def   = ref.def,
+                    .kind         = (uint8_t) kind,
+                    .at           = at,
                 });
                 break;
             case int_argument_type_unresolved:
@@ -1360,7 +1365,10 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
         }
 
         if (zp_recording(b, flags, section) && site != RC_INDEX_NONE) {
-            parse_result rec = record_cflow_targets(b, e.value, site, kind, flags, cursor_at(at, pos));
+            symbol_result sym = peek_symbol(b, cursor_at(at, pos));
+            symbol_ref ref = sym.name.len ? scopes_resolve_symbol_def(&b->scopes, scope, sym.name)
+                                          : (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};
+            parse_result rec = record_cflow_targets(b, e.value, ref, site, kind, flags, cursor_at(at, pos));
             unresolved |= rec.unresolved;
         }
 
@@ -1405,10 +1413,12 @@ static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t 
         uint32_t site = annotation_site(b, zp_cflow_za_return);
         if (site != RC_INDEX_NONE) {
             zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-                .site   = site,
-                .target = RC_INDEX_NONE,
-                .kind   = zp_cflow_za_return,
-                .at     = cursor_at(at, at.pos),
+                .site         = site,
+                .target       = RC_INDEX_NONE,
+                .target_scope = RC_INDEX_NONE,
+                .target_def   = cursor_none(),
+                .kind         = zp_cflow_za_return,
+                .at           = cursor_at(at, at.pos),
             });
         }
     }
@@ -3650,7 +3660,7 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         for (uint32_t j = 0; j < insns.num; j++) {
             zp_insn n = rc_view_zp_insn_get(insns, j);
             if (n.flow == zp_flow_call && n.pc == cf.site) {
-                if (!code_at(insns, n.section, cf.target)) {
+                if (!code_at(insns, cfg_cflow_target_section(g, cf, n.section), cf.target)) {
                     baron_warning(b, error_type_za_returnto_no_code, cf.at, severity_warning);
                 }
                 break;
@@ -5857,6 +5867,57 @@ RC_TEST_STEP(assemble, za_auto_var_live_across_cross_section_call, fix)
                       "SECTION bank, org=&8000 : .sub : STA tmp : LDA tmp : RTS : ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "keep"), ==, zp_addr(&fix->r, "tmp"));   // nothing spans the call -> reuse
+}
+
+RC_TEST_STEP(assemble, za_declared_targets_cross_sections, fix)
+{
+    // A declared target that names a label lands in the label's own section, exactly as the JMP's literal
+    // operand does. Here the targets sit in a nested section: both are reachable from the entry, so neither
+    // routine warns. (Each was once resolved in the JMP's section, found no block, and read as external.)
+    RC_CHECK_TRUE(ASM("SECTION loader, org=&1900\n"
+                      "  ZA_POOL &70..&7F\n"
+                      "  SECTION code, org=&0E00\n"
+                      "  .first { ZA_AUTO1 t1 : STA t1 : LDA t1 : RTS }\n"
+                      "  .second { ZA_AUTO1 t2 : STA t2 : LDA t2 : RTS }\n"
+                      "  ENDSECTION\n"
+                      ".start ZA_ENTRY : JMP first : ZA_CANJUMP first, second\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
+
+    // ZA_CANCALL resolves its targets the same way: the declared callee in the other section is a real
+    // callee, so keep, live across the call, is kept off its tmp. (Resolved in main, sub read as an
+    // external arm and tmp shared keep's byte: wrong code, not just a warning.)
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, tmp\n"
+                      "SECTION main, org=&1900 : STA keep : JSR &0000 : ZA_CANCALL sub : LDA keep : RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION bank, org=&8000 : .sub STA tmp : LDA tmp : RTS : ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "tmp"));
+
+    // The label picks the section the raw address never could: two banks share &8000, and each arm
+    // reaches its own bank's routine.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      "SECTION main, org=&1900\n"
+                      ".start ZA_ENTRY : JMP (vector) : ZA_CANJUMP go1, go2\n"
+                      ".vector EQUW 0 : ENDSECTION\n"
+                      "SECTION b1, org=&8000 : .go1 { ZA_AUTO1 t1 : STA t1 : LDA t1 : RTS } : ENDSECTION\n"
+                      "SECTION b2, org=&8000 : .go2 { ZA_AUTO1 t2 : STA t2 : LDA t2 : RTS } : ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
+
+    // A bare address names no label, so it still resolves within the annotated site's section: &0E00
+    // has no code in loader, the arm reads as external, and the routine there is unreachable.
+    RC_CHECK_TRUE(ASM("SECTION loader, org=&1900\n"
+                      "  ZA_POOL &70..&7F\n"
+                      "  SECTION code, org=&0E00\n"
+                      "  .first { ZA_AUTO1 t1 : STA t1 : LDA t1 : RTS }\n"
+                      "  ENDSECTION\n"
+                      ".start ZA_ENTRY : JMP (vector) : ZA_CANJUMP &0E00\n"
+                      ".vector EQUW 0\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
 }
 
 RC_TEST_STEP(assemble, za_auto_unreachable_prunes_dead_edge, fix)
