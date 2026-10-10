@@ -68,6 +68,11 @@ uint32_t cfg_target_block(cfg g, zp_insn n);
 // cannot pin down" (the conservative taint / unknown-call case).
 bool cfg_target_is_external(cfg g, zp_insn n);
 
+// The section a declared annotation target (ZA_CANJUMP / ZA_CANCALL / ZA_RETURNTO) at a site in
+// site_section lands in: a target that named a label is in the label's own section, as a literal
+// operand's is (cfg_target_block); a bare address stays in site_section.
+uint32_t cfg_cflow_target_section(cfg g, zp_cflow cf, uint32_t site_section);
+
 // The i-th successor block index of b (i < b.succ_count). Reads the shared successor pool.
 uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 

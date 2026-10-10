@@ -142,10 +142,12 @@ typedef enum zp_cflow_kind {
 } zp_cflow_kind;
 
 typedef struct zp_cflow {
-    uint32_t site;    // pc of the annotated instruction: ZA_UNREACHABLE its own pc; the others the JSR/JMP/branch pc
-    uint32_t target;  // a target address (ZA_CANCALL/ZA_CANJUMP/ZA_RETURNTO); RC_INDEX_NONE for the bare markers
-    uint8_t  kind;    // zp_cflow_kind
-    cursor   at;      // where the annotation sits, for diagnostics
+    uint32_t site;          // pc of the annotated instruction: ZA_UNREACHABLE its own pc; others the JSR/JMP/branch pc
+    uint32_t target;        // a target address (ZA_CANCALL/ZA_CANJUMP/ZA_RETURNTO); RC_INDEX_NONE for the bare markers
+    uint32_t target_scope;  // scope of the target LABEL, when the annotation named one, else RC_INDEX_NONE
+    cursor   target_def;    // def cursor of that label, or cursor_none; with target_scope, picks the target's section
+    uint8_t  kind;          // zp_cflow_kind
+    cursor   at;            // where the annotation sits, for diagnostics
 } zp_cflow;
 
 #define RC_ARRAY_TYPE zp_cflow
