@@ -3519,6 +3519,25 @@ static bool code_at(rc_view_zp_insn insns, uint32_t section, uint32_t pc)
     return false;
 }
 
+// Where a block's code begins: the first record (a label, say) sharing the pc of its first REAL
+// instruction, or RC_INDEX_NONE for a block of markers alone. Anything but the block's first record
+// means it opens on data: a label on the tables after a terminator heads a block, and the inline-data
+// fall-through carries it on into whatever code follows.
+static uint32_t block_code_head(rc_view_zp_insn insns, basic_block blk)
+{
+    for (uint32_t i = 0; i < blk.num_insns; i++) {
+        zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
+        if (n.size > 0) {
+            uint32_t head = blk.first_insn + i;
+            while (head > blk.first_insn && rc_view_zp_insn_get(insns, head - 1).pc == n.pc) {
+                head--;
+            }
+            return head;
+        }
+    }
+    return RC_INDEX_NONE;
+}
+
 
 // Post-convergence zero-page allocation. Layout has settled with every ZA_AUTO reference sized as
 // a placeholder zero-page access, so assigning a real byte cannot perturb size. The governing rule
@@ -3732,7 +3751,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
         if (any_offending) {
             // A region head is an unreachable block with no unreachable predecessor. Warn once per
             // head whose closure holds an uncovered offender; a pure cycle has no head, so a mop-up
-            // sweep catches anything the heads did not claim.
+            // sweep catches anything the heads did not claim. A block opening on data is not code:
+            // it neither heads a region nor counts as a predecessor, else a label on the tables
+            // after a dead routine speaks for the code its fall-through runs into.
             rc_bitset unreached = rc_bitset_make(nb, &scratch);
             rc_bitset upred = rc_bitset_make(nb, &scratch);   // "has an unreached predecessor" - a set, so a bitset
             for (uint32_t bi = 0; bi < nb; bi++) {
@@ -3741,10 +3762,10 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                 }
             }
             for (uint32_t bi = 0; bi < nb; bi++) {
-                if (rc_bitset_is_set(&reach, bi)) {
+                basic_block blk = rc_view_basic_block_get(g.blocks, bi);
+                if (rc_bitset_is_set(&reach, bi) || block_code_head(insns, blk) != blk.first_insn) {
                     continue;
                 }
-                basic_block blk = rc_view_basic_block_get(g.blocks, bi);
                 for (uint32_t i = 0; i < blk.num_insns; i++) {
                     zp_insn n = rc_view_zp_insn_get(insns, blk.first_insn + i);
                     if (n.flow != zp_flow_call) {
@@ -3764,7 +3785,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             rc_bitset covered = rc_bitset_make(nb, &scratch);
             for (uint32_t pass = 0; pass < 2; pass++) {
                 for (uint32_t bi = 0; bi < nb; bi++) {
-                    bool head = pass == 0 ? (!rc_bitset_is_set(&reach, bi) && !rc_bitset_is_set(&upred, bi))
+                    basic_block blk = rc_view_basic_block_get(g.blocks, bi);
+                    bool head = pass == 0 ? (!rc_bitset_is_set(&reach, bi) && !rc_bitset_is_set(&upred, bi)
+                                             && block_code_head(insns, blk) == blk.first_insn)
                                           : (rc_bitset_is_set(&offending, bi) && !rc_bitset_is_set(&covered, bi));
                     if (!head) {
                         continue;
@@ -3777,9 +3800,11 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                         fresh = rc_bitset_is_set(&offending, c) && !rc_bitset_is_set(&covered, c);
                     }
                     if (fresh) {
-                        basic_block blk = rc_view_basic_block_get(g.blocks, bi);
+                        // An offender opening on data (a mop-up) is named where its code begins.
+                        uint32_t at = block_code_head(insns, blk);
                         baron_warning(b, error_type_za_auto_unreachable,
-                                      rc_view_zp_insn_get(insns, blk.first_insn).at, severity_warning);
+                                      rc_view_zp_insn_get(insns, at != RC_INDEX_NONE ? at : blk.first_insn).at,
+                                      severity_warning);
                     }
                     rc_bitset_union(&covered, &closure);
                 }
@@ -4322,6 +4347,18 @@ static uint32_t diag_count(const baron_result *r, error_type code)
         }
     }
     return n;
+}
+
+// The source offset of the first diagnostic carrying code (RC_INDEX_NONE when none does).
+static uint32_t diag_pos(const baron_result *r, error_type code)
+{
+    for (uint32_t i = 0; i < r->diagnostics.num; i++) {
+        diagnostic d = rc_view_diagnostic_get(r->diagnostics, i);
+        if (d.code == code) {
+            return d.at.pos;
+        }
+    }
+    return RC_INDEX_NONE;
 }
 
 // The severity level of the first diagnostic carrying code (0xFF when none does).
@@ -6639,6 +6676,34 @@ RC_TEST_STEP(assemble, za_auto_unreachable_region_dedup, fix)
                       ".main STA m : LDA m : RTS\n"
                       ".irq STA h : BNE done : LDA h\n.done LDA h : RTI\n") != 0);
     RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
+}
+
+RC_TEST_STEP(assemble, za_auto_unreachable_names_code_not_data, fix)
+{
+    // A label on the data after a terminator heads a block of its own, and the inline-data fall-through
+    // carries it into the next code - but it is not code, so it never speaks for the region. Here the
+    // dead caller is a cycle (no head), and the warning used to name .t1; it names the offender.
+    #define SRC "ZA_POOL &70..&7F : ZA_AUTO1 v\n" \
+                ".main RTS\n" \
+                ".loop JSR sub : JMP loop\n" \
+                ".t1 EQUB 0\n" \
+                ".t2 EQUB 0\n" \
+                ".sub STA v : LDA v : RTS\n"
+    RC_CHECK_TRUE(ASM(SRC) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
+    RC_CHECK(diag_pos(&fix->r, error_type_za_auto_unreachable), ==, (uint32_t) (strstr(SRC, "sub STA") - SRC));
+    #undef SRC
+
+    // Code glued onto the data's block (no leader at .sub) is named where it begins, not at .t1.
+    #define SRC "ZA_POOL &70..&7F : ZA_AUTO1 v\n" \
+                ".main RTS\n" \
+                ".t1 EQUB 0\n" \
+                ".t2 EQUB 0\n" \
+                ".sub STA v : LDA v : RTS\n"
+    RC_CHECK_TRUE(ASM(SRC) != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
+    RC_CHECK(diag_pos(&fix->r, error_type_za_auto_unreachable), ==, (uint32_t) (strstr(SRC, "sub STA") - SRC));
+    #undef SRC
 }
 
 RC_TEST_STEP(assemble, za_auto_unreachable_follows_calls, fix)
