@@ -71,9 +71,9 @@ to the end of the line.
 | `EQUB v [, v...]` | Emit bytes. Numbers emit one byte (-255..255 accepted); strings emit their characters; lists and ranges flatten. `EQUS` is an alias - the two are interchangeable. |
 | `EQUW v [, v...]` | As `EQUB`, but each value is a 16-bit little-endian word. |
 | `EQUD v [, v...]` | As `EQUB`, but 32-bit. |
-| `SKIP n` | Reserve `n` bytes of zeroes. |
-| `SKIPTO addr` | Pad with zeroes up to `addr` (the address only ever moves forwards). |
-| `ALIGN n` | Pad with zeroes to the next multiple of `n`. |
+| `SKIP n` | Reserve `n` bytes of zeroes. `n` can be at most `&10000`. |
+| `SKIPTO addr` | Pad with zeroes up to `addr` (the address only ever moves forwards). `addr` can be at most `&10000`, the top of memory. |
+| `ALIGN n` | Pad with zeroes to the next multiple of `n`, which must be between 1 and `&10000`. |
 | `INCBIN "file"` | Splice a binary file's bytes into the output. Path is relative to the including source file. |
 | `BITABS` | Emit a lone `&2C` (a `BIT abs` opcode): at run time its operand fetch swallows the next 2 bytes, so fall-through resumes past them while a branch straight to the next instruction executes it - the classic skip trick. The zero-page allocator models it (the swallowed instruction counts only on the branch-taken path); without the allocator it is trusted raw emission, exactly like `EQUB &2C`. |
 | `BITZP` | The 1-byte flavour: emit `&24` (`BIT zp`), swallowing the next single byte. |
@@ -112,6 +112,10 @@ section nested inside a virtual one keeps no bytes either). Other keys are carri
 The address attributes take the BBC's full 32-bit host addresses (`&FFFFxxxx` = the I/O processor,
 `&0000xxxx` = the second processor): `load` and `exec` keep the whole value for the catalogue, while
 `org` and `guard` apply their low 16 bits - the 6502's actual address - to the assembly.
+
+The last byte of memory is `&FFFF`. A section may fill right up to it, but a byte placed past it is a
+non-halting error ("Program counter runs past &FFFF by N bytes"), reported once per section at the
+statement that went over.
 
 A filename destined for a disc image follows DFS rules: an optional single-character directory prefix
 (`"D.NAME"`; default `$`), then a name of up to 7 characters.

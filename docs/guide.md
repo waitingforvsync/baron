@@ -221,6 +221,8 @@ ENDSECTION
 - `guard` sets an address the section must not reach - `guard = &3000` means the last byte may land at
   `&2FFF` and no further. Overrunning it reports how many bytes too far you went, without stopping the
   assembly: you get every overrun (and everything else) in one run.
+- Every section has a built-in guard at the top of memory: the last byte may land at `&FFFF`. Going
+  past it is reported the same way, at the statement that went over.
 - `filename` asks for the section to be saved - no filename, no file. `load` defaults to `org`, and `exec` defaults to `load`.
 - Addresses are the BBC's full 32-bit host addresses: `&FFFFxxxx` runs on the I/O processor,
   `&0000xxxx` on the second processor. `org`, `load`, `exec` and `guard` all take the whole value -

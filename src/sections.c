@@ -133,12 +133,15 @@ uint32_t sections_make(sections *sec, rc_str name, uint32_t parent)
         return RC_INDEX_NONE;
     }
 
-    // Discarding by containment, not inheritance: a child's bytes land in its parent, which drops them
+    // Discarding by containment, not inheritance: a child's bytes land in its parent, which drops them.
+    // The pc is copied whole, not through sections_org's 16-bit mask: a parent filled right to &10000
+    // must not hand its child address 0.
     return rc_array_section_push(
         &sec->nodes,
         (section) {
             .name     = name,
             .parent   = parent,
+            .pc       = sections_pc(sec, parent),
             .discards = sections_discards(sec, parent),
             .begin    = sec->stream.num,
             .end      = sec->stream.num,
@@ -217,6 +220,18 @@ void sections_set_virtual(sections *sec, uint32_t id, bool is_virtual)
 }
 
 
+// Count bytes placed in s, noticing the one that first lands past &FFFF (the subtraction cannot
+// underflow on that side of the test, nor the addition wrap on a huge count).
+static void advance(section *s, uint32_t count)
+{
+    if (s->pc <= sections_address_space && count > sections_address_space - s->pc) {
+        s->overrun = true;
+    }
+    s->size += count;
+    s->pc   += count;
+}
+
+
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
 {
     RC_ASSERT(sec != NULL);
@@ -228,8 +243,7 @@ void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
         rc_array_bytes_push(&sec->stream, b, sec->arena);
         s->end = sec->stream.num;
     }
-    s->size += 1;
-    s->pc   += 1;
+    advance(s, 1);
 }
 
 
@@ -249,8 +263,18 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count)
         rc_array_bytes_push_n_zero(&sec->stream, count, sec->arena);
         s->end = sec->stream.num;
     }
-    s->size += count;
-    s->pc   += count;
+    advance(s, count);
+}
+
+
+bool sections_take_overrun(sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+
+    section *s = rc_array_section_at(&sec->nodes, id);
+    bool overrun = s->overrun;
+    s->overrun = false;
+    return overrun;
 }
 
 
@@ -548,6 +572,45 @@ RC_TEST(sections, close_folds_child_into_parent)
     // The default is the root: its window covers the whole stream, its pc advanced with everything
     RC_CHECK(sections_pc(&sec, sections_default), ==, 4u);
     RC_CHECK(sections_code(&sec, sections_default).num, ==, 4u);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, overrun_fires_once)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+    sections_reset(&sec);
+
+    // Reaching &10000 exactly is no overrun; the next byte is, and asking again finds it already taken.
+    uint32_t a = sections_make(&sec, RC_STR("a"), sections_default);
+    sections_org(&sec, a, 0xFFFE);
+    sections_emit_u16(&sec, a, 0x1234);
+    RC_CHECK_FALSE(sections_take_overrun(&sec, a));
+    sections_emit_u8(&sec, a, 0x56);
+    RC_CHECK_TRUE(sections_take_overrun(&sec, a));
+    RC_CHECK_FALSE(sections_take_overrun(&sec, a));
+
+    // Already past the top, nothing crosses again - and a child continues the parent's whole pc rather
+    // than its low 16 bits, so it does not quietly restart at address 5.
+    sections_skip(&sec, a, 4);
+    uint32_t b = sections_make(&sec, RC_STR("b"), a);
+    RC_CHECK(sections_pc(&sec, b), ==, 0x10005u);
+    sections_emit_u8(&sec, b, 0x78);
+    RC_CHECK_FALSE(sections_take_overrun(&sec, b));
+
+    // A rephased child's fold pushes its parent's pc past the top without counting as the parent's own
+    // overrun; only the parent's own emission (from below the top) would.
+    uint32_t c = sections_make(&sec, RC_STR("c"), sections_default);
+    sections_org(&sec, c, 0xFF00);
+    uint32_t d = sections_make(&sec, RC_STR("d"), c);
+    sections_org(&sec, d, 0x1000);
+    sections_skip(&sec, d, 0x200);
+    sections_close(&sec, d);
+    RC_CHECK(sections_pc(&sec, c), ==, 0x10100u);
+    RC_CHECK_FALSE(sections_take_overrun(&sec, d));
+    RC_CHECK_FALSE(sections_take_overrun(&sec, c));
 
     rc_arena_deinit(&arena);
 }

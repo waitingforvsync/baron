@@ -34,6 +34,7 @@ typedef struct section {
     bool                is_virtual;   // consumed virtual attribute: a pool of its own, taking no room in its parent
     bool                discards;     // virtual, or inside a virtual section: bytes advance pc but land nowhere
     bool                is_guarded;   // consumed guard attribute present? (never inherited)
+    bool                overrun;      // own emission just carried pc past &10000; cleared by sections_take_overrun
     uint32_t            guard;        // the guarded 16-bit address: first address emission must not reach (meaningful only when is_guarded)
     uint32_t            begin;        // window into the shared stream: stream.num at creation
     uint32_t            end;          // maintained on every emit here and on every child close
@@ -73,6 +74,7 @@ typedef struct sections {
 } sections;
 
 enum { sections_default = 0 };   // index of the default section
+enum { sections_address_space = 0x10000 };   // the 6502's 64 KB: a pc may reach &10000, but no byte may land there
 
 
 // ---- lifecycle ----
@@ -122,8 +124,8 @@ bool sections_discards(const sections *sec, uint32_t id);
 
 // ---- mutation ----
 
-// Create the named section inside parent (an empty window at the stream tail, pc 0 - the caller seeds
-// it from the enclosing section - and empty attributes) and return its stable index, or RC_INDEX_NONE
+// Create the named section inside parent (an empty window at the stream tail, continuing the parent's
+// pc until an org rephases it, and empty attributes) and return its stable index, or RC_INDEX_NONE
 // if the name already exists this pass (names are unique; the caller raises the error, or reopens a
 // virtual section). Indices are stable across passes because creation order is first-sighting parse
 // order, identical each pass. A section made inside a virtual one discards its bytes too.
@@ -157,6 +159,11 @@ void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);
 
 // Append count zero bytes, pc += count (a discarding section only advances the pc).
 void sections_skip(sections *sec, uint32_t id, uint32_t count);
+
+// Did section id's own emission carry its pc past the top of memory since we last asked? True at most
+// once a pass, since a pc never comes back down. A child folding in does not count: a child continuing
+// our addresses reports its own crossing, and a rephased one only adds to our byte count.
+bool sections_take_overrun(sections *sec, uint32_t id);
 
 // ENDSECTION bookkeeping: fold the closed child into its parent - the parent's window absorbs the
 // child's extent and its pc advances by the child's size, so bytes propagate all the way up to the

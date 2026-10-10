@@ -670,7 +670,9 @@ static parse_result fold(parse_result r, parse_result sub)
 // ---- directive statements ----
 
 // SKIP n - pad the object code with n zero bytes (advancing pc by n). A negative count would
-// rewind the pointer, which we cannot do; the layout-dependent check is deferred to the final pass.
+// rewind the pointer, which we cannot do, and one bigger than all of memory is nonsense (left
+// unchecked, a huge count wraps the stream's 32-bit size); both wait for the final pass. A pad that
+// merely runs off the top is the statement loop's business, as for any other emission.
 static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
@@ -689,6 +691,9 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
             case int_argument_type_known:
                 if (arg.value < 0) {
                     semantic_error(b, flags, error_type_skip_backwards, cursor_at(at, at.pos));   // skip nothing
+                }
+                else if (arg.value > sections_address_space) {
+                    semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, at.pos));   // skip nothing
                 }
                 else {
                     sections_skip(&b->sections, section, (uint32_t) arg.value);
@@ -711,8 +716,9 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
 }
 
 
-// SKIPTO addr - pad with zeroes until pc reaches addr. Being already past addr is an error,
-// deferred to the final pass since pc only settles once preceding forward references resolve.
+// SKIPTO addr - pad with zeroes until pc reaches addr. Being already past addr is an error, as is
+// an addr beyond the top of memory; both are deferred to the final pass since pc only settles once
+// preceding forward references resolve.
 static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
@@ -730,7 +736,10 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
         switch ((int_argument_type) arg.type) {
             case int_argument_type_known: {
                 uint32_t pc = sections_pc(&b->sections, section);
-                if (arg.value < pc) {
+                if (arg.value > sections_address_space) {
+                    semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, at.pos));   // skip nothing
+                }
+                else if (arg.value < pc) {
                     semantic_error(b, flags, error_type_skip_backwards, cursor_at(at, at.pos));   // skip nothing
                 }
                 else {
@@ -756,7 +765,8 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
 
 
 // ALIGN n - pad with zeroes until pc is a multiple of n. n < 1 is meaningless (and would divide
-// by zero), so it is an error; the modulo is only evaluated once we know n is sound.
+// by zero), as is n beyond the 64 KB address space (whose 32-bit truncation could be zero, too), so
+// both are errors; the modulo is only evaluated once we know n is sound.
 static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
@@ -775,6 +785,9 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
             case int_argument_type_known:
                 if (arg.value < 1) {
                     semantic_error(b, flags, error_type_bad_alignment, cursor_at(at, at.pos));   // pad nothing
+                }
+                else if (arg.value > sections_address_space) {
+                    semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, at.pos));   // pad nothing
                 }
                 else {
                     uint32_t n = (uint32_t) arg.value;
@@ -829,14 +842,12 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             child = existing;
         }
         else {
+            // The child continues the enclosing section's address unless an explicit org below
+            // rephases; cmos and guard keep sections_make's defaults - nothing is inherited.
             child = sections_make(&b->sections, name, section);
             if (child == RC_INDEX_NONE) {
                 return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos), name);
             }
-
-            // Continue the enclosing section's address unless an explicit org below rephases; cmos and
-            // guard keep sections_make's defaults - nothing is inherited.
-            sections_org(&b->sections, child, sections_pc(&b->sections, section));
         }
     }
 
@@ -3143,18 +3154,33 @@ static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uin
 
     // at is the statement's true start; the handlers get it as stmt (for source echoing) alongside
     // the post-token cursor they parse from.
+    parse_result r;
     switch (lr.token.type) {
         case lexeme_type_opcode:
-            return opcode_parse(b, (mnemonic)lr.token.opcode.id, at, cursor_at(at, lr.next), scope, section, flags, scratch);
+            r = opcode_parse(b, (mnemonic)lr.token.opcode.id, at, cursor_at(at, lr.next), scope, section, flags, scratch);
+            break;
         case lexeme_type_keyword:
-            return lr.token.keyword.handle(b, at, cursor_at(at, lr.next), scope, section, flags, scratch);
+            r = lr.token.keyword.handle(b, at, cursor_at(at, lr.next), scope, section, flags, scratch);
+            break;
         case lexeme_type_macro:
-            return handle_macro_invocation(b, at, cursor_at(at, lr.next), scope, section, flags, lr.token.macro.index, scratch);
+            r = handle_macro_invocation(b, at, cursor_at(at, lr.next), scope, section, flags, lr.token.macro.index, scratch);
+            break;
         case lexeme_type_identifier:
-            return handle_assignment(b, at, cursor_at(at, lr.next), scope, section, flags, lr.token.identifier.name, scratch);
+            r = handle_assignment(b, at, cursor_at(at, lr.next), scope, section, flags, lr.token.identifier.name, scratch);
+            break;
         default:
             return syntax_error(b, error_type_unexpected_token, at);
     }
+
+    // Running off the top of memory is reported by the statement that did it. Inside a block (IF, FOR,
+    // a macro...) the inner statement takes the flag first, so the block itself stays quiet. Recoverable.
+    if (!r.fatal && sections_take_overrun(&b->sections, section)) {
+        char storage[16];
+        rc_mstr over = {.data = storage, .cap = sizeof storage};
+        rc_mstr_append_u32(&over, sections_pc(&b->sections, section) - sections_address_space, NULL);
+        semantic_error_payload(b, flags, error_type_pc_overflow, at, over.view);
+    }
+    return r;
 }
 
 
@@ -4484,6 +4510,86 @@ RC_TEST_STEP(assemble, skip_skipto_align, fix)
     RC_CHECK_TRUE(code_is(&fix->r, ASM("ALIGN 4 : NOP"), (uint8_t[]) {0xEA}, 1));
     // ALIGN 0 is meaningless.
     RC_CHECK_TRUE(ERR("ALIGN 0") == error_type_bad_alignment);
+}
+
+RC_TEST_STEP(assemble, pad_stays_in_address_space, fix)
+{
+    // A pad may run right up to the top of memory (default section, org 0)...
+    uint32_t passes = ASM("SKIP &10000");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 0x10000u);
+    passes = ASM("NOP : SKIPTO &10000");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 0x10000u);
+    passes = ASM("NOP : ALIGN &10000");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 0x10000u);
+
+    // ...but an operand bigger than all of memory is refused outright. A smaller pad that merely runs
+    // off the top gets the overflow error any emission would (see pc_overflow_reports_once).
+    RC_CHECK_TRUE(ERR("SKIP &10001") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("SKIPTO &10001") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("ALIGN &10001") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("NOP : SKIP &10000") == error_type_pc_overflow);
+    RC_CHECK_TRUE(ERR("SECTION s, org=&C001 : ALIGN &C000 : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_payload(&fix->r, error_type_pc_overflow), ==, RC_STR("32768"));   // padded up to &18000
+
+    // The fuzzer's find and its cousins. A count near 2^32 (10^100 saturates, then truncates, to one)
+    // overflowed the stream's size arithmetic and memset 4 GB; 2^40 truncated to a zero divisor; a
+    // merely huge SKIP exhausted the arena.
+    RC_CHECK_TRUE(ERR("EQUB 1 : SKIP &FFFFFFFF") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("EQUB 1, 2 : SECTION s, org=1 : SKIPTO 2^32 : ENDSECTION") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("EQUB 1, 2 : SECTION s, org=1 : ALIGN 2^32-1 : ENDSECTION") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("ALIGN 2^40") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("NOP : ALIGN 10^100") == error_type_value_out_of_range);
+    RC_CHECK_TRUE(ERR("SKIP &10000000") == error_type_value_out_of_range);
+}
+
+RC_TEST_STEP(assemble, pc_overflow_reports_once, fix)
+{
+    // Filling memory right to the top is fine: the pc may reach &10000, it just cannot place a byte there.
+    uint32_t passes = ASM("SECTION s, org=&FFFE : EQUB 1, 2 : .top : ENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("top")), value_make_numeric(0x10000)));
+
+    // One byte more is an error at the statement that went over, saying by how much.
+    RC_CHECK_TRUE(ERR("SECTION s, org=&FFFE\nEQUB 1, 2, 3\nENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_payload(&fix->r, error_type_pc_overflow), ==, RC_STR("1"));
+    RC_CHECK(diag_pos(&fix->r, error_type_pc_overflow), ==, 21u);   // the EQUB line
+
+    // Once per section: later statements are past the top too, but they would only repeat the news.
+    RC_CHECK_TRUE(ERR("SECTION s, org=&FFFE : NOP : NOP : NOP : NOP : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_pc_overflow), ==, RC_STR("1"));   // the third NOP
+
+    // A block reports through its inner statement and never again for itself.
+    RC_CHECK_TRUE(ERR("SECTION s, org=&FFFE : IF TRUE : EQUB 1, 2, 3 : ENDIF : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
+    RC_CHECK_TRUE(ERR("SECTION s, org=&FFFE : FOR i = 1..4 : NOP : NEXT : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
+    RC_CHECK_TRUE(ERR("MACRO fill : EQUB 1, 2, 3 : ENDMACRO : SECTION s, org=&FFFE : fill : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
+
+    // A nested section continuing our addresses reports for both of us: not again when it folds in, nor
+    // when we carry on past the top ourselves.
+    RC_CHECK_TRUE(ERR("SECTION a, org=&FFFE : SECTION b : EQUB 1, 2, 3 : ENDSECTION : NOP : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
+
+    // A child opened in a parent filled exactly to the top starts at &10000, not back at address 0.
+    passes = ASM("SECTION a, org=&FFFF : NOP : SECTION b : .inb : ENDSECTION : ENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("inb")), value_make_numeric(0x10000)));
+    RC_CHECK_TRUE(ERR("SECTION a, org=&FFFF : NOP : SECTION b : NOP : ENDSECTION : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
+
+    // Rephased sections that each fit only add to their parent's byte count: two 48K halves fold into
+    // the default section (96K between them) without complaint.
+    passes = ASM("SECTION a, org=&4000 : SKIP &C000 : ENDSECTION : SECTION b, org=&4000 : SKIP &C000 : ENDSECTION");
+    RC_CHECK_TRUE(passes != 0);
+
+    // A virtual section's addresses run out just the same.
+    RC_CHECK_TRUE(ERR("SECTION ws, org=&FFF0, virtual=TRUE : SKIP &20 : ENDSECTION") == error_type_pc_overflow);
+    RC_CHECK(diag_payload(&fix->r, error_type_pc_overflow), ==, RC_STR("16"));
 }
 
 RC_TEST_STEP(assemble, skip_advances_pc, fix)

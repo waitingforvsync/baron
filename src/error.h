@@ -62,6 +62,7 @@ typedef enum error_type {
     error_type_bad_basic_line_number, // a BASIC line number past 32767 (the ROM's enterable maximum)
     error_type_basic_line_too_long,   // a tokenised BASIC line record past 255 bytes (its length is one byte)
     error_type_guard_exceeded,        // a section's emission ran past its guard address
+    error_type_pc_overflow,           // a section's emission ran past &FFFF, the top of memory
     error_type_reserve_not_zeropage,  // a ZA_POOL address falls outside the zero page ($00-$FF)
     error_type_var_without_reserve,   // a ZA_AUTO1/ZA_AUTO2 declared with no ZA_POOL enabling the feature first
     error_type_zeropage_full,         // no free reserved byte to place a ZA_AUTO variable (a spill)
