@@ -196,7 +196,7 @@ int main(int argc, char **argv)
             disc_options = true;
         }
         else if (argv[i][0] == '-') {
-            fprintf(stderr, "baron: unknown option '%s'.\nbaron --help for options.", argv[i]);
+            fprintf(stderr, "baron: unknown option '%s'.\nbaron --help for options.\n", argv[i]);
             return 1;
         }
         else {
@@ -212,11 +212,11 @@ int main(int argc, char **argv)
         return 1;
     }
     if (out == NULL && disc_options) {
-        fprintf(stderr, "baron: --title/--opt/--cycle/--pad describe a disc image and need -o.\nbaron --help for options.");
+        fprintf(stderr, "baron: --title/--opt/--cycle/--pad describe a disc image and need -o.\nbaron --help for options.\n");
         return 1;
     }
     if (inf && raw == NULL) {
-        fprintf(stderr, "baron: --inf describes the raw binaries and needs -p.\nbaron --help for options.");
+        fprintf(stderr, "baron: --inf describes the raw binaries and needs -p.\nbaron --help for options.\n");
         return 1;
     }
     if (out == NULL && raw == NULL && symbols_path == NULL && !check) {
