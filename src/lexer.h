@@ -17,6 +17,11 @@ typedef struct lexer_result {
 // advancing, so repeated calls at the end stay put.
 lexer_result lexer_next(rc_str text, uint32_t pos, token_table tt);
 
+// Lex the number literal at pos - decimal, &/$ hex, % binary or a 'c' character - with nothing
+// skipped first; anything else is an invalid_number error. lexer_next reads its numbers through
+// this, and so does AS_NUMBER, so the two always agree on what a number looks like.
+lexer_result lexer_number(rc_str text, uint32_t pos);
+
 // True when pos is at the end of text.
 bool lexer_at_end(rc_str text, uint32_t pos);
 

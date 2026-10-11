@@ -669,6 +669,36 @@ Two type predicates round the toolkit out: `IS_STRING(x)` and `IS_NUMBER(x)` ans
 for the value *as a whole* (a list is neither; test list-ness with `RANK(x) > 0`) - handy for a
 `FUNCTION` that accepts either a string or a list of codes.
 
+### Numbers as text ###
+
+`AS_STRING` writes a number as decimal text, just as `PRINT` would show it, and `AS_NUMBER` reads one
+back - the conversions to go with `IS_STRING` and `IS_NUMBER`:
+
+```
+AS_STRING(1234)         ; "1234"
+AS_STRING(1.5)          ; "1.5"
+AS_NUMBER("42")         ; 42
+AS_NUMBER("&1F40")      ; 8000
+```
+
+That's handy wherever a number has to end up as characters, like a version number inside a BASIC
+line:
+
+```
+version = 3
+
+BASIC
+10PRINT "Version {
+    EQUS AS_STRING(version)
+}"
+ENDBASIC
+```
+
+`AS_NUMBER` takes exactly one number, written the way you'd write it in source: `-` and `+` are fine,
+and so are `&`, `$` and `%`. Anything else in the string, a space included, is an error naming the
+string, so `AS_NUMBER("12x")` fails with `Not a number: '12x'` rather than quietly giving 12. For hex
+text, there's `~` (see [Logging](#logging)), and `AS_NUMBER("&" + ~n)` gets you `n` back.
+
 ## Zero-page allocation ##
 
 The headline feature. Hand Baron a pool of zero-page bytes and declare variables by name; it runs a
@@ -867,6 +897,7 @@ PRINT "code ends at &", ~*, " (", * - start, " bytes)"     ; code ends at &1F40 
 ```
 
 Like `<` and `>`, it swallows the whole expression after it, so `~start+1` is the hex of `start+1`.
+For decimal text, there's `AS_STRING` (see [Numbers as text](#numbers-as-text)).
 
 There are ten channels, `#0` to `#9`, selected by a leading `#n,`:
 

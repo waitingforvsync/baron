@@ -5445,6 +5445,10 @@ RC_TEST_STEP(assemble, za_auto_address_is_typed, fix)
                       "SECTION S, org = v : ENDSECTION") == error_type_za_auto_address);
     RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : JSR sub : ZA_CANCALL v : RTS\n"
                       ".sub RTS") == error_type_za_auto_address);
+    // as_string() too, though ~ is fine: the decimal text grows once allocated ("0" to "112"), which
+    // would silently move every label after an EQUS of it.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : STA v : LDA v : EQUS as_string(v)") == error_type_za_auto_address);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_auto_address), ==, RC_STR("v"));
 
     // The only arithmetic an address supports is +/- an integer; everything else refuses through the
     // evaluator's ordinary type checks. A comparison, a multiply, a range endpoint - all caught.
@@ -9272,6 +9276,11 @@ RC_TEST_STEP(assemble, mapchar_idioms, fix)
         "FUNCTION mapchar(s) = find(codes(glyphs), codes(s))\n"
         "EQUB mapchar(\"AQ\")") == error_type_not_found);
     RC_CHECK(diag_payload(&fix->r, error_type_not_found), ==, RC_STR("81"));   // 'Q'
+
+    // as_string() and as_number() make the trip between numbers and text in decimal.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUS as_string(1234) : EQUB as_number(\"&7F\")"), (uint8_t[]) {'1', '2', '3', '4', 0x7F}, 5));
+    RC_CHECK_TRUE(ERR("EQUB as_number(\"12x\")") == error_type_not_a_number);
+    RC_CHECK(diag_payload(&fix->r, error_type_not_a_number), ==, RC_STR("12x"));
 }
 
 RC_TEST_STEP(assemble, function_error_value, fix)

@@ -415,6 +415,47 @@ static value fn_hex(value v, rc_arena *arena)
 }
 
 
+// A number as decimal text, exactly as PRINT shows it: as_string(42) is "42", as_string(1.5) is
+// "1.5". BASIC's STR$, to go with ~ for hex. A boolean coerces as it does anywhere a number is wanted.
+static value fn_as_string(value v, rc_arena *arena)
+{
+    // Unlike ~, no stand-in for a ZA_AUTO address: its hex is always two digits, but its decimal
+    // grows once allocated, and EQUS AS_STRING(var) would quietly move everything after it.
+    // PRINT var already shows the address in decimal.
+    if (value_is_za_auto(v)) {
+        return value_make_error_detail(error_type_za_auto_address, v.za_auto.name);
+    }
+
+    NEEDS_NUM(value_is_number(v));
+    rc_mstr m = rc_mstr_make(16, arena);
+    value_format(&m, value_make_numeric(v.numeric), arena);
+    return value_make_string(m.view);
+}
+
+
+// The number a string spells: an optional sign, then one number literal exactly as the source would
+// write it (as_number("&FF") is 255), and nothing else. Stricter than BASIC's VAL, which reads what
+// it can and quietly makes the rest zero - here the leftovers are an error naming the string.
+static value fn_as_number(value v, rc_arena *arena)
+{
+    if (!value_is_string(v)) {
+        return value_make_error(error_type_type_mismatch);
+    }
+
+    rc_str       s    = v.string;
+    bool         sign = s.len > 0 && (s.data[0] == '-' || s.data[0] == '+');
+    lexer_result r    = lexer_number(s, sign ? 1 : 0);
+    if (r.token.type != lexeme_type_numeric_literal || r.next != s.len) {
+        rc_mstr m = rc_mstr_make(16, arena);   // never 0: an empty string still needs a buffer to name
+        rc_mstr_append(&m, s, arena);
+        return value_make_error_detail(error_type_not_a_number, m.view);
+    }
+
+    double n = r.token.numeric_literal.value;
+    return value_make_numeric(sign && s.data[0] == '-' ? -n : n);
+}
+
+
 // A string's character codes as a rank-1 list of numbers: codes("AB") is {65, 66}. The bridge from
 // text to arithmetic - broadcasting remaps (codes(s) - codes(" ")) and the character-mapping gather
 // (table[codes(s)]) both build on it.
@@ -1650,6 +1691,8 @@ static const token even_entries[] = {
     {RC_STR_INIT("ln("),    {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_ln}}},      // natural
     {RC_STR_INIT("exp("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_exp}}},
     {RC_STR_INIT("codes("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_codes}}},   // string -> list of char codes
+    {RC_STR_INIT("as_string("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_as_string}}},   // number -> decimal string
+    {RC_STR_INIT("as_number("), {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_as_number}}},   // and back again
 
     // Structural/variadic builtins are functions: the handler gets the whole arg list.
     {RC_STR_INIT("shape("),   {.type = lexeme_type_function, .function = {.apply = fn_shape}}},
@@ -3288,6 +3331,51 @@ RC_TEST_STEP(expression, hex_operator, fix)
 
     // A string has no hex form.
     RC_CHECK_TRUE(value_is_error(VAL("~\"x\"")));
+}
+
+RC_TEST_STEP(expression, as_string_and_as_number, fix)
+{
+    // as_string() is PRINT's decimal: whole numbers exactly, fractions to 10 significant digits.
+    RC_CHECK_TRUE(value_is_equal(VAL("as_string(42)"),         value_make_string(RC_STR("42"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_string(-5)"),         value_make_string(RC_STR("-5"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_string(1.5)"),        value_make_string(RC_STR("1.5"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_string(1/3)"),        value_make_string(RC_STR("0.3333333333"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_string(&FFFF1900)"),  value_make_string(RC_STR("4294908160"))));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_string(TRUE)"),       value_make_string(RC_STR("1"))));   // coerced
+    RC_CHECK_TRUE(value_is_equal(VAL("len(as_string(65535))"), value_make_numeric(5)));
+    RC_CHECK_TRUE(value_is_error(VAL("as_string(\"x\")")));
+
+    // as_number() reads one number literal in any form, with an optional sign.
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"42\")"),             value_make_numeric(42)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"-5\")"),             value_make_numeric(-5)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"+5\")"),             value_make_numeric(5)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"1.5\")"),            value_make_numeric(1.5)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"&ff\")"),            value_make_numeric(255)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"$FF\")"),            value_make_numeric(255)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"-%1010\")"),         value_make_numeric(-10)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(as_string(1234))"),    value_make_numeric(1234)));
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number(\"&\" + ~&1234)"),     value_make_numeric(0x1234)));   // hex needs its '&'
+
+    // Anything more or less than that is not_a_number, naming the string as given.
+    rc_str bad[] = {RC_STR(""), RC_STR(" 42"), RC_STR("42 "), RC_STR("4x"), RC_STR("1."), RC_STR("--5"), RC_STR("-"), RC_STR("&")};
+    rc_view_str bads = RC_VIEW(bad);
+    for (uint32_t i = 0; i < bads.num; i++) {
+        rc_mstr text = rc_mstr_make(16, &fix->arena);
+        rc_mstr_append(&text, RC_STR("as_number(\""), &fix->arena);
+        rc_mstr_append(&text, rc_view_str_get(bads, i), &fix->arena);
+        rc_mstr_append(&text, RC_STR("\")"), &fix->arena);
+        expr_env env = {.scopes = &fix->scopes};
+        value v = expression_parse(text.view, 0, &env, &fix->arena).value;
+        RC_CHECK_TRUE(value_is_error(v) && v.error.code == error_type_not_a_number);
+        RC_CHECK(v.error.detail, ==, rc_view_str_get(bads, i));
+    }
+    RC_CHECK_TRUE(value_is_error(VAL("as_number(42)")) && VAL("as_number(42)").error.code == error_type_type_mismatch);
+
+    // Both are element-wise, like ~.
+    value n[] = {value_make_numeric(1), value_make_numeric(16)};
+    RC_CHECK_TRUE(value_is_equal(VAL("as_number({\"1\", \"&10\"})"), value_make_list((rc_view_value) RC_VIEW(n))));
+    value t[] = {value_make_string(RC_STR("1")), value_make_string(RC_STR("16"))};
+    RC_CHECK_TRUE(value_is_equal(VAL("as_string({1, 16})"), value_make_list((rc_view_value) RC_VIEW(t))));
 }
 
 RC_TEST_STEP(expression, math_functions, fix)

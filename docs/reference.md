@@ -204,7 +204,7 @@ arithmetic and comparisons, so `0..n-1` needs no parentheses.
 | `AND` | Logical AND on two booleans (yielding a boolean); bitwise AND (32-bit) on two numbers. A mixed boolean/number pair is an error. |
 | `OR` `EOR` | Logical / bitwise OR and exclusive-OR, overloaded exactly as `AND`. |
 | `..` `..<` | Range construction. |
-| `<x` `>x` `~x` | 6502-style low / high byte of the whole following expression: `<start+1` is `LO(start+1)`. `~x` is the same shape, giving `x` as an uppercase hex *string* - 2, 4 or 8 digits, the narrowest that holds it (`~10` is `"0A"`, `~&123` is `"0123"`, `~&123456` is `"00123456"`). No `&` prefix; the 32-bit pattern is what is formatted, so `~-1` is `"FFFFFFFF"`. |
+| `<x` `>x` `~x` | 6502-style low / high byte of the whole following expression: `<start+1` is `LO(start+1)`. `~x` is the same shape, giving `x` as an uppercase hex *string* - 2, 4 or 8 digits, the narrowest that holds it (`~10` is `"0A"`, `~&123` is `"0123"`, `~&123456` is `"00123456"`). No `&` prefix; the 32-bit pattern is what is formatted, so `~-1` is `"FFFFFFFF"`. For decimal text, see `AS_STRING`. |
 
 ### Subscripts ###
 
@@ -255,6 +255,8 @@ All broadcast; trigonometry is in radians.
 | `NOT(x)` | Logical NOT on a boolean (`NOT(TRUE)` is `FALSE`); bitwise complement (32-bit) on a number. |
 | `RND(n)` | A random integer in 0..n-1. `RND(REPEATED(k, n))` makes k draws. Deterministically reseeded each pass, so it converges. |
 | `CODES(s)` | A string's character codes as a rank-1 list: `CODES("AB")` is `{65, 66}`, `CODES("")` is `{}`. The bridge from text to arithmetic (a lone character is simpler as a [character literal](#character-literals), `'A'`). The result broadcasts like any list: `CODES(s) - ' '` offsets every code. |
+| `AS_STRING(n)` | A number as decimal text, exactly as `PRINT` shows it: `AS_STRING(42)` is `"42"`, `AS_STRING(1.5)` is `"1.5"`, `AS_STRING(TRUE)` is `"1"`. For hex, use `~n`. A `ZA_AUTO` address is refused, since its length as text isn't known until it's allocated (`PRINT v` shows it). |
+| `AS_NUMBER(s)` | The number a string spells, written as a number literal is written in source: an optional `-` or `+`, then decimal, `&`/`$` hex, `%` binary or a character literal - `AS_NUMBER("42")` is 42, `AS_NUMBER("-&FF")` is -255. The whole string must be that one number, with no blanks around it; anything else is an error naming the string (`Not a number: '12x'`). So hex from `~` needs its `&` back: `AS_NUMBER("&" + ~n)` is `n`. |
 
 ### String, search and type functions ###
 

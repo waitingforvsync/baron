@@ -312,6 +312,26 @@ static lexer_result make_identifier(rc_str text, uint32_t start, uint32_t end)
 
 // ---- main ----
 
+lexer_result lexer_number(rc_str text, uint32_t pos)
+{
+    char c = is_eof(text, pos) ? '\0' : at(text, pos);
+    if (is_digit(c)) {
+        return lex_decimal(text, pos);
+    }
+    if (is_hex_prefix(c)) {
+        return lex_hex(text, pos + 1);
+    }
+    if (is_bin_prefix(c)) {
+        return lex_binary(text, pos + 1);
+    }
+    if (c == '\'') {
+        return lex_char(text, pos + 1);
+    }
+
+    return make_error(lexer_error_invalid_number, pos);
+}
+
+
 lexer_result lexer_next(rc_str text, uint32_t pos, token_table tt)
 {
     RC_ASSERT(rc_str_is_valid(text));
@@ -337,24 +357,9 @@ lexer_result lexer_next(rc_str text, uint32_t pos, token_table tt)
         return lex_string(text, pos + 1);
     }
 
-    // Parse a decimal number literal
-    if (is_digit(c)) {
-        return lex_decimal(text, pos);
-    }
-
-    // Parse a hex number literal
-    if (is_hex_prefix(c)) {
-        return lex_hex(text, pos + 1);
-    }
-
-    // Parse a binary number literal
-    if (is_bin_prefix(c)) {
-        return lex_binary(text, pos + 1);
-    }
-
-    // Parse a character literal
-    if (c == '\'') {
-        return lex_char(text, pos + 1);
+    // Parse a number literal, in any of its forms
+    if (is_digit(c) || is_hex_prefix(c) || is_bin_prefix(c) || c == '\'') {
+        return lexer_number(text, pos);
     }
 
     // Parse a comma (commas are commas regardless of context)
@@ -450,6 +455,24 @@ RC_TEST(lexer, number_errors)
     r = lexer_next(RC_STR("#"), 0, lexer_tt);
     RC_CHECK_TRUE(r.token.type == lexeme_type_error);
     RC_CHECK_TRUE(r.token.error.type == lexer_error_unexpected_char);
+}
+
+RC_TEST(lexer, number_alone)
+{
+    // Every literal form, read in place with nothing skipped first.
+    lexer_result r = lexer_number(RC_STR("&ff"), 0);
+    RC_CHECK_TRUE(r.token.type == lexeme_type_numeric_literal);
+    RC_CHECK(r.token.numeric_literal.value, ==, 255.0);
+    RC_CHECK(r.next, ==, 3u);
+    RC_CHECK(lexer_number(RC_STR("x12.5"), 1).token.numeric_literal.value, ==, 12.5);
+    RC_CHECK(lexer_number(RC_STR("%101"), 0).token.numeric_literal.value, ==, 5.0);
+    RC_CHECK(lexer_number(RC_STR("'A'"), 0).token.numeric_literal.value, ==, 65.0);
+
+    // Anything else, a leading blank and an empty string included, is no number.
+    RC_CHECK_TRUE(lexer_number(RC_STR(" 42"), 0).token.error.type == lexer_error_invalid_number);
+    RC_CHECK_TRUE(lexer_number(RC_STR("-1"), 0).token.error.type == lexer_error_invalid_number);
+    RC_CHECK_TRUE(lexer_number(RC_STR(""), 0).token.error.type == lexer_error_invalid_number);
+    RC_CHECK_TRUE(lexer_number(RC_STR("&"), 0).token.error.type == lexer_error_bad_hex_literal);
 }
 
 RC_TEST(lexer, strings)
