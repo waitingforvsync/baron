@@ -368,6 +368,64 @@ error. Lines are emitted exactly in the order written - Baron does not sort them
 ascending if you want `GOTO` and `LIST` to behave - and a line whose tokenised record would pass 255
 bytes is refused.
 
+### Splicing bytes into a line ###
+
+Some BASIC lines hold bytes nobody can type: teletext colour codes in a `REM`, or a `VDU 21` hidden
+inside a string. A `{` at the very end of a BASIC line drops into Baron, and a `}` picks the same line
+back up:
+
+```
+TT_GREEN  = &82
+TT_YELLOW = &83
+
+BASIC
+1430REM"{
+    EQUB &7F, TT_GREEN
+}Hello,{
+    EQUB TT_YELLOW
+}Soni
+ENDBASIC
+```
+
+That is still one BASIC line: `0D 05 96 13 F4 22 7F 82 "Hello," 83 "Soni"`. The spliced bytes go in
+exactly as emitted, never tokenised, and the line's length byte counts them along with everything
+else. The 255-byte limit is for the whole line, splices included.
+
+The tokeniser picks up where it left off, as if the splice weren't there: inside a string we stay in
+the string, and after `REM`, `DATA` or a `*` command the rest of the line stays raw. A splice does
+always end a token, though, so `PRI{` ... `}NT` is two variable names, never `PRINT`.
+
+### Splice rules ###
+
+- **The `{` must be the last thing on the line**, blanks aside. Everything between the line number and
+  the `{` is the line's text, spaces included - so an editor trimming trailing whitespace can't eat
+  the spaces before a splice.
+- **Anything Baron can assemble can go between the braces.** A `}` ends a statement just as a newline
+  does, so a short splice can share a line with its bytes: `EQUB TT_YELLOW }Reeve{`.
+- **The text after the `}` runs to the end of that line.** It can end in another `{`, or be empty,
+  which ends the BASIC line right there.
+- **A splice is not a scope**, so a label inside it belongs to the rest of the program.
+
+That last rule makes machine code in a `REM` easy:
+
+```
+BASIC
+10REM{
+.beep
+    LDA #7 : JMP &FFEE
+}
+20CALL PAGE+5
+ENDBASIC
+```
+
+The routine starts five bytes into the program - after the line's four-byte header and the `REM`
+token - and the assembly can use `beep` wherever it needs the address.
+
+A splice must be closed. If a numbered line, `ENDBASIC` or the end of the file comes before the `}`,
+that's an error, with a note pointing back at the `{` that opened the splice. That catches a `REM`
+which really does end in a brace; to write one of those, splice it in: end the line with `{`, then
+`EQUS "{"`, then `}`.
+
 ## Expressions ##
 
 Anywhere Baron wants a value, you get the full expression language: the usual arithmetic (`+ - * / ^`),

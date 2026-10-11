@@ -160,6 +160,11 @@ void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);
 // Append count zero bytes, pc += count (a discarding section only advances the pc).
 void sections_skip(sections *sec, uint32_t id, uint32_t count);
 
+// Overwrite a byte section id has already emitted, offset bytes into its window: for a length that
+// is only known once everything it counts has gone out (a spliced BASIC line's). A discarding section
+// kept no bytes to overwrite, so the caller asks sections_discards first.
+void sections_set_u8(sections *sec, uint32_t id, uint32_t offset, uint8_t b);
+
 // Did section id's own emission carry its pc past the top of memory since we last asked? True at most
 // once a pass, since a pc never comes back down. A child folding in does not count: a child continuing
 // our addresses reports its own crossing, and a rephased one only adds to our byte count.

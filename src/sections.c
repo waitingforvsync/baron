@@ -267,6 +267,16 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count)
 }
 
 
+void sections_set_u8(sections *sec, uint32_t id, uint32_t offset, uint8_t b)
+{
+    RC_ASSERT(sec != NULL);
+
+    section s = rc_array_section_get(&sec->nodes, id);
+    RC_ASSERT(!s.discards && offset < s.end - s.begin);
+    rc_array_bytes_set(&sec->stream, s.begin + offset, b);
+}
+
+
 bool sections_take_overrun(sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
@@ -492,6 +502,27 @@ RC_TEST(sections, emit_org_reset)
     sections_reset(&sec);
     RC_CHECK(sections_pc(&sec, 0), ==, 0u);
     RC_CHECK(sections_code(&sec, 0).num, ==, 0u);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, set_u8_overwrites_in_window)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+    sections_reset(&sec);
+
+    // The offset counts from the section's own window, not the stream: a child opened after two
+    // bytes of its parent overwrites its own first byte, and neither pc moves.
+    sections_emit_u16(&sec, 0, 0x1111);
+    uint32_t child = sections_make(&sec, RC_STR("child"), 0);
+    sections_emit_u8(&sec, child, 0x00);
+    sections_emit_u8(&sec, child, 0x22);
+    sections_set_u8(&sec, child, 0, 0x33);
+    RC_CHECK(sections_pc(&sec, child), ==, 4u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(sections_code(&sec, child), 0), ==, 0x33u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(sections_code(&sec, 0), 0), ==, 0x11u);
 
     rc_arena_deinit(&arena);
 }

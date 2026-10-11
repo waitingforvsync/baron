@@ -320,6 +320,25 @@ void verbose_code_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_po
 }
 
 
+// Rewrite byte index of the code line listed at mark (the channel's length just before the line
+// went out). A spliced BASIC line's length byte is only known once the rows after its first are out.
+static void verbose_set_byte(baron *b, parse_flags flags, uint32_t mark, uint32_t index, uint8_t byte)
+{
+    if (!verbose_on(flags)) {
+        return;
+    }
+
+    char storage[4];
+    rc_mstr hex = {.data = storage, .cap = sizeof storage};
+    rc_mstr_append_hex8(&hex, byte, NULL);
+
+    uint32_t at = mark + 8 + 3 * index;   // past "  0900  ", then three characters a byte
+    RC_ASSERT(index < verbose_max_bytes && at + 2 <= b->channels[0].len);
+    b->channels[0].data[at]     = hex.data[0];
+    b->channels[0].data[at + 1] = hex.data[1];
+}
+
+
 void verbose_text_line(baron *b, parse_flags flags, cursor stmt, uint32_t end_pos,
                        uint32_t pc, verbose_text_kind kind)
 {
@@ -983,12 +1002,111 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 }
 
 
+// Where a numbered BASIC line starts at pos (past blanks and a comment), or RC_INDEX_NONE. Nothing
+// else in Baron begins with a digit, so the peek needs no lexing: the line is one opaque span to Baron.
+static uint32_t basic_line_at(rc_str src, uint32_t pos)
+{
+    uint32_t start = lexer_skip_whitespace(src, pos);
+    return (start < src.len && src.data[start] >= '0' && src.data[start] <= '9') ? start : RC_INDEX_NONE;
+}
+
+
+// The '{' ending the BASIC text [pos, end) as its last non-blank character, which opens a splice, or
+// RC_INDEX_NONE when the text simply runs to the end of the line.
+static uint32_t basic_splice_at(rc_str src, uint32_t pos, uint32_t end)
+{
+    while (end > pos && (src.data[end - 1] == ' ' || src.data[end - 1] == '\t' || src.data[end - 1] == '\r')) {
+        end--;
+    }
+    return (end > pos && src.data[end - 1] == '{') ? end - 1 : RC_INDEX_NONE;
+}
+
+
+// One numbered line, as the record the ROM would store: 0D, the line number high byte first, the
+// length of the whole record, then the tokenised text. A '{' ending the text splices in Baron
+// statements whose bytes join the line untouched; after the '}' the tokeniser carries on just as it
+// left off. The length goes in last, once everything it counts is in.
+static parse_result parse_basic_line(baron *b, cursor line, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
+{
+    rc_str   src    = source_files_text(&b->source_files, line.source);
+    uint32_t pc0    = sections_pc(&b->sections, section);
+    uint32_t code0  = sections_code(&b->sections, section).num;
+    uint32_t listed = b->channels[0].len;   // where the first row lands, to fill its length in later
+
+    // A bad number is recoverable, and the line keeps its shape: text never depends on a symbol, so
+    // either way the bytes are the same every pass.
+    basic_number_result number = basic_line_number(rc_str_skip(src, line.pos));
+    if (number.error != error_type_none) {
+        semantic_error(b, flags, number.error, line);
+    }
+
+    if (flags.active) {
+        sections_emit_u8(&b->sections, section, 0x0D);
+        sections_emit_u8(&b->sections, section, (uint8_t) (number.number >> 8));
+        sections_emit_u8(&b->sections, section, (uint8_t) number.number);
+        sections_emit_u8(&b->sections, section, 0);
+    }
+
+    // One listing row per piece of text: the first from the line number, each later one from just
+    // past its '}' (parse_scope lists the brace itself, at the margin like any other).
+    basic_state  state    = basic_state_start();
+    cursor       row      = line;
+    uint32_t     row_pc   = pc0;
+    uint32_t     row_code = code0;
+    parse_result acc      = {.next = line.pos + number.next};
+    while (true) {
+        uint32_t line_end = lexer_line_end(src, acc.next);
+        uint32_t brace    = basic_splice_at(src, acc.next, line_end);
+        uint32_t end      = (brace != RC_INDEX_NONE) ? brace : line_end;
+        if (flags.active) {
+            basic_text_result text = basic_tokenise(rc_str_substr(src, acc.next, end - acc.next), state, brace == RC_INDEX_NONE, &scratch);
+            for (uint32_t i = 0; i < text.bytes.num; i++) {
+                sections_emit_u8(&b->sections, section, rc_view_bytes_get(text.bytes, i));
+            }
+            state = text.state;
+        }
+
+        verbose_code_line(b, flags, row, line_end, section, row_pc, row_code);
+        if (brace == RC_INDEX_NONE) {
+            acc.next = line_end;   // the newline is the block's next terminator lexeme
+            break;
+        }
+
+        // The splice is the braces' contents in the CURRENT scope, so a label in it (a REM routine's
+        // entry, say) belongs to the program. A REM that really ends in '{' runs on until something
+        // cannot be Baron - its next numbered line, ENDBASIC - and the note says why it was parsed.
+        acc = fold(acc, parse_scope(b, cursor_at(line, brace + 1), scope, section, flags, scratch));
+        if (acc.fatal) {
+            baron_error(b, error_type_spliced_from, cursor_at(line, brace));   // ungated, like the fatal
+            return acc;
+        }
+        row      = cursor_at(line, acc.next);
+        row_pc   = sections_pc(&b->sections, section);
+        row_code = sections_code(&b->sections, section).num;
+    }
+
+    // The pc counts the bytes even in a section that keeps none, so the limit still holds there.
+    if (flags.active) {
+        uint32_t length = sections_pc(&b->sections, section) - pc0;
+        if (length > basic_max_record) {
+            semantic_error(b, flags, error_type_basic_line_too_long, line);
+        }
+        if (!sections_discards(&b->sections, section)) {
+            sections_set_u8(&b->sections, section, code0 + 3, (uint8_t) length);
+            verbose_set_byte(b, flags, listed, 3, (uint8_t) length);
+        }
+    }
+
+    return acc;
+}
+
+
 // BASIC ... ENDBASIC - inline BBC BASIC, each numbered line tokenised byte-for-byte as the BASIC 4
 // ROM would store it (basic.h). A numbered line belongs WHOLE to the tokeniser, bypassing the lexer
-// (':' and ';' are BASIC text); the bytes are pure text, so the block never disturbs convergence.
+// (':' and ';' are BASIC text), up to any splice; the text never depends on a symbol, so only what
+// a splice emits can ever disturb convergence.
 static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    (void) scope;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     // BASIC takes no operands; its line frames the listing like a SECTION.
@@ -1000,28 +1118,12 @@ static parse_result handle_basic(baron *b, cursor stmt, cursor at, uint32_t scop
     verbose_text_line(b, flags, stmt, at.pos, 0, verbose_text_margin);
 
     while (true) {
-        // A statement starting with a digit is a BASIC line - nothing else in Baron begins with
-        // one. The peek comes before any lexing: the line is one opaque span to Baron.
-        uint32_t start = lexer_skip_whitespace(src, acc.next);
-        if (start < src.len && src.data[start] >= '0' && src.data[start] <= '9') {
-            uint32_t line_end   = lexer_line_end(src, start);
-            cursor   line_stmt  = cursor_at(at, start);
-            uint32_t pc0        = sections_pc(&b->sections, section);
-            uint32_t code0      = sections_code(&b->sections, section).num;
-            if (flags.active) {
-                basic_line_result line = basic_tokenise_line(rc_str_substr(src, start, line_end - start), &scratch);
-                if (line.error != error_type_none) {
-                    // Recoverable; dropping the record is pass-stable (text never depends on a symbol).
-                    semantic_error(b, flags, line.error, line_stmt);
-                }
-                for (uint32_t i = 0; i < line.bytes.num; i++) {
-                    sections_emit_u8(&b->sections, section, rc_view_bytes_get(line.bytes, i));
-                }
+        uint32_t start = basic_line_at(src, acc.next);
+        if (start != RC_INDEX_NONE) {
+            acc = fold(acc, parse_basic_line(b, cursor_at(at, start), scope, section, flags, scratch));
+            if (acc.fatal) {
+                return acc;
             }
-
-            // The listing dumps the whole record from its 0D (a dropped line: empty byte field).
-            verbose_code_line(b, flags, line_stmt, line_end, section, pc0, code0);
-            acc.next = line_end;   // the newline is the next iteration's terminator lexeme
             continue;
         }
 
@@ -4972,7 +5074,7 @@ RC_TEST_STEP(assemble, basic_block_errors, fix)
     RC_CHECK_TRUE(ERR("ENDBASIC") == error_type_unexpected_endbasic);
     // Only numbered lines (and blanks) live inside the block - assembly statements are refused.
     RC_CHECK_TRUE(ERR("BASIC\n10REM\nLDA #42\nENDBASIC") == error_type_expected_basic_line);
-    // A bad line number is recoverable: the line is dropped, the rest of the block still parses.
+    // A bad line number is recoverable: the rest of the block still parses.
     RC_CHECK_TRUE(ERR("BASIC\n70000CLS\nENDBASIC") == error_type_bad_basic_line_number);
 }
 
@@ -4987,6 +5089,15 @@ RC_TEST_STEP(assemble, basic_line_too_long, fix)
     rc_mstr_append(&src, RC_STR("\nENDBASIC"), &build);
     fix->r = assemble_string(&fix->desc, RC_STR("too_long"), src.view);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_basic_line_too_long);
+
+    // 250 characters is the longest that fits: 4 header bytes + REM + 250 = a length byte of 255.
+    rc_mstr_reset(&src);
+    rc_mstr_append(&src, RC_STR("BASIC\n10REM"), &build);
+    rc_mstr_append_n(&src, 'A', 250, &build);
+    rc_mstr_append(&src, RC_STR("\nENDBASIC"), &build);
+    fix->r = assemble_string(&fix->desc, RC_STR("longest"), src.view);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK((uint32_t) rc_view_bytes_get(baron_result_code(&fix->r), 3), ==, 255u);
     rc_arena_deinit(&build);
 }
 
@@ -5000,6 +5111,85 @@ RC_TEST_STEP(assemble, basic_listing, fix)
                     "  0000  0D 00 0A 05 DB              10CLS\n"
                     "  0005  0D 00 14 0A E5 20 8D 54...  20GOTO 10\n"
                     "  000F  0D FF                       ENDBASIC\n"));
+    fix->desc.verbose = false;
+}
+
+RC_TEST_STEP(assemble, basic_splice_emits_into_line, fix)
+{
+    // A '{' ending a line drops into Baron; the '}' picks the same line back up. Spliced bytes join
+    // the record untokenised and the length byte counts them all (&13 here).
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("green = &82 : yellow = &83\n"
+                                       "BASIC\n"
+                                       "1430REM\"{\n"
+                                       "    EQUB &7F, green\n"
+                                       "}Hello,{\n"
+                                       "    EQUB yellow\n"
+                                       "}Soni\n"
+                                       "ENDBASIC"),
+                          (uint8_t[]) {0x0D, 0x05, 0x96, 0x13, 0xF4, 0x22, 0x7F, 0x82,
+                                       'H', 'e', 'l', 'l', 'o', ',', 0x83, 'S', 'o', 'n', 'i',
+                                       0x0D, 0xFF}, 21));
+    // A '}' can share a line with the statements before it. The spaces before a '{' are the line's
+    // own; only the last piece loses its trailing spaces.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\n10REM  {\nEQUB 1 }A  \nENDBASIC"),
+                          (uint8_t[]) {0x0D, 0x00, 0x0A, 0x09, 0xF4, 0x20, 0x20, 0x01, 0x41, 0x0D, 0xFF}, 11));
+    // The tokeniser resumes where it stopped - still in the string, so the VDU 21 sits inside it -
+    // but a splice always ends a token: PRI{}NT is two variable names, never PRINT.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\n10PRINT\"A{\nEQUB 21\n}B\"\nENDBASIC"),
+                          (uint8_t[]) {0x0D, 0x00, 0x0A, 0x0A, 0xF1, 0x22, 0x41, 0x15, 0x42, 0x22, 0x0D, 0xFF}, 12));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\n10PRI{\n}NT\nENDBASIC"),
+                          (uint8_t[]) {0x0D, 0x00, 0x0A, 0x09, 0x50, 0x52, 0x49, 0x4E, 0x54, 0x0D, 0xFF}, 11));
+}
+
+RC_TEST_STEP(assemble, basic_splice_is_not_a_scope, fix)
+{
+    // Machine code in a REM: the label inside belongs to the program, so the assembly can name it.
+    // Nothing after the '}' ends the line right there.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\n10REM{\n.beep LDA #7 : JMP &FFEE\n}\nENDBASIC"),
+                          (uint8_t[]) {0x0D, 0x00, 0x0A, 0x0A, 0xF4, 0xA9, 0x07, 0x4C, 0xEE, 0xFF, 0x0D, 0xFF}, 12));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("beep")), value_make_numeric(5)));
+
+    // A virtual section keeps no bytes to put a length in, but the addresses still add up.
+    RC_CHECK_TRUE(ASM("SECTION ws, org=&400, virtual=TRUE\nBASIC\n10REM{\n.inside NOP\n}\nENDBASIC\nENDSECTION") != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("inside")), value_make_numeric(0x405)));
+
+    // A dead branch walks the splice for its extent and emits nothing.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("IF FALSE\nBASIC\n10REM{\nNOP\n}\nENDBASIC\nENDIF\nNOP"),
+                          (uint8_t[]) {0xEA}, 1));
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, basic_splice_errors, fix)
+{
+    // A '{' never meant as a splice (a REM that really ends in one) runs on until something cannot
+    // be Baron - a numbered line, ENDBASIC, the end of input - and a note points back at the '{'.
+    RC_CHECK_TRUE(ERR("BASIC\n10REM {\n20PRINT\nENDBASIC") == error_type_unexpected_token);
+    RC_CHECK(diag_pos(&fix->r, error_type_spliced_from), ==, 12u);
+    RC_CHECK_TRUE(ERR("BASIC\n10REM {\nENDBASIC") == error_type_unexpected_endbasic);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_spliced_from));
+    RC_CHECK_TRUE(ERR("BASIC\n10REM {\nNOP") == error_type_unclosed_scope);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_spliced_from));
+
+    // The 255-byte limit counts the spliced bytes: 250 of them fill a REM line exactly.
+    RC_CHECK_TRUE(ERR("BASIC\n10REM{\nSKIP 251\n}\nENDBASIC") == error_type_basic_line_too_long);
+    RC_CHECK_TRUE(ERR("BASIC\n10REM{\nSKIP 250\n}\nENDBASIC") == error_type_none);
+    RC_CHECK((uint32_t) rc_view_bytes_get(baron_result_code(&fix->r), 3), ==, 255u);
+}
+
+RC_TEST_STEP(assemble, basic_splice_listing, fix)
+{
+    fix->desc.verbose = true;
+    // A row per piece of text with the spliced statements listed between them, and the '}' at the
+    // margin like any brace. The first row went out before the length was known, and is filled in
+    // afterwards.
+    RC_CHECK_TRUE(ASM("BASIC\n10REM{\nEQUB 1\n}A\nENDBASIC") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("BASIC\n"
+                    "  0000  0D 00 0A 07 F4              10REM{\n"
+                    "  0005  01                          EQUB 1\n"
+                    "}\n"
+                    "  0006  41                          A\n"
+                    "  0007  0D FF                       ENDBASIC\n"));
     fix->desc.verbose = false;
 }
 

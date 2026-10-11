@@ -156,7 +156,6 @@ static const basic_keyword basic_keywords[] = {
 
 enum {
     basic_max_line_number = 32767,   // the ROM's 16-bit accumulate refuses anything larger
-    basic_max_record      = 255,     // the length byte counts the whole record, itself included
     basic_end_of_table    = 0xFE,    // WIDTH's token: the scan stops here, never past it
 };
 
@@ -211,15 +210,6 @@ static void basic_push_line_number(rc_array_bytes *out, uint32_t n, rc_arena *ar
 }
 
 
-// Copy [pos, end) through untouched.
-static void basic_push_raw(rc_array_bytes *out, rc_str text, uint32_t pos, uint32_t end, rc_arena *arena)
-{
-    for (uint32_t i = pos; i < end; i++) {
-        rc_array_bytes_push(out, basic_at(text, i), arena);
-    }
-}
-
-
 // ---- the keyword matcher ----
 
 typedef struct basic_match {
@@ -266,20 +256,30 @@ static basic_match basic_find_keyword(rc_str text, uint32_t pos)
 
 // ---- the tokeniser proper ----
 
-// Tokenise text (the line with its number already peeled off) into out, following the ROM's
-// dispatch at &8DB2 case for case. Two state flags drive everything: sos ("start of statement" -
-// cleared by nearly anything, set again by ':' and a few keywords) decides '*' commands and the
-// pseudo-variable +&40 rule; lnexp ("a line number would tokenise here") starts TRUE - the ROM
-// leaves it set after the leading line number, which is why 10 GOTO10 and even a bare 10 20 embed
-// &8D forms - and survives spaces, commas, '&' literals and strings, exactly as the ROM's does.
-static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *arena)
+// Tokenise one piece of text into out from state, following the ROM's dispatch at &8DB2 case for
+// case. Two flags drive everything: sos ("start of statement" - cleared by nearly anything, set
+// again by ':' and a few keywords) decides '*' commands and the pseudo-variable +&40 rule; lnexp
+// ("a line number would tokenise here") survives spaces, commas, '&' literals and strings, exactly
+// as the ROM's does. The other two are the modes a piece can end in: mid-string, or raw.
+static basic_state basic_tokenise_into(rc_array_bytes *out, rc_str text, basic_state state, rc_arena *arena)
 {
-    bool sos = true;
-    bool lnexp = true;
     uint32_t pos = 0;
 
     while (pos < text.len) {
         uint8_t c = basic_at(text, pos);
+
+        if (state.raw) {
+            rc_array_bytes_push(out, c, arena);             // REM, DATA or a * command: not ours to read
+            pos++;
+            continue;
+        }
+
+        if (state.quoted) {
+            rc_array_bytes_push(out, c, arena);             // strings are never looked inside
+            pos++;
+            state.quoted = (c != '"');
+            continue;
+        }
 
         if (c == ' ') {
             rc_array_bytes_push(out, c, arena);
@@ -300,23 +300,15 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
         if (c == '"') {
             rc_array_bytes_push(out, c, arena);
             pos++;
-            while (pos < text.len && basic_at(text, pos) != '"') {
-                rc_array_bytes_push(out, basic_at(text, pos), arena);
-                pos++;
-            }
-            if (pos == text.len) {
-                return;                                     // unterminated: the rest went through raw
-            }
-            rc_array_bytes_push(out, '"', arena);
-            pos++;
+            state.quoted = true;                            // an unterminated one runs to the line's end
             continue;
         }
 
         if (c == ':') {
             rc_array_bytes_push(out, c, arena);
             pos++;
-            sos = true;
-            lnexp = false;
+            state.sos = true;
+            state.lnexp = false;
             continue;
         }
 
@@ -327,18 +319,18 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
         }
 
         if (c == '*') {
-            if (sos) {
-                basic_push_raw(out, text, pos, text.len, arena);   // a * command: the OS gets it verbatim
-                return;
+            if (state.sos) {
+                state.raw = true;                           // a * command: the OS gets it verbatim, '*' and all
+                continue;
             }
             rc_array_bytes_push(out, c, arena);
             pos++;
-            sos = false;
-            lnexp = false;
+            state.sos = false;
+            state.lnexp = false;
             continue;
         }
 
-        if (basic_is_digit(c) && lnexp) {
+        if (basic_is_digit(c) && state.lnexp) {
             uint32_t end = pos;
             uint32_t n = 0;
 
@@ -364,8 +356,8 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
                 pos++;
             }
 
-            sos = false;
-            lnexp = false;
+            state.sos = false;
+            state.lnexp = false;
             continue;
         }
 
@@ -380,7 +372,7 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
                 if (!rejected) {
                     uint8_t token = e->token;
 
-                    if ((e->flags & basic_flag_pseudo_var) && sos) {
+                    if ((e->flags & basic_flag_pseudo_var) && state.sos) {
                         token += 0x40;                      // the statement form: PAGE=&E00, TIME=0, ...
                     }
 
@@ -388,13 +380,13 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
                     pos = m.next;
 
                     if (e->flags & basic_flag_middle) {
-                        sos = false;
-                        lnexp = false;
+                        state.sos = false;
+                        state.lnexp = false;
                     }
 
                     if (e->flags & basic_flag_start) {
-                        sos = true;
-                        lnexp = false;
+                        state.sos = true;
+                        state.lnexp = false;
                     }
 
                     if (e->flags & basic_flag_fnproc) {     // the FN/PROC name belongs to the user
@@ -405,12 +397,11 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
                     }
 
                     if (e->flags & basic_flag_line_number) {
-                        lnexp = true;                       // applied last, so ELSE/THEN keep it despite bit 2
+                        state.lnexp = true;                 // applied last, so ELSE/THEN keep it despite bit 2
                     }
 
                     if (e->flags & basic_flag_rest_raw) {   // REM and DATA own the rest of the line
-                        basic_push_raw(out, text, pos, text.len, arena);
-                        return;
+                        state.raw = true;
                     }
 
                     continue;
@@ -431,18 +422,20 @@ static void basic_tokenise_text(rc_array_bytes *out, rc_str text, rc_arena *aren
             pos++;
         }
 
-        sos = false;
-        lnexp = false;
+        state.sos = false;
+        state.lnexp = false;
     }
+
+    return state;
 }
 
 
-basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
+basic_number_result basic_line_number(rc_str line)
 {
     RC_ASSERT(line.len > 0 && basic_is_digit((uint8_t) line.data[0]));
 
-    // Peel the decimal line number. The ROM would &8D-encode it and have the insert routine decode
-    // it straight back into the record header - reading the digits directly lands the same bytes.
+    // The ROM would &8D-encode the number and have the insert routine decode it straight back into
+    // the record header - reading the digits directly lands the same bytes.
     uint32_t pos = 0;
     uint32_t number = 0;
 
@@ -454,34 +447,33 @@ basic_line_result basic_tokenise_line(rc_str line, rc_arena *arena)
     }
 
     if (number > basic_max_line_number) {
-        return (basic_line_result) {.error = error_type_bad_basic_line_number};
+        return (basic_number_result) {.next = pos, .error = error_type_bad_basic_line_number};
     }
 
-    // Trailing housekeeping the ROM's line-insert does on every entered line: spaces at the end are
-    // dropped (a '\r' first, in case the source came with CRLF endings). Spaces after the number
-    // stay - stripping those is LISTO's opt-in behaviour and LISTO 0 is the power-on default.
-    uint32_t end = line.len;
-    if (end > pos && line.data[end - 1] == '\r') {
-        end--;
+    return (basic_number_result) {.number = number, .next = pos};
+}
+
+
+basic_text_result basic_tokenise(rc_str text, basic_state state, bool last, rc_arena *arena)
+{
+    // The housekeeping the ROM's line-insert does on every entered line: spaces at the end are
+    // dropped (a '\r' first, in case the source came with CRLF endings).
+    if (last) {
+        uint32_t end = text.len;
+        if (end > 0 && text.data[end - 1] == '\r') {
+            end--;
+        }
+
+        while (end > 0 && text.data[end - 1] == ' ') {
+            end--;
+        }
+
+        text = rc_str_left(text, end);
     }
 
-    while (end > pos && line.data[end - 1] == ' ') {
-        end--;
-    }
-
-    rc_array_bytes out = rc_array_bytes_make(line.len + 16, arena);
-    rc_array_bytes_push(&out, 0x0D, arena);
-    rc_array_bytes_push(&out, (uint8_t) (number >> 8), arena);
-    rc_array_bytes_push(&out, (uint8_t) (number & 0xFF), arena);
-    rc_array_bytes_push(&out, 0, arena);                    // the length, filled in once we know it
-    
-    basic_tokenise_text(&out, rc_str_substr(line, pos, end - pos), arena);
-    if (out.num > basic_max_record) {
-        return (basic_line_result) {.error = error_type_basic_line_too_long};
-    }
-
-    rc_array_bytes_set(&out, 3, (uint8_t) out.num);
-    return (basic_line_result) {.bytes = out.view};
+    rc_array_bytes out = rc_array_bytes_make(text.len + 16, arena);
+    basic_state after = basic_tokenise_into(&out, text, state, arena);
+    return (basic_text_result) {.bytes = out.view, .state = after};
 }
 
 
@@ -505,14 +497,37 @@ RC_TEST_GROUP_DEINIT(basic, fix)
     rc_arena_deinit(&fix->arena);
 }
 
+// Build line's record the way the assembler does - header, text, length - and compare it whole.
 static bool basic_record_is(rc_str line, const uint8_t *expect, uint32_t num, rc_arena *arena)
 {
-    basic_line_result r = basic_tokenise_line(line, arena);
-    if (r.error != error_type_none || r.bytes.num != num) {
+    basic_number_result n = basic_line_number(line);
+    basic_text_result   t = basic_tokenise(rc_str_skip(line, n.next), basic_state_start(), true, arena);
+    if (n.error != error_type_none || t.bytes.num + 4 != num) {
         return false;
     }
+
+    uint8_t head[4] = {0x0D, (uint8_t) (n.number >> 8), (uint8_t) n.number, (uint8_t) num};
     for (uint32_t i = 0; i < num; i++) {
-        if (rc_view_bytes_get(r.bytes, i) != expect[i]) {
+        if ((i < 4 ? head[i] : rc_view_bytes_get(t.bytes, i - 4)) != expect[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+// Tokenise a line's text as two pieces either side of a cut, the state carried across, and compare.
+static bool basic_pieces_are(rc_str first, rc_str second, const uint8_t *expect, uint32_t num, rc_arena *arena)
+{
+    basic_text_result a = basic_tokenise(first, basic_state_start(), false, arena);
+    basic_text_result b = basic_tokenise(second, a.state, true, arena);
+    if (a.bytes.num + b.bytes.num != num) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < num; i++) {
+        uint8_t got = i < a.bytes.num ? rc_view_bytes_get(a.bytes, i) : rc_view_bytes_get(b.bytes, i - a.bytes.num);
+        if (got != expect[i]) {
             return false;
         }
     }
@@ -638,24 +653,33 @@ RC_TEST_STEP(basic, statement_state, fix)
 
 RC_TEST_STEP(basic, errors, fix)
 {
-    basic_line_result r = basic_tokenise_line(RC_STR("70000REM"), &fix->arena);
+    (void) fix;
+    basic_number_result r = basic_line_number(RC_STR("70000REM"));
     RC_CHECK_TRUE(r.error == error_type_bad_basic_line_number);
-    RC_CHECK(r.bytes.num, ==, 0u);
+    RC_CHECK(r.next, ==, 5u);
+    RC_CHECK_TRUE(basic_line_number(RC_STR("32767REM")).error == error_type_none);
+}
 
-    // 4 header bytes + REM + 252 raw characters = 257: one byte too many twice over.
-    rc_mstr long_line = rc_mstr_from_cstr("10REM", 300, &fix->arena);
-    rc_mstr_append_n(&long_line, 'A', 252, &fix->arena);
-    r = basic_tokenise_line(long_line.view, &fix->arena);
-    RC_CHECK_TRUE(r.error == error_type_basic_line_too_long);
-    RC_CHECK(r.bytes.num, ==, 0u);
-
-    // 251 bytes of text is the largest record that fits.
-    rc_mstr max_line = rc_mstr_from_cstr("10REM", 300, &fix->arena);
-    rc_mstr_append_n(&max_line, 'A', 250, &fix->arena);
-    r = basic_tokenise_line(max_line.view, &fix->arena);
-    RC_CHECK_TRUE(r.error == error_type_none);
-    RC_CHECK(r.bytes.num, ==, 255u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(r.bytes, 3), ==, 255u);
+RC_TEST_STEP(basic, pieces_carry_state, fix)
+{
+    // A cut mid-string or mid-REM changes nothing: the next piece carries on where the last stopped.
+    RC_CHECK_TRUE(basic_pieces_are(RC_STR("PRINT\"A"), RC_STR("B\"X"),
+                                   (uint8_t[]) {0xF1, 0x22, 0x41, 0x42, 0x22, 0x58}, 6, &fix->arena));
+    RC_CHECK_TRUE(basic_pieces_are(RC_STR("REM\""), RC_STR("PRINT"),
+                                   (uint8_t[]) {0xF4, 0x22, 0x50, 0x52, 0x49, 0x4E, 0x54}, 7, &fix->arena));
+    RC_CHECK_TRUE(basic_pieces_are(RC_STR("*FX"), RC_STR("PRINT"),
+                                   (uint8_t[]) {0x2A, 0x46, 0x58, 0x50, 0x52, 0x49, 0x4E, 0x54}, 8, &fix->arena));
+    // The statement flags carry too: a line number after GOTO, and the start of a statement after ':'.
+    RC_CHECK_TRUE(basic_pieces_are(RC_STR("GOTO "), RC_STR("10"),
+                                   (uint8_t[]) {0xE5, 0x20, 0x8D, 0x54, 0x4A, 0x40}, 6, &fix->arena));
+    RC_CHECK_TRUE(basic_pieces_are(RC_STR("X=1:"), RC_STR("PAGE=8"),
+                                   (uint8_t[]) {0x58, 0x3D, 0x31, 0x3A, 0xD0, 0x3D, 0x38}, 7, &fix->arena));
+    // But a token never spans a cut: PRI|NT is two variable names, not PRINT.
+    RC_CHECK_TRUE(basic_pieces_are(RC_STR("PRI"), RC_STR("NT"),
+                                   (uint8_t[]) {0x50, 0x52, 0x49, 0x4E, 0x54}, 5, &fix->arena));
+    // Only the last piece loses its trailing spaces; spaces before a cut are part of the text.
+    RC_CHECK_TRUE(basic_pieces_are(RC_STR("REM  "), RC_STR("A  \r"),
+                                   (uint8_t[]) {0xF4, 0x20, 0x20, 0x41}, 4, &fix->arena));
 }
 
 #endif // BARON_TESTS
