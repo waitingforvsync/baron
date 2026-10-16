@@ -168,11 +168,18 @@ void semantic_error_cause(baron *b, parse_flags flags, error_type code, cursor a
 }
 
 
-void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity)
+void semantic_warning_payload(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity,
+                              rc_str payload)
 {
     if (flags.final && flags.active) {
-        baron_warning(b, code, at, severity);
+        baron_warning_payload(b, code, at, severity, payload);
     }
+}
+
+
+void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity)
+{
+    semantic_warning_payload(b, flags, code, at, severity, (rc_str) {0});
 }
 
 
@@ -8786,6 +8793,42 @@ RC_TEST_STEP(assemble, warnings_do_not_fail_assembly, fix)
     // A vector that does not straddle a page boundary is silent.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("JMP (&1234)"), (uint8_t[]){0x6C, 0x34, 0x12}, 3));
     RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+}
+
+RC_TEST_STEP(assemble, branch_page_cross_warns, fix)
+{
+    // A branch landing on another page costs a cycle when taken: a level-3 warning, bytes untouched.
+    uint32_t passes = ASM("SECTION s, org=&10FC : BNE &1110 : ENDSECTION");
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xD0, 0x12}, 2));
+    RC_CHECK(diag_count(&fix->r, error_type_branch_page_cross), ==, 1u);
+    RC_CHECK(diag_severity(&fix->r, error_type_branch_page_cross), ==, (uint8_t) severity_noisy);
+    RC_CHECK(diag_payload(&fix->r, error_type_branch_page_cross), ==, RC_STR("&10FC"));   // the branch's own address
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM("SECTION s, org=&1100 : BNE &10F0 : ENDSECTION") != 0);   // backwards too
+    RC_CHECK(diag_count(&fix->r, error_type_branch_page_cross), ==, 1u);
+
+    // The page that counts is the NEXT instruction's, not the branch's own: a branch on &10FE whose
+    // successor sits on &1100 is free into page &11 and pays to loop back onto itself.
+    RC_CHECK_TRUE(ASM("SECTION s, org=&10FE : BNE &1100 : ENDSECTION") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+    RC_CHECK_TRUE(ASM("SECTION s, org=&10FE : .self BNE self : ENDSECTION") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_branch_page_cross), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_branch_page_cross), ==, RC_STR("&10FE"));
+
+    // Same page is silent; a forward label settles first and warns once, not once per pass.
+    RC_CHECK_TRUE(ASM("SECTION s, org=&1100 : .l BNE l : ENDSECTION") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+    RC_CHECK_TRUE(ASM("SECTION s, org=&10F0 : BNE fwd : SKIP 20 : .fwd : ENDSECTION") > 1);
+    RC_CHECK(diag_count(&fix->r, error_type_branch_page_cross), ==, 1u);
+
+    // BRA pays the same cycle; a dead branch says nothing; an out-of-range branch is just the error.
+    RC_CHECK_TRUE(ASM("SECTION s, org=&10FC, cmos=TRUE : BRA &1110 : ENDSECTION") != 0);
+    RC_CHECK(diag_count(&fix->r, error_type_branch_page_cross), ==, 1u);
+    RC_CHECK_TRUE(ASM("SECTION s, org=&10FC : IF FALSE : BNE &1110 : ENDIF : ENDSECTION") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+    RC_CHECK_TRUE(ASM("SECTION s, org=&1000 : BNE &1100 : ENDSECTION") == 0);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_branch_out_of_range));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_branch_page_cross));
 }
 
 RC_TEST_STEP(assemble, named_constants, fix)

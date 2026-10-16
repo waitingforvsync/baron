@@ -44,6 +44,8 @@ void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor
 void semantic_error_cause(baron *b, parse_flags flags, error_type code, cursor at, value_error cause);
 
 // Like semantic_error at a positive severity level; does not fail the assemble.
+void semantic_warning_payload(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity,
+                              rc_str payload);
 void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, uint8_t severity);
 
 // Whether a statement in section feeds the zero-page IR: the final pass of a live branch with the

@@ -36,7 +36,7 @@ static void display_help(void)
     puts("  -vv              As -v, but dump every emitted byte (8 per line) and whole list values");
     puts("  --beebasm-true   BeebAsm compatibility: TRUE coerces to -1 rather than 1");
     puts("  --symbols <file> Write each source file's sections and symbols to a JSON file");
-    puts("  --warn <n>       Show warnings up to level n (default 1; 2 adds the opt-in checks)");
+    puts("  --warn <n>       Show warnings up to level n (default 1; 2 and 3 add opt-in checks)");
     puts("");
     puts("Options for generating a .ssd disk image:");
     puts("  -o <file>        Create a .ssd disk image containing the saved sections");

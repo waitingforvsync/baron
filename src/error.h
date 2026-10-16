@@ -131,6 +131,7 @@ typedef enum error_type {
 
     // Warnings (recorded with diagnostic_warning; harmless, they do not fail the assemble).
     error_type_jmp_indirect_page_cross,   // JMP (&xxFF): the NMOS vector-fetch page-wrap bug
+    error_type_branch_page_cross,         // opt-in (level 3): a branch lands on another page (a cycle more when taken)
 } error_type;
 
 // The terse human-readable message template for a code (not the enumerator tail) - what a rendered

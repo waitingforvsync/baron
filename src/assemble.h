@@ -27,6 +27,7 @@ enum {
     severity_error    = 0,
     severity_warning  = 1,   // reported by default
     severity_optional = 2,   // reported only when the warning level is raised
+    severity_noisy    = 3,   // opt-in too, but so plentiful it would drown level 2 (cycle-counting hints)
 };
 
 // How many PRINT output channels there are: PRINT #n, ... takes a single digit, so exactly ten.

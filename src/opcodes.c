@@ -799,7 +799,8 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
             uint8_t off = 0;
             if (arg.type == int_argument_type_known) {
                 // From the address after the instruction (the offset byte we are about to emit).
-                int64_t delta = arg.value - (int64_t)(sections_pc(&b->sections, section) + 1);
+                int64_t next  = (int64_t)(sections_pc(&b->sections, section) + 1);
+                int64_t delta = arg.value - next;
                 if (delta < -128 || delta > 127) {
                     // The message reports the distance the branch would need ("% bytes"); a small stack
                     // buffer holds the digits and the recorder copies it into the diagnostic's arena.
@@ -811,6 +812,18 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
                     rc_mstr_append_i64(&dist, delta, NULL);
                     semantic_error_payload(b, flags, error_type_branch_out_of_range, cursor_at(at, start),
                                            dist.view);
+                }
+                // A taken branch costs a cycle more when it lands on a different page from the NEXT
+                // instruction (the 6502 wraps at &FFFF, hence the 16-bit compare). Only timing-critical
+                // code cares, and ordinary code is full of them, so it waits for --warn 3. It names the
+                // branch's address, which tells a macro's or FOR loop's instances apart and matches -v.
+                else if ((((uint16_t) arg.value ^ (uint16_t) next) & 0xFF00) != 0) {
+                    char storage[8];
+                    rc_mstr addr = {.data = storage, .len = 0, .cap = sizeof storage};
+                    rc_mstr_append_char(&addr, '&', NULL);
+                    rc_mstr_append_hex16(&addr, (uint16_t) insn_pc, NULL);
+                    semantic_warning_payload(b, flags, error_type_branch_page_cross, cursor_at(at, start),
+                                             severity_noisy, addr.view);
                 }
                 off = (uint8_t)(int8_t)delta;   // best-effort: the low byte of the (out-of-range) delta
             }
