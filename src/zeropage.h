@@ -189,6 +189,21 @@ typedef struct zp_entry {
 #include "richc/template/array.h"
 
 
+// A use of a variable's ADDRESS rather than its bytes: an EQUB/EQUW element, an immediate (LDA #var), a
+// jump to it, or a PRINT. Nothing is read or written there, so it tells liveness nothing - which is fine
+// alongside real touches, but a variable used ONLY this way gets no address, and every such use is an
+// error (zeropage_finalize). Recorded on the final pass, feature on.
+typedef struct zp_address_use {
+    uint32_t scope;   // the variable's identity: its declaring scope...
+    cursor   def;     // ...and its ZA_AUTO statement's def cursor
+    cursor   at;      // where the address was used, for diagnostics
+} zp_address_use;
+
+#define RC_ARRAY_TYPE zp_address_use
+#define RC_ARRAY_NAME zp_address_use
+#include "richc/template/array.h"
+
+
 typedef struct zeropage {
     rc_arena        *arena;      // BORROWED permanent: backs the reserve bitset, var list and insn list
     rc_bitset        reserved;   // 256 bits: reserved[b] iff zero-page byte b may be auto-allocated
@@ -197,6 +212,7 @@ typedef struct zeropage {
     rc_array_zp_cflow cflows;    // control-flow annotations (ZA_UNREACHABLE etc.), recorded on the final pass
     rc_array_zp_label labels;    // label markers (identity -> section + pc), recorded on the final pass
     rc_array_zp_entry entries;   // ZA_ENTRY / ZA_INTERRUPT markers, recorded on the final pass
+    rc_array_zp_address_use address_uses;   // uses of a variable's address alone, recorded on the final pass
     bool             enabled;    // a ZA_POOL directive has run -> the ZA_AUTO1/ZA_AUTO2 feature is active
 } zeropage;
 
@@ -261,6 +277,10 @@ rc_view_zp_label  zeropage_labels(const zeropage *zp);   // all label markers, f
 // Record one entry marker (final pass only). Returns its index.
 uint32_t          zeropage_add_entry(zeropage *zp, zp_entry e);
 rc_view_zp_entry  zeropage_entries(const zeropage *zp);  // all entry markers, for the CFG + finalize roots
+
+// Record one use of a variable's address alone (final pass only). Returns its index.
+uint32_t               zeropage_add_address_use(zeropage *zp, zp_address_use use);
+rc_view_zp_address_use zeropage_address_uses(const zeropage *zp);   // all of them, for finalize
 
 
 #endif // ifndef BARON_ZEROPAGE_H_

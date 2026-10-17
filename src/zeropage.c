@@ -9,6 +9,7 @@ enum {
     zeropage_cflows_reserve = 16,   // annotations are rare; grows if exceeded
     zeropage_labels_reserve = 64,   // a routine's worth of named labels; grows if exceeded
     zeropage_entries_reserve = 8,   // entry markers are one per externally-visible routine; grows if exceeded
+    zeropage_address_uses_reserve = 16,   // address tables and pointer seeds; grows if exceeded
 };
 
 void zeropage_init(zeropage *zp, rc_arena *permanent)
@@ -21,6 +22,7 @@ void zeropage_init(zeropage *zp, rc_arena *permanent)
     zp->cflows   = rc_array_zp_cflow_make(zeropage_cflows_reserve, permanent);
     zp->labels   = rc_array_zp_label_make(zeropage_labels_reserve, permanent);
     zp->entries  = rc_array_zp_entry_make(zeropage_entries_reserve, permanent);
+    zp->address_uses = rc_array_zp_address_use_make(zeropage_address_uses_reserve, permanent);
     zp->enabled  = false;
 }
 
@@ -34,6 +36,7 @@ void zeropage_reset(zeropage *zp)
     rc_array_zp_cflow_resize(&zp->cflows, 0, zp->arena);
     rc_array_zp_label_resize(&zp->labels, 0, zp->arena);
     rc_array_zp_entry_resize(&zp->entries, 0, zp->arena);
+    rc_array_zp_address_use_resize(&zp->address_uses, 0, zp->arena);
     zp->enabled = false;
 }
 
@@ -250,6 +253,22 @@ rc_view_zp_entry zeropage_entries(const zeropage *zp)
 }
 
 
+uint32_t zeropage_add_address_use(zeropage *zp, zp_address_use use)
+{
+    RC_ASSERT(zp != NULL);
+    uint32_t index = zp->address_uses.num;
+    rc_array_zp_address_use_push(&zp->address_uses, use, zp->arena);
+    return index;
+}
+
+
+rc_view_zp_address_use zeropage_address_uses(const zeropage *zp)
+{
+    RC_ASSERT(zp != NULL);
+    return zp->address_uses.view;
+}
+
+
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
@@ -416,6 +435,32 @@ RC_TEST(zeropage, entry_registry)
     zp_entry e1 = rc_view_zp_entry_get(entries, 1);
     RC_CHECK(e1.section, ==, 1u);
     RC_CHECK_TRUE(e1.interrupt);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(zeropage, address_use_registry)
+{
+    rc_arena arena = rc_arena_make_default();
+    zeropage zp;
+    zeropage_init(&zp, &arena);
+
+    RC_CHECK(zeropage_address_uses(&zp).num, ==, 0u);
+
+    // A use is the variable's identity plus where its address appeared, nothing more.
+    uint32_t i0 = zeropage_add_address_use(&zp, (zp_address_use) {.scope = 2, .def = (cursor) {.source = 0, .pos = 7},
+                                                                  .at = (cursor) {.source = 1, .pos = 40}});
+    RC_CHECK(i0, ==, 0u);
+    rc_view_zp_address_use uses = zeropage_address_uses(&zp);
+    RC_CHECK(uses.num, ==, 1u);
+    zp_address_use u0 = rc_view_zp_address_use_get(uses, 0);
+    RC_CHECK(u0.scope, ==, 2u);
+    RC_CHECK(u0.def.pos, ==, 7u);
+    RC_CHECK(u0.at.source, ==, 1u);
+    RC_CHECK(u0.at.pos, ==, 40u);
+
+    zeropage_reset(&zp);
+    RC_CHECK(zeropage_address_uses(&zp).num, ==, 0u);   // each pass records afresh
 
     rc_arena_deinit(&arena);
 }

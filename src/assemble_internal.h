@@ -52,6 +52,10 @@ void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, u
 // allocator on - and never from a virtual section, whose code exists nowhere to analyse.
 bool zp_recording(const baron *b, parse_flags flags, uint32_t section);
 
+// Note that a ZA_AUTO variable's ADDRESS was used at `at` - data, an immediate, a jump, a PRINT - so
+// zeropage_finalize can refuse it should no instruction touch the variable. Gated by zp_recording.
+void zp_note_address_use(baron *b, parse_flags flags, uint32_t section, uint32_t scope, cursor def, cursor at);
+
 // Discriminates an int_argument.
 typedef enum int_argument_type {
     int_argument_type_error,        // 0/default: a value that can never be an address (fail-safe)

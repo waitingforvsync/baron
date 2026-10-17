@@ -55,6 +55,25 @@ static void display_help(void)
 }
 
 
+// Write s whole. Not printf: a message can carry ANY byte (an ERROR naming a CHR-built string, say),
+// and even a precision-capped "%.*s" stops at the first NUL.
+static void write_str(FILE *f, rc_str s)
+{
+    if (s.len != 0) {
+        fwrite(s.data, 1, s.len, f);
+    }
+}
+
+
+// A complaint from the output stage, as its own "baron: ..." line.
+static void report_cli_error(rc_str message)
+{
+    fputs("baron: ", stderr);
+    write_str(stderr, message);
+    fputc('\n', stderr);
+}
+
+
 // A decimal option value in [0, max], or -1 with a complaint printed. what names the switch.
 // Bailing out the moment we pass max keeps the running total below max * 10 + 9, so it cannot overflow.
 static int32_t parse_option_value(const char *what, const char *s, uint32_t max)
@@ -265,9 +284,7 @@ int main(int argc, char **argv)
         baron_result r = assemble_file(&desc, path);
 
         rc_str rep = report_render(&r, path, (uint8_t) warn_level, &cli);
-        if (rep.len != 0) {
-            fprintf(stderr, "%.*s", (int) rep.len, rep.data);
-        }
+        write_str(stderr, rep);
 
         if (r.passes != 0) {
             // Channel 0 - the PRINT output, with the -v listing interleaved when asked for - goes to
@@ -278,9 +295,7 @@ int main(int argc, char **argv)
                 if (listed_any) {
                     fputc('\n', stdout);
                 }
-                // fwrite, not printf: PRINT may put ANY byte in the channel (an embedded NUL
-                // included), and even a precision-capped "%.*s" stops at the first NUL.
-                fwrite(r.channels[0].data, 1, r.channels[0].len, stdout);
+                write_str(stdout, r.channels[0]);   // PRINT may put any byte in the channel
                 listed_any = true;
             }
             for (uint32_t c = 0; c < baron_num_channels; c++) {
@@ -336,7 +351,7 @@ int main(int argc, char **argv)
         output_spec_result sr = output_spec_make(saved.view, rc_str_from_cstr(title),
                                                  (uint32_t) boot, (uint32_t) cycle, &cli);
         if (sr.error.len != 0) {
-            fprintf(stderr, "baron: %.*s\n", (int) sr.error.len, sr.error.data);
+            report_cli_error(sr.error);
             failed = true;
         }
         else {
@@ -348,7 +363,7 @@ int main(int argc, char **argv)
             if (raw != NULL && !check) {
                 rc_str err = output_write_files(&sr.spec, rc_str_from_cstr(raw), inf, &cli);
                 if (err.len != 0) {
-                    fprintf(stderr, "baron: %.*s\n", (int) err.len, err.data);
+                    report_cli_error(err);
                     failed = true;
                 }
             }
@@ -357,7 +372,7 @@ int main(int argc, char **argv)
                 // run - it just never lands on disk.
                 disc_ssd_result d = disc_ssd_make(&sr.spec, pad, &cli);
                 if (d.error.len != 0) {
-                    fprintf(stderr, "baron: %.*s\n", (int) d.error.len, d.error.data);
+                    report_cli_error(d.error);
                     failed = true;
                 }
                 else if (!check && rc_file_save_binary(rc_str_from_cstr(out), d.image) != RC_FILE_OK) {

@@ -127,6 +127,12 @@ uint32_t scopes_num_resolved(const scopes *s);
 // here. Used to point a duplicate-symbol error back at the binding it collides with.
 cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 
+// Once each ZA_AUTO declaration's binding holds its allocated address, swap every other binding's
+// placeholders for real addresses too - an alias like `ptrs = {v1, v2}`, inside lists included. The
+// output pass can read an alias before its assignment re-runs, and must not see a placeholder. One
+// whose declaration holds no number (an unused variable, removed) is left as it is.
+void scopes_resolve_za_auto(scopes *s);
+
 // A resolved binding's IDENTITY: its def cursor plus the declaring scope. The def cursor ALONE is
 // not unique - a macro / FOR body shares one def across its instantiations - so the per-instantiation
 // scope is what tells two instances apart. cursor_none / RC_INDEX_NONE when the name is unbound.

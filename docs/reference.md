@@ -87,7 +87,7 @@ to the end of the line.
 | `FOR v = seq` ... `NEXT` | Run the body once per element of a range or list, `v` bound to each element, each iteration in its own scope. An empty sequence runs zero times. |
 | `INCLUDE "file"` | Splice another source file in textually: its code emits here, its symbols bind here. Paths resolve relative to the including file. |
 | `MACRO name sig` ... `ENDMACRO` | Define a macro. The signature is parameter names, commas, and quoted literal tokens matched verbatim; one name may carry several overloads, matched by shape. An empty body forward-declares. Define before use. |
-| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments, `IF`s and `ASSERT`s ending in a top-level `= expr` return. Locals (parameters included) bind once - a second live assignment to the same name is an error. Overloads by parameter count. Define before use. |
+| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments, `IF`s and `ASSERT`s ending in a top-level `= expr` return. Locals (parameters included) bind once, in order - a second live assignment to the same name is an error, and a local can be read only after its assignment. Overloads by parameter count. Define before use. |
 | `PRINT [#n,] v [, v...]` | Write text during assembly (final pass only): values concatenated, one newline per statement, to channel `n` (default 0). |
 | `ERROR [v [, v...]]` | Report the message as an assembly error and fail the build; assembly carries on to find more. |
 | `ASSERT e [, v [, v...]]` | `IF NOT(e) : ERROR v... : ENDIF` in one statement. The message is evaluated only on failure; without one the error is "Assertion failed". Also a `FUNCTION` body statement, where a failure becomes the call's result. |
@@ -182,8 +182,9 @@ see `CODES` under [Element-wise functions](#element-wise-functions).
 
 ### Range forms ###
 
-Endpoints must be whole numbers; either or both may be any constant expression. `..` binds looser than
-arithmetic and comparisons, so `0..n-1` needs no parentheses.
+Endpoints must be whole numbers, at most 2^53 either way (where numbers stop holding every integer);
+either or both may be any constant expression. `..` binds looser than arithmetic and comparisons, so
+`0..n-1` needs no parentheses.
 
 | Form | Meaning |
 |------|---------|

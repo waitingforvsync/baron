@@ -882,7 +882,8 @@ With the interference graph built, `zp_color` (`src/zpalloc.c`) assigns addresse
   interfering neighbour's span (`span_reserved` / `spans_overlap` - width-generic, so a table packs
   exactly like a pointer, just wider);
 - an `unused` variable (touched by no instruction) is skipped entirely: warned once per declaration
-  site, given no address, and its binding *removed* at the rewrite - as if never declared;
+  site, given no address, and its binding *removed* at the rewrite - as if never declared. If its
+  address was used anyway, the warning gives way to a refusal at each use (below);
 - a *used* variable with no home is a spill: `zeropage_full`, naming the variable.
 
 The graphs are tiny (dozens of nodes), so the quadratic scan is irrelevant and first-fit is close enough
@@ -891,10 +892,13 @@ to optimal in practice.
 ## The output pass ##
 
 With a spill-free colouring, the finalizer rewrites each variable's symbol from the typed placeholder to
-its real address (an *unused* variable's binding is removed instead), and then `run_passes` runs one last
-re-emission - the **output pass** (`parse_flags.output`) - whose sections ARE the result. There is no
-operand patching: a settling pass's operand bytes hold only intra-variable offsets, meaningless as
-output, and simply get thrown away with the rest of that pass's sections.
+its real address (an *unused* variable's binding is removed instead). It then swaps the placeholders held
+by every *other* binding too (`scopes_resolve_za_auto`): an alias such as `ptrs = {v1, v2}` still holds
+the final pass's placeholders, and a reference written above the alias reads it on the output pass
+before its assignment re-runs. Then `run_passes` runs one last re-emission - the **output pass**
+(`parse_flags.output`) - whose sections ARE the result. There is no operand patching: a settling pass's
+operand bytes hold only intra-variable offsets, meaningless as output, and simply get thrown away with
+the rest of that pass's sections.
 
 Why re-emission cannot move anything: a ZA_AUTO address is a typed value, and every context is
 statically one of two kinds. The layout-affecting kind (conditions, counts, `org`) *refused* it
@@ -918,7 +922,8 @@ The refusals (all fatal):
 | `za_auto_narrow_pointer` / `za_auto_out_of_bounds` | an access window past the declared width |
 | `za_indexedby_out_of_range` | a declared index set reaching past the variable (the `ZA_INDEXEDBY` bounds check) |
 | `za_auto_bad_width` | `ZA_AUTO n` outside 1-256 (at parse) |
-| `za_auto_address` | a ZA_AUTO address in a context needing a number now: a condition, a count, an `org`, an annotation operand (the typed placeholder refused at the use site) |
+| `za_auto_address` | a ZA_AUTO address in a context needing a number now: a condition, a count, an `org`, a `ZA_POOL` byte, an annotation operand (the typed placeholder refused at the use site) |
+| `za_auto_address_untouched` | the address of an `unused` variable used anyway. The final pass records every use of an address alone (`zp_address_use`: an `EQU*` element, an operand that neither reads nor writes - `LDA #var`, `JMP var` - a `PRINT`, a section attribute); finalize refuses each one whose variable no instruction touches, once per use site |
 | `za_auto_computed_flow` | an `unknown_succ` block with variables in play (the computed-flow refusal) |
 | `za_auto_across_call` | live across a call whose footprint cannot be bounded (the across-call check) |
 | `za_auto_recursion` | a fresh per-level value held across a recursive call (the recursion check) |

@@ -610,13 +610,19 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
     }
     uint8_t rw = (uint8_t) (((rw_cell & op_zpread) ? vref_read : 0) | ((rw_cell & op_zpwrite) ? vref_write : 0));
 
+    // A dispatch through a ZA_AUTO vector reads the pointer (both bytes; a table read is indexed).
+    uint8_t touch = !is_control ? rw : (vector_var ? (uint8_t) vref_read : (uint8_t) vref_none);
+
+    // An operand that neither reads nor writes the variable (LDA #var, JMP var) uses only its address.
+    if (arg.za_auto && touch == vref_none) {
+        zp_note_address_use(b, flags, section, arg.zp_scope, arg.zp_def, at);
+    }
+
     zeropage_add_insn(&b->zeropage, (zp_insn) {
         .pc             = pc,
         .size           = (uint16_t) (1 + mode_operand_bytes(mode)),
         .flow           = (uint8_t) flow,
-
-        // A dispatch through a ZA_AUTO vector reads the pointer (both bytes; a table read is indexed).
-        .rw             = !is_control ? rw : (vector_var ? (uint8_t) vref_read : (uint8_t) vref_none),
+        .rw             = touch,
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
         .var_scope      = is_var ? id_scope : RC_INDEX_NONE,
         .var_def        = is_var ? id_def : cursor_none(),

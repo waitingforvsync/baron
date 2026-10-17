@@ -76,6 +76,7 @@ typedef enum error_type {
     error_type_za_auto_out_of_bounds, // a var+n access reaches past the ZA_AUTO variable's declared width
     error_type_za_auto_bad_width,     // ZA_AUTO <count> with a count outside 1..256
     error_type_za_auto_address,       // a ZA_AUTO address used where a number is needed NOW - addresses exist only after allocation
+    error_type_za_auto_address_untouched, // a ZA_AUTO address used (data, immediate, PRINT) when no instruction touches the variable
     error_type_za_discard_needs_var,  // a ZA_DISCARD operand that is not a whole ZA_AUTO variable
     error_type_za_pool_store,         // opt-in warning: a store whose fixed address / indexed base lies inside the ZA_POOL
     error_type_za_indexedby_needs_indexed, // a ZA_INDEXEDBY that does not follow an indexed ZA_AUTO access

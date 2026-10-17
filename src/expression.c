@@ -830,7 +830,16 @@ static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
 
     if (step < 0 && end < 0) {
         end = 0;
-    }                
+    }
+
+    // and jump the near end onto the axis, rather than stepping there from somewhere far off
+    if (step > 0 && start < 0) {
+        start += (-start + step - 1) / step * step;
+    }
+
+    if (step < 0 && start > (int64_t)len - 1) {
+        start -= (start - ((int64_t)len - 1) - step - 1) / -step * -step;
+    }
 
     for (int64_t n = start; step > 0 ? n <= end : n >= end; n += step) {
         if (n >= 0 && n < (int64_t)len) {
@@ -839,6 +848,31 @@ static rc_array_u32 range_indices(value_range r, uint32_t len, rc_arena *arena)
     }
 
     return out;
+}
+
+
+// The indices a step-1 range picks along an axis - range_indices' answer, minus the enumeration. It
+// lets a slice share its target's storage (values are immutable, so nobody can tell), which keeps
+// l[1..] down a recursion linear instead of copying the rest of the list at every level.
+typedef struct index_run {
+    uint32_t first;
+    uint32_t num;
+} index_run;
+
+static index_run range_run(value_range r, uint32_t len)
+{
+    RC_ASSERT(value_range_step(r) == 1);
+
+    int64_t first = r.has_start ? r.start : 0;
+    int64_t last  = r.has_end   ? r.end   : (int64_t)len - 1;
+    first = first < 0 ? 0 : first;
+    last  = last > (int64_t)len - 1 ? (int64_t)len - 1 : last;
+
+    if (last < first) {
+        return (index_run) {0};
+    }
+
+    return (index_run) {.first = (uint32_t)first, .num = (uint32_t)(last - first + 1)};
 }
 
 
@@ -861,6 +895,11 @@ static value subscript_string(rc_str s, rc_view_value indices, rc_arena *arena)
         }
 
         return value_make_string(rc_str_substr(s, i, 1));
+    }
+
+    if (value_is_range(index) && value_range_step(index.range) == 1) {
+        index_run run = range_run(index.range, s.len);
+        return value_make_string(rc_str_substr(s, run.first, run.num));
     }
 
     rc_mstr m = rc_mstr_make(s.len, arena);   // gather the picked characters
@@ -937,6 +976,15 @@ static value subscript(value v, rc_view_value indices, rc_arena *arena)
         }
 
         return subscript(rc_view_value_get(v.list, i), rest, arena);
+    }
+
+    // a contiguous slice with nothing left to select inside it is a view of the list itself
+    if (rest.num == 0 && value_is_range(sel) && value_range_step(sel.range) == 1) {
+        index_run run = range_run(sel.range, len);
+        if (run.num == 0) {
+            return value_make_list((rc_view_value) {0});   // an empty list may have no data to offset from
+        }
+        return value_make_list(rc_view_value_get_head(rc_view_value_get_tail(v.list, run.first), run.num));
     }
 
     // a range or list keeps this axis: recurse on each selected element into a result list
@@ -1770,6 +1818,41 @@ static const token_table odd_tokens  = RC_VIEW(odd_entries);
 token_table expression_operand_base(void) { return even_tokens; }
 
 
+// ---- FUNCTION call frames ----
+
+// A running FUNCTION call's parameters and locals: a handful of names, each bound once, kept in the
+// evaluation's own arena rather than the symbol table - so a call copies nothing and leaves nothing
+// behind once the evaluation is done.
+typedef struct frame_slot {
+    rc_str name;
+    value  v;
+} frame_slot;
+
+#define RC_ARRAY_TYPE frame_slot
+#include "richc/template/array.h"
+
+typedef struct frame {
+    rc_array_frame_slot slots;
+} frame;
+
+// The slot binding name, or RC_INDEX_NONE - always so with no frame (outside a body). Newest first, so of
+// two like-named parameters the later wins, as it always has.
+static uint32_t frame_find(const frame *f, rc_str name)
+{
+    if (f == NULL) {
+        return RC_INDEX_NONE;
+    }
+
+    for (uint32_t i = f->slots.num; i-- > 0;) {
+        if (rc_str_is_equal(rc_array_frame_slot_get(&f->slots, i).name, name)) {
+            return i;
+        }
+    }
+
+    return RC_INDEX_NONE;
+}
+
+
 // ---- the parser ----
 
 // The invariants for one parse, bundled so the recursive helpers stay readable. live is false during
@@ -1780,6 +1863,7 @@ typedef struct parser {
     rc_str          text;
     const expr_env *env;
     rc_arena       *arena;
+    frame          *frame;     // the running call's parameters and locals; NULL outside a body
     bool            live;      // a call executes its body only when live
     bool            in_body;   // parsing a FUNCTION body, so an error raised here records its origin
 } parser;
@@ -1997,13 +2081,19 @@ static parser body_sub(const parser *p, bool active)
 
 
 // A body assignment name = expr, from just after name (whose start is name_at). A single immutable
-// binding into the current (child) scope when active; when inactive, clear only the binding this statement
-// owns (the dead-branch rule). Returns the cursor after the RHS.
+// binding in the call's frame when active; inactive (a dead branch, the definition scan) it binds
+// nothing. Returns the cursor after the RHS.
 static body_result interpret_assignment(const parser *p, rc_str name, uint32_t pos, bool active, uint32_t name_at)
 {
     lexer_result eq = lexer_next(p->text, pos, assign_only_tokens);
     if (eq.token.type != lexeme_type_assign) {
         return body_fail(p, error_type_expected_assign, pos);
+    }
+
+    // A local is a plain name: a dotted path always means a scope, so it could never be read back.
+    // Checked even inactive, so the definition scan refuses it up front.
+    if (rc_str_find_first(name, RC_STR(".")) != RC_INDEX_NONE) {
+        return body_fail(p, error_type_invalid_assignment, name_at);
     }
 
     parser sp = body_sub(p, active);
@@ -2012,28 +2102,22 @@ static body_result interpret_assignment(const parser *p, rc_str name, uint32_t p
         return body_fail(p, error_type_expression, rhs.error_at);
     }
 
-    rhs.value = place_error(p, rhs.value, eq.next);
-    cursor at = {p->env->source, name_at};
-    if (active) {
-        // Bindings are single-assignment: a second live assignment to the same name in one call
-        // (a parameter included) would otherwise be silently ignored, which reads like mutation
-        // that never happens. Branches are fine - only the live one binds.
-        symbol_status st = scopes_set_symbol(p->env->scopes, p->env->scope_index, name, (symbol) {
-            .v       = rhs.value,
-            .def     = at,
-            .section = p->env->section,
-            .kind    = symbol_kind_assignment,
-        });
-        if (st == symbol_status_duplicate) {
-            body_result dup = body_fail(p, error_type_duplicate_symbol, name_at);
-            dup.error.detail = name;
-            return dup;
-        }
-    }
-    else if (cursor_is_equal(scopes_symbol_def(p->env->scopes, p->env->scope_index, name), at)) {
-        scopes_remove_symbol(p->env->scopes, p->env->scope_index, name);
+    if (!active) {
+        return (body_result) {.next = rhs.next, .saw_statement = true};
     }
 
+    // Bindings are single-assignment: a second live assignment to the same name in one call (a
+    // parameter included) would read like mutation that never happens. Branches are fine - only the
+    // live one binds.
+    RC_ASSERT(p->frame != NULL);   // a live body only ever runs inside a call
+    if (frame_find(p->frame, name) != RC_INDEX_NONE) {
+        body_result dup = body_fail(p, error_type_duplicate_symbol, name_at);
+        dup.error.detail = name;
+        return dup;
+    }
+
+    frame_slot local = {.name = name, .v = place_error(p, rhs.value, eq.next)};
+    rc_array_frame_slot_push(&p->frame->slots, local, p->arena);
     return (body_result) {.next = rhs.next, .saw_statement = true};
 }
 
@@ -2241,8 +2325,8 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
 
 
 // A user-defined FUNCTION call in operand position. call_pos is the token's start in the CALLER source
-// (for the child-scope key), pos is just past the '('. Collects arguments in the caller scope, matches an
-// overload by arity, then interprets the body in a fresh child scope parented on the definition scope.
+// (where a bad argument is reported), pos is just past the '('. Collects arguments in the caller scope,
+// matches an overload by arity, then interprets the body with a fresh frame for its own names.
 static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call_pos, uint32_t pos, bool active)
 {
     rc_array_value args = {0};
@@ -2272,49 +2356,34 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
         return ok(value_make_error(error_type_function_too_deep), after);
     }
 
-    // A per-call child scope, parented on the DEFINITION scope so lookup is LEXICAL (a body sees its
-    // params and the def scope's globals, never the caller's locals), but KEYED on the caller's scope
-    // index + call site: the caller's frame is unique per call chain, so two chains never alias one
-    // frame (keying on site + depth alone did, and corrupted deep recursion). Stable pass-to-pass.
-    // The site is '@' source ':' pos, as for an anonymous block, with the caller frame in parentheses
-    // after it: a bare pos let two files' calls at the same offset share a frame, and '@' scope ':' pos
-    // could spell a macro / block / FOR key ('@' source ':' pos) in the same parent - either way the
-    // second binding of each parameter was a duplicate, and the body read the stale first one.
-    char storage[80];
-    rc_mstr key = {.data = storage, .len = 0, .cap = sizeof storage};
-    rc_mstr_append_char(&key, '@', NULL);
-    rc_mstr_append_u32(&key, p->env->source, NULL);
-    rc_mstr_append_char(&key, ':', NULL);
-    rc_mstr_append_u32(&key, call_pos, NULL);
-    rc_mstr_append_char(&key, '(', NULL);
-    rc_mstr_append_u32(&key, p->env->scope_index, NULL);   // the caller frame - names this call chain
-    rc_mstr_append_char(&key, ')', NULL);
-    uint32_t child = scopes_get_or_make_child(p->env->scopes, sig->def_scope, key.view);
-
-    // An error argument is the caller's doing, never the body's: placed at this call inside a body,
-    // else left for the top-level use site to report.
-    cursor call_at = {p->env->source, call_pos};
+    // A fresh frame per call holds the parameters, and the locals as they bind. Every other name resolves
+    // from the DEFINITION scope, so lookup is lexical: a body sees its own names and the definition's
+    // globals, never the caller's locals. An error argument is the caller's doing, never the body's:
+    // placed at this call inside a body, else left for the top-level use site to report.
+    frame callee = {0};
     for (uint32_t i = 0; i < sig->params.num; i++) {
         value arg = rc_view_value_get(args.view, i);
         if (value_is_error(arg) && arg.error.origin_type == value_origin_type_none) {
             arg.error.origin_type = p->in_body ? value_origin_type_body : value_origin_type_caller;
             arg.error.origin      = (cursor) {p->env->source, lexer_skip_whitespace(p->text, call_pos)};
         }
-        scopes_set_symbol(p->env->scopes, child, rc_view_str_get(sig->params, i), (symbol) {
-            .v       = arg,
-            .def     = call_at,
-            .section = p->env->section,
-            .kind    = symbol_kind_param,
-        });
+        frame_slot param = {.name = rc_view_str_get(sig->params, i), .v = arg};
+        rc_array_frame_slot_push(&callee.slots, param, p->arena);
     }
 
-    // Interpret the body in the child scope, in ITS source (a body may live in a different file than the call).
+    // Interpret the body in ITS source (a body may live in a different file than the call).
     expr_env body_env = *p->env;
-    body_env.scope_index = child;
+    body_env.scope_index = sig->def_scope;
     body_env.source      = sig->body.source;
     body_env.offset      = sig->body.pos;
-    parser body_p = {.text = source_files_text(p->env->sources, sig->body.source), .env = &body_env,
-                     .arena = p->arena, .live = true, .in_body = true};
+    parser body_p = {
+        .text    = source_files_text(p->env->sources, sig->body.source),
+        .env     = &body_env,
+        .arena   = p->arena,
+        .frame   = &callee,
+        .live    = true,
+        .in_body = true,
+    };
 
     if (p->env->call_depth) { (*p->env->call_depth)++; }
     body_result br = interpret_statements(&body_p, sig->body.pos, true);
@@ -2397,7 +2466,11 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
         }
 
         case lexeme_type_identifier: {
-            value v = scopes_get_symbol(p->env->scopes, p->env->scope_index, lex.identifier.name);
+            // A body's own parameters and locals first, then the scopes (from the definition's, in a body)
+            uint32_t local = frame_find(p->frame, lex.identifier.name);
+            value v = local != RC_INDEX_NONE
+                ? rc_array_frame_slot_get(&p->frame->slots, local).v
+                : scopes_get_symbol(p->env->scopes, p->env->scope_index, lex.identifier.name);
 
             // Not found is not a parse error: it becomes an error value that propagates, so a forward
             // reference can resolve on a later pass. This is the one place that still KNOWS the name,
@@ -3155,6 +3228,18 @@ RC_TEST_STEP(expression, ranges_errors, fix)
     // Enumerating a huge range (here by subscripting it) is capped at VALUE_LIST_MAX_LENGTH.
     RC_CHECK_TRUE(value_is_equal(VAL("(0..65535)[0]"), value_make_numeric(0)));   // exactly the cap is fine
     RC_CHECK_TRUE(VAL("(0..65536)[0]").error.code == error_type_list_too_big);        // one past it
+
+    // Endpoints stop at 2^53 (beyond it doubles are not exact integers), so differences between
+    // them can never overflow. Before, these reached int64 arithmetic that did.
+    RC_CHECK_TRUE(value_is_range(VAL("-(2^53)..2^53")));
+    RC_CHECK_TRUE(VAL("-(2^54)..0").error.code == error_type_domain);
+    RC_CHECK_TRUE(VAL("2^63..").error.code == error_type_domain);
+    RC_CHECK_TRUE(VAL("-9000000000000000000..0..9000000000000000000").error.code == error_type_domain);
+
+    // A stepped slice starting far off the axis jumps onto it, keeping its stride (it once stepped
+    // there one index at a time, which never finished).
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3,4}[(-(10^12))..(2-10^12)..3]"), VAL("{1, 3}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("{1,2,3,4}[(10^12+1)..(10^12-1)..0]"), VAL("{4, 2}")));
 }
 
 RC_TEST_STEP(expression, subscript, fix)
@@ -3224,6 +3309,52 @@ RC_TEST_STEP(expression, subscript, fix)
     RC_CHECK_TRUE(RESULT("{1,2,3}[0").error != expr_error_none);   // a missing ']' is a committed error
     RC_CHECK_TRUE(RESULT("{1,2,3}[]").error != expr_error_none);   // an empty '[]' is illegal
     RC_CHECK_TRUE(RESULT("{1,2,3}[0,]").error != expr_error_none); // a trailing comma too
+}
+
+RC_TEST_STEP(expression, contiguous_slice_shares_storage, fix)
+{
+    // Values are immutable, so only the storage can tell a contiguous slice is a view, not a copy
+    value items[] = {value_make_numeric(1), value_make_numeric(2), value_make_numeric(3), value_make_numeric(4)};
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("xs"), (symbol) {.v = value_make_list((rc_view_value) RC_VIEW(items)), .def = (cursor){0, 0}});
+    scopes_set_symbol(&fix->scopes, 0, RC_STR("s"), (symbol) {.v = value_make_string(RC_STR("hello")), .def = (cursor){0, 0}});
+    value xs = scopes_get_symbol(&fix->scopes, 0, RC_STR("xs"));
+    value s  = scopes_get_symbol(&fix->scopes, 0, RC_STR("s"));
+
+    value tail = VAL("xs[1..]");
+    RC_CHECK_TRUE(tail.list.data == xs.list.data + 1);
+    RC_CHECK(tail.list.num, ==, 3u);
+
+    value mid = VAL("xs[1..<3]");
+    RC_CHECK_TRUE(mid.list.data == xs.list.data + 1);
+    RC_CHECK(mid.list.num, ==, 2u);
+
+    value ell = VAL("s[1..3]");
+    RC_CHECK_TRUE(ell.string.data == s.string.data + 1);
+    RC_CHECK(ell.string, ==, RC_STR("ell"));
+
+    // Clipping is unchanged: past either end is forgiving, and a slice that misses comes back empty
+    RC_CHECK(VAL("xs[-2..1]").list.num, ==, 2u);
+    RC_CHECK(VAL("xs[2..99]").list.num, ==, 2u);
+    RC_CHECK(VAL("xs[9..]").list.num, ==, 0u);
+    RC_CHECK(VAL("s[3..1]").string, ==, RC_STR("lle"));   // descending still gathers
+
+    // A slice with selectors left for the elements still builds a fresh list
+    RC_CHECK_TRUE(value_is_equal(VAL("{{1,2},{3,4}}[0..1, 0]"), VAL("{1, 3}")));
+}
+
+RC_TEST_STEP(expression, empty_values_stay_valid, fix)
+{
+    // Every way of making an empty string gives real (empty) storage, so comparing, searching and
+    // formatting it are all fine - and slicing an empty list or string never offsets a NULL pointer.
+    value empty = value_make_string(RC_STR(""));
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR({})"), empty));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"\" + \"\""), empty));
+    RC_CHECK_TRUE(value_is_equal(VAL("REVERSE(\"\")"), empty));
+    RC_CHECK_TRUE(value_is_equal(VAL("\"\"[1..0]"), empty));
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR({}) == \"\""), value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(VAL("CHR({})[0..]"), empty));
+    RC_CHECK(VAL("{}[0..]").list.num, ==, 0u);
+    RC_CHECK_TRUE(value_is_equal(VAL("(5..<5)[0..]"), VAL("{}")));
 }
 
 RC_TEST_STEP(expression, reductions, fix)

@@ -384,7 +384,9 @@ RC_TEST(symdump, groups_every_kind)
     RC_CHECK_TRUE(dump_contains(&f, RC_STR(".i\": {\"value\": 0, \"source\": 0, \"line\": 6}")));
     RC_CHECK_TRUE(dump_contains(&f, RC_STR("\"params\": {\n")));
     RC_CHECK_TRUE(dump_contains(&f, RC_STR(".n\": {\"value\": 6, \"source\": 0, \"line\": 7}")));
-    RC_CHECK_TRUE(dump_contains(&f, RC_STR(".v\": {\"value\": 3, \"source\": 0, \"line\": 7}")));
+
+    // A FUNCTION call's parameters live in a frame of their own, never the symbol table
+    RC_CHECK_FALSE(dump_contains(&f, RC_STR(".v\"")));
 
     dump_fixture_deinit(&f);
 }

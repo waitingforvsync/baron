@@ -929,6 +929,7 @@ away (`IF` for the base case, as with macros). Definition before use, as with ma
 Locals bind **once**, parameters included: there is no mutation in a body, so a second assignment to the
 same name is an error rather than a silent no-op (`x = x + 1` is asking for a loop that does not exist -
 recursion is the loop). Assigning the same name in an `IF` and its `ELSE` is fine; only one arm runs.
+They bind in order, too: a local can be read only once its assignment has run.
 
 An error inside a body is reported on the body line that caused it, followed by a note at the call it
 came from. A bad argument is the caller's mistake, so that one is reported at the call.
@@ -1120,11 +1121,11 @@ Within a section, symbols are grouped by kind:
 | Group | Holds |
 |---|---|
 | `labels` | `.name` and `.@` labels - always addresses |
-| `assignments` | `name = expr`, and the locals of a `FUNCTION` body |
+| `assignments` | `name = expr` |
 | `defines` | `-D` predefines |
 | `za_autos` | `ZA_AUTO` variables - each one's allocated address |
 | `loop_vars` | `FOR` variables, one per iteration |
-| `params` | macro and `FUNCTION` parameters |
+| `params` | macro parameters |
 
 A group with nothing in it is left out. For a label, its section is the one whose bytes it addresses.
 Any other kind just lands in whichever section its line sits in.
@@ -1142,8 +1143,9 @@ Symbols are sorted within their group, one per line, so `grep '"start"' syms.jso
 address and line, and two builds' dumps diff cleanly.
 
 Baron's internals are included too: symbols inside anonymous `{ }` scopes, per-iteration `FOR` frames,
-macro and `FUNCTION` calls, and local labels appear under unspellable `@` keys (`"@0:3:0.i"` is
-iteration 0's `i`). Filter out keys containing `@` if only the names you wrote matter.
+macro calls, and local labels appear under unspellable `@` keys (`"@0:3:0.i"` is iteration 0's
+`i`). Filter out keys containing `@` if only the names you wrote matter. A `FUNCTION` call's
+parameters and locals never appear: they only exist while the call runs.
 
 Like every other output, the file is only written when every file assembled, and `--check` skips the
 write.

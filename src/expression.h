@@ -34,14 +34,13 @@ typedef struct expr_result {
 
 
 // The environment one expression evaluates in: symbol resolution plus the live assembler state an
-// impure value needs - the evaluator never sees baron. scopes is MUTABLE because a user-FUNCTION call
-// interprets its body right here, making a per-call child scope and binding locals (symbols are
-// immutable, so this stays purely functional); everything else is a read-only projection.
+// impure value needs - the evaluator never sees baron. All of it is a read-only projection: a
+// user-FUNCTION call interprets its body right here, but its parameters and locals live in a frame in
+// the evaluation's arena, never in the symbol table.
 typedef struct expr_env {
-    scopes             *scopes;         // MUTABLE: a FUNCTION body binds locals / makes its child scope
+    const scopes       *scopes;         // read-only: a FUNCTION body keeps its locals in a frame of its own
     uint32_t            scope_index;
     uint32_t            pc;             // current program counter, for * / P%
-    uint32_t            section;        // current section, recorded on a FUNCTION body's bindings
     uint32_t            source;         // the reference's source, and...
     uint32_t            offset;         // ...its position, together the use site - for the local labels @- / @+
     token_table         operand_tokens; // dynamic operand (even) table: static base + a token per FUNCTION; {0} = the static base

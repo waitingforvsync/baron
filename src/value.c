@@ -36,7 +36,9 @@ value value_make_bool(bool b)
 
 value value_make_string(rc_str s)
 {
-    return (value) {.type = value_type_string, .string = s};
+    // An empty builder can hand back NULL data, which richc's string checks refuse - point it
+    // at a real (empty) string instead.
+    return (value) {.type = value_type_string, .string = s.data ? s : RC_STR("")};
 }
 
 
@@ -139,9 +141,11 @@ static range_endpoint range_int(value v)
         return (range_endpoint) {.err = value_make_error(error_type_type_mismatch)};
     }
 
+    // Endpoints stop at 2^53, where doubles stop holding every integer. That keeps them far inside
+    // int64, so no difference or step between two of them can overflow anywhere downstream.
     double d = v.numeric;
-    if (floor(d) != d || d < (double)INT64_MIN || d > (double)INT64_MAX) {
-        return (range_endpoint) {.err = value_make_error(error_type_domain)};   // not whole (or out of range / NaN)
+    if (floor(d) != d || fabs(d) > 9007199254740992.0) {
+        return (range_endpoint) {.err = value_make_error(error_type_domain)};   // not whole (or too big / NaN)
     }
 
     return (range_endpoint) {.v = (int64_t)d, .err = value_make_none()};

@@ -203,6 +203,83 @@ cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
 }
 
 
+// Does v hold a ZA_AUTO placeholder anywhere, however deep in lists?
+static bool holds_za_auto(value v)
+{
+    if (value_is_za_auto(v)) {
+        return true;
+    }
+
+    if (value_is_list(v)) {
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            if (holds_za_auto(rc_view_value_get(v.list, i))) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
+// v with each placeholder swapped for its declaration's address plus offset, any list rebuilt in
+// permanent. A declaration that holds no number (an unused variable, removed) keeps its placeholder.
+static value resolve_za_auto(const scopes *s, value v)
+{
+    if (value_is_za_auto(v)) {
+        value_za_auto  z     = v.za_auto;
+        rc_trie_symbol syms  = rc_array_scope_node_get(&s->nodes, z.scope).symbols;
+        uint32_t       found = rc_trie_symbol_find(syms, &s->symbol_pool, z.name);
+        if (found == RC_INDEX_NONE) {
+            return v;
+        }
+
+        symbol decl = rc_trie_symbol_value_get(&s->symbol_pool, found);
+        return cursor_is_equal(decl.def, z.def) && value_is_numeric(decl.v)
+                   ? value_make_numeric(decl.v.numeric + z.offset)
+                   : v;
+    }
+
+    if (!holds_za_auto(v)) {
+        return v;
+    }
+
+    rc_array_value out = rc_array_value_make(v.list.num, s->arena);
+    for (uint32_t i = 0; i < v.list.num; i++) {
+        rc_array_value_push(&out, resolve_za_auto(s, rc_view_value_get(v.list, i)), s->arena);
+    }
+
+    return value_make_list(out.view);
+}
+
+
+// One binding of the walk below: resolved in place when it holds a placeholder.
+static void resolve_za_auto_symbol(scopes *s, rc_trie_symbol_pool *pool, uint32_t i)
+{
+    symbol sym = rc_trie_symbol_value_get(pool, i);
+    if (holds_za_auto(sym.v)) {
+        sym.v = resolve_za_auto(s, sym.v);
+        rc_trie_symbol_value_set(pool, i, sym);
+        s->edits++;
+    }
+}
+
+#define RC_TRIE_FOREACH_TRIE          rc_trie_symbol
+#define RC_TRIE_FOREACH_CTX           scopes
+#define RC_TRIE_FOREACH_FUNC(c, p, i) resolve_za_auto_symbol(c, p, i)
+#define RC_TRIE_FOREACH_NAME          rc_trie_symbol_foreach_resolve
+#include "richc/template/algorithm/hash_trie_foreach.h"
+
+void scopes_resolve_za_auto(scopes *s)
+{
+    RC_ASSERT(s != NULL);
+
+    for (uint32_t n = 0; n < s->nodes.num; n++) {
+        rc_trie_symbol_foreach_resolve(rc_array_scope_node_get(&s->nodes, n).symbols, &s->symbol_pool, s);
+    }
+}
+
+
 scopes_view scopes_view_make(const scopes *s)
 {
     RC_ASSERT(s != NULL);

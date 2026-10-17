@@ -116,6 +116,12 @@ count (`SKIP v`, `ZA_AUTO v, q`), a loop bound (`FOR n = v..8`), a section's `or
 number while Baron is still assembling - before any addresses exist - so Baron refuses them at the
 line: `Cannot use a ZA_AUTO address here: 'v'`.
 
+An address also needs code that touches the variable. Baron works out when a variable's byte is in use
+from the instructions that read and write it, so a variable nothing reads or writes gets no address at
+all - and using its address anyway (`EQUW v`, `LDA #v`, `PRINT v`) is an error at each use:
+`ZA_AUTO address used, but no instruction touches the variable: 'v'`. Storage that is only ever reached
+through a pointer belongs at a fixed address instead.
+
 The only arithmetic a placeholder address supports is adding or subtracting a whole number (that is
 how `ptr+1` works); the only other operator that will touch one is `~`, which formats it for
 `PRINT`. Anything else - multiply, compare, a range - is a type error.
@@ -745,7 +751,8 @@ fall back to a hand-placed address.
 | `ZA_POOL address outside the zero page` | The pool can only contain bytes &00-&FF. |
 | `ZA_AUTO needs a prior ZA_POOL` | A variable with no pool reserved. Add a `ZA_POOL` first. |
 | `ZA_AUTO count must be 1 to 256` | A generic `ZA_AUTO n` with a count outside 1-256. |
-| `Cannot use a ZA_AUTO address here: '...'` | A variable's address used somewhere that needs a real number during assembly - a condition, a count, an `org`, an annotation target. See [The address of a variable](#the-address-of-a-variable). |
+| `Cannot use a ZA_AUTO address here: '...'` | A variable's address used somewhere that needs a real number during assembly - a condition, a count, an `org`, a `ZA_POOL` byte, an annotation target. See [The address of a variable](#the-address-of-a-variable). |
+| `ZA_AUTO address used, but no instruction touches the variable: '...'` | The variable's address appears in data, an immediate, a `PRINT` or a section attribute, but no instruction reads or writes the variable, so Baron cannot tell when it is in use and gives it no address. Touch it in code, or give it a fixed address. |
 | `ZA_AUTO variable cannot be named 'A'` | The accumulator clash. Rename it. |
 | `No free zero-page byte for ZA_AUTO variable: '...'` | More variables needed at once than the pool has bytes. Reserve more, or shorten a lifetime. |
 | `ZA_AUTO variable live across an unanalysable JSR (annotate with ZA_CANCALL)` | A variable held across a call whose destination Baron cannot follow. |
@@ -764,7 +771,7 @@ And six warnings (the default level shows in every run; opt-in ones need `--warn
 | Message | Level | What happened |
 |---------|-------|---------------|
 | `ZA_RETURNTO target does not begin an assembled instruction` | default | The declared resumption point matches no code Baron assembled - usually a mistyped label, or an address inside the inline data. That arm gets no edge; if it genuinely names an OS address, the warning is yours to wave through. |
-| `Unused ZA_AUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition** - referencing it is an error, exactly as if the declaration were not there. Use it or remove it. |
+| `Unused ZA_AUTO variable: '...'` | default | No instruction touches it, so it gets no address and **no definition**, as if the declaration were not there. Use it or remove it. (Using its address anyway is the error above.) |
 | `Unchecked indexed access into ZA_AUTO variable: '...'` | default | An indexed access (`var,X`, `var,Y`, `(var,X)`) - allowed, but the run-time index is yours to keep in range. Declare the index set with `ZA_INDEXEDBY` and the access is checked instead (no warning). |
 | `Store into the ZA_POOL at a fixed address: '...'` | opt-in | A store whose literal address or indexed base lies inside the pool without naming a `ZA_AUTO` - it may be quietly stomping an allocated variable. A deliberate whole-pool wipe is blessed with `ZA_WIPE`. |
 | `ZA_AUTO used in code unreachable from any entry (missing ZA_ENTRY/ZA_INTERRUPT, or dead code)` | default | Nothing can reach this code from any entry. Usually a handler or a BASIC-called routine missing its marker; sometimes dead code; occasionally a routine behind a computed call that wants a `ZA_CANCALL`. |

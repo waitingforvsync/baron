@@ -190,6 +190,29 @@ bool zp_recording(const baron *b, parse_flags flags, uint32_t section)
 }
 
 
+void zp_note_address_use(baron *b, parse_flags flags, uint32_t section, uint32_t scope, cursor def, cursor at)
+{
+    if (zp_recording(b, flags, section)) {
+        zeropage_add_address_use(&b->zeropage, (zp_address_use) {.scope = scope, .def = def, .at = at});
+    }
+}
+
+
+// Every ZA_AUTO address inside a whole value kept or shown as it is (a PRINT, a section attribute),
+// lists included, is a use of that address.
+static void note_address_uses(baron *b, parse_flags flags, uint32_t section, value v, cursor at)
+{
+    if (value_is_za_auto(v)) {
+        zp_note_address_use(b, flags, section, v.za_auto.scope, v.za_auto.def, at);
+    }
+    else if (value_is_list(v)) {
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            note_address_uses(b, flags, section, rc_view_value_get(v.list, i), at);
+        }
+    }
+}
+
+
 // Remember the pass's FIRST binding that would not settle; if we give up on settling, this is the
 // culprit we point at (changes cascade down the file, so the earliest is nearest the root cause).
 static void note_unsettled(baron *b, cursor at, rc_str name, value from, value to)
@@ -657,7 +680,6 @@ expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena
         .scopes         = &b->scopes,
         .scope_index    = scope,
         .pc             = sections_pc(&b->sections, section),
-        .section        = section,
         .source         = at.source,
         .offset         = at.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),   // base + a token per FUNCTION name
@@ -914,6 +936,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         }
         else if (child != RC_INDEX_NONE) {
             sections_add_attribute(&b->sections, child, key.token.identifier.name, e.value, cursor_at(at, comma.next));
+            note_address_uses(b, flags, section, e.value, cursor_at(at, eq.next));   // exec = var, say
             bool is_org     = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("org"));
             bool is_cmos    = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("cmos"));
             bool is_guard   = rc_str_is_equal_insensitive(key.token.identifier.name, RC_STR("guard"));
@@ -1188,8 +1211,10 @@ static parse_result za_pool_add(baron *b, value v, parse_flags flags, cursor at)
     bool unresolved = false;
     value flat = flatten_to_list(v, b->per_pass);
     for (uint32_t i = 0; i < flat.list.num; i++) {
-        // A numeric, a forward reference, or an error (a string leaf lands here as operand_not_numeric).
-        int_argument arg = int_argument_make(rc_view_value_get(flat.list, i), flags.final, at.pos);
+        // A numeric, a forward reference, or an error (a string leaf lands here as operand_not_numeric,
+        // a ZA_AUTO address as za_auto_address - its offset is no byte of the pool).
+        int_argument arg = int_argument_no_za_auto(
+            int_argument_make(rc_view_value_get(flat.list, i), flags.final, at.pos), at.pos);
         if (arg.type == int_argument_type_error) {
             semantic_error_cause(b, flags, arg.error, at, arg.cause);
         }
@@ -1849,6 +1874,9 @@ static parse_result emit_data(baron *b, uint32_t section, value v, parse_flags f
             semantic_error(b, flags, error_type_value_out_of_range, at);
         }
 
+        if (arg.za_auto) {
+            zp_note_address_use(b, flags, section, arg.zp_scope, arg.zp_def, at);
+        }
         emit_le(b, section, (uint64_t) arg.value, width);
     }
 
@@ -2037,8 +2065,11 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
                 semantic_error_cause(b, flags, code, cursor_at(at, pos), e.value.error);
             }
         }
-        else if (print_on(b, flags)) {
-            print_value(b, channel, e.value);
+        else {
+            note_address_uses(b, flags, section, e.value, cursor_at(at, pos));
+            if (print_on(b, flags)) {
+                print_value(b, channel, e.value);
+            }
         }
 
         lexer_result lr = lexer_next(src, e.next, statement_tokens(b));
@@ -2099,11 +2130,13 @@ static parse_result user_error_statement(baron *b, cursor stmt, cursor at, uint3
             }
         }
         else if (record) {
+            // Not scratch: e.value's backing sits in the region eval's copy of scratch claimed, which
+            // ours never did, so building msg there would write over the value as we read it.
             if (value_is_string(e.value)) {
-                rc_mstr_append(&msg, e.value.string, &scratch);
+                rc_mstr_append(&msg, e.value.string, b->per_pass);
             }
             else {
-                value_format(&msg, e.value, &scratch);
+                value_format(&msg, e.value, b->per_pass);
             }
         }
 
@@ -3063,7 +3096,6 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
         .scopes         = &b->scopes,
         .scope_index    = scope,
         .pc             = sections_pc(&b->sections, section),
-        .section        = section,
         .source         = at.source,
         .offset         = body.pos,
         .operand_tokens = functions_operand_tokens(&b->functions),
@@ -3775,11 +3807,36 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     liveness lv = liveness_analyze(g, insns, cflows, zeropage_vars(&b->zeropage), RC_INDEX_NONE,
                                    &work, scratch);
 
-    // A variable no instruction touches: a WARNING, no address, no binding (the rewrite below
-    // removes it). One warning per declaration site - a macro / FOR body's instantiations share one
-    // def cursor, so an unused declaration in a 2000-iteration loop speaks once.
+    // A variable no instruction touches gets no address. Using its address anyway (EQUB var, LDA #var,
+    // PRINT var) is an ERROR at each use: with nothing reading or writing it we cannot tell when its
+    // byte is live, so there is no address we could honestly hand out. One error per use site - a
+    // macro / FOR body's instantiations share their cursors.
+    rc_view_zp_address_use uses = zeropage_address_uses(&b->zeropage);
+    rc_bitset addressed = rc_bitset_make(nv ? nv : 1, &scratch);
+    for (uint32_t i = 0; i < uses.num; i++) {
+        zp_address_use use = rc_view_zp_address_use_get(uses, i);
+        uint32_t v = zeropage_find_var(&b->zeropage, use.scope, use.def);
+        if (v == RC_INDEX_NONE || liveness_class_of(&lv, v) != vreg_class_unused) {
+            continue;
+        }
+        bool already = false;
+        for (uint32_t j = 0; j < i && !already; j++) {
+            zp_address_use prev = rc_view_zp_address_use_get(uses, j);
+            uint32_t pv = zeropage_find_var(&b->zeropage, prev.scope, prev.def);
+            already = cursor_is_equal(prev.at, use.at) && pv != RC_INDEX_NONE
+                   && liveness_class_of(&lv, pv) == vreg_class_unused;
+        }
+        rc_bitset_set(&addressed, v);
+        if (!already) {
+            baron_error_payload(b, error_type_za_auto_address_untouched, use.at, zeropage_var_get(&b->zeropage, v).name);
+            refused = true;
+        }
+    }
+
+    // Otherwise it is a WARNING, and the rewrite below removes its binding. One warning per declaration
+    // site - an unused declaration in a 2000-iteration loop speaks once.
     for (uint32_t v = 0; v < nv; v++) {
-        if (liveness_class_of(&lv, v) != vreg_class_unused) {
+        if (liveness_class_of(&lv, v) != vreg_class_unused || rc_bitset_is_set(&addressed, v)) {
             continue;
         }
         zp_var var = zeropage_var_get(&b->zeropage, v);
@@ -4213,6 +4270,9 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
                     });
                 }
             }
+
+            // Aliases too (ptrs = {v1, v2}): the output pass can read one before its assignment re-runs.
+            scopes_resolve_za_auto(&b->scopes);
         }
     }
 }
@@ -5409,6 +5469,8 @@ RC_TEST_STEP(assemble, za_pool_errors, fix)
     RC_CHECK_TRUE(ERR("ZA_POOL &FE..&102") == error_type_reserve_not_zeropage);
     // A non-numeric operand is not an address.
     RC_CHECK_TRUE(ERR("ZA_POOL \"hi\"")    == error_type_operand_not_numeric);
+    // A ZA_AUTO address is no pool byte (it once reserved &00 - its offset - and allocated into it).
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 u : LDA u : RTS : ZA_POOL u") == error_type_za_auto_address);
 }
 
 RC_TEST_STEP(assemble, za_auto_declares_scoped_var, fix)
@@ -5715,6 +5777,28 @@ RC_TEST_STEP(assemble, za_auto_alias_attributes, fix)
     RC_CHECK_TRUE(q != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(code_is(&fix->r, q, (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x60}, 7));
+}
+
+RC_TEST_STEP(assemble, za_auto_forward_alias_gets_real_address, fix)
+{
+    // Aliases read BEFORE their assignments: the output pass meets each one ahead of its re-binding, so
+    // every alias must already hold real addresses by then - scalars, offsets and lists of them alike.
+    // (Before, all of these emitted the placeholder's offset: STA alias was 85 00, and exit was 0.)
+    uint32_t passes = ASM("ZA_POOL &70..&7F\n"
+                          "STA v1 : STA alias : LDA hi : LDA v1 : RTS\n"
+                          "EQUB ptrs, nested\n"
+                          "PRINT ptrs\n"
+                          "ZA_AUTO1 v1\n"
+                          "ZA_AUTO2 v2\n"
+                          "ptrs = {v1, v2}\n"
+                          "alias = v2\n"
+                          "hi = v2 + 1\n"
+                          "nested = {{v1}, {v2, hi}}");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x72, 0x85, 0x70, 0xA5, 0x71, 0xA5, 0x72, 0x60,
+                                                         0x72, 0x70, 0x72, 0x70, 0x71}, 14));
+    RC_CHECK_TRUE(rc_str_is_equal(fix->r.channels[0], RC_STR("{114, 112}\n")));
 }
 
 RC_TEST_STEP(assemble, za_auto_print_allocated_address, fix)
@@ -6980,6 +7064,33 @@ RC_TEST_STEP(assemble, za_auto_unused_is_warned_and_undefined, fix)
     RC_CHECK(warnings, ==, 1u);
 }
 
+RC_TEST_STEP(assemble, za_auto_address_without_a_touch_is_an_error, fix)
+{
+    // A variable no instruction reads or writes gets no address, so using its address (data, an
+    // immediate, PRINT, an attribute, an alias of it) is an error at the use - liveness has nothing
+    // to go on. (Before, each shipped the placeholder 00 with just the unused warning, exit 0.)
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 u : LDA #u : RTS") == error_type_za_auto_address_untouched);
+    RC_CHECK(diag_payload(&fix->r, error_type_za_auto_address_untouched), ==, RC_STR("u"));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_za_auto_unused));   // the error says it all
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 u : RTS : EQUB u") == error_type_za_auto_address_untouched);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : RTS : EQUW x : ZA_AUTO1 u : x = u") == error_type_za_auto_address_untouched);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 u : RTS : PRINT {1, u}") == error_type_za_auto_address_untouched);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 u\n"
+                      "SECTION S, org=&2000, exec=u : RTS : ENDSECTION") == error_type_za_auto_address_untouched);
+
+    // One error per use site: a FOR body's iterations share it, while two sites are two errors.
+    RC_CHECK(ASM("ZA_POOL &70..&7F : ZA_AUTO1 u : FOR i = 1..4 : EQUB u : NEXT : RTS"), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_address_untouched), ==, 1u);
+    RC_CHECK(ASM("ZA_POOL &70..&7F : ZA_AUTO1 u : RTS : EQUB u : EQUB u"), ==, 0u);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_address_untouched), ==, 2u);
+
+    // Alongside a real touch, the address is fine: the variable is allocated and every use gets it.
+    uint32_t passes = ASM("ZA_POOL &70..&7F : ZA_AUTO1 u : LDA u : LDA #u : RTS : EQUB u");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0xA5, 0x70, 0xA9, 0x70, 0x60, 0x70}, 6));
+}
+
 RC_TEST_STEP(assemble, za_auto_external_calls_and_jumps, fix)
 {
     // A CONSTANT destination matching nothing we assembled leaves the program: an empty footprint,
@@ -8145,6 +8256,13 @@ RC_TEST_STEP(assemble, error_statement, fix)
     // A forward reference in the message defers like PRINT's and formats once settled.
     RC_CHECK(ASM("ERROR \"at \", target\nSKIP 5\n.target"), ==, 0u);
     RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("at 5"));
+
+    // Values built during evaluation (an escaped string, a list) must survive the message being built
+    // beside them - and a FUNCTION hands its arguments back uncopied, so f(x) = x is one of those too.
+    RC_CHECK(ASM("FUNCTION f(x) = x\n"
+                 "ERROR f(\"say \"\"hi\"\" there\"), f({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20})"), ==, 0u);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==,
+             RC_STR("say \"hi\" there{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}"));
 
     // A dead branch records nothing; a bare ERROR fires with an empty message.
     RC_CHECK_TRUE(ASM("IF FALSE\nERROR \"no\"\nENDIF\nRTS") != 0);
@@ -9529,6 +9647,28 @@ RC_TEST_STEP(assemble, function_error_value, fix)
     RC_CHECK_TRUE(ERR(CHECKED_FN "EQUB checked(0-3)") == error_type_user_error);
     RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("bad width: -3"));
     #undef CHECKED_FN
+}
+
+RC_TEST_STEP(assemble, function_calls_leave_no_scopes, fix)
+{
+    // A call keeps its parameters and locals in a frame of its own, so recursing over a list (forty
+    // calls deep, each passing the rest of the list on) adds nothing to the symbol table: only the
+    // root scope remains.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION rsum(l)\nIF LEN(l) == 0\nr = 0\nELSE\nr = l[0] + rsum(l[1..])\nENDIF\n= r\n"
+        "EQUW rsum(0..<40)"), (uint8_t[]) {0x0C, 0x03}, 2));
+    RC_CHECK(fix->r.scopes.nodes.num, ==, 1u);
+}
+
+RC_TEST_STEP(assemble, function_locals_are_plain_names_bound_in_order, fix)
+{
+    // A local is read only after its assignment runs. (The old frames in the symbol table outlived
+    // the pass, so this used to work from the second pass on, reading last pass's y.)
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nx = y + n\ny = 1\n= x\nEQUB f(1)") == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("y"));
+
+    // A dotted name always means a scope, so as a local it could never be read back
+    RC_CHECK_TRUE(ERR("FUNCTION g(n)\na.b = n\n= n\nEQUB g(7)") == error_type_invalid_assignment);
 }
 
 RC_TEST_STEP(assemble, function_duplicate_local, fix)
