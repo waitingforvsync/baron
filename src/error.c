@@ -84,8 +84,10 @@ rc_str error_type_name(error_type e)
         case error_type_duplicate_symbol:        return RC_STR("Duplicate symbol: '%'");
         case error_type_original_definition:     return RC_STR("Note: First defined here: '%'");
         case error_type_duplicate_section:       return RC_STR("Duplicate section: '%'");
-        case error_type_virtual_reopen_attribute: return RC_STR("Reopened virtual section takes no attributes: '%'");
+        case error_type_section_still_open:      return RC_STR("Section is still open: '%'");
+        case error_type_reopen_attribute:        return RC_STR("Reopened section takes no attributes: '%'");
         case error_type_virtual_filename:        return RC_STR("Virtual section cannot be saved: '%'");
+        case error_type_virtual_needs_org:       return RC_STR("Virtual section inside a real one needs its own org: '%'");
         case error_type_not_iterable:            return RC_STR("FOR needs a list or a range");
         case error_type_expected_filename:       return RC_STR("Expected a filename string");
         case error_type_include_too_deep:        return RC_STR("INCLUDE nested too deeply");

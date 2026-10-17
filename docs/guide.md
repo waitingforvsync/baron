@@ -228,24 +228,34 @@ ENDSECTION
   `&0000xxxx` on the second processor. `org`, `load`, `exec` and `guard` all take the whole value -
   `load` and `exec` carry it through to the catalogue, while the assembly address and the guard
   check use the 6502's low 16 bits.
-- Sections nest, and nesting means *containment*: a child's bytes land inline in its parent, right
-  where the child is written, and the parent's address advances past them at `ENDSECTION`. A child
+- Sections nest, and nesting means *containment*: a child's bytes are copied into its parent, right
+  where the child is written, and the parent's address moves past them at `ENDSECTION`. A child
   with no `org` of its own simply continues the enclosing address; a child with an explicit `org` is
-  *rephased* - its labels resolve at the runtime address it names while its bytes stay put in the
+  *rephased* - its labels resolve at the runtime address it names while its bytes still land in the
   parent (see the relocation workflow below).
 - Attributes are never inherited: they stay on the `SECTION` line they are written on. A nested
   section that wants `cmos = TRUE` or a `guard` says so itself.
 - `cmos = TRUE` enables the 65C02 instruction set for the section: `PHX`, `STZ`, `BRA`, `LDA (zp)`
   and friends. Everywhere else is plain NMOS 6502, and a CMOS instruction there says so: `CMOS-only
   instruction (needs cmos=TRUE on the section)`.
-- Section names don't clash with symbol/label names, but must be unique - except that a
-  [virtual section](#virtual-sections) can be reopened.
+- Section names don't clash with symbol/label names, and each names one section. Writing a name again
+  [reopens](#reopening-sections) that section, where that is possible.
 - Two sections may sit at the *same* address - sideways banks, swap-in overlays - without complaint;
   each keeps its own instruction pointer.
 
 Code outside any section lands in a nameless default section starting at address 0. That is fine for
 scratch and experiments, but it can never be saved - anything you want out of the assembler needs a named
 section with a filename.
+
+A section written at the top level stands alone: it takes no room in the default section, whose
+address only follows its own bytes. So `.here` below is 0, not 2:
+
+```
+SECTION a, org = &2000
+    EQUB 1, 2
+ENDSECTION
+.here
+```
 
 Relocation workflow is achieved with nested sections. Nest the code at its *runtime* address inside the loadable
 section, and it is carried inside the file while its labels point where it will run; a label after
@@ -275,14 +285,66 @@ Labels around the child live in the loader's address space (`payload` is where t
 file's memory image, `entry - payload` their length), while labels inside it live in the child's
 (`start` = `&400`) - which is exactly what the stub needs on each side of the copy.
 
+### Reopening sections ###
+
+Writing `SECTION name` again for a section that has already closed writes another piece of it. The
+piece carries on exactly where the last one stopped, and its bytes join the end of the section's -
+wherever the piece happens to be written. They belong to the section being reopened, not to whatever
+encloses the reopening.
+
+That lets each routine keep its data right beside it, while the data still comes out as one file:
+
+```
+SECTION tables, org = &5000, filename = "TABLES"
+ENDSECTION
+
+SECTION code, org = &1900, filename = "CODE"
+.draw
+{
+    SECTION tables
+    .sintab EQUB 0, 25, 49, 71, 90, 106, 117, 125
+    ENDSECTION
+
+    LDA sintab,X
+    RTS
+}
+
+.plot
+{
+    SECTION tables
+    .masks  EQUB &80, &40, &20, &10, &08, &04, &02, &01
+    ENDSECTION
+
+    LDA masks,X
+    RTS
+}
+ENDSECTION
+```
+
+`draw.sintab` lands at `&5000` and `plot.masks` at `&5008`. `TABLES` holds all sixteen bytes and
+`CODE` only the code.
+
+The rules:
+
+- A reopening takes no attributes, not even an `org`: the section was described once, on its first
+  `SECTION` line, and every later piece keeps that `guard`, `cmos` and so on. Write that first line
+  before any reopening. If you want code at a different address, that is what a nested section with
+  its own `org` is for.
+- The `guard` is checked as each piece closes, so an overrun is reported at the piece that crossed it.
+- A section can't be reopened from inside itself - not even from inside one of its own children.
+- A section that took room in its parent can't be reopened: its bytes are already in the parent, and
+  the parent has moved on past them, so a second piece would have nowhere to go. That rules out most
+  nested sections. Top-level sections can always be reopened, and so can the nested sections that
+  take no room (see the virtual sections below).
+- Since any top-level name can be reopened, a bare `SECTION Code` written twice simply joins up with
+  the first. A second `SECTION Code, org = &1900, ...` is refused, because it has attributes.
+
 ### Virtual sections ###
 
 `virtual = TRUE` makes a section that hands out addresses but keeps no bytes. Everything in it -
-`SKIP`, `EQUB`, even instructions - moves its address on and lands nowhere, and the section takes no
-room in whatever encloses it.
+`SKIP`, `EQUB`, even instructions - moves its address on and lands nowhere.
 
-That makes it a pool of workspace. Unlike any other section, a virtual one can be opened again by
-name, carrying on from where it stopped. So each routine can claim its variables right where it
+That makes it a pool of workspace, and reopening lets each routine claim its variables right where it
 uses them:
 
 ```
@@ -320,20 +382,41 @@ reachable from outside by its dotted path like any other scoped name.
 
 The rules:
 
-- Attributes belong on the first `SECTION` line; a reopening takes none. Write that first line
-  before any reopening: the other way round, the early one makes an ordinary section and the
-  declaration becomes a duplicate.
-- `guard` is the pool's limit. It is checked as each piece closes, so an overrun is reported at the
-  piece that crossed it.
 - A virtual section has nothing to save, so a `filename` on it is an error.
-- A section nested inside a virtual one keeps no bytes either, but otherwise behaves as usual: it
-  continues the enclosing address and is stepped past at its `ENDSECTION`. A virtual section opened
-  inside another is a separate pool, so it never moves the outer one on.
+- Inside a real section, a virtual one takes no room at all - so it needs an `org` of its own.
+  Carrying on from the parent's address would put its labels on top of the parent's next bytes, so
+  that is an error. With its own `org` it can be declared right inside the code that uses it, and
+  still reopened.
 - Code in a virtual section never runs, so the [zero-page allocator](#zero-page-allocation) ignores
   it.
 
 The same idea gives plain zero-page bytes when you want them never shared (`org = &70, guard =
 &90`), and with `org = 0` it lays out the field offsets of a structure.
+
+### Memory maps ###
+
+Inside a virtual section, the sections without an `org` of their own are laid end to end. A real
+section in there keeps its own bytes, and can be saved; the virtual parent just steps past them. So
+separately saved files can follow one another in memory without chaining each `org` to the end of
+the last:
+
+```
+SECTION memmap, org = &1900, virtual = TRUE
+    SECTION code, filename = "CODE"
+        ; ... the program ...          ; at &1900
+    ENDSECTION
+    SECTION data, filename = "DATA"
+        ; ... the tables ...           ; straight after the code
+    ENDSECTION
+.free                                  ; the first unused byte
+ENDSECTION
+```
+
+A virtual section inside the map without an `org` reserves its room in the same way - a group of
+buffers, say. One with its own `org` is placed elsewhere and takes no room in the map, and that is
+what lets it be reopened later. The same goes for a real section with its own `org`.
+
+The code in `code` and `data` is real, so the zero-page allocator analyses it like any other.
 
 ## Includes ##
 
@@ -964,7 +1047,7 @@ Its dump looks like this:
       "sources": ["main.6502", "zp.6502"],
       "sections": [
         {
-          "parent": null, "size": 4,
+          "parent": null, "size": 0,
           "assignments": {
             "ptr": {"value": 112, "source": 1, "line": 1},
             "width": {"value": 32, "source": 0, "line": 3}
@@ -1013,11 +1096,13 @@ source of its own, named after its switch - `-D DEBUG=1`.
 ### Sections ###
 
 `sections` lists every section in the order it opened. Entry 0 is the file's default section, which
-holds everything outside a `SECTION`: it has no name and no parent, and its `size` counts every byte
-the file assembled.
+holds everything outside a `SECTION`: it has no name and no parent, and its `size` counts only the
+bytes written outside every section - none, above.
 
 A nested section's bytes are part of its parent's, so a parent's `size` includes its children - `game`
-above is 4 bytes, `handler`'s `RTI` among them.
+above is 4 bytes, `handler`'s `RTI` among them. A top-level section's `parent` is 0, the default it
+was written in, though none of its bytes land there. A reopened section appears once, with its
+`parent` taken from where it was first written and a `size` covering every piece.
 
 `attributes` holds the attributes exactly as the `SECTION` line wrote them, in order. A section with
 no attributes leaves it out.

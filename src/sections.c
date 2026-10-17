@@ -5,9 +5,9 @@
 
 
 enum {
-    sections_nodes_reserve  = 64,        // 64 ROM banks / sections is a very large project
-    sections_stream_reserve = 0x10000,   // 64 KB: the hard 6502 ceiling, so the stream rarely grows within a pass
-    section_attrs_reserve   = 4,         // a handful of attributes per section is typical
+    sections_nodes_reserve = 64,    // 64 ROM banks / sections is a very large project
+    section_code_floor     = 256,   // the first pass's opening buffer, before there is a size to go on
+    section_attrs_reserve  = 4,     // a handful of attributes per section is typical
 };
 
 
@@ -17,11 +17,10 @@ void sections_init(sections *sec, rc_arena *per_pass, rc_arena *permanent)
 {
     RC_ASSERT(sec != NULL && per_pass != NULL && permanent != NULL);
 
-    // The stream and node list stay empty here: sections_reset builds them at the top of each pass.
-    // The emission fingerprints are lazily made and deliberately survive the per-pass resets.
+    // The node list stays empty here: sections_reset builds it at the top of each pass. The emission
+    // fingerprints are lazily made and deliberately survive the per-pass resets.
     sec->arena     = per_pass;
     sec->permanent = permanent;
-    sec->stream    = (rc_array_bytes) {0};
     sec->nodes     = (rc_array_section) {0};
     sec->emissions = (rc_view_section_emission) {0};
 }
@@ -31,10 +30,9 @@ void sections_reset(sections *sec)
 {
     RC_ASSERT(sec != NULL);
 
-    // A fresh stream, and the default section at index 0: an empty window at its start
-    sec->stream = rc_array_bytes_make(sections_stream_reserve, sec->arena);
-    sec->nodes  = rc_array_section_make(sections_nodes_reserve, sec->arena);
-    rc_array_section_push(&sec->nodes, (section) {.parent = RC_INDEX_NONE}, sec->arena);
+    // Just the default section at index 0, which is open for the whole pass
+    sec->nodes = rc_array_section_make(sections_nodes_reserve, sec->arena);
+    rc_array_section_push(&sec->nodes, (section) {.parent = RC_INDEX_NONE, .is_open = true}, sec->arena);
 }
 
 
@@ -50,9 +48,7 @@ uint32_t sections_pc(const sections *sec, uint32_t id)
 rc_view_bytes sections_code(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
-
-    section s = rc_array_section_get(&sec->nodes, id);
-    return rc_view_bytes_get_subview(sec->stream.view, s.begin, s.end);
+    return rc_array_section_get(&sec->nodes, id).code.view;
 }
 
 
@@ -115,10 +111,35 @@ bool sections_is_virtual(const sections *sec, uint32_t id)
 }
 
 
-bool sections_discards(const sections *sec, uint32_t id)
+bool sections_has_org(const sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL);
-    return rc_array_section_get(&sec->nodes, id).discards;
+
+    // The key alone decides, resolved or not, so the answer is the same on every pass
+    rc_view_attribute attrs = sections_attributes(sec, id);
+    for (uint32_t i = 0; i < attrs.num; i++) {
+        if (rc_str_is_equal_insensitive(rc_view_attribute_get(attrs, i).key, RC_STR("org"))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+bool sections_is_open(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+    return rc_array_section_get(&sec->nodes, id).is_open;
+}
+
+
+bool sections_can_reopen(const sections *sec, uint32_t id)
+{
+    RC_ASSERT(sec != NULL);
+
+    section s = rc_array_section_get(&sec->nodes, id);
+    return s.reopenable && !s.is_open;
 }
 
 
@@ -133,18 +154,15 @@ uint32_t sections_make(sections *sec, rc_str name, uint32_t parent)
         return RC_INDEX_NONE;
     }
 
-    // Discarding by containment, not inheritance: a child's bytes land in its parent, which drops them.
     // The pc is copied whole, not through sections_org's 16-bit mask: a parent filled right to &10000
-    // must not hand its child address 0.
+    // must not hand its child address 0. The code buffer waits for the first byte (see make_room).
     return rc_array_section_push(
         &sec->nodes,
         (section) {
-            .name     = name,
-            .parent   = parent,
-            .pc       = sections_pc(sec, parent),
-            .discards = sections_discards(sec, parent),
-            .begin    = sec->stream.num,
-            .end      = sec->stream.num,
+            .name    = name,
+            .parent  = parent,
+            .pc      = sections_pc(sec, parent),
+            .is_open = true,
         },
         sec->arena);
 }
@@ -157,7 +175,7 @@ void sections_add_attribute(sections *sec, uint32_t id, rc_str key, value v, cur
     section *s = rc_array_section_at(&sec->nodes, id);
     value copy = value_make_copy(v, sec->arena);   // durable backing in the (per-pass) manager arena
 
-    // Upsert: a key already present (inherited from a parent, most often) is replaced in place
+    // Upsert: a key repeated on one SECTION line is replaced in place, last wins
     for (uint32_t i = 0; i < s->attributes.num; i++) {
         if (rc_str_is_equal(rc_array_attribute_get(&s->attributes, i).key, key)) {
             *rc_array_attribute_at(&s->attributes, i) = (attribute) {
@@ -212,15 +230,11 @@ void sections_set_guard(sections *sec, uint32_t id, uint32_t addr)
 void sections_set_virtual(sections *sec, uint32_t id, bool is_virtual)
 {
     RC_ASSERT(sec != NULL && id != sections_default);
-
-    // virtual = FALSE cannot rescue a section from a discarding parent: its bytes would still be dropped
-    section *s = rc_array_section_at(&sec->nodes, id);
-    s->is_virtual = is_virtual;
-    s->discards   = is_virtual || sections_discards(sec, s->parent);
+    rc_array_section_at(&sec->nodes, id)->is_virtual = is_virtual;
 }
 
 
-// Count bytes placed in s, noticing the one that first lands past &FFFF (the subtraction cannot
+// Move s's pc on by count, noticing the step that first goes past &FFFF (the subtraction cannot
 // underflow on that side of the test, nor the addition wrap on a huge count).
 static void advance(section *s, uint32_t count)
 {
@@ -232,16 +246,31 @@ static void advance(section *s, uint32_t count)
 }
 
 
+// Make sure section id's buffer exists before its first n bytes land. It opens at last pass's final
+// size (the fingerprints remember it), so once the layout has settled a buffer is allocated exactly
+// once and never moves - sections growing side by side in one arena would otherwise keep relocating
+// past each other. After that, ordinary doubling growth takes over.
+static void make_room(sections *sec, section *s, uint32_t id, uint32_t n)
+{
+    if (s->code.data != NULL) {
+        return;
+    }
+
+    uint32_t hint = id < sec->emissions.num ? rc_view_section_emission_get(sec->emissions, id).size : 0;
+    uint32_t cap  = hint > section_code_floor ? hint : section_code_floor;
+    s->code = rc_array_bytes_make(cap > n ? cap : n, sec->arena);
+}
+
+
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b)
 {
     RC_ASSERT(sec != NULL);
 
-    // Emission only ever happens in the innermost open section, so its window tail IS the stream tail.
-    // A discarding section keeps its window empty: the byte only claims its address.
+    // A virtual section keeps nothing: the byte only claims its address
     section *s = rc_array_section_at(&sec->nodes, id);
-    if (!s->discards) {
-        rc_array_bytes_push(&sec->stream, b, sec->arena);
-        s->end = sec->stream.num;
+    if (!s->is_virtual) {
+        make_room(sec, s, id, 1);
+        rc_array_bytes_push(&s->code, b, sec->arena);
     }
     advance(s, 1);
 }
@@ -259,9 +288,9 @@ void sections_skip(sections *sec, uint32_t id, uint32_t count)
     RC_ASSERT(sec != NULL);
 
     section *s = rc_array_section_at(&sec->nodes, id);
-    if (!s->discards) {
-        rc_array_bytes_push_n_zero(&sec->stream, count, sec->arena);
-        s->end = sec->stream.num;
+    if (!s->is_virtual) {
+        make_room(sec, s, id, count);
+        rc_array_bytes_push_n_zero(&s->code, count, sec->arena);
     }
     advance(s, count);
 }
@@ -271,9 +300,9 @@ void sections_set_u8(sections *sec, uint32_t id, uint32_t offset, uint8_t b)
 {
     RC_ASSERT(sec != NULL);
 
-    section s = rc_array_section_get(&sec->nodes, id);
-    RC_ASSERT(!s.discards && offset < s.end - s.begin);
-    rc_array_bytes_set(&sec->stream, s.begin + offset, b);
+    section *s = rc_array_section_at(&sec->nodes, id);
+    RC_ASSERT(!s->is_virtual);
+    rc_array_bytes_set(&s->code, offset, b);
 }
 
 
@@ -288,36 +317,39 @@ bool sections_take_overrun(sections *sec, uint32_t id)
 }
 
 
-void sections_close(sections *sec, uint32_t id)
+void sections_reopen(sections *sec, uint32_t id)
 {
-    RC_ASSERT(sec != NULL && id != sections_default);
-
-    // A virtual child is a pool of its own, taking no room in its parent (and a reopened one's recorded
-    // parent need not even enclose it)
-    section c = rc_array_section_get(&sec->nodes, id);
-    if (c.is_virtual) {
-        return;
-    }
-
-    // The child's window is contiguous and sits at the parent's tail, so absorbing it is just
-    // bookkeeping: extend the window, advance the pc by the child's size. A discarding child still
-    // takes its room; it just has no window to hand over.
-    section *p = rc_array_section_at(&sec->nodes, c.parent);
-    if (!c.discards) {
-        p->end = c.end;
-    }
-    p->size += c.size;
-    p->pc   += c.size;
+    RC_ASSERT(sec != NULL && sections_can_reopen(sec, id));
+    rc_array_section_at(&sec->nodes, id)->is_open = true;
 }
 
 
-void sections_seal(sections *sec)
+void sections_close(sections *sec, uint32_t id)
 {
-    RC_ASSERT(sec != NULL);
+    RC_ASSERT(sec != NULL && id != sections_default && sections_is_open(sec, id));
 
-    for (uint32_t i = 0; i < sec->nodes.num; i++) {
-        section *s = rc_array_section_at(&sec->nodes, i);
-        s->code = rc_view_bytes_get_subview(sec->stream.view, s->begin, s->end);
+    section *c = rc_array_section_at(&sec->nodes, id);
+    c->is_open = false;
+
+    // The cases that leave the parent alone (see the header's table), which is what makes a section safe
+    // to write again: there is no room in the parent for a later piece to have to fit into.
+    bool own_org = sections_has_org(sec, id);
+    section *p   = rc_array_section_at(&sec->nodes, c->parent);
+    if (c->parent == sections_default || (p->is_virtual ? own_org : c->is_virtual)) {
+        c->reopenable = true;
+        return;
+    }
+
+    // A child that continued our addresses already reported going past &FFFF itself; one with its own
+    // org only shows up here, as our pc moves past its bytes
+    bool overrun = p->overrun;
+    advance(p, c->size);
+    if (!own_org) {
+        p->overrun = overrun;
+    }
+    if (!p->is_virtual && c->code.num != 0) {
+        make_room(sec, p, c->parent, c->code.num);
+        rc_array_bytes_append(&p->code, c->code.view, sec->arena);
     }
 }
 
@@ -348,8 +380,8 @@ bool sections_emission_changed(sections *sec)
     bool changed = !first && sec->emissions.num != sec->nodes.num;
 
     // Compare each section's fingerprint against last time's while rebuilding the noted set for next
-    // time. Windows overlap (a parent's covers its children's), so a child's shift also fingerprints
-    // through its ancestors - redundant, but only ever MORE eager, and index order is pass-stable.
+    // time. A parent's bytes include its children's copies, so a child's shift also fingerprints through
+    // its ancestors - redundant, but only ever MORE eager, and index order is pass-stable.
     rc_array_section_emission next = rc_array_section_emission_make(sec->nodes.num, sec->permanent);
     for (uint32_t i = 0; i < sec->nodes.num; i++) {
         section_emission e = {
@@ -403,7 +435,6 @@ section section_make_copy(section s, rc_arena *arena)
         }
     }
 
-    // The copied window is normalized to its own bytes: begin/end are meaningless without the stream
     return (section) {
         .name       = str_make_copy(s.name, arena),
         .parent     = s.parent,
@@ -411,12 +442,12 @@ section section_make_copy(section s, rc_arena *arena)
         .size       = s.size,
         .cmos       = s.cmos,
         .is_virtual = s.is_virtual,
-        .discards   = s.discards,
         .is_guarded = s.is_guarded,
+        .is_open    = s.is_open,
+        .reopenable = s.reopenable,
+        .overrun    = s.overrun,
         .guard      = s.guard,
-        .begin      = 0,
-        .end        = s.code.num,
-        .code       = rc_array_bytes_make_copy(s.code, 0, arena).view,
+        .code       = rc_array_bytes_make_copy(s.code.view, 0, arena),
         .attributes = attributes,
     };
 }
@@ -425,6 +456,13 @@ section section_make_copy(section s, rc_arena *arena)
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
+
+// An org as handle_section writes one: the attribute (which makes it the section's own) and the pc
+static void test_org(sections *sec, uint32_t id, uint32_t addr)
+{
+    sections_add_attribute(sec, id, RC_STR("org"), value_make_numeric(addr), cursor_none());
+    sections_org(sec, id, addr);
+}
 
 RC_TEST(sections, emission_changed_tracks_content)
 {
@@ -506,15 +544,15 @@ RC_TEST(sections, emit_org_reset)
     rc_arena_deinit(&arena);
 }
 
-RC_TEST(sections, set_u8_overwrites_in_window)
+RC_TEST(sections, set_u8_overwrites_own_bytes)
 {
     rc_arena arena = rc_arena_make_default();
     sections sec;
     sections_init(&sec, &arena, &arena);
     sections_reset(&sec);
 
-    // The offset counts from the section's own window, not the stream: a child opened after two
-    // bytes of its parent overwrites its own first byte, and neither pc moves.
+    // The offset counts from the section's own bytes: a child opened after two bytes of its parent
+    // overwrites its own first byte, and neither pc moves.
     sections_emit_u16(&sec, 0, 0x1111);
     uint32_t child = sections_make(&sec, RC_STR("child"), 0);
     sections_emit_u8(&sec, child, 0x00);
@@ -577,13 +615,13 @@ RC_TEST(sections, close_folds_child_into_parent)
     sections_reset(&sec);
 
     // Parent at &2000 emits one byte, then a child rephased to &400 emits two, then the parent one
-    // more: closing folds the child's window and size into the parent, so the parent's code carries
-    // all four bytes in order and its pc advanced through the child's.
+    // more: closing copies the child's bytes onto the parent's, so the parent's code carries all four
+    // in order and its pc moved past the child's.
     uint32_t parent = sections_make(&sec, RC_STR("outer"), sections_default);
-    sections_org(&sec, parent, 0x2000);
+    test_org(&sec, parent, 0x2000);
     sections_emit_u8(&sec, parent, 0x01);
     uint32_t child = sections_make(&sec, RC_STR("inner"), parent);
-    sections_org(&sec, child, 0x400);
+    test_org(&sec, child, 0x400);
     sections_emit_u8(&sec, child, 0x02);
     sections_emit_u8(&sec, child, 0x03);
     sections_close(&sec, child);
@@ -600,9 +638,131 @@ RC_TEST(sections, close_folds_child_into_parent)
     RC_CHECK((uint32_t) rc_view_bytes_get(sections_code(&sec, parent), 1), ==, 0x02u);
     RC_CHECK((uint32_t) rc_view_bytes_get(sections_code(&sec, parent), 3), ==, 0x04u);
 
-    // The default is the root: its window covers the whole stream, its pc advanced with everything
-    RC_CHECK(sections_pc(&sec, sections_default), ==, 4u);
-    RC_CHECK(sections_code(&sec, sections_default).num, ==, 4u);
+    // The nested child took room in its parent, so it can never be written again; the top-level parent
+    // stood alone - the default holds none of it - and can
+    RC_CHECK_FALSE(sections_can_reopen(&sec, child));
+    RC_CHECK_TRUE(sections_can_reopen(&sec, parent));
+    RC_CHECK(sections_pc(&sec, sections_default), ==, 0u);
+    RC_CHECK(sections_code(&sec, sections_default).num, ==, 0u);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, close_rules_for_virtual_sections)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+    sections_reset(&sec);
+
+    // A virtual child of a real parent (with the org it needs) keeps nothing and leaves the parent alone
+    uint32_t code = sections_make(&sec, RC_STR("code"), sections_default);
+    test_org(&sec, code, 0x2000);
+    sections_emit_u8(&sec, code, 0x01);
+    uint32_t ws = sections_make(&sec, RC_STR("ws"), code);
+    sections_set_virtual(&sec, ws, true);
+    test_org(&sec, ws, 0x400);
+    sections_emit_u16(&sec, ws, 0x1234);
+    sections_skip(&sec, ws, 3);
+    sections_close(&sec, ws);
+    RC_CHECK(sections_pc(&sec, ws), ==, 0x405u);
+    RC_CHECK(sections_code(&sec, ws).num, ==, 0u);
+    RC_CHECK(sections_pc(&sec, code), ==, 0x2001u);
+    RC_CHECK_TRUE(sections_can_reopen(&sec, ws));
+
+    // A virtual parent is a memory map: a real child continuing its addresses keeps its own bytes, and
+    // the map moves past them without keeping any
+    uint32_t map = sections_make(&sec, RC_STR("map"), sections_default);
+    sections_set_virtual(&sec, map, true);
+    test_org(&sec, map, 0x1900);
+    uint32_t file = sections_make(&sec, RC_STR("file"), map);
+    sections_emit_u8(&sec, file, 0xEA);
+    sections_emit_u8(&sec, file, 0x60);
+    sections_close(&sec, file);
+    RC_CHECK(sections_code(&sec, file).num, ==, 2u);
+    RC_CHECK(sections_code(&sec, map).num, ==, 0u);
+    RC_CHECK(sections_pc(&sec, map), ==, 0x1902u);
+    RC_CHECK_FALSE(sections_can_reopen(&sec, file));
+
+    // So does a virtual child continuing its addresses (a group within the map)...
+    uint32_t group = sections_make(&sec, RC_STR("group"), map);
+    sections_set_virtual(&sec, group, true);
+    sections_skip(&sec, group, 0x10);
+    sections_close(&sec, group);
+    RC_CHECK(sections_pc(&sec, map), ==, 0x1912u);
+    RC_CHECK_FALSE(sections_can_reopen(&sec, group));
+
+    // ...but a child with an org of its own, real or virtual, is placed elsewhere and takes no room
+    uint32_t zp = sections_make(&sec, RC_STR("zp"), map);
+    sections_set_virtual(&sec, zp, true);
+    test_org(&sec, zp, 0x70);
+    sections_skip(&sec, zp, 2);
+    sections_close(&sec, zp);
+    uint32_t far = sections_make(&sec, RC_STR("far"), map);
+    test_org(&sec, far, 0x8000);
+    sections_emit_u8(&sec, far, 0x42);
+    sections_close(&sec, far);
+    RC_CHECK(sections_pc(&sec, map), ==, 0x1912u);
+    RC_CHECK(sections_code(&sec, far).num, ==, 1u);
+    RC_CHECK_TRUE(sections_can_reopen(&sec, zp));
+    RC_CHECK_TRUE(sections_can_reopen(&sec, far));
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, reopen_carries_on)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+    sections_reset(&sec);
+
+    // A section cannot be reopened while it is open; once closed, a second piece joins the first
+    uint32_t a = sections_make(&sec, RC_STR("a"), sections_default);
+    test_org(&sec, a, 0x3000);
+    RC_CHECK_TRUE(sections_is_open(&sec, a));
+    RC_CHECK_FALSE(sections_can_reopen(&sec, a));
+    sections_emit_u8(&sec, a, 0x01);
+    sections_close(&sec, a);
+    RC_CHECK_FALSE(sections_is_open(&sec, a));
+
+    sections_emit_u8(&sec, sections_default, 0xFF);   // written between the pieces, and not part of a
+    sections_reopen(&sec, a);
+    RC_CHECK_TRUE(sections_is_open(&sec, a));
+    sections_emit_u8(&sec, a, 0x02);
+    sections_close(&sec, a);
+
+    RC_CHECK(sections_pc(&sec, a), ==, 0x3002u);
+    RC_CHECK(sections_code(&sec, a).num, ==, 2u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(sections_code(&sec, a), 1), ==, 0x02u);
+    RC_CHECK(sections_code(&sec, sections_default).num, ==, 1u);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(sections, buffers_open_at_last_pass_size)
+{
+    rc_arena arena = rc_arena_make_default();
+    sections sec;
+    sections_init(&sec, &arena, &arena);
+
+    // Pass 1 has nothing to go on, so a big section grows its way there
+    sections_reset(&sec);
+    uint32_t big = sections_make(&sec, RC_STR("big"), sections_default);
+    sections_skip(&sec, big, 5000);
+    sections_emission_changed(&sec);
+
+    // Pass 2 opens the buffer at that size on the first byte, so it never has to move
+    sections_reset(&sec);
+    big = sections_make(&sec, RC_STR("big"), sections_default);
+    sections_emit_u8(&sec, big, 0xEA);
+    RC_CHECK(rc_array_section_get(&sec.nodes, big).code.cap, >=, 5000u);
+
+    // A section that keeps nothing never allocates at all
+    uint32_t ws = sections_make(&sec, RC_STR("ws"), sections_default);
+    sections_set_virtual(&sec, ws, true);
+    sections_skip(&sec, ws, 100);
+    RC_CHECK_TRUE(rc_array_section_get(&sec.nodes, ws).code.data == NULL);
 
     rc_arena_deinit(&arena);
 }
@@ -631,95 +791,26 @@ RC_TEST(sections, overrun_fires_once)
     sections_emit_u8(&sec, b, 0x78);
     RC_CHECK_FALSE(sections_take_overrun(&sec, b));
 
-    // A rephased child's fold pushes its parent's pc past the top without counting as the parent's own
-    // overrun; only the parent's own emission (from below the top) would.
+    // A child with its own org fits its own addresses, but closing it pushes the parent past the top:
+    // that crossing is the parent's to report
     uint32_t c = sections_make(&sec, RC_STR("c"), sections_default);
-    sections_org(&sec, c, 0xFF00);
+    test_org(&sec, c, 0xFF00);
     uint32_t d = sections_make(&sec, RC_STR("d"), c);
-    sections_org(&sec, d, 0x1000);
+    test_org(&sec, d, 0x1000);
     sections_skip(&sec, d, 0x200);
     sections_close(&sec, d);
     RC_CHECK(sections_pc(&sec, c), ==, 0x10100u);
     RC_CHECK_FALSE(sections_take_overrun(&sec, d));
-    RC_CHECK_FALSE(sections_take_overrun(&sec, c));
+    RC_CHECK_TRUE(sections_take_overrun(&sec, c));
 
-    rc_arena_deinit(&arena);
-}
-
-RC_TEST(sections, virtual_moves_pc_only)
-{
-    rc_arena arena = rc_arena_make_default();
-    sections sec;
-    sections_init(&sec, &arena, &arena);
-    sections_reset(&sec);
-
-    // A virtual child's bytes and skips advance its pc and nothing else: the stream stays put, and
-    // closing it leaves the parent's window and pc exactly as they were.
-    uint32_t parent = sections_make(&sec, RC_STR("code"), sections_default);
-    sections_org(&sec, parent, 0x2000);
-    sections_emit_u8(&sec, parent, 0x01);
-    uint32_t ws = sections_make(&sec, RC_STR("ws"), parent);
-    sections_set_virtual(&sec, ws, true);
-    sections_org(&sec, ws, 0x400);
-    sections_emit_u16(&sec, ws, 0x1234);
-    sections_skip(&sec, ws, 3);
-
-    // A grandchild discards by containment, and asking otherwise cannot change that - but not being
-    // virtual itself, it still takes its room in ws, like any nested section
-    uint32_t inner = sections_make(&sec, RC_STR("inner"), ws);
-    RC_CHECK_TRUE(sections_discards(&sec, inner));
-    sections_set_virtual(&sec, inner, false);
-    RC_CHECK_TRUE(sections_discards(&sec, inner));
-    RC_CHECK_FALSE(sections_is_virtual(&sec, inner));
-    sections_emit_u8(&sec, inner, 0x09);
-    sections_close(&sec, inner);
-    RC_CHECK(sections_pc(&sec, ws), ==, 0x406u);
-
-    // A second virtual pool inside ws takes no room there: its addresses are its own
-    uint32_t zp = sections_make(&sec, RC_STR("zp"), ws);
-    sections_set_virtual(&sec, zp, true);
-    sections_org(&sec, zp, 0x70);
-    sections_skip(&sec, zp, 2);
-    sections_close(&sec, zp);
-    sections_close(&sec, ws);
-
-    sections_emit_u8(&sec, parent, 0x02);
-    sections_close(&sec, parent);
-
-    RC_CHECK_FALSE(sections_discards(&sec, parent));
-    RC_CHECK(sections_pc(&sec, ws), ==, 0x406u);
-    RC_CHECK(sections_pc(&sec, zp), ==, 0x72u);
-    RC_CHECK(sections_code(&sec, ws).num, ==, 0u);
-    RC_CHECK(sections_code(&sec, inner).num, ==, 0u);
-    RC_CHECK(sections_pc(&sec, parent), ==, 0x2002u);
-    RC_CHECK(sections_code(&sec, parent).num, ==, 2u);
-    RC_CHECK(sec.stream.num, ==, 2u);
-
-    rc_arena_deinit(&arena);
-}
-
-RC_TEST(sections, seal_slices_the_stream)
-{
-    rc_arena arena = rc_arena_make_default();
-    sections sec;
-    sections_init(&sec, &arena, &arena);
-    sections_reset(&sec);
-
-    sections_emit_u8(&sec, sections_default, 0xEA);
-    uint32_t id = sections_make(&sec, RC_STR("code"), sections_default);
-    sections_emit_u8(&sec, id, 0xA9);
-    sections_emit_u8(&sec, id, 0x2A);
-    sections_close(&sec, id);
-    sections_seal(&sec);
-
-    // The sealed views are slices of one stream: the named window inside the default's
-    section root = rc_array_section_get(&sec.nodes, sections_default);
-    section code = rc_array_section_get(&sec.nodes, id);
-    RC_CHECK(root.code.num, ==, 3u);
-    RC_CHECK(code.code.num, ==, 2u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(root.code, 0), ==, 0xEAu);
-    RC_CHECK((uint32_t) rc_view_bytes_get(code.code, 0), ==, 0xA9u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(code.code, 1), ==, 0x2Au);
+    // A child continuing the parent's addresses reports its own crossing, so its close stays quiet
+    uint32_t e = sections_make(&sec, RC_STR("e"), sections_default);
+    test_org(&sec, e, 0xFFFF);
+    uint32_t f = sections_make(&sec, RC_STR("f"), e);
+    sections_skip(&sec, f, 2);
+    RC_CHECK_TRUE(sections_take_overrun(&sec, f));
+    sections_close(&sec, f);
+    RC_CHECK_FALSE(sections_take_overrun(&sec, e));
 
     rc_arena_deinit(&arena);
 }
@@ -743,7 +834,6 @@ RC_TEST(sections, make_copy_owns_its_backing)
     sections_emit_u8(&sec, id, 0xA9);
     sections_emit_u8(&sec, id, 0x2A);
     sections_add_attribute(&sec, id, key, value_make_string(file), cursor_none());
-    sections_seal(&sec);
 
     section copy = section_make_copy(rc_array_section_get(&sec.nodes, id), &kept);
 
@@ -755,8 +845,8 @@ RC_TEST(sections, make_copy_owns_its_backing)
     RC_CHECK(copy.parent, ==, (uint32_t) sections_default);
     RC_CHECK(copy.pc, ==, 0x1902u);
     RC_CHECK(copy.code.num, ==, 2u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 0), ==, 0xA9u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 1), ==, 0x2Au);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code.view, 0), ==, 0xA9u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code.view, 1), ==, 0x2Au);
     RC_CHECK(copy.attributes.num, ==, 1u);
     RC_CHECK(rc_array_attribute_get(&copy.attributes, 0).key, ==, RC_STR("filename"));
     RC_CHECK_TRUE(value_is_equal(rc_array_attribute_get(&copy.attributes, 0).v, value_make_string(RC_STR("game.bin"))));

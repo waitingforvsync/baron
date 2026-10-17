@@ -121,7 +121,7 @@ output_spec_result output_spec_make(rc_view_section sections, rc_str title, uint
                 .filename = filename,
                 .load     = load,
                 .exec     = exec,
-                .code     = s.code,
+                .code     = s.code.view,
             },
             arena);
     }
@@ -209,7 +209,6 @@ RC_TEST(output, spec_from_sections)
     sections_org(&sec, d, 0x2000);
     sections_emit_u8(&sec, d, 0x0D);
 
-    sections_seal(&sec);
     output_spec_result r = output_spec_make(sections_all(&sec), RC_STR("T"), 3, 42, &arena);
     RC_CHECK(r.error.len, ==, 0u);
     RC_CHECK(r.spec.title, ==, RC_STR("T"));
@@ -241,7 +240,6 @@ RC_TEST(output, spec_rejects_bad_attributes)
 
     uint32_t a = sections_make(&sec, RC_STR("code"), sections_default);
     sections_add_attribute(&sec, a, RC_STR("filename"), value_make_numeric(7), cursor_none());
-    sections_seal(&sec);
     output_spec_result r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
     RC_CHECK_TRUE(r.error.len != 0);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("code")));

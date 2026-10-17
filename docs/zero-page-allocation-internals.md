@@ -129,7 +129,8 @@ analysable, colourable program gets real addresses.
 
 Only the final pass records anything - earlier passes exist to let the layout settle. Nothing is
 recorded from a virtual section either: its code is assembled for its addresses but never stored,
-so it never runs. The IR (`src/zeropage.c`, filled by `record_insn` in `src/opcodes.c`) is four flat
+so it never runs. Only the innermost section counts - a real section nested inside a virtual one
+keeps its bytes, so its code is recorded like any other. The IR (`src/zeropage.c`, filled by `record_insn` in `src/opcodes.c`) is four flat
 arrays:
 
 - `zp_var` - one per declaration: name, owning scope, width (1-256), and its **def cursor** (the source
@@ -256,6 +257,12 @@ CPU will really do.
 Two paged banks may both sit at `&8000`, so a block's identity is the pair `(section, pc)`, never
 the address alone. Within one section the pc only ever moves forward (asserted in debug builds), so
 the pair is unambiguous.
+
+That holds for a reopened section too. A reopening takes no `org`, so each piece carries on from the
+address the last one stopped at, and its bytes follow the last piece's in the output. The pieces'
+records interleave with other sections' in the stream, but within the section the addresses still
+climb, and code running off the end of one piece falls through into the next - the same edge the
+CFG wires for any fall-through, because it is resolved by `(section, pc)`, not by stream order.
 
 ### A JSR is not an edge ###
 
@@ -959,9 +966,9 @@ Deliberate limitations, all soundness-safe or documented trust points:
   their sites in one bank until sites carry a section.
 - **The reserved set is global.** One physical zero page, one pool.
 - **Fall-through never crosses a section boundary.** A transfer's fall-through resolves in its own
-  section. Runtime flow that walks off the end of one section into the code textually after it is
-  an expressible shape now (a nested section with no `org` continues its parent's addresses), but
-  it is an edge the CFG does not wire - and a missed edge can hide a callee's uses, the unsound
+  section (which, for a reopened section, reaches its next piece). Runtime flow that walks off the
+  end of one section into the code textually after it is an expressible shape now (a nested section
+  with no `org` continues its parent's addresses), but it is an edge the CFG does not wire - and a missed edge can hide a callee's uses, the unsound
   direction. End a section's straight-line flow with a real transfer (`JMP`/`RTS`), or treat a
   deliberate fall-through across `SECTION`/`ENDSECTION` as a trust point for now.
 - **Re-entrant interruption is outside the model.** A handler preempted by *itself* (or an unmarked

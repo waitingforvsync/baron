@@ -186,7 +186,7 @@ void semantic_warning(baron *b, parse_flags flags, error_type code, cursor at, u
 bool zp_recording(const baron *b, parse_flags flags, uint32_t section)
 {
     return flags.final && flags.active && zeropage_is_enabled(&b->zeropage)
-        && !sections_discards(&b->sections, section);
+        && !sections_is_virtual(&b->sections, section);
 }
 
 
@@ -840,12 +840,13 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
-// SECTION name, key = expr, ... / ENDSECTION - a uniquely-named window of the emission stream, folded
-// into its enclosing section at ENDSECTION. With no org of its own a section continues the enclosing
-// address; an explicit org rephases (labels resolve at the runtime address while the bytes stay put -
-// the relocation workflow). The assembler consumes the org, cmos and guard attributes and stores the
-// whole bag for the output stage; attributes are never inherited, and a SECTION does NOT open a
-// naming scope.
+// SECTION name, key = expr, ... / ENDSECTION - a uniquely-named section owning its own bytes; at
+// ENDSECTION a nested section's bytes are copied onto its parent's (sections_close has the rules). With
+// no org of its own a section continues the enclosing address; an explicit org rephases (labels resolve
+// at the runtime address while the bytes land in the parent - the relocation workflow). The assembler
+// consumes the org, cmos, guard and virtual attributes and stores the whole bag for the output stage;
+// attributes are never inherited, and a SECTION does NOT open a naming scope. Naming a section that
+// may be reopened writes another piece of it, carrying on where the last one stopped.
 static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
     rc_str src = source_files_text(&b->source_files, at.source);
@@ -857,23 +858,29 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     }
 
     // Create the section (only when live); the child is threaded to the body's parse_block. Naming a
-    // virtual section again reopens it, carrying on where its pc stopped.
+    // closed section that may be reopened writes another piece of it, wherever this SECTION sits. One
+    // still open is refused: its parent has not taken its bytes yet, so a second piece would land on
+    // the same addresses as the rest of the first.
     rc_str   name     = nm.token.identifier.name;
     uint32_t child    = RC_INDEX_NONE;
     bool     reopened = false;
     if (flags.active) {
         uint32_t existing = sections_find(&b->sections, name);
-        reopened = existing != RC_INDEX_NONE && sections_is_virtual(&b->sections, existing);
-        if (reopened) {
-            child = existing;
+        if (existing != RC_INDEX_NONE) {
+            if (sections_is_open(&b->sections, existing)) {
+                return syntax_error_payload(b, error_type_section_still_open, cursor_at(at, at.pos), name);
+            }
+            if (!sections_can_reopen(&b->sections, existing)) {
+                return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos), name);
+            }
+            sections_reopen(&b->sections, existing);
+            child    = existing;
+            reopened = true;
         }
         else {
             // The child continues the enclosing section's address unless an explicit org below
             // rephases; cmos and guard keep sections_make's defaults - nothing is inherited.
             child = sections_make(&b->sections, name, section);
-            if (child == RC_INDEX_NONE) {
-                return syntax_error_payload(b, error_type_duplicate_section, cursor_at(at, at.pos), name);
-            }
         }
     }
 
@@ -903,7 +910,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
 
         if (reopened) {
             // A reopening only continues: the section was described once, on its first SECTION line
-            semantic_error_payload(b, flags, error_type_virtual_reopen_attribute, cursor_at(at, comma.next), name);
+            semantic_error_payload(b, flags, error_type_reopen_attribute, cursor_at(at, comma.next), name);
         }
         else if (child != RC_INDEX_NONE) {
             sections_add_attribute(&b->sections, child, key.token.identifier.name, e.value, cursor_at(at, comma.next));
@@ -942,15 +949,21 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         pos = e.next;
     }
 
-    // A virtual section has no bytes to save, so a filename on it (or anywhere inside one) can only be
-    // a mistake. The check waits for the whole line: virtual may come after the filename.
-    if (child != RC_INDEX_NONE && !reopened && sections_discards(&b->sections, child)) {
+    // A virtual section has no bytes to save, so a filename on it can only be a mistake. Nor can a
+    // virtual section inside a real one just carry on from the parent's address: it reserves nothing
+    // there, so its labels would land on the parent's next bytes. Both checks wait for the whole line:
+    // virtual may come after the filename or the org.
+    if (child != RC_INDEX_NONE && !reopened && sections_is_virtual(&b->sections, child)) {
         rc_view_attribute attrs = sections_attributes(&b->sections, child);
         for (uint32_t i = 0; i < attrs.num; i++) {
             attribute a = rc_view_attribute_get(attrs, i);
             if (rc_str_is_equal(a.key, RC_STR("filename"))) {
                 semantic_error_payload(b, flags, error_type_virtual_filename, a.at, name);
             }
+        }
+        if (section != sections_default && !sections_is_virtual(&b->sections, section)
+            && !sections_has_org(&b->sections, child)) {
+            semantic_error_payload(b, flags, error_type_virtual_needs_org, stmt, name);
         }
     }
 
@@ -979,9 +992,9 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
     lexer_result cl = lexer_next(src, body.next, statement_tokens(b));
     if (cl.token.type == lexeme_type_closer && cl.token.closer.id == closer_endsection) {
         if (child != RC_INDEX_NONE) {
-            // The guard check, once the section is complete: pc past the guard means the guarded
-            // address was written - by this block only if it placed anything (a reopened virtual
-            // section may already be past it). Recoverable.
+            // The guard check, once this piece is complete: pc past the guard means the guarded
+            // address was written - by this piece only if it placed anything (a reopened section may
+            // already be past it). Recoverable.
             uint32_t pc = sections_pc(&b->sections, child);
             if (sections_is_guarded(&b->sections, child) && pc > sections_guard(&b->sections, child) && pc > pc_open) {
                 char storage[16];
@@ -997,8 +1010,8 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
                 rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
             }
 
-            // Fold the child into its enclosing section: the parent's window absorbs the bytes and
-            // its pc advances by the child's size, all the way up to the default section.
+            // Settle the child with its parent: a nested section's bytes are copied up and the
+            // parent's pc moves past them; a top-level one stands alone.
             sections_close(&b->sections, child);
         }
         body.next = cl.next;
@@ -1098,7 +1111,7 @@ static parse_result parse_basic_line(baron *b, cursor line, uint32_t scope, uint
         if (length > basic_max_record) {
             semantic_error(b, flags, error_type_basic_line_too_long, line);
         }
-        if (!sections_discards(&b->sections, section)) {
+        if (!sections_is_virtual(&b->sections, section)) {
             sections_set_u8(&b->sections, section, code0 + 3, (uint8_t) length);
             verbose_set_byte(b, flags, listed, 3, (uint8_t) length);
         }
@@ -3516,10 +3529,6 @@ static parse_result run_pass(baron *b, uint32_t source, parse_flags flags, rc_ar
     ));
 
     if (!r.fatal) {
-        // Seal the section windows: the stream has stopped growing, so the code views hold. The
-        // result's sections come from whichever pass ran last - every pass seals.
-        sections_seal(&b->sections);
-
         // Convergence hardening: emission that shifted with no symbol moving still owes another
         // pass. Settling passes only - final and output differ legitimately (INCBIN, ZA_AUTO).
         if (!flags.final && !flags.output) {
@@ -4351,7 +4360,7 @@ rc_view_bytes baron_result_code(const baron_result *r)
         return (rc_view_bytes) {0};
     }
 
-    return rc_view_section_get(r->sections, sections_default).code;
+    return rc_view_section_get(r->sections, sections_default).code.view;
 }
 
 
@@ -4443,7 +4452,7 @@ static bool code_in_is(const baron_result *r, uint32_t passes, uint32_t index, c
     if (passes == 0 || index >= r->sections.num) {
         return false;
     }
-    rc_view_bytes code = rc_view_section_get(r->sections, index).code;
+    rc_view_bytes code = rc_view_section_get(r->sections, index).code.view;
     if (code.num != n) {
         return false;
     }
@@ -4712,25 +4721,28 @@ RC_TEST_STEP(assemble, skip_advances_pc, fix)
 
 RC_TEST_STEP(assemble, section_selects_and_creates, fix)
 {
-    // A SECTION block emits into a named window of the one emission stream; ENDSECTION folds it into
-    // the enclosing section, so the default (index 0, the root) covers everything emitted.
+    // A SECTION block emits into a named section of its own. A top-level one stands alone: the default
+    // (index 0) holds only what is written outside every section.
     RC_CHECK_TRUE(ASM("SECTION code : LDA #&11 : LDX #&22 : ENDSECTION") != 0);
     RC_CHECK(fix->r.sections.num, ==, 2u);   // default + "code"
     section def  = rc_view_section_get(fix->r.sections, 0);
     section code = rc_view_section_get(fix->r.sections, 1);
-    RC_CHECK(def.code.num, ==, 4u);          // the root window covers the whole stream
+    RC_CHECK(def.code.num, ==, 0u);          // nothing written outside the section
     RC_CHECK(code.code.num, ==, 4u);         // LDA #, LDX # -> 4 bytes
     RC_CHECK_TRUE(rc_str_is_equal(code.name, RC_STR("code")));
 }
 
 RC_TEST_STEP(assemble, section_names_are_unique, fix)
 {
-    // Distinct sections are distinct windows, each covering its own bytes; a repeated name is refused.
+    // Distinct sections each keep their own bytes. A nested section took room in its parent, so its
+    // name can never be written again (a top-level one reopens instead - see section_reopens).
     RC_CHECK_TRUE(ASM("SECTION a : EQUB 1 : ENDSECTION : SECTION b : EQUB 2 : ENDSECTION") != 0);
     RC_CHECK(fix->r.sections.num, ==, 3u);   // default + a + b
     RC_CHECK(rc_view_section_get(fix->r.sections, 1).code.num, ==, 1u);   // a got one byte
     RC_CHECK(rc_view_section_get(fix->r.sections, 2).code.num, ==, 1u);   // b got one
-    RC_CHECK_TRUE(ERR("SECTION a : ENDSECTION : SECTION a : ENDSECTION") == error_type_duplicate_section);
+    RC_CHECK_TRUE(ERR("SECTION o\nSECTION a\nENDSECTION\nENDSECTION\nSECTION a\nENDSECTION") == error_type_duplicate_section);
+    RC_CHECK(diag_payload(&fix->r, error_type_duplicate_section), ==, RC_STR("a"));
+    RC_CHECK_TRUE(ERR("SECTION o\nSECTION a\nENDSECTION\nSECTION a\nENDSECTION\nENDSECTION") == error_type_duplicate_section);
 }
 
 RC_TEST_STEP(assemble, section_org_attribute, fix)
@@ -4745,10 +4757,12 @@ RC_TEST_STEP(assemble, section_org_attribute, fix)
 RC_TEST_STEP(assemble, section_pc_continues_and_folds, fix)
 {
     // A section with no org of its own CONTINUES the enclosing section's address. a runs at &2000 and
-    // folds its byte into the default (root) section, so sibling b picks up at the root's pc, 1.
-    RC_CHECK_TRUE(ASM("SECTION a, org=&2000 : .x EQUB 0 : ENDSECTION : SECTION b : .y EQUB 0 : ENDSECTION") != 0);
+    // stands alone, so the default's address follows only its own bytes: sibling b starts at 0, and
+    // so does a label after both.
+    RC_CHECK_TRUE(ASM("SECTION a, org=&2000 : .x EQUB 0 : ENDSECTION : SECTION b : .y EQUB 0 : ENDSECTION : .z") != 0);
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x0001)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x0000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("z")), value_make_numeric(0x0000)));
 
     // A NESTED section with no org is transparent: p continues past o, and the parent's pc advances
     // through the child's bytes at ENDSECTION, so q follows p's two bytes.
@@ -4853,7 +4867,7 @@ static bool section_code_is(const baron_result *r, rc_str name, const uint8_t *e
         return false;
     }
     for (uint32_t i = 0; i < num; i++) {
-        if (rc_view_bytes_get(s.code, i) != expect[i]) {
+        if (rc_view_bytes_get(s.code.view, i) != expect[i]) {
             return false;
         }
     }
@@ -4880,16 +4894,16 @@ RC_TEST_STEP(assemble, section_32bit_host_addresses, fix)
 
 RC_TEST_STEP(assemble, section_nesting_propagates_bytes, fix)
 {
-    // A child's bytes land inline in its parent's stream, in statement order, whatever the child's
-    // org says: the parent carries everything, the child covers just its own emission, and the
-    // default (root) section aggregates the lot.
+    // A child's bytes are copied onto its parent's at ENDSECTION, in statement order, whatever the
+    // child's org says: the parent carries everything, the child keeps just its own emission, and the
+    // default holds nothing - outer stands alone.
     RC_CHECK_TRUE(ASM("SECTION outer, org=&2000\nEQUB 1\n"
                       "SECTION inner, org=&400\nEQUB 2,3\nENDSECTION\n"
                       "EQUB 4\nENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("outer"), (uint8_t[]) {1, 2, 3, 4}, 4));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("inner"), (uint8_t[]) {2, 3}, 2));
-    RC_CHECK(baron_result_code(&fix->r).num, ==, 4u);
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 0u);
     RC_CHECK(result_section(&fix->r, RC_STR("outer")).pc, ==, 0x2004u);   // advanced through the child
     RC_CHECK(result_section(&fix->r, RC_STR("inner")).pc, ==, 0x0402u);   // its own runtime space
 }
@@ -4950,14 +4964,14 @@ RC_TEST_STEP(assemble, section_nesting_converges, fix)
 
 RC_TEST_STEP(assemble, section_virtual_emits_nothing, fix)
 {
-    // Everything in a virtual section claims its addresses and lands nowhere: the parent neither
-    // carries the bytes nor moves past them. A child inside drops its bytes too, even when it asks
-    // not to - they would only land in a parent that drops them - but takes its room like any
-    // nested section. A second virtual pool inside is the exception: its addresses are its own.
+    // Everything in a virtual section claims its addresses and lands nowhere, and inside a real parent
+    // it takes no room there either. A real section inside it keeps its own bytes (they stop at the
+    // virtual parent, which moves past them); a second virtual pool with its own org has addresses of
+    // its own and moves nothing.
     RC_CHECK_TRUE(ASM("SECTION code, org=&2000\nEQUB 1\n"
                       "SECTION ws, org=&400, virtual=TRUE\n"
                       ".v1 SKIP 3\n.v2 EQUW 0\nLDA #1\n"
-                      "SECTION inner, virtual=FALSE\n.v3 EQUB 9\nENDSECTION\n"
+                      "SECTION inner\n.v3 EQUB 9\nENDSECTION\n"
                       "SECTION zp, org=&70, virtual=TRUE\n.p SKIP 2\nENDSECTION\n"
                       ".v4\nENDSECTION\n"
                       ".after EQUB 2\nENDSECTION") != 0);
@@ -4970,8 +4984,8 @@ RC_TEST_STEP(assemble, section_virtual_emits_nothing, fix)
     RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("after")), value_make_numeric(0x2001)));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"), (uint8_t[]) {1, 2}, 2));
     RC_CHECK(result_section(&fix->r, RC_STR("ws")).code.num, ==, 0u);
-    RC_CHECK(result_section(&fix->r, RC_STR("inner")).code.num, ==, 0u);
-    RC_CHECK(baron_result_code(&fix->r).num, ==, 2u);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("inner"), (uint8_t[]) {9}, 1));
+    RC_CHECK(baron_result_code(&fix->r).num, ==, 0u);
 }
 
 RC_TEST_STEP(assemble, section_virtual_reopens, fix)
@@ -4989,37 +5003,209 @@ RC_TEST_STEP(assemble, section_virtual_reopens, fix)
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("main"), (uint8_t[]) {0xBD, 0x00, 0x04, 0xAD, 0x0A, 0x04}, 6));
     RC_CHECK(result_section(&fix->r, RC_STR("ws")).pc, ==, 0x40Cu);
 
-    // Reopening is for virtual sections only: an ordinary one keeps its unique name, and a reopening
-    // written before the declaration makes an ordinary section, so the declaration is the duplicate.
-    RC_CHECK_TRUE(ERR("SECTION ws\nENDSECTION\nSECTION ws, virtual=TRUE\nENDSECTION") == error_type_duplicate_section);
+    // The pool may just as well be declared inside the code that uses it: with an org of its own it
+    // takes no room there, so it can still be written again
+    RC_CHECK_TRUE(ASM("SECTION main, org=&8000\n"
+                      "SECTION ws, org=&400, virtual=TRUE\nENDSECTION\n"
+                      "SECTION ws\n.foo SKIP 1\nENDSECTION\n"
+                      "SECTION ws\n.bar SKIP 1\nENDSECTION\n"
+                      "LDA bar\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("bar")), value_make_numeric(0x401)));
 
-    // Only the pool itself reopens: a section merely nested inside one keeps its unique name.
+    // But a section that took room in its parent - here a real one inside the pool, carrying on from
+    // its addresses - keeps its unique name: a second piece would have nowhere to go
     RC_CHECK_TRUE(ERR("SECTION ws, virtual=TRUE\nSECTION inner\nENDSECTION\nENDSECTION\nSECTION inner\nENDSECTION")
                   == error_type_duplicate_section);
 }
 
 RC_TEST_STEP(assemble, section_virtual_errors, fix)
 {
-    // A reopening only continues: attributes belong on the first SECTION line.
-    RC_CHECK_TRUE(ERR("SECTION ws, org=&400, virtual=TRUE\nENDSECTION\nSECTION ws, org=&500\nENDSECTION")
-                  == error_type_virtual_reopen_attribute);
-    RC_CHECK(diag_payload(&fix->r, error_type_virtual_reopen_attribute), ==, RC_STR("ws"));
-
-    // There is nothing to save, whichever order the attributes come in, and inside a virtual section.
+    // There is nothing to save, whichever order the attributes come in.
     RC_CHECK_TRUE(ERR("SECTION ws, filename=\"WS\", virtual=TRUE\nENDSECTION") == error_type_virtual_filename);
     RC_CHECK(diag_payload(&fix->r, error_type_virtual_filename), ==, RC_STR("ws"));
-    RC_CHECK_TRUE(ERR("SECTION ws, virtual=TRUE\nSECTION inner, filename=\"IN\"\nENDSECTION\nENDSECTION")
-                  == error_type_virtual_filename);
-    RC_CHECK(diag_payload(&fix->r, error_type_virtual_filename), ==, RC_STR("inner"));
 
-    // The guard is the pool's limit, checked per fragment: the fragment that crosses it reports,
-    // and a later one that places nothing does not repeat it.
+    // A real section inside one keeps its bytes, though, so it may be saved
+    RC_CHECK_TRUE(ASM("SECTION ws, virtual=TRUE\nSECTION inner, filename=\"IN\"\nEQUB 1\nENDSECTION\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("inner"), (uint8_t[]) {1}, 1));
+
+    // A virtual section inside a real one reserves nothing there, so carrying on from the parent's
+    // address would put its labels on the parent's next bytes: it needs an org of its own. Top level
+    // and inside another virtual section, carrying on is fine.
+    RC_CHECK_TRUE(ERR("SECTION code, org=&2000\nSECTION ws, virtual=TRUE\n.v SKIP 2\nENDSECTION\nNOP\nENDSECTION")
+                  == error_type_virtual_needs_org);
+    RC_CHECK(diag_payload(&fix->r, error_type_virtual_needs_org), ==, RC_STR("ws"));
+    RC_CHECK_TRUE(ASM("SECTION code, org=&2000\nSECTION ws, virtual=TRUE, org=&400\nENDSECTION\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(ASM("SECTION ws, virtual=TRUE\nENDSECTION\n"
+                      "SECTION map, virtual=TRUE, org=&1900\nSECTION group, virtual=TRUE\nENDSECTION\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+
+    // The guard is the pool's limit, checked per piece: the piece that crosses it reports, and a
+    // later one that places nothing does not repeat it.
     RC_CHECK_TRUE(ERR("SECTION ws, org=0, guard=4, virtual=TRUE\nENDSECTION\n"
                       "SECTION ws\nSKIP 3\nENDSECTION\n"
                       "SECTION ws\nSKIP 3\nENDSECTION\n"
                       "SECTION ws\nENDSECTION") == error_type_guard_exceeded);
     RC_CHECK(diag_count(&fix->r, error_type_guard_exceeded), ==, 1u);
     RC_CHECK(diag_payload(&fix->r, error_type_guard_exceeded), ==, RC_STR("2"));
+}
+
+RC_TEST_STEP(assemble, section_reopens, fix)
+{
+    // Segments: each routine writes its table next to it, and the pieces join up in the tables section
+    // in order, wherever they are written. A reopened piece adds to its own section - the code around
+    // it neither carries its bytes nor moves past them.
+    #define SEGMENTS \
+        "SECTION tables, org=&5000, filename=\"TABLES\"\nENDSECTION\n" \
+        "SECTION code, org=&1900, filename=\"CODE\"\n" \
+        ".draw {\nSECTION tables\n.sintab EQUB 1,2\nENDSECTION\nLDA sintab,X\n}\n" \
+        ".plot {\nSECTION tables\n.costab EQUB 3\nENDSECTION\nLDA costab,X\n}\n" \
+        "RTS\nENDSECTION\n" \
+        "SECTION tables\n.last EQUB 4\nENDSECTION"
+    RC_CHECK_TRUE(ASM(SEGMENTS) != 0);
+    #undef SEGMENTS
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("draw.sintab")), value_make_numeric(0x5000)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("plot.costab")), value_make_numeric(0x5002)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("last")), value_make_numeric(0x5003)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("plot")), value_make_numeric(0x1903)));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("tables"), (uint8_t[]) {1, 2, 3, 4}, 4));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"),
+                                  (uint8_t[]) {0xBD, 0x00, 0x50, 0xBD, 0x02, 0x50, 0x60}, 7));
+    RC_CHECK(result_section(&fix->r, RC_STR("tables")).pc, ==, 0x5004u);
+
+    // Any top-level section reopens, so a bare one written twice simply joins up
+    RC_CHECK_TRUE(ASM("SECTION a, org=&3000\nEQUB 1\nENDSECTION\nEQUB 9\nSECTION a\nEQUB 2\nENDSECTION") != 0);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("a"), (uint8_t[]) {1, 2}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, fix->r.passes, (uint8_t[]) {9}, 1));
+
+    // A reopening only continues, so no attribute is taken - not even an org, nor virtual on an
+    // ordinary section (each offending attribute reports)
+    RC_CHECK_TRUE(ERR("SECTION ws, org=&400, virtual=TRUE\nENDSECTION\nSECTION ws, org=&500\nENDSECTION")
+                  == error_type_reopen_attribute);
+    RC_CHECK(diag_payload(&fix->r, error_type_reopen_attribute), ==, RC_STR("ws"));
+    RC_CHECK_TRUE(ERR("SECTION a\nENDSECTION\nSECTION a, virtual=TRUE, guard=&1000\nENDSECTION")
+                  == error_type_reopen_attribute);
+    RC_CHECK(diag_count(&fix->r, error_type_reopen_attribute), ==, 2u);
+
+    // A reopened section keeps the guard it was declared with, checked per piece
+    RC_CHECK_TRUE(ERR("SECTION a, org=0, guard=3\nEQUB 1,2\nENDSECTION\nSECTION a\nEQUB 3,4\nENDSECTION")
+                  == error_type_guard_exceeded);
+    RC_CHECK(diag_payload(&fix->r, error_type_guard_exceeded), ==, RC_STR("1"));
+
+    // A dead branch reopens nothing
+    RC_CHECK_TRUE(ASM("SECTION a\nEQUB 1\nENDSECTION\nIF FALSE\nSECTION a\nEQUB 2\nENDSECTION\nENDIF") != 0);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("a"), (uint8_t[]) {1}, 1));
+}
+
+RC_TEST_STEP(assemble, section_still_open, fix)
+{
+    // A section cannot be written again from inside itself: the open piece has not settled with its
+    // parent yet, so a second piece would sit on the same addresses as the rest of the first. Before,
+    // this quietly gave b the same address as a.
+    RC_CHECK_TRUE(ERR("SECTION ws, org=&400, virtual=TRUE\n"
+                      "SECTION inner\n.a SKIP 2\n"
+                      "SECTION ws\n.b SKIP 1\nENDSECTION\n"
+                      "ENDSECTION\nENDSECTION") == error_type_section_still_open);
+    RC_CHECK(diag_payload(&fix->r, error_type_section_still_open), ==, RC_STR("ws"));
+    RC_CHECK_TRUE(ERR("SECTION a\nSECTION a\nENDSECTION\nENDSECTION") == error_type_section_still_open);
+}
+
+RC_TEST_STEP(assemble, section_memory_map, fix)
+{
+    // A virtual section as a memory map: files saved separately but laid end to end, each a real
+    // section carrying on from the map's address, with no org chaining - and a label after them marks
+    // the first free byte.
+    RC_CHECK_TRUE(ASM("SECTION memmap, org=&1900, virtual=TRUE\n"
+                      "SECTION code, filename=\"CODE\"\n.entry LDA #1\nRTS\nENDSECTION\n"
+                      "SECTION data, filename=\"DATA\"\n.table EQUB 1,2,3,4\nENDSECTION\n"
+                      ".free\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("entry")), value_make_numeric(0x1900)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("table")), value_make_numeric(0x1903)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("free")), value_make_numeric(0x1907)));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"), (uint8_t[]) {0xA9, 0x01, 0x60}, 3));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("data"), (uint8_t[]) {1, 2, 3, 4}, 4));
+    RC_CHECK(result_section(&fix->r, RC_STR("memmap")).code.num, ==, 0u);
+
+    // Each file's start address is where its bytes begin: pc less what it holds
+    section data = result_section(&fix->r, RC_STR("data"));
+    RC_CHECK(data.pc - data.code.num, ==, 0x1903u);
+}
+
+RC_TEST_STEP(assemble, section_rephased_child_overflows_parent, fix)
+{
+    // A child with its own org fits its own addresses, but its bytes land in the parent too: when that
+    // carries the parent past &FFFF, the SECTION statement that did it reports, once.
+    RC_CHECK_TRUE(ERR("SECTION load, org=&FF00\nSECTION code, org=&1000\nSKIP &200\nENDSECTION\nENDSECTION")
+                  == error_type_pc_overflow);
+    RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
+    RC_CHECK(diag_payload(&fix->r, error_type_pc_overflow), ==, RC_STR("256"));
+
+    // Top-level sections no longer add up in the default section, so two big ones stand side by side
+    RC_CHECK_TRUE(ASM("SECTION a, org=&4000 : SKIP &C000 : ENDSECTION : SECTION b, org=&4000 : SKIP &C000 : ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+}
+
+RC_TEST_STEP(assemble, section_real_inside_virtual_is_analysed, fix)
+{
+    // Only code in a section that is itself virtual is invisible to the zero-page allocator: a real
+    // section inside a virtual one is real code, and holding v1 live across v2's write keeps them apart.
+    #define MAPPED_ZP \
+        "ZA_POOL &70..&71\nZA_AUTO1 v1\nZA_AUTO1 v2\n" \
+        "SECTION map, org=&2000, virtual=TRUE\n" \
+        "SECTION code\nSTA v1 : STA v2 : LDA v1 : LDA v2 : RTS\nENDSECTION\nENDSECTION"
+    RC_CHECK_TRUE(ASM(MAPPED_ZP) != 0);
+    #undef MAPPED_ZP
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v1")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x71)));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"),
+                                  (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xA5, 0x70, 0xA5, 0x71, 0x60}, 9));
+}
+
+RC_TEST_STEP(assemble, section_reopened_falls_through, fix)
+{
+    // The pieces of a section are one run of bytes, so code running off the end of one piece runs into
+    // the next. x is written by the first piece and only read by the second, so it is live across y's
+    // whole life and the two must be kept apart.
+    #define PIECES(second) \
+        "ZA_POOL &70..&71\nZA_AUTO1 x\nZA_AUTO1 y\n" \
+        "SECTION code, org=&2000\nLDA #1 : STA x : LDA #2 : STA y : LDA y\nENDSECTION\n" \
+        "SECTION other, org=&3000\nNOP : RTS\nENDSECTION\n" \
+        "SECTION " second "\nLDA x : RTS\nENDSECTION"
+    RC_CHECK_TRUE(ASM(PIECES("code")) != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x71)));
+
+    // The control: the same read in a section of its own is not reached by falling off the end, so x
+    // dies at its store and y may share its byte
+    RC_CHECK_TRUE(ASM(PIECES("apart, org=&2009")) != 0);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x70)));
+    #undef PIECES
+}
+
+RC_TEST_STEP(assemble, listing_reopened_section, fix)
+{
+    fix->desc.verbose = true;   // the listing is opt-in
+    // Each piece lists where it is written, at its own section's addresses, framed at the margin.
+    RC_CHECK_TRUE(ASM("SECTION t, org=&5000\nENDSECTION\n"
+                      "SECTION c, org=&1900\nLDA #1\nSECTION t\nEQUB 7\nENDSECTION\nRTS\nENDSECTION") != 0);
+    RC_CHECK(VERB(), ==,
+             RC_STR("SECTION t, org=&5000\n"
+                    "ENDSECTION\n"
+                    "\n"
+                    "SECTION c, org=&1900\n"
+                    "  1900  A9 01                       LDA #1\n"
+                    "SECTION t\n"
+                    "  5000  07                          EQUB 7\n"
+                    "ENDSECTION\n"
+                    "\n"
+                    "  1902  60                          RTS\n"
+                    "ENDSECTION\n"
+                    "\n"));
+    fix->desc.verbose = false;
 }
 
 RC_TEST_STEP(assemble, section_virtual_invisible_to_allocator, fix)
@@ -7744,9 +7930,9 @@ RC_TEST_STEP(assemble, section_copies_survive_next_assemble, fix)
     RC_CHECK_TRUE(ASM("LDX #&EE : LDY #&FF : NOP") != 0);   // supersedes the first result's sections
 
     RC_CHECK(copy.code.num, ==, 3u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 0), ==, 0xA9u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 1), ==, 0x12u);
-    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code, 2), ==, 0x60u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code.view, 0), ==, 0xA9u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code.view, 1), ==, 0x12u);
+    RC_CHECK((uint32_t) rc_view_bytes_get(copy.code.view, 2), ==, 0x60u);
     rc_arena_deinit(&kept);
 }
 
@@ -8799,7 +8985,8 @@ RC_TEST_STEP(assemble, branch_page_cross_warns, fix)
 {
     // A branch landing on another page costs a cycle when taken: a level-3 warning, bytes untouched.
     uint32_t passes = ASM("SECTION s, org=&10FC : BNE &1110 : ENDSECTION");
-    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xD0, 0x12}, 2));
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("s"), (uint8_t[]){0xD0, 0x12}, 2));
     RC_CHECK(diag_count(&fix->r, error_type_branch_page_cross), ==, 1u);
     RC_CHECK(diag_severity(&fix->r, error_type_branch_page_cross), ==, (uint8_t) severity_noisy);
     RC_CHECK(diag_payload(&fix->r, error_type_branch_page_cross), ==, RC_STR("&10FC"));   // the branch's own address

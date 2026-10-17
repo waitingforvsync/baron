@@ -88,9 +88,11 @@ typedef enum error_type {
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope
     error_type_original_definition,   // the companion to duplicate_symbol: points at the first binding
-    error_type_duplicate_section,     // two SECTION blocks share a name (unique, unless virtual - which reopens)
-    error_type_virtual_reopen_attribute, // attributes on a reopened virtual section (they belong on its first SECTION line)
+    error_type_duplicate_section,     // two SECTION blocks share a name, and the first cannot be reopened
+    error_type_section_still_open,    // a SECTION naming a section that is open around it
+    error_type_reopen_attribute,      // attributes on a reopened section (they belong on its first SECTION line)
     error_type_virtual_filename,      // a filename on a virtual section, which has no bytes to save
+    error_type_virtual_needs_org,     // a virtual section inside a real one, with no org of its own
     error_type_not_iterable,          // a FOR sequence that is neither a list nor a range
     error_type_expected_filename,     // an INCLUDE / INCBIN operand did not evaluate to a string
     error_type_include_too_deep,      // INCLUDE recursion hit the depth cap - a cyclic include, most likely

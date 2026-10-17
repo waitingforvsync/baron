@@ -21,24 +21,23 @@ typedef struct attribute {
 #include "richc/template/array.h"
 
 
-// One section: a window onto the manager's shared emission stream, with its own pc, a unique name
-// and a resolved attribute bag. The window is contiguous because nesting is lexical and emission
-// sequential; an explicit org repositions later labels without moving where code lands. A virtual
-// section emits nothing, so its window stays empty - which is what lets it be reopened by name.
+// One section: its own bytes, its own pc, a unique name and a resolved attribute bag. ENDSECTION copies
+// a nested section's bytes onto the end of its parent's; a top-level section stands alone (the default
+// section only ever holds what was written outside every section). A section whose close left its
+// parent untouched may be written again: a reopened piece carries on where the last one stopped.
 typedef struct section {
     rc_str              name;         // own namespace, separate from symbols and scopes; a view into source text
-    uint32_t            parent;       // the enclosing section; RC_INDEX_NONE for the default
+    uint32_t            parent;       // the section it was first written inside; RC_INDEX_NONE for the default
     uint32_t            pc;           // effective address of the next byte - the value a label takes
-    uint32_t            size;         // bytes placed here, children included - the window's length, unless discarded
+    uint32_t            size;         // bytes placed here, children included: code.num, or a virtual section's extent
     bool                cmos;         // consumed cmos attribute: 65C02 encodings allowed here (never inherited)
-    bool                is_virtual;   // consumed virtual attribute: a pool of its own, taking no room in its parent
-    bool                discards;     // virtual, or inside a virtual section: bytes advance pc but land nowhere
+    bool                is_virtual;   // consumed virtual attribute: assigns addresses, keeps no bytes
     bool                is_guarded;   // consumed guard attribute present? (never inherited)
-    bool                overrun;      // own emission just carried pc past &10000; cleared by sections_take_overrun
+    bool                is_open;      // between its SECTION and ENDSECTION right now
+    bool                reopenable;   // its close left the parent untouched, so it may be written again
+    bool                overrun;      // pc just went past &10000; cleared by sections_take_overrun
     uint32_t            guard;        // the guarded 16-bit address: first address emission must not reach (meaningful only when is_guarded)
-    uint32_t            begin;        // window into the shared stream: stream.num at creation
-    uint32_t            end;          // maintained on every emit here and on every child close
-    rc_view_bytes       code;         // the window's bytes, SEALED by sections_seal once the pass stops emitting
+    rc_array_bytes      code;         // the bytes it keeps (always empty for a virtual section)
     rc_array_attribute  attributes;
 } section;
 
@@ -60,16 +59,14 @@ typedef struct section_emission {
 
 
 // The section manager: sections addressed by index, in the same spirit as scopes is for symbols.
-// All emission appends to ONE shared stream; every section is a window into it, and ENDSECTION folds
-// a child's window into its parent's (the default section at index 0 is the true root, so its window
-// ends up covering the whole stream). Sections are per-pass (object code is only read from the final
-// pass's output), rebuilt by sections_reset each pass; only the emission fingerprints survive, in the
-// permanent arena.
+// Emission appends to the innermost open section's own bytes. Sections are per-pass (object code is only
+// read from the final pass's output), rebuilt by sections_reset each pass; only the emission fingerprints
+// survive, in the permanent arena - and they double as next pass's capacity hints, so after the first pass
+// each section's buffer is allocated once at its full size and never moves.
 typedef struct sections {
-    rc_arena                  *arena;       // borrowed: baron's per_pass arena - stream, nodes, attributes
+    rc_arena                  *arena;       // borrowed: baron's per_pass arena - nodes, code, attributes
     rc_arena                  *permanent;   // borrowed: backs emissions, the only cross-pass state
-    rc_array_bytes             stream;      // the one shared emission stream, rebuilt each pass
-    rc_array_section           nodes;       // index 0 is the default section, the root of the nesting tree
+    rc_array_section           nodes;       // index 0 is the default section
     rc_view_section_emission   emissions;   // per-section {size, crc}, rebuilt in full each settling pass
 } sections;
 
@@ -90,9 +87,8 @@ void sections_reset(sections *sec);
 
 uint32_t sections_pc(const sections *sec, uint32_t id);
 
-// Section id's bytes so far, computed live from its window. The view is invalidated by ANY section's
-// next emission (one shared, growing stream): take .num immediately, or read the bytes before the
-// next emit - never hold the view across one.
+// Section id's bytes so far. The view is invalidated by the next emission into that section, or a child
+// closing into it (either may move the buffer): take .num immediately, or read the bytes first.
 rc_view_bytes sections_code(const sections *sec, uint32_t id);
 
 // The whole section list as a read-only view (index 0 is the default) - what a baron_result hands back.
@@ -114,21 +110,26 @@ bool sections_is_guarded(const sections *sec, uint32_t id);
 // Section id's guarded 16-bit address. Only a guarded section has one - ask sections_is_guarded first.
 uint32_t sections_guard(const sections *sec, uint32_t id);
 
-// Is section id virtual (the consumed virtual attribute) - a pool that takes no room in its parent
-// and may be reopened by name?
+// Is section id virtual (the consumed virtual attribute) - assigning addresses but keeping no bytes?
 bool sections_is_virtual(const sections *sec, uint32_t id);
 
-// Does section id discard its bytes - virtual itself, or nested inside a virtual section?
-bool sections_discards(const sections *sec, uint32_t id);
+// Did section id's SECTION line give it an org of its own? Read off the attribute bag, so a
+// forward-referenced org counts from the first pass: the answer decides how the section closes.
+bool sections_has_org(const sections *sec, uint32_t id);
+
+// Is section id between its SECTION and ENDSECTION right now?
+bool sections_is_open(const sections *sec, uint32_t id);
+
+// May section id be written again - closed, and its close left the parent untouched?
+bool sections_can_reopen(const sections *sec, uint32_t id);
 
 
 // ---- mutation ----
 
-// Create the named section inside parent (an empty window at the stream tail, continuing the parent's
-// pc until an org rephases it, and empty attributes) and return its stable index, or RC_INDEX_NONE
-// if the name already exists this pass (names are unique; the caller raises the error, or reopens a
-// virtual section). Indices are stable across passes because creation order is first-sighting parse
-// order, identical each pass. A section made inside a virtual one discards its bytes too.
+// Create and open the named section inside parent (no bytes, continuing the parent's pc until an org
+// rephases it, and empty attributes) and return its stable index, or RC_INDEX_NONE if the name already
+// exists this pass (names are unique; the caller raises the error, or reopens it). Indices are stable
+// across passes because creation order is first-sighting parse order, identical each pass.
 uint32_t sections_make(sections *sec, rc_str name, uint32_t parent);
 
 // Add (or, for an already-present key, replace) one attribute on section id: a key repeated on one
@@ -147,37 +148,39 @@ void sections_set_cmos(sections *sec, uint32_t id, bool cmos);
 // sections_org, addr may be a full 32-bit host address; the guard keeps the low 16 bits.
 void sections_set_guard(sections *sec, uint32_t id, uint32_t addr);
 
-// Set the consumed virtual attribute. Inside a virtual parent the section discards its bytes whatever
-// it asks for: they would land in a parent that drops them.
+// Set the consumed virtual attribute.
 void sections_set_virtual(sections *sec, uint32_t id, bool is_virtual);
 
-// Append a byte, pc += 1 (a discarding section only advances the pc).
+// Append a byte, pc += 1 (a virtual section only advances the pc).
 void sections_emit_u8(sections *sec, uint32_t id, uint8_t b);
 
 // Append a little-endian word, pc += 2.
 void sections_emit_u16(sections *sec, uint32_t id, uint16_t w);
 
-// Append count zero bytes, pc += count (a discarding section only advances the pc).
+// Append count zero bytes, pc += count (a virtual section only advances the pc).
 void sections_skip(sections *sec, uint32_t id, uint32_t count);
 
-// Overwrite a byte section id has already emitted, offset bytes into its window: for a length that
-// is only known once everything it counts has gone out (a spliced BASIC line's). A discarding section
-// kept no bytes to overwrite, so the caller asks sections_discards first.
+// Overwrite a byte section id has already emitted, offset bytes into its code: for a length that is
+// only known once everything it counts has gone out (a spliced BASIC line's). A virtual section kept no
+// bytes to overwrite, so the caller asks sections_is_virtual first.
 void sections_set_u8(sections *sec, uint32_t id, uint32_t offset, uint8_t b);
 
-// Did section id's own emission carry its pc past the top of memory since we last asked? True at most
-// once a pass, since a pc never comes back down. A child folding in does not count: a child continuing
-// our addresses reports its own crossing, and a rephased one only adds to our byte count.
+// Did section id's pc go past the top of memory since we last asked? True at most once a pass, since a
+// pc never comes back down. Our own emission counts, and so does a child with its own org closing into
+// us; a child continuing our addresses does not - it reported the same crossing itself.
 bool sections_take_overrun(sections *sec, uint32_t id);
 
-// ENDSECTION bookkeeping: fold the closed child into its parent - the parent's window absorbs the
-// child's extent and its pc advances by the child's size, so bytes propagate all the way up to the
-// default section at index 0. A virtual section folds nothing: it takes no room in its parent.
-void sections_close(sections *sec, uint32_t id);
+// Reopen a closed section that sections_can_reopen allows: its next piece carries on where it stopped.
+void sections_reopen(sections *sec, uint32_t id);
 
-// End-of-pass: fill every section's code view as a slice of the stream. Views are only stable once
-// the pass stops growing the stream, so they are sealed in one step, never maintained live.
-void sections_seal(sections *sec);
+// ENDSECTION bookkeeping: close section id and settle it with the parent it was first written inside.
+//   - parent is the default: nothing (a top-level section stands alone)
+//   - real child, real parent: the child's bytes are copied onto the parent's, whose pc moves past them
+//   - virtual child, real parent: nothing (a real section's pc only moves with its bytes)
+//   - virtual parent: its pc moves past a child that continued its addresses; a child with its own org
+//     is placed elsewhere and takes no room
+// Whichever case left the parent untouched makes the section reopenable.
+void sections_close(sections *sec, uint32_t id);
 
 
 // ---- cross-pass bookkeeping ----
@@ -190,9 +193,8 @@ bool sections_emission_changed(sections *sec);
 
 // ---- copying ----
 
-// A deep copy of one SEALED section into the given arena - the copy owns its backing outright (name,
-// code bytes, attribute keys and values), so it outlives the per-pass original, its stream and the
-// source text itself. This is how a caller keeps a result's sections beyond the next assemble.
+// A deep copy of one section into the given arena - the copy owns its backing outright (name, code
+// bytes, attribute keys and values), so it outlives the per-pass original and the source text itself. This is how a caller keeps a result's sections beyond the next assemble.
 section section_make_copy(section s, rc_arena *arena);
 
 
