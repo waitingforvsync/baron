@@ -2,6 +2,7 @@
 
 #include "scopes.h"
 #include "functions.h"
+#include "lzparse.h"
 #include "source_files.h"
 #include "lexer.h"
 #include "richc/random.h"
@@ -1694,6 +1695,213 @@ static value const_prev_local(const expr_env *env) { return scopes_find_local_la
 static value const_next_local(const expr_env *env) { return scopes_find_local_label(env->scopes, env->scope_index, env->source, env->offset, true ); }
 
 
+// ---- bit fields and the optimal parse: the pieces a compressing transform is built from ----
+
+// BITLEN(x): how many bits x's integer part needs - floor(log2 x) + 1, exactly - and 0 for anything
+// below 1. A field of n bits holding v is written as the single number 2^n + v, so a field's width is
+// BITLEN(field) - 1, and a whole cost table is one broadcast expression.
+static value fn_bitlen(value v, rc_arena *arena)
+{
+    (void)arena;
+    if (!value_is_number(v)) {
+        return value_make_error(error_type_type_mismatch);
+    }
+    double x = floor(v.numeric);
+    if (isnan(x) || x < 1.0) {
+        return value_make_numeric(0.0);
+    }
+    if (isinf(x)) {
+        return value_make_error(error_type_domain);
+    }
+
+    int e = 0;
+    frexp(x, &e);   // x = m * 2^e with m in [0.5, 1): e is the bit length
+    return value_make_numeric((double) e);
+}
+
+
+// The largest field BITPACK takes: a double holds every integer up to 2^53, so 52 bits plus the marker.
+static const double bitfield_limit = 9007199254740992.0;
+
+// BITPACK(fields): fields (2^n + v: n bits holding v, the top set bit a marker) concatenated into a list
+// of bytes, each field's bits most significant first and each byte filled from its top bit down; the
+// last byte is padded with zero bits. Nested lists and ranges flatten, as for EQUB.
+static value fn_bitpack(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 1) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    value flat = flatten_to_list(rc_view_value_get(args, 0), arena);
+    if (value_is_error(flat)) {
+        return flat;
+    }
+
+    rc_array_value bytes = {0};
+    uint32_t acc   = 0;
+    uint32_t nbits = 0;
+    for (uint32_t i = 0; i < flat.list.num; i++) {
+        value f = rc_view_value_get(flat.list, i);
+        if (value_is_error(f)) {
+            return f;
+        }
+        if (!value_is_number(f)) {
+            return value_make_error(error_type_type_mismatch);
+        }
+        if (f.numeric != floor(f.numeric) || f.numeric < 1.0 || f.numeric >= bitfield_limit) {
+            return value_make_error(error_type_domain);   // not a field: no marker bit, or too wide
+        }
+
+        uint64_t field = (uint64_t) f.numeric;
+        int      width = 0;
+        while ((field >> (width + 1)) != 0) {
+            width++;
+        }
+        for (int b = width - 1; b >= 0; b--) {
+            acc = (acc << 1) | (uint32_t) ((field >> b) & 1);
+            if (++nbits == 8) {
+                rc_array_value_push(&bytes, value_make_numeric((double) acc), arena);
+                acc   = 0;
+                nbits = 0;
+            }
+        }
+    }
+    if (nbits != 0) {
+        rc_array_value_push(&bytes, value_make_numeric((double) (acc << (8 - nbits))), arena);
+    }
+
+    return value_make_list(bytes.view);
+}
+
+
+// A cost table for LZ_PARSE: a list (or bounded range) of whole numbers, a negative one meaning that
+// value cannot be written; or the reason it is no table, as an error value in err.
+typedef struct cost_table {
+    rc_view_i32 costs;
+    value       err;
+} cost_table;
+
+static cost_table cost_table_make(value v, rc_arena *arena)
+{
+    value list = value_is_range(v) ? range_to_list(v.range, arena) : v;
+    if (value_is_error(list)) {
+        return (cost_table) {.err = list};
+    }
+    if (!value_is_list(list)) {
+        return (cost_table) {.err = value_make_error(error_type_type_mismatch)};
+    }
+
+    rc_span_i32 costs = rc_array_i32_resize(&(rc_array_i32) {0}, list.list.num, arena);
+    for (uint32_t i = 0; i < list.list.num; i++) {
+        value c = rc_view_value_get(list.list, i);
+        if (value_is_error(c)) {
+            return (cost_table) {.err = c};
+        }
+        if (!value_is_number(c)) {
+            return (cost_table) {.err = value_make_error(error_type_type_mismatch)};
+        }
+        double d = floor(c.numeric);
+        rc_span_i32_set(costs, i, d < 0.0 ? -1 : (d > 1e9 ? 1000000000 : (int32_t) d));
+    }
+
+    return (cost_table) {.costs = costs.view, .err = value_make_none()};
+}
+
+// LZ_PARSE(data, literal_run, literal, match_run, length, offset): the cheapest way to write data (a list
+// of bytes, or a string) as alternating literal and match runs, literals first, each run's count before
+// its contents (lzparse.h has the search). The five tables give the cost in bits of each value a field
+// can hold, indexed by that value. The result is {bits, runs}: a literal run is {0, bytes}, a match run
+// {1, {offsets, lengths}} - two lists, so a format's field FUNCTIONs encode a whole run in one call.
+static value fn_lz_parse(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 6) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    value data = rc_view_value_get(args, 0);
+    if (value_is_range(data)) {
+        data = range_to_list(data.range, arena);
+    }
+    if (value_is_error(data)) {
+        return data;
+    }
+
+    rc_array_bytes bytes = {0};
+    if (value_is_string(data)) {
+        rc_array_bytes_append(&bytes, (rc_view_bytes) {.data = (const uint8_t *) data.string.data, .num = data.string.len}, arena);
+    }
+    else if (value_is_list(data)) {
+        for (uint32_t i = 0; i < data.list.num; i++) {
+            value b = rc_view_value_get(data.list, i);
+            if (value_is_error(b)) {
+                return b;
+            }
+            if (!value_is_number(b) || b.numeric != floor(b.numeric) || b.numeric < 0.0 || b.numeric > 255.0) {
+                return value_make_error(error_type_domain);   // data is bytes
+            }
+            rc_array_bytes_push(&bytes, (uint8_t) b.numeric, arena);
+        }
+    }
+    else {
+        return value_make_error(error_type_type_mismatch);
+    }
+
+    cost_table tables[5];
+    for (uint32_t i = 0; i < 5; i++) {
+        tables[i] = cost_table_make(rc_view_value_get(args, i + 1), arena);
+        if (!value_is_none(tables[i].err)) {
+            return tables[i].err;
+        }
+    }
+
+    lz_parse_result r = lz_parse(bytes.view, (lz_costs) {
+        .literal_run = tables[0].costs,
+        .literal     = tables[1].costs,
+        .match_run   = tables[2].costs,
+        .length      = tables[3].costs,
+        .offset      = tables[4].costs,
+    }, arena);
+    if (!r.ok) {
+        return value_make_error(error_type_domain);   // no parse fits these tables
+    }
+
+    rc_array_value runs = rc_array_value_make(r.runs.num, arena);
+    for (uint32_t i = 0; i < r.runs.num; i++) {
+        lz_run run = rc_view_lz_run_get(r.runs, i);
+        value  body;
+        if (run.is_match) {
+            rc_array_value offs = rc_array_value_make(run.count, arena);
+            rc_array_value lens = rc_array_value_make(run.count, arena);
+            for (uint32_t k = 0; k < run.count; k++) {
+                lz_match m = rc_view_lz_match_get(r.matches, run.start + k);
+                rc_array_value_push(&offs, value_make_numeric(m.offset), arena);
+                rc_array_value_push(&lens, value_make_numeric(m.length), arena);
+            }
+            rc_array_value pair = rc_array_value_make(2, arena);
+            rc_array_value_push(&pair, value_make_list(offs.view), arena);
+            rc_array_value_push(&pair, value_make_list(lens.view), arena);
+            body = value_make_list(pair.view);
+        }
+        else {
+            rc_array_value lits = rc_array_value_make(run.count, arena);
+            for (uint32_t k = 0; k < run.count; k++) {
+                rc_array_value_push(&lits, value_make_numeric(rc_view_bytes_get(bytes.view, run.start + k)), arena);
+            }
+            body = value_make_list(lits.view);
+        }
+        rc_array_value item = rc_array_value_make(2, arena);
+        rc_array_value_push(&item, value_make_numeric(run.is_match ? 1 : 0), arena);
+        rc_array_value_push(&item, body, arena);
+        rc_array_value_push(&runs, value_make_list(item.view), arena);
+    }
+
+    rc_array_value result = rc_array_value_make(2, arena);
+    rc_array_value_push(&result, value_make_numeric((double) r.bits), arena);
+    rc_array_value_push(&result, value_make_list(runs.view), arena);
+    return value_make_list(result.view);
+}
+
+
 // ---- the two context tables ----
 // EVEN: lexed where an operand is expected. Numbers/strings/identifiers come from the lexer itself,
 // so the table only carries the leading operators, the functions, the constants and the brackets.
@@ -1749,6 +1957,9 @@ static const token even_entries[] = {
     {RC_STR_INIT("full("),    {.type = lexeme_type_function, .function = {.apply = fn_full}}},
     {RC_STR_INIT("repeated("), {.type = lexeme_type_function, .function = {.apply = fn_full}}},   // full by a friendlier name
     {RC_STR_INIT("flatten("), {.type = lexeme_type_function, .function = {.apply = fn_flatten}}},
+    {RC_STR_INIT("bitlen("),   {.type = lexeme_type_unary_op, .unary_op = {.apply = fn_bitlen}}},
+    {RC_STR_INIT("bitpack("),  {.type = lexeme_type_function, .function = {.apply = fn_bitpack}}},
+    {RC_STR_INIT("lz_parse("), {.type = lexeme_type_function, .function = {.apply = fn_lz_parse}}},
     {RC_STR_INIT("concat("),  {.type = lexeme_type_function, .function = {.apply = fn_concat}}},
     {RC_STR_INIT("zip("),      {.type = lexeme_type_function, .function = {.apply = fn_zip}}},
     {RC_STR_INIT("reverse("), {.type = lexeme_type_function, .function = {.apply = fn_reverse}}},
@@ -1863,6 +2074,7 @@ typedef struct parser {
     rc_str          text;
     const expr_env *env;
     rc_arena       *arena;
+    rc_arena        spare;     // a second arena, free from here: where a call does its work
     frame          *frame;     // the running call's parameters and locals; NULL outside a body
     bool            live;      // a call executes its body only when live
     bool            in_body;   // parsing a FUNCTION body, so an error raised here records its origin
@@ -2016,7 +2228,9 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
 
 // ---- user-defined FUNCTION calls: interpreted here, in the evaluator, with no callback into the assembler ----
 
-#define FUNCTION_MAX_DEPTH 64u   // a runaway backstop; a bounded recursion unwinds well before it
+// A runaway backstop. A level costs 3.5-4 KB of C stack (measured, clang release), and Windows gives the
+// main thread 1 MB, so 128 leaves room for bigger frames elsewhere.
+#define FUNCTION_MAX_DEPTH 128u
 
 // Where a body statement-run stopped.
 typedef enum body_stop {
@@ -2324,51 +2538,46 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
 }
 
 
-// A user-defined FUNCTION call in operand position. call_pos is the token's start in the CALLER source
-// (where a bad argument is reported), pos is just past the '('. Collects arguments in the caller scope,
-// matches an overload by arity, then interprets the body with a fresh frame for its own names.
-static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call_pos, uint32_t pos, bool active)
+// Run function index on arguments already evaluated (they live in the caller's arena, or older): match an
+// overload by arity, then interpret the body with a fresh frame for its own names. The body works in a
+// fresh copy of the spare arena, with the caller's arena as it stands for its own spare, and its result
+// comes back copied into the caller's arena - so whatever the call built for itself is dropped when it
+// returns. call_pos places an error argument; inactive (the definition scan, a dead branch) runs nothing.
+static value call_function(const parser *p, uint32_t index, rc_view_value args, uint32_t call_pos, bool active)
 {
-    rc_array_value args = {0};
-    expr_result r = collect_args(p, pos, &args);
-    if (r.error != expr_error_none) {
-        return r;
-    }
-
-    uint32_t after = r.next;   // past ')'
-
-    const function_signature *sig = functions_match(p->env->functions, index, args.view.num);
+    const function_signature *sig = functions_match(p->env->functions, index, args.num);
     if (sig == NULL) {
-        return ok(value_make_error(error_type_no_matching_arity), after);
+        return value_make_error(error_type_no_matching_arity);
     }
 
     if (!sig->defined) {
-        return ok(value_make_error(error_type_function_not_defined), after);   // only forward-declared
+        return value_make_error(error_type_function_not_defined);   // only forward-declared
     }
 
-    // Inactive (the definition scan, or a dead enclosing branch): arguments consumed, body NOT run - which is
-    // what stops the inactive scan from recursing into a self-call. Yield a deferrable placeholder.
+    // Inactive: arguments consumed, body NOT run - which is what stops the inactive scan from recursing
+    // into a self-call. Yield a deferrable placeholder.
     if (!active) {
-        return ok(value_make_error(error_type_unknown_symbol), after);
+        return value_make_error(error_type_unknown_symbol);
     }
 
     if (p->env->call_depth && *p->env->call_depth >= FUNCTION_MAX_DEPTH) {
-        return ok(value_make_error(error_type_function_too_deep), after);
+        return value_make_error(error_type_function_too_deep);
     }
 
     // A fresh frame per call holds the parameters, and the locals as they bind. Every other name resolves
     // from the DEFINITION scope, so lookup is lexical: a body sees its own names and the definition's
     // globals, never the caller's locals. An error argument is the caller's doing, never the body's:
     // placed at this call inside a body, else left for the top-level use site to report.
-    frame callee = {0};
+    rc_arena work   = p->spare;
+    frame    callee = {0};
     for (uint32_t i = 0; i < sig->params.num; i++) {
-        value arg = rc_view_value_get(args.view, i);
+        value arg = rc_view_value_get(args, i);
         if (value_is_error(arg) && arg.error.origin_type == value_origin_type_none) {
             arg.error.origin_type = p->in_body ? value_origin_type_body : value_origin_type_caller;
             arg.error.origin      = (cursor) {p->env->source, lexer_skip_whitespace(p->text, call_pos)};
         }
         frame_slot param = {.name = rc_view_str_get(sig->params, i), .v = arg};
-        rc_array_frame_slot_push(&callee.slots, param, p->arena);
+        rc_array_frame_slot_push(&callee.slots, param, &work);
     }
 
     // Interpret the body in ITS source (a body may live in a different file than the call).
@@ -2379,7 +2588,8 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     parser body_p = {
         .text    = source_files_text(p->env->sources, sig->body.source),
         .env     = &body_env,
-        .arena   = p->arena,
+        .arena   = &work,
+        .spare   = *p->arena,
         .frame   = &callee,
         .live    = true,
         .in_body = true,
@@ -2389,24 +2599,36 @@ static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call
     body_result br = interpret_statements(&body_p, sig->body.pos, true);
     if (p->env->call_depth) { (*p->env->call_depth)--; }
 
-    if (br.error.code != error_type_none) {
-        return ok((value) {.type = value_type_error, .error = br.error}, after);   // a failed body -> a value
-    }
-
-    if (br.stop != body_stop_return) {
-        return ok(value_make_error(error_type_unclosed_function), after);
-    }
-
-    return ok(br.value, after);
+    value result = br.error.code != error_type_none ? (value) {.type = value_type_error, .error = br.error}
+                 : br.stop != body_stop_return    ? value_make_error(error_type_unclosed_function)
+                 : br.value;
+    return value_make_copy(result, p->arena);
 }
 
 
-function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena)
+// A user-defined FUNCTION call in operand position. call_pos is the token's start in the CALLER source
+// (where a bad argument is reported), pos is just past the '('. Collects the arguments in the caller
+// scope, then runs the call.
+static expr_result interpret_call(const parser *p, uint32_t index, uint32_t call_pos, uint32_t pos, bool active)
+{
+    rc_array_value args = {0};
+    expr_result r = collect_args(p, pos, &args);
+    if (r.error != expr_error_none) {
+        return r;
+    }
+
+    return ok(call_function(p, index, args.view, call_pos, active), r.next);
+}
+
+
+function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena,
+                                                 rc_arena spare)
 {
     parser p = {   // scan: nested calls do not execute
         .text  = text,
         .env   = env,
         .arena = arena,
+        .spare = spare,
         .live  = false,
     };
     body_result br = interpret_statements(&p, pos, false);   // inactive: just walk to the top-level '='
@@ -2681,19 +2903,42 @@ static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_p
 }
 
 
-expr_result expression_parse(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena)
+expr_result expression_parse(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena, rc_arena spare)
 {
     RC_ASSERT(rc_str_is_valid(text));
     RC_ASSERT(env != NULL && env->scopes != NULL);
 
     parser p = {
-        .text = text,
-        .env = env,
+        .text  = text,
+        .env   = env,
         .arena = arena,
-        .live = true
+        .spare = spare,
+        .live  = true,
     };
 
     return parse_precedence(&p, pos, 0);
+}
+
+
+value expression_call_function(rc_str text, uint32_t call_pos, const expr_env *env, rc_str name, rc_view_value args,
+                               rc_arena *arena, rc_arena spare)
+{
+    RC_ASSERT(env != NULL && env->functions != NULL);
+
+    uint32_t index = functions_find(env->functions, name);
+    if (index == RC_INDEX_NONE) {
+        return value_make_error_detail(error_type_unknown_function, name);
+    }
+
+    parser p = {
+        .text  = text,
+        .env   = env,
+        .arena = arena,
+        .spare = spare,
+        .live  = true,
+    };
+
+    return call_function(&p, index, args, call_pos, true);
 }
 
 
@@ -2707,11 +2952,13 @@ expr_result expression_parse(rc_str text, uint32_t pos, const expr_env *env, rc_
 RC_TEST_GROUP_DATA(expression) {
     scopes   scopes;
     rc_arena arena;
+    rc_arena spare;   // the evaluator's second arena, which calls work in
 };
 
 RC_TEST_GROUP_INIT(expression, fix)
 {
     fix->arena = rc_arena_make_default();
+    fix->spare = rc_arena_make_default();
     scopes_init(&fix->scopes, &fix->arena);
     scopes_make_root(&fix->scopes);
 }
@@ -2719,10 +2966,11 @@ RC_TEST_GROUP_INIT(expression, fix)
 RC_TEST_GROUP_DEINIT(expression, fix)
 {
     rc_arena_deinit(&fix->arena);
+    rc_arena_deinit(&fix->spare);
 }
 
 // Parse a source literal from offset 0 in the fixture's root scope.
-#define RESULT(src) expression_parse(RC_STR(src), 0, &(expr_env){.scopes = &fix->scopes, .scope_index = 0, .pc = 0}, &fix->arena)
+#define RESULT(src) expression_parse(RC_STR(src), 0, &(expr_env){.scopes = &fix->scopes, .scope_index = 0, .pc = 0}, &fix->arena, fix->spare)
 #define VAL(src)    RESULT(src).value
 
 // A bounded range with the expected start/end/step.
@@ -3182,10 +3430,10 @@ RC_TEST_STEP(expression, ranges_stepped, fix)
     rc_view_str spellings = RC_VIEW(spelled);
     for (uint32_t i = 0; i < spellings.num; i++) {
         expr_env env = {.scopes = &fix->scopes};
-        value v = expression_parse(rc_view_str_get(spellings, i), 0, &env, &fix->arena).value;
+        value v = expression_parse(rc_view_str_get(spellings, i), 0, &env, &fix->arena, fix->spare).value;
         rc_mstr text = rc_mstr_make(16, &fix->arena);
         value_format(&text, v, &fix->arena);
-        RC_CHECK_TRUE(value_is_range(v) && value_is_equal(expression_parse(text.view, 0, &env, &fix->arena).value, v));
+        RC_CHECK_TRUE(value_is_range(v) && value_is_equal(expression_parse(text.view, 0, &env, &fix->arena, fix->spare).value, v));
     }
 }
 
@@ -3342,6 +3590,44 @@ RC_TEST_STEP(expression, contiguous_slice_shares_storage, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("{{1,2},{3,4}}[0..1, 0]"), VAL("{1, 3}")));
 }
 
+RC_TEST_STEP(expression, bit_fields, fix)
+{
+    // BITLEN: the exact bit length of the integer part, 0 below 1
+    RC_CHECK_TRUE(value_is_equal(VAL("BITLEN({0, 0.5, 1, 2, 3, 255, 256, 2^52, -5})"),
+                                 VAL("{0, 0, 1, 2, 2, 8, 9, 53, 0}")));
+    RC_CHECK_TRUE(VAL("BITLEN(\"x\")").error.code == error_type_type_mismatch);
+
+    // BITPACK: fields (2^n + v) concatenated most significant bit first, the last byte padded with zeroes
+    RC_CHECK_TRUE(value_is_equal(VAL("BITPACK({2^3 + 5, 2^1 + 1, 2^8 + 255, 37})"), VAL("{191, 242, 128}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("BITPACK({{2^4 + 10}, 2^4 + 5})"), VAL("{165}")));   // nested lists flatten
+    RC_CHECK_TRUE(value_is_equal(VAL("BITPACK({1, 1})"), VAL("{}")));                    // zero-width fields
+    RC_CHECK_TRUE(VAL("BITPACK({0})").error.code == error_type_domain);                  // no marker bit
+    RC_CHECK_TRUE(VAL("BITPACK({2.5})").error.code == error_type_domain);
+    RC_CHECK_TRUE(VAL("BITPACK({2^53})").error.code == error_type_domain);               // past 52 bits
+    RC_CHECK_TRUE(VAL("BITPACK({\"a\"})").error.code == error_type_type_mismatch);
+    RC_CHECK_TRUE(VAL("BITPACK()").error.code == error_type_incorrect_parameters);
+}
+
+// Gamma code widths for 0..8 (0 impossible), the same shifted by one for match lengths, and 8-bit literals.
+#define LZ_GAMMA   "{-1, 1, 3, 3, 5, 5, 5, 5, 7}"
+#define LZ_LENGTHS "{-1, -1, 1, 3, 3, 5, 5, 5, 5}"
+#define LZ_TABLES  LZ_GAMMA ", full(256, 8), " LZ_GAMMA ", " LZ_LENGTHS ", " LZ_GAMMA
+
+RC_TEST_STEP(expression, lz_parse, fix)
+{
+    // ABABABAB: two literals (3 + 16 bits), then one match of 6 from 2 back (1 + 5 + 3 bits)
+    RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE({65, 66, 65, 66, 65, 66, 65, 66}, " LZ_TABLES ")"),
+                                 VAL("{28, {{0, {65, 66}}, {1, {{2}, {6}}}}}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE(\"ABABABAB\", " LZ_TABLES ")"),
+                                 VAL("LZ_PARSE({65, 66, 65, 66, 65, 66, 65, 66}, " LZ_TABLES ")")));
+    RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE({}, " LZ_TABLES ")"), VAL("{0, {}}")));
+
+    RC_CHECK_TRUE(VAL("LZ_PARSE({256}, " LZ_TABLES ")").error.code == error_type_domain);   // data is bytes
+    RC_CHECK_TRUE(VAL("LZ_PARSE({1}, 5, full(256, 8), 5, 5, 5)").error.code == error_type_type_mismatch);
+    RC_CHECK_TRUE(VAL("LZ_PARSE({1}, {-1}, full(256, 8), {-1}, {-1}, {-1})").error.code == error_type_domain);
+    RC_CHECK_TRUE(VAL("LZ_PARSE({1})").error.code == error_type_incorrect_parameters);
+}
+
 RC_TEST_STEP(expression, empty_values_stay_valid, fix)
 {
     // Every way of making an empty string gives real (empty) storage, so comparing, searching and
@@ -3496,7 +3782,7 @@ RC_TEST_STEP(expression, as_string_and_as_number, fix)
         rc_mstr_append(&text, rc_view_str_get(bads, i), &fix->arena);
         rc_mstr_append(&text, RC_STR("\")"), &fix->arena);
         expr_env env = {.scopes = &fix->scopes};
-        value v = expression_parse(text.view, 0, &env, &fix->arena).value;
+        value v = expression_parse(text.view, 0, &env, &fix->arena, fix->spare).value;
         RC_CHECK_TRUE(value_is_error(v) && v.error.code == error_type_not_a_number);
         RC_CHECK(v.error.detail, ==, rc_view_str_get(bads, i));
     }

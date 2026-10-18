@@ -13,9 +13,12 @@
 #include "baron.h"
 #include "richc/macros.h"
 
+#include <math.h>
+
 
 #define ASSEMBLE_MAX_PASSES 64u        // backstop for a program that keeps resolving new names forever
 #define ASSEMBLE_MAX_IDLE_PASSES 8u    // passes in a row that may resolve nothing new before we give up
+#define ASSEMBLE_MAX_ROUNDS 8u         // rounds whose transformed sizes may still move before we give up
 #define ASSEMBLE_MAX_INCLUDE_DEPTH 64u   // a runaway / cyclic INCLUDE is caught here before the C stack gives out
 #define ASSEMBLE_MAX_MACRO_DEPTH 64u     // a runaway macro expansion (a missing recursion base case) is caught here
 
@@ -668,15 +671,10 @@ parse_result require_separator(baron *b, cursor at)
 
 
 // The one place that projects baron into an expr_env; the cursor's source+pos double as the parse
-// start and the use site (for the impure @- / @+ locals). NOTE the result's backing (a list's
-// elements, a string's bytes) lives in the region OUR by-value scratch copy claimed - unclaimed
-// memory from the caller's point of view - so a caller that allocates into its own scratch while
-// still holding the value tramples it (the scratch-arena aliasing trap). Stage such work in
-// per_pass instead (see flatten_to_list's call sites).
-expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch)
+// start and the use site (for the impure @- / @+ locals).
+static expr_env eval_env(baron *b, cursor at, uint32_t scope, uint32_t section)
 {
-    rc_str src = source_files_text(&b->source_files, at.source);
-    expr_env env = {
+    return (expr_env) {
         .scopes         = &b->scopes,
         .scope_index    = scope,
         .pc             = sections_pc(&b->sections, section),
@@ -687,7 +685,18 @@ expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena
         .sources        = &b->source_files,
         .call_depth     = &b->function_depth,
     };
-    return expression_parse(src, at.pos, &env, &scratch);
+}
+
+// NOTE the result's backing (a list's elements, a string's bytes) lives in the region OUR by-value
+// scratch copy claimed - unclaimed memory from the caller's point of view - so a caller that allocates
+// into its own scratch while still holding the value tramples it (the scratch-arena aliasing trap).
+// Stage such work in per_pass instead (see flatten_to_list's call sites). FUNCTION calls do their own
+// work in a copy of per_pass, the evaluator's spare, beyond everything staged there so far.
+expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch)
+{
+    rc_str   src = source_files_text(&b->source_files, at.source);
+    expr_env env = eval_env(b, at, scope, section);
+    return expression_parse(src, at.pos, &env, &scratch, *b->per_pass);
 }
 
 
@@ -862,6 +871,138 @@ static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scop
 }
 
 
+// A section's transform attribute: the value naming its FUNCTION, and where it was written.
+typedef struct transform_attr {
+    bool   present;
+    value  name;
+    cursor at;
+} transform_attr;
+
+static transform_attr transform_attribute(const baron *b, uint32_t id)
+{
+    rc_view_attribute attrs = sections_attributes(&b->sections, id);
+    for (uint32_t i = 0; i < attrs.num; i++) {
+        attribute a = rc_view_attribute_get(attrs, i);
+        if (rc_str_is_equal_insensitive(a.key, RC_STR("transform"))) {
+            return (transform_attr) {.present = true, .name = a.v, .at = a.at};
+        }
+    }
+    return (transform_attr) {0};
+}
+
+
+// A transform's result as bytes - a list of whole numbers 0..255, or a string - or not ok.
+typedef struct transform_bytes {
+    bool          ok;
+    rc_view_bytes bytes;
+} transform_bytes;
+
+static transform_bytes transform_output(value v, rc_arena *arena)
+{
+    if (value_is_string(v)) {
+        return (transform_bytes) {.ok = true, .bytes = {.data = (const uint8_t *) v.string.data, .num = v.string.len}};
+    }
+    if (!value_is_list(v)) {
+        return (transform_bytes) {0};
+    }
+
+    rc_array_bytes bytes = rc_array_bytes_make(v.list.num, arena);
+    for (uint32_t i = 0; i < v.list.num; i++) {
+        value e = rc_view_value_get(v.list, i);
+        if (!value_is_number(e) || e.numeric != floor(e.numeric) || e.numeric < 0.0 || e.numeric > 255.0) {
+            return (transform_bytes) {0};
+        }
+        rc_array_bytes_push(&bytes, (uint8_t) e.numeric, arena);
+    }
+    return (transform_bytes) {.ok = true, .bytes = bytes.view};
+}
+
+
+// ENDSECTION for a section carrying transform = "name": its bytes become what that FUNCTION makes of
+// them, before they go to the parent. Only the output pass runs the FUNCTION - by then every byte is
+// final, ZA_AUTO addresses included - and the same bytes never run it twice. Every earlier pass lays the
+// section out at the size its transform last produced, zeroes standing in; when the output pass gets a
+// different size, everything after it was laid out wrongly, and the assembly goes round again.
+static void apply_transform(baron *b, cursor stmt, uint32_t id, rc_str name, uint32_t scope, parse_flags flags,
+                            rc_arena scratch)
+{
+    transform_attr t = transform_attribute(b, id);
+    if (!t.present) {
+        return;
+    }
+    b->has_transforms = true;
+
+    if (sections_is_virtual(&b->sections, id)) {
+        semantic_error_payload(b, flags, error_type_transform_virtual, t.at, name);
+        return;
+    }
+    if (!value_is_string(t.name)) {
+        semantic_error(b, flags, error_type_transform_name, t.at);
+        return;
+    }
+    rc_str function = t.name.string;
+    if (functions_find(&b->functions, function) == RC_INDEX_NONE) {
+        semantic_error_payload(b, flags, error_type_unknown_function, t.at, function);
+        return;
+    }
+
+    if (!flags.output) {
+        rc_array_bytes zeroes = {0};
+        rc_array_bytes_push_n_zero(&zeroes, sections_transform_reserved(&b->sections, name), b->per_pass);
+        sections_set_code(&b->sections, id, zeroes.view);
+        return;
+    }
+
+    rc_view_bytes            raw = sections_code(&b->sections, id);
+    section_transform_lookup hit = sections_transform_lookup(&b->sections, name, raw);
+    rc_view_bytes            out = hit.output;
+    if (!hit.found) {
+        rc_arena       work  = scratch;
+        rc_array_value input = rc_array_value_make(raw.num, &work);
+        for (uint32_t i = 0; i < raw.num; i++) {
+            rc_array_value_push(&input, value_make_numeric(rc_view_bytes_get(raw, i)), &work);
+        }
+        value    arg = value_make_list(input.view);
+        expr_env env = eval_env(b, t.at, scope, id);
+        value    res = expression_call_function(source_files_text(&b->source_files, t.at.source), t.at.pos, &env,
+                                                function, (rc_view_value) {.data = &arg, .num = 1}, &work,
+                                                *b->per_pass);
+
+        // Reported here and now: the output pass records nothing on its own, being no final pass.
+        parse_flags report = {.final = true, .active = true};
+        if (value_is_error(res)) {
+            error_type code = res.error.code == error_type_unknown_symbol ? error_type_undefined_symbol : res.error.code;
+            semantic_error_cause(b, report, code, t.at, res.error);
+            return;
+        }
+        transform_bytes bytes = transform_output(res, &work);
+        if (!bytes.ok) {
+            semantic_error_payload(b, report, error_type_transform_not_bytes, t.at, function);
+            return;
+        }
+        out = bytes.bytes;
+
+        if (sections_transform_note(&b->sections, name, raw, out)) {
+            b->resized      = true;
+            b->resized_name = name;
+            b->resized_at   = stmt;
+        }
+    }
+
+    if (verbose_on(flags)) {
+        rc_mstr *listing = &b->channels[0];
+        rc_mstr_append(listing, RC_STR("; transform \""), b->per_pass);
+        rc_mstr_append(listing, function, b->per_pass);
+        rc_mstr_append(listing, RC_STR("\": "), b->per_pass);
+        rc_mstr_append_u32(listing, raw.num, b->per_pass);
+        rc_mstr_append(listing, RC_STR(" -> "), b->per_pass);
+        rc_mstr_append_u32(listing, out.num, b->per_pass);
+        rc_mstr_append(listing, RC_STR(" bytes\n"), b->per_pass);
+    }
+    sections_set_code(&b->sections, id, out);
+}
+
+
 // SECTION name, key = expr, ... / ENDSECTION - a uniquely-named section owning its own bytes; at
 // ENDSECTION a nested section's bytes are copied onto its parent's (sections_close has the rules). With
 // no org of its own a section continues the enclosing address; an explicit org rephases (labels resolve
@@ -898,6 +1039,11 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             sections_reopen(&b->sections, existing);
             child    = existing;
             reopened = true;
+
+            // Its bytes were transformed whole at its close; a piece after that would go in untransformed.
+            if (transform_attribute(b, existing).present) {
+                semantic_error_payload(b, flags, error_type_transform_reopened, cursor_at(at, at.pos), name);
+            }
         }
         else {
             // The child continues the enclosing section's address unless an explicit org below
@@ -1027,8 +1173,9 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
             }
 
             // The ENDSECTION line at the margin (its own start cursor: stmt is the SECTION
-            // statement), then a blank line to set sections apart.
+            // statement), a transform's summary, then a blank line to set sections apart.
             verbose_text_line(b, flags, cursor_at(at, body.next), cl.next, 0, verbose_text_margin);
+            apply_transform(b, stmt, child, name, scope, flags, scratch);
             if (verbose_on(flags)) {
                 rc_mstr_append_char(&b->channels[0], '\n', b->per_pass);
             }
@@ -3092,18 +3239,8 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
 
     // Scan the body (in the evaluator) to find the top-level '=' return and its extent. Inactive
     // and side-effect-free; it also reports whether this is a forward declaration.
-    expr_env env = {
-        .scopes         = &b->scopes,
-        .scope_index    = scope,
-        .pc             = sections_pc(&b->sections, section),
-        .source         = at.source,
-        .offset         = body.pos,
-        .operand_tokens = functions_operand_tokens(&b->functions),
-        .functions      = &b->functions,
-        .sources        = &b->source_files,
-        .call_depth     = &b->function_depth,
-    };
-    function_body_scan fs = expression_scan_function_body(src, body.pos, &env, &scratch);
+    expr_env env = eval_env(b, body, scope, section);
+    function_body_scan fs = expression_scan_function_body(src, body.pos, &env, &scratch, *b->per_pass);
     if (fs.error != error_type_none) {
         return syntax_error(b, fs.error, cursor_at(at, fs.error_at));   // a structurally broken body aborts
     }
@@ -4304,10 +4441,10 @@ static void report_no_convergence(baron *b, uint32_t source)
 }
 
 
-// The shared core: run passes over the cached source until everything settles (or fails). Only the
-// final pass records recoverable errors and warnings, so the diagnostics array holds the complete
-// set. Returns the pass count, 0 on failure.
-static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
+// One round: run passes over the cached source until everything settles (or fails), then the final,
+// allocation and output passes. Only the final pass records recoverable errors and warnings, so the
+// diagnostics array holds the complete set. Returns the pass count, 0 on failure.
+static uint32_t run_round(baron *b, uint32_t source, rc_arena scratch)
 {
     uint32_t most_resolved = 0;   // the most bindings ever holding a real value at once
     uint32_t idle          = 0;   // passes in a row that resolved nothing new
@@ -4346,8 +4483,8 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
             // The OUTPUT pass: one re-emission with the ZA_AUTO symbols holding their allocated
             // addresses, whose sections ARE the result; -v rides it for the listing. Re-emission
             // cannot move anything (a ZA_AUTO address is typed and the accepting contexts are
-            // width-stable); final=false, so nothing records twice.
-            if (b->want_verbose || zeropage_is_enabled(&b->zeropage)) {
+            // width-stable); final=false, so nothing records twice. It is also where transforms run.
+            if (b->want_verbose || zeropage_is_enabled(&b->zeropage) || b->has_transforms) {
                 parse_result out = run_pass(b, source,
                     (parse_flags) {
                         .active  = true,
@@ -4391,6 +4528,35 @@ static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
     }
 
     return assemble_failed(b);
+}
+
+
+// The shared core: rounds of passes until every transformed section has the size it was laid out
+// with. A round lays the program out around each transform's last size (0 the first time round); when
+// its output pass gets a different one, the round's diagnostics are void and the next round settles
+// around the new size - quickly, as everything else is already bound. Returns the pass count, 0 on
+// failure.
+static uint32_t run_passes(baron *b, uint32_t source, rc_arena scratch)
+{
+    uint32_t passes = 0;
+    for (uint32_t round = 1; ; round++) {
+        b->resized = false;
+        uint32_t p = run_round(b, source, scratch);
+        if (p == 0) {
+            return 0;
+        }
+
+        passes += p;
+        if (!b->resized) {
+            return passes;
+        }
+
+        if (round == ASSEMBLE_MAX_ROUNDS) {
+            baron_error_payload(b, error_type_transform_unsettled, b->resized_at, b->resized_name);
+            return assemble_failed(b);
+        }
+        rc_array_diagnostic_resize(&b->diagnostics, 0, b->permanent);
+    }
 }
 
 
@@ -4966,6 +5132,95 @@ RC_TEST_STEP(assemble, section_nesting_propagates_bytes, fix)
     RC_CHECK(baron_result_code(&fix->r).num, ==, 0u);
     RC_CHECK(result_section(&fix->r, RC_STR("outer")).pc, ==, 0x2004u);   // advanced through the child
     RC_CHECK(result_section(&fix->r, RC_STR("inner")).pc, ==, 0x0402u);   // its own runtime space
+}
+
+RC_TEST_STEP(assemble, transform_replaces_section_bytes, fix)
+{
+    // transform names a FUNCTION; at ENDSECTION the section's bytes become what it returns, and that is
+    // what the parent receives. The section's own labels stay where the untransformed bytes will run.
+    RC_CHECK_TRUE(ASM("FUNCTION xor55(data) = data EOR &55\n"
+                      "SECTION outer, org=&2000\n"
+                      "SECTION inner, org=&400, transform=\"xor55\"\n.start EQUB 1, 2, 3\nENDSECTION\n"
+                      "EQUW start\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("outer"), (uint8_t[]) {0x54, 0x57, 0x56, 0x00, 0x04}, 5));
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("inner"), (uint8_t[]) {0x54, 0x57, 0x56}, 3));
+
+    // A string result is bytes too, and a top-level section's transform is what it saves.
+    RC_CHECK_TRUE(ASM("FUNCTION greet(data) = \"HI\"\nSECTION solo, transform=\"greet\"\nEQUB 0\nENDSECTION") != 0);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("solo"), (uint8_t[]) {'H', 'I'}, 2));
+}
+
+RC_TEST_STEP(assemble, transform_size_change_goes_round_again, fix)
+{
+    // Earlier passes lay a transformed section out at the size its transform last produced (nothing,
+    // the first time); a different size from the output pass sends the assembly round again, so a label
+    // after it - and whatever reads that label - ends up with the true size.
+    RC_CHECK_TRUE(ASM("FUNCTION halve(data) = data[(0..<LEN(data) DIV 2) * 2]\n"
+                      "SECTION outer, org=&2000\n"
+                      "SECTION inner, org=&400, transform=\"halve\"\nEQUB 10, 11, 12, 13, 14, 15\nENDSECTION\n"
+                      ".after EQUW after\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("outer"), (uint8_t[]) {10, 12, 14, 0x03, 0x20}, 5));
+    RC_CHECK(result_section(&fix->r, RC_STR("outer")).pc, ==, 0x2005u);
+
+    // Nested transforms compose: the inner's result is part of what the outer transforms.
+    RC_CHECK_TRUE(ASM("FUNCTION halve(data) = data[(0..<LEN(data) DIV 2) * 2]\n"
+                      "FUNCTION xor55(data) = data EOR &55\n"
+                      "SECTION top, org=&2000\n"
+                      "SECTION mid, org=&3000, transform=\"halve\"\n"
+                      "SECTION low, org=&400, transform=\"xor55\"\nEQUB 1, 2, 3, 4\nENDSECTION\n"
+                      "ENDSECTION\nENDSECTION") != 0);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("top"), (uint8_t[]) {0x54, 0x56}, 2));
+
+    // A transform whose size depends on where it lands can never settle: reported, not looped on.
+    RC_CHECK_TRUE(ERR("FUNCTION flip(data) = full(1 + (data[0] AND 1), 0)\n"
+                      "SECTION outer, org=&2000\n"
+                      "SECTION inner, org=&400, transform=\"flip\"\nEQUB LO(after)\nENDSECTION\n"
+                      ".after\nENDSECTION") == error_type_transform_unsettled);
+    RC_CHECK(diag_payload(&fix->r, error_type_transform_unsettled), ==, RC_STR("inner"));
+}
+
+RC_TEST_STEP(assemble, transform_sees_final_bytes, fix)
+{
+    // The transform runs once every byte is final: ZA_AUTO addresses allocated, and an INCBIN's real
+    // bytes loaded (earlier passes only reserve its size). One assemble: sources dedupe by name.
+    uint8_t blob[] = {7, 8, 9};
+    RC_CHECK_TRUE(rc_file_save_binary(RC_STR("transform_blob.bin"),
+                  (rc_view_bytes) {.data = blob, .num = (uint32_t) sizeof blob}) == RC_FILE_OK);
+    fix->desc.verbose = true;
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      "FUNCTION id(data) = data\n"
+                      "SECTION outer, org=&2000\n"
+                      "SECTION code, org=&400, transform=\"id\"\n"
+                      "ZA_AUTO1 v\nSTA v\nLDA v\nRTS\nINCBIN \"transform_blob.bin\"\n"
+                      "ENDSECTION\nENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("outer"), (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60, 7, 8, 9}, 8));
+
+    // The listing notes what the transform made of the section, after its ENDSECTION.
+    RC_CHECK_TRUE(rc_str_find_first(VERB(), RC_STR("ENDSECTION\n; transform \"id\": 8 -> 8 bytes\n")) != RC_INDEX_NONE);
+    rc_file_delete(RC_STR("transform_blob.bin"));
+}
+
+RC_TEST_STEP(assemble, transform_errors, fix)
+{
+    RC_CHECK_TRUE(ERR("SECTION s, transform=\"nosuch\"\nEQUB 1\nENDSECTION") == error_type_unknown_function);
+    RC_CHECK(diag_payload(&fix->r, error_type_unknown_function), ==, RC_STR("nosuch"));
+    RC_CHECK_TRUE(ERR("SECTION s, transform=5\nEQUB 1\nENDSECTION") == error_type_transform_name);
+    RC_CHECK_TRUE(ERR("FUNCTION bad(d) = {300}\nSECTION s, transform=\"bad\"\nEQUB 1\nENDSECTION")
+                  == error_type_transform_not_bytes);
+
+    // An error inside the FUNCTION is reported where it happened, with a note at the transform.
+    RC_CHECK_TRUE(ERR("FUNCTION bad(d) = d[99]\nSECTION s, transform=\"bad\"\nEQUB 1\nENDSECTION")
+                  == error_type_subscript_range);
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_called_from));
+
+    // A virtual section keeps no bytes to transform, and a transformed one cannot take another piece.
+    RC_CHECK_TRUE(ERR("FUNCTION id(d) = d\nSECTION v, virtual=TRUE, org=&400, transform=\"id\"\nEQUB 1\nENDSECTION")
+                  == error_type_transform_virtual);
+    RC_CHECK_TRUE(ERR("FUNCTION id(d) = d\nSECTION s, transform=\"id\"\nEQUB 1\nENDSECTION\nSECTION s\nEQUB 2\nENDSECTION")
+                  == error_type_transform_reopened);
 }
 
 RC_TEST_STEP(assemble, section_relocation_workflow, fix)
@@ -9658,6 +9913,22 @@ RC_TEST_STEP(assemble, function_calls_leave_no_scopes, fix)
         "FUNCTION rsum(l)\nIF LEN(l) == 0\nr = 0\nELSE\nr = l[0] + rsum(l[1..])\nENDIF\n= r\n"
         "EQUW rsum(0..<40)"), (uint8_t[]) {0x0C, 0x03}, 2));
     RC_CHECK(fix->r.scopes.nodes.num, ==, 1u);
+}
+
+RC_TEST_STEP(assemble, function_recursion_reaches_100, fix)
+{
+    // Deeper than the old limit of 64 (it is 128 now); a runaway recursion still reports, rather than
+    // running out of C stack (function_call_and_definition_errors pins that).
+    uint32_t passes = ASM("FUNCTION depth(n)\n"
+                          "    IF n == 0\n"
+                          "        r = 0\n"
+                          "    ELSE\n"
+                          "        r = 1 + depth(n - 1)\n"
+                          "    ENDIF\n"
+                          "= r\n"
+                          "EQUB depth(100)");
+    RC_CHECK_TRUE(passes != 0);
+    RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {100}, 1));
 }
 
 RC_TEST_STEP(assemble, function_locals_are_plain_names_bound_in_order, fix)

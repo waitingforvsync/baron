@@ -73,6 +73,23 @@ uint32_t functions_index_for_name(functions *f, rc_str name)
 }
 
 
+uint32_t functions_find(const functions *f, rc_str name)
+{
+    RC_ASSERT(f != NULL);
+
+    // Each function's token spells name( - so a match is the name, then the paren, and nothing more.
+    for (uint32_t t = 0; t < f->operand_tokens.num; t++) {
+        token tok = rc_array_token_get(&f->operand_tokens, t);
+        if (tok.lexeme.type == lexeme_type_user_function && tok.name.len == name.len + 1
+            && rc_str_is_equal_insensitive(rc_str_left(tok.name, name.len), name)) {
+            return tok.lexeme.user_function.index;
+        }
+    }
+
+    return RC_INDEX_NONE;
+}
+
+
 function *functions_at(functions *f, uint32_t index)
 {
     RC_ASSERT(f != NULL);
@@ -156,6 +173,23 @@ RC_TEST(functions, index_for_name_reuses)
     RC_CHECK(a, ==, a2);
     RC_CHECK_TRUE(a != b);
     RC_CHECK(f.list.num, ==, 2u);
+
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(functions, find_is_read_only)
+{
+    rc_arena arena = rc_arena_make_default();
+    functions f;
+    functions_init(&f, &arena);
+    functions_reset(&f, (token_table) {0}, 8);
+
+    uint32_t sqr = functions_index_for_name(&f, RC_STR("sqr"));
+    RC_CHECK(functions_find(&f, RC_STR("sqr")), ==, sqr);
+    RC_CHECK(functions_find(&f, RC_STR("SQR")), ==, sqr);              // names match as calls do, case-blind
+    RC_CHECK(functions_find(&f, RC_STR("sq")), ==, RC_INDEX_NONE);     // a prefix is not the name
+    RC_CHECK(functions_find(&f, RC_STR("gcd")), ==, RC_INDEX_NONE);
+    RC_CHECK(f.list.num, ==, 1u);                                      // and nothing was registered
 
     rc_arena_deinit(&arena);
 }

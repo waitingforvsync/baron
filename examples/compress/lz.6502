@@ -1,0 +1,104 @@
+\ **************************************************************************
+\ *
+\ *    The compressor: an LZ format written as Baron FUNCTIONs
+\ *
+\ *    LEN in 16 bits and OB in 3 bits, then runs that alternate literals,
+\ *    matches, literals, ... (always literals first) until LEN bytes are
+\ *    out. Every run starts with its count as an Elias gamma code:
+\ *
+\ *      literal run   gamma(count), then each byte in 8 bits
+\ *      match run     gamma(count), then for each match:
+\ *                      gamma(length - 1)
+\ *                      gamma(((offset - 1) >> OB) + 1)
+\ *                      (offset - 1) AND (2^OB - 1), in OB bits
+\ *
+\ *    A match copies length bytes from offset bytes back, one at a time,
+\ *    so a short offset repeats a pattern. Bits go out most significant
+\ *    first. LZ_PARSE finds the cheapest stream under the costs it is
+\ *    given; everything about how a field is written lives here, once.
+\ *
+\ **************************************************************************
+
+\ A field of n bits holding v is the single number 2^n + v: the top set bit
+\ marks the width. BITPACK concatenates fields into bytes.
+
+FUNCTION bits(v, n) = 2^n + v                           ; v in n bits
+FUNCTION gamma(n)   = 2^(2 * BITLEN(n) - 1) + n         ; Elias gamma, n >= 1
+FUNCTION join(a, b) = (a - 1) * 2^(BITLEN(b) - 1) + b   ; a's bits, then b's
+FUNCTION cost(f)    = BITLEN(f) - 1                     ; a field's width; -1 if impossible
+
+\ The two match fields, each written once.
+
+FUNCTION len_field(len) = gamma(len - 1)
+
+FUNCTION off_field(off, ob)
+    hi = gamma(((off - 1) >> ob) + 1)
+    lo = bits((off - 1) AND (2^ob - 1), ob)
+= join(hi, lo)
+
+\ One run, in the order the decompressor reads it. LZ_PARSE hands back a
+\ literal run as {0, bytes} and a match run as {1, {offsets, lengths}}, so
+\ each field FUNCTION encodes a whole run's worth at once.
+
+FUNCTION run_fields(run, ob)
+    IF run[0] == 0
+        r = {gamma(LEN(run[1])), bits(run[1], 8)}
+    ELSE
+        offs = run[1][0]
+        lens = run[1][1]
+        r = {gamma(LEN(offs)), ZIP(len_field(lens), off_field(offs, ob))}
+    ENDIF
+= r
+
+\ One search: the cost of every value each field could hold, worked out by
+\ the encodings themselves. A run of 0 and a match of length 1 come out
+\ impossible on their own: gamma(0) is no field, so its cost is -1. The table
+\ of lengths stops at 256, so the decompressor can copy a match with an 8-bit
+\ index; a longer repeat simply takes several matches.
+
+FUNCTION parse_with(ob, data)
+    n    = LEN(data)
+    runs = cost(gamma(0..n))                            ; a run's count
+    lits = cost(bits(0..255, 8))                        ; a literal byte
+    lens = cost(len_field(0..256))                      ; a match length, at most 256
+    offs = cost(off_field(0..n, ob))                    ; a match offset
+= LZ_PARSE(data, runs, lits, runs, lens, offs)
+
+\ The search with each OB from ob to 7, keeping the smallest as {ob, parse}.
+\ A tie goes to the smaller OB.
+
+FUNCTION smallest(ob, data)
+    p = parse_with(ob, data)
+    IF ob == 7
+        r = {ob, p}
+    ELSE
+        q = smallest(ob + 1, data)
+        IF p[0] <= q[1][0]
+            r = {ob, p}
+        ELSE
+            r = q
+        ENDIF
+    ENDIF
+= r
+
+\ Every run's fields, by halving the list: BITPACK flattens the nesting, and
+\ halving keeps the recursion shallow however many runs there are.
+
+FUNCTION encode(runs, ob)
+    n = LEN(runs)
+    IF n == 0
+        r = {}
+    ELIF n == 1
+        r = run_fields(runs[0], ob)
+    ELSE
+        h = n DIV 2
+        r = {encode(runs[0..<h], ob), encode(runs[h..<n], ob)}
+    ENDIF
+= r
+
+\ The transform: search with every OB, keep the smallest, encode it.
+
+FUNCTION lz(data)
+    best = smallest(0, data)
+    ob   = best[0]
+= BITPACK({bits(LEN(data), 16), bits(ob, 3), encode(best[1][1], ob)})

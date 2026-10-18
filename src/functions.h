@@ -63,6 +63,10 @@ token_table functions_operand_tokens(const functions *f);
 // filled - reuses its index. name is the bare name (no paren).
 uint32_t functions_index_for_name(functions *f, rc_str name);
 
+// The index of the function named name (case-insensitively, as calls match), or RC_INDEX_NONE. Read-only:
+// unlike functions_index_for_name, it never registers anything.
+uint32_t functions_find(const functions *f, rc_str name);
+
 // A pointer to the function at index. Valid only until the list next grows - copy out what you need.
 function *functions_at(functions *f, uint32_t index);
 

@@ -1,0 +1,382 @@
+SECTION Boot, filename="!BOOT", exec=&FFFFFFFF
+  0000  2A 52 55 4E 20 4C 5A 0D     EQUS "*RUN LZ", 13
+ENDSECTION
+
+  0000                              INCLUDE "lz.6502"
+oswrch = 65518 [&FFEE]
+screen = 22528 [&5800]
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "LZ", guard = screen
+dest = &70 [auto]
+copy = &72 [auto]
+limit = &74 [auto]
+count = &76 [auto]
+bitbuf = &78 [auto]
+temp = &79 [auto]
+length = &7A [auto]
+ob1 = &7B [auto]
+  1900  .entry
+  1900  A2 00                       LDX #0
+  1902  .@
+  1902  BD 25 19                    LDA vdu,X
+  1905  20 EE FF                    JSR oswrch
+  1908  E8                          INX
+  1909  E0 0C                       CPX #vdu_end - vdu
+  190B  D0 F5                       BNE @-
+  190D  A9 FE                       LDA #LO(packed)
+  190F  8D EF 19                    STA src
+  1912  A9 19                       LDA #HI(packed)
+  1914  8D F0 19                    STA src+1
+  1917  A9 00                       LDA #LO(screen)
+  1919  85 70                       STA dest
+  191B  A9 58                       LDA #HI(screen)
+  191D  85 71                       STA dest+1
+  191F  20 31 19                    JSR unpack
+  1922  .hang
+  1922  4C 22 19                    JMP hang
+  1925  .vdu
+  1925  16 05                       EQUB 22, 5
+  1927  17 01 00 00 00 00 00 00...  EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+  1931  .vdu_end
+  1931  .unpack
+  1931  A9 80                       LDA #&80
+  1933  85 78                       STA bitbuf
+  1935  A2 0F                       LDX #15
+  1937  20 E0 19                    JSR getbits
+  193A  18                          CLC
+  193B  65 70                       ADC dest
+  193D  85 74                       STA limit
+  193F  A5 79                       LDA temp
+  1941  65 71                       ADC dest+1
+  1943  85 75                       STA limit+1
+  1945  A9 00                       LDA #0
+  1947  A2 02                       LDX #2
+  1949  20 E0 19                    JSR getbits
+  194C  38                          SEC
+  194D  E9 01                       SBC #1
+  194F  85 7B                       STA ob1
+  1951  .literals
+  1951  20 A9 19                    JSR run_count
+  1954  .literal
+  1954  A2 07                       LDX #7
+  1956  20 E0 19                    JSR getbits
+  1959  A0 00                       LDY #0
+  195B  91 70                       STA (dest),Y
+  195D  E6 70                       INC dest
+  195F  D0 02                       BNE @+
+  1961  E6 71                       INC dest+1
+  1963  .@
+  1963  20 C2 19                    JSR counted
+  1966  D0 EC                       BNE literal
+  1968  .matches
+  1968  20 A9 19                    JSR run_count
+  196B  .match
+  196B  20 CF 19                    JSR getgamma
+  196E  85 7A                       STA length
+  1970  20 CF 19                    JSR getgamma
+  1973  38                          SEC
+  1974  E9 01                       SBC #1
+  1976  B0 02                       BCS @+
+  1978  C6 79                       DEC temp
+  197A  .@
+  197A  A6 7B                       LDX ob1
+  197C  30 03                       BMI @+
+  197E  20 E0 19                    JSR getbits
+  1981  .@
+  1981  49 FF                       EOR #&FF
+  1983  18                          CLC
+  1984  65 70                       ADC dest
+  1986  85 72                       STA copy
+  1988  A5 71                       LDA dest+1
+  198A  E5 79                       SBC temp
+  198C  85 73                       STA copy+1
+  198E  A0 FF                       LDY #&FF
+  1990  .@
+  1990  C8                          INY
+  1991  B1 72                       LDA (copy),Y
+  1993  91 70                       STA (dest),Y
+  1995  C4 7A                       CPY length
+  1997  D0 F7                       BNE @-
+  1999  98                          TYA
+  199A  65 70                       ADC dest
+  199C  85 70                       STA dest
+  199E  90 02                       BCC @+
+  19A0  E6 71                       INC dest+1
+  19A2  .@
+  19A2  20 C2 19                    JSR counted
+  19A5  D0 C4                       BNE match
+  19A7  F0 A8                       BEQ literals
+  19A9  .run_count
+  19A9  A5 70                       LDA dest
+  19AB  C5 74                       CMP limit
+  19AD  D0 09                       BNE @+
+  19AF  A5 71                       LDA dest+1
+  19B1  C5 75                       CMP limit+1
+  19B3  D0 03                       BNE @+
+  19B5  68                          PLA
+  19B6  68                          PLA
+  19B7  60                          RTS
+  19B8  .@
+  19B8  20 CF 19                    JSR getgamma
+  19BB  85 76                       STA count
+  19BD  A5 79                       LDA temp
+  19BF  85 77                       STA count+1
+  19C1  60                          RTS
+  19C2  .counted
+  19C2  A5 76                       LDA count
+  19C4  D0 02                       BNE @+
+  19C6  C6 77                       DEC count+1
+  19C8  .@
+  19C8  C6 76                       DEC count
+  19CA  A5 76                       LDA count
+  19CC  05 77                       ORA count+1
+  19CE  60                          RTS
+  19CF  .getgamma
+  19CF  A2 00                       LDX #0
+  19D1  86 79                       STX temp
+  19D3  A2 FE                       LDX #254
+  19D5  A9 01                       LDA #1
+  19D7  .@
+  19D7  20 EA 19                    JSR getbit
+  19DA  E8                          INX
+  19DB  90 FA                       BCC @-
+  19DD  10 01                       BPL getbits
+  19DF  60                          RTS
+  19E0  .getbits
+  19E0  20 EA 19                    JSR getbit
+  19E3  2A                          ROL A
+  19E4  26 79                       ROL temp
+  19E6  CA                          DEX
+  19E7  10 F7                       BPL getbits
+  19E9  60                          RTS
+  19EA  .getbit
+  19EA  06 78                       ASL bitbuf
+  19EC  D0 0F                       BNE @+
+src = 6639 [P% + 1]
+  19EE  AC FF FF                    LDY &FFFF
+  19F1  EE EF 19                    INC src
+  19F4  D0 03                       BNE got_byte
+  19F6  EE F0 19                    INC src+1
+  19F9  .got_byte
+  19F9  84 78                       STY bitbuf
+  19FB  26 78                       ROL bitbuf
+  19FD  .@
+  19FD  60                          RTS
+  19FE  .packed
+SECTION Screen, org = screen, transform = "lz"
+  5800  0F 0F 0F 0F 0F 0F 0F 0F...  INCBIN "blurpscreen.bin"
+ENDSECTION
+; transform "lz": 8320 -> 3142 bytes
+
+  2644  .packed_end
+ENDSECTION
+
+LZ: screen packed from 8320 to 3142 bytes; decompressor 205 bytes
+  0000                              INCLUDE "exo.6502"
+never = 1.099511628e+12 [2^40]
+gammas = {0..15, 0..15, 0..15}
+oswrch = 65518 [&FFEE]
+screen = 22528 [&5800]
+tables = 22381 [screen - 3 * 49]
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "EXO", guard = tables
+dest = &70 [auto]
+copy = &72 [auto]
+limit = &74 [auto]
+count = &76 [auto]
+bitbuf = &78 [auto]
+temp = &79 [auto]
+length = &7A [auto]
+  1900  .entry
+  1900  A2 00                       LDX #0
+  1902  .@
+  1902  BD 25 19                    LDA vdu,X
+  1905  20 EE FF                    JSR oswrch
+  1908  E8                          INX
+  1909  E0 0C                       CPX #vdu_end - vdu
+  190B  D0 F5                       BNE @-
+  190D  A9 2D                       LDA #LO(packed)
+  190F  8D 1E 1A                    STA src
+  1912  A9 1A                       LDA #HI(packed)
+  1914  8D 1F 1A                    STA src+1
+  1917  A9 00                       LDA #LO(screen)
+  1919  85 70                       STA dest
+  191B  A9 58                       LDA #HI(screen)
+  191D  85 71                       STA dest+1
+  191F  20 31 19                    JSR unpack
+  1922  .hang
+  1922  4C 22 19                    JMP hang
+  1925  .vdu
+  1925  16 05                       EQUB 22, 5
+  1927  17 01 00 00 00 00 00 00...  EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+  1931  .vdu_end
+  1931  .unpack
+  1931  A9 80                       LDA #&80
+  1933  85 78                       STA bitbuf
+  1935  A0 10                       LDY #16
+  1937  20 14 1A                    JSR getbits
+  193A  18                          CLC
+  193B  65 70                       ADC dest
+  193D  85 74                       STA limit
+  193F  A5 79                       LDA temp
+  1941  65 71                       ADC dest+1
+  1943  85 75                       STA limit+1
+  1945  A2 00                       LDX #0
+  1947  .bucket
+  1947  A9 00                       LDA #0
+  1949  A0 04                       LDY #4
+  194B  20 14 1A                    JSR getbits
+  194E  9D 6D 57                    STA width,X
+  1951  A8                          TAY
+  1952  8A                          TXA
+  1953  29 0F                       AND #15
+  1955  D0 09                       BNE @+
+  1957  A9 01                       LDA #1
+  1959  9D 9D 57                    STA base_lo,X
+  195C  4A                          LSR A
+  195D  9D CE 57                    STA base_hi,X
+  1960  .@
+  1960  A9 00                       LDA #0
+  1962  85 79                       STA temp
+  1964  38                          SEC
+  1965  .@
+  1965  2A                          ROL A
+  1966  26 79                       ROL temp
+  1968  88                          DEY
+  1969  10 FA                       BPL @-
+  196B  7D 9D 57                    ADC base_lo,X
+  196E  9D 9E 57                    STA base_lo+1,X
+  1971  A5 79                       LDA temp
+  1973  7D CE 57                    ADC base_hi,X
+  1976  9D CF 57                    STA base_hi+1,X
+  1979  E8                          INX
+  197A  E0 30                       CPX #48
+  197C  D0 C9                       BNE bucket
+  197E  .literals
+  197E  20 CE 19                    JSR run_count
+  1981  .literal
+  1981  A0 08                       LDY #8
+  1983  20 14 1A                    JSR getbits
+  1986  C8                          INY
+  1987  91 70                       STA (dest),Y
+  1989  E6 70                       INC dest
+  198B  D0 02                       BNE @+
+  198D  E6 71                       INC dest+1
+  198F  .@
+  198F  20 E7 19                    JSR counted
+  1992  D0 ED                       BNE literal
+  1994  .matches
+  1994  20 CE 19                    JSR run_count
+  1997  .match
+  1997  A2 0F                       LDX #lengths - 1
+  1999  20 F4 19                    JSR getvalue
+  199C  84 7A                       STY length
+  199E  A2 1F                       LDX #offsets - 1
+  19A0  20 F4 19                    JSR getvalue
+  19A3  85 79                       STA temp
+  19A5  98                          TYA
+  19A6  49 FF                       EOR #&FF
+  19A8  38                          SEC
+  19A9  65 70                       ADC dest
+  19AB  85 72                       STA copy
+  19AD  A5 71                       LDA dest+1
+  19AF  E5 79                       SBC temp
+  19B1  85 73                       STA copy+1
+  19B3  A0 FF                       LDY #&FF
+  19B5  .@
+  19B5  C8                          INY
+  19B6  B1 72                       LDA (copy),Y
+  19B8  91 70                       STA (dest),Y
+  19BA  C4 7A                       CPY length
+  19BC  D0 F7                       BNE @-
+  19BE  98                          TYA
+  19BF  65 70                       ADC dest
+  19C1  85 70                       STA dest
+  19C3  90 02                       BCC @+
+  19C5  E6 71                       INC dest+1
+  19C7  .@
+  19C7  20 E7 19                    JSR counted
+  19CA  D0 CB                       BNE match
+  19CC  F0 B0                       BEQ literals
+counts = 0
+lengths = 16
+offsets = 32
+  19CE  .run_count
+  19CE  A5 70                       LDA dest
+  19D0  C5 74                       CMP limit
+  19D2  D0 09                       BNE @+
+  19D4  A5 71                       LDA dest+1
+  19D6  C5 75                       CMP limit+1
+  19D8  D0 03                       BNE @+
+  19DA  68                          PLA
+  19DB  68                          PLA
+  19DC  60                          RTS
+  19DD  .@
+  19DD  A2 FF                       LDX #counts - 1
+  19DF  20 F4 19                    JSR getvalue
+  19E2  84 76                       STY count
+  19E4  85 77                       STA count+1
+  19E6  60                          RTS
+  19E7  .counted
+  19E7  A5 76                       LDA count
+  19E9  D0 02                       BNE @+
+  19EB  C6 77                       DEC count+1
+  19ED  .@
+  19ED  C6 76                       DEC count
+  19EF  A5 76                       LDA count
+  19F1  05 77                       ORA count+1
+  19F3  60                          RTS
+  19F4  .getvalue
+  19F4  .@
+  19F4  E8                          INX
+  19F5  20 18 1A                    JSR getbit
+  19F8  B0 FA                       BCS @-
+  19FA  A9 00                       LDA #0
+  19FC  85 79                       STA temp
+  19FE  BC 6D 57                    LDY width,X
+  1A01  20 14 1A                    JSR getbits
+  1A04  7D 9D 57                    ADC base_lo,X
+  1A07  A8                          TAY
+  1A08  A5 79                       LDA temp
+  1A0A  7D CE 57                    ADC base_hi,X
+  1A0D  60                          RTS
+  1A0E  .@
+  1A0E  20 18 1A                    JSR getbit
+  1A11  2A                          ROL A
+  1A12  26 79                       ROL temp
+  1A14  .getbits
+  1A14  88                          DEY
+  1A15  10 F7                       BPL @-
+  1A17  60                          RTS
+  1A18  .getbit
+  1A18  06 78                       ASL bitbuf
+  1A1A  D0 10                       BNE @+
+  1A1C  48                          PHA
+src = 6686 [P% + 1]
+  1A1D  AD FF FF                    LDA &FFFF
+  1A20  EE 1E 1A                    INC src
+  1A23  D0 03                       BNE got_byte
+  1A25  EE 1F 1A                    INC src+1
+  1A28  .got_byte
+  1A28  2A                          ROL A
+  1A29  85 78                       STA bitbuf
+  1A2B  68                          PLA
+  1A2C  .@
+  1A2C  60                          RTS
+  1A2D  .packed
+SECTION Screen, org = screen, transform = "exo"
+  5800  0F 0F 0F 0F 0F 0F 0F 0F...  INCBIN "blurpscreen.bin"
+ENDSECTION
+; transform "exo": 8320 -> 3066 bytes
+
+  2627  .packed_end
+SECTION Tables, org = tables, guard = screen, virtual = TRUE
+  576D  .width
+  576D                              SKIP 48
+  579D  .base_lo
+  579D                              SKIP 49
+  57CE  .base_hi
+  57CE                              SKIP 49
+ENDSECTION
+
+ENDSECTION
+
+Exo: screen packed from 8320 to 3066 bytes; decompressor 252 bytes

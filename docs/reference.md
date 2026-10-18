@@ -87,7 +87,7 @@ to the end of the line.
 | `FOR v = seq` ... `NEXT` | Run the body once per element of a range or list, `v` bound to each element, each iteration in its own scope. An empty sequence runs zero times. |
 | `INCLUDE "file"` | Splice another source file in textually: its code emits here, its symbols bind here. Paths resolve relative to the including file. |
 | `MACRO name sig` ... `ENDMACRO` | Define a macro. The signature is parameter names, commas, and quoted literal tokens matched verbatim; one name may carry several overloads, matched by shape. An empty body forward-declares. Define before use. |
-| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments, `IF`s and `ASSERT`s ending in a top-level `= expr` return. Locals (parameters included) bind once, in order - a second live assignment to the same name is an error, and a local can be read only after its assignment. Overloads by parameter count. Define before use. |
+| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments, `IF`s and `ASSERT`s ending in a top-level `= expr` return. Locals (parameters included) bind once, in order - a second live assignment to the same name is an error, and a local can be read only after its assignment. Overloads by parameter count. Define before use. Recursion may nest 128 calls deep. |
 | `PRINT [#n,] v [, v...]` | Write text during assembly (final pass only): values concatenated, one newline per statement, to channel `n` (default 0). |
 | `ERROR [v [, v...]]` | Report the message as an assembly error and fail the build; assembly carries on to find more. |
 | `ASSERT e [, v [, v...]]` | `IF NOT(e) : ERROR v... : ENDIF` in one statement. The message is evaluated only on failure; without one the error is "Assertion failed". Also a `FUNCTION` body statement, where a failure becomes the call's result. |
@@ -105,6 +105,11 @@ default section starts at 0), `filename` (the request to save; an empty filename
 `cmos` (truthy enables the 65C02 instruction set for this section - see the note under Reserved names),
 `guard` (an address the section's emission must not reach; overrunning it is a non-halting error
 reporting the overshoot - checked at each `ENDSECTION`, so per piece of a reopened section),
+`transform` (the name of a `FUNCTION`, as a string: at `ENDSECTION` the section's bytes, as a list of
+numbers, are replaced by what it returns - a list of bytes, or a string - and that is what the parent
+receives; the section's labels keep their untransformed addresses. It runs once every byte is final, and
+a change of size sends the assembly round again until the sizes settle. Not on a virtual section, and a
+transformed section cannot be reopened),
 and `virtual` (truthy makes the section assign addresses but keep no bytes: it cannot be saved, and
 its code is ignored by the zero-page allocator. Inside a real section it takes no room, so it needs
 an `org` of its own. As a parent it is a memory map: it steps past each child that continues its
@@ -286,6 +291,17 @@ All broadcast; trigonometry is in radians.
 | `SUM(x [, axis])`, `PRODUCT(x [, axis])` | With no axis, fold *every* leaf to one scalar (`SUM({{1,2,3},{4,5,6}})` is 21; `SUM({})` is 0). With an axis (0 = outermost), collapse just that one: axis 0 folds rows together (`{5, 7, 9}`), axis 1 folds within each row (`{6, 15}`). |
 | `MIN(x [, axis])`, `MAX(x [, axis])` | Smallest / largest, same axis rules. `MIN({})` errors - no identity. |
 | `DEFINED(name)` | `TRUE` if the symbol resolves (yet), `FALSE` if not - the one function happy to receive an undefined name. |
+
+### Bit and compression functions ###
+
+The building blocks of a section `transform` that compresses. A field of `n` bits holding `v` is written as
+the single number `2^n + v` (the top set bit marks the width).
+
+| Function | Meaning |
+|----------|---------|
+| `BITLEN(x)` | How many bits `x`'s integer part needs: `floor(log2 x) + 1`, exactly, and 0 below 1. Broadcasts. A field's width is `BITLEN(field) - 1`. |
+| `BITPACK(fields)` | The fields (flattened, as for `EQUB`) concatenated into a list of bytes, each field most significant bit first and each byte filled from its top bit; the last byte is padded with zero bits. A field is a whole number from 1 (no bits) to 2^53 - 1 (52 bits). |
+| `LZ_PARSE(data, literal_run, literal, match_run, length, offset)` | The cheapest way to write `data` (a list of bytes, or a string) as runs alternating literals and matches - literals first, each run's count before its contents, a match copying `length` bytes from `offset` back. The five arguments are cost tables: lists of bits by value written (a run's count, a literal byte, a match run's count, a length, an offset), a negative entry meaning impossible. Returns `{bits, runs}`, each run `{0, bytes}` or `{1, {offsets, lengths}}`. Exact, given matches of 2 bytes or more, and offsets and match-run counts never cheaper as they grow. |
 
 ### Constants ###
 

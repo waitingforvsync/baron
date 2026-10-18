@@ -17,6 +17,8 @@ set(BARON_SOURCES
     scopes.h
     expression.c
     expression.h
+    lzparse.c
+    lzparse.h
     opcodes.c
     opcodes.h
     sections.c

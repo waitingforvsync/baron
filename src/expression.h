@@ -65,13 +65,21 @@ typedef struct function_body_scan {
     uint32_t error_at;   // where the structural problem was seen
 } function_body_scan;
 
-function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena);
+function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, const expr_env *env, rc_arena *arena,
+                                                 rc_arena spare);
 
 
 // Parse and evaluate one expression from text starting at cursor, resolving symbols and reading live
-// assembler state through env. arena backs any value that needs to allocate (none of the numeric operators
-// do yet). See the header comment for the greedy semantics.
-expr_result expression_parse(rc_str text, uint32_t cursor, const expr_env *env, rc_arena *arena);
+// assembler state through env. The result's backing is in arena. spare must be a DIFFERENT arena: each
+// FUNCTION call does its own work in a fresh copy of it (the two arenas take turns as calls nest), so that
+// work is dropped as soon as its result is copied out. See the header comment for the greedy semantics.
+expr_result expression_parse(rc_str text, uint32_t cursor, const expr_env *env, rc_arena *arena, rc_arena spare);
+
+// Call the user FUNCTION named name on args (already evaluated values) - a section transform's way in. The
+// result, copied into arena, is the function's value or an error value (error_type_unknown_function when
+// no FUNCTION has that name). text and call_pos are the call site, where a bad argument is placed.
+value expression_call_function(rc_str text, uint32_t call_pos, const expr_env *env, rc_str name, rc_view_value args,
+                               rc_arena *arena, rc_arena spare);
 
 
 // Reseed the RND stream to its fixed starting point. The multi-pass driver calls this at the start of every

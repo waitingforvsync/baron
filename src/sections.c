@@ -3,6 +3,8 @@
 #include "richc/macros.h"
 #include "richc/mstr.h"
 
+#include <string.h>
+
 
 enum {
     sections_nodes_reserve = 64,    // 64 ROM banks / sections is a very large project
@@ -23,6 +25,7 @@ void sections_init(sections *sec, rc_arena *per_pass, rc_arena *permanent)
     sec->permanent = permanent;
     sec->nodes     = (rc_array_section) {0};
     sec->emissions = (rc_view_section_emission) {0};
+    sec->transforms = (rc_array_section_transform) {0};
 }
 
 
@@ -324,6 +327,17 @@ void sections_reopen(sections *sec, uint32_t id)
 }
 
 
+void sections_set_code(sections *sec, uint32_t id, rc_view_bytes code)
+{
+    RC_ASSERT(sec != NULL);
+
+    section *s = rc_array_section_at(&sec->nodes, id);
+    RC_ASSERT(!s->is_virtual);
+    s->code = rc_array_bytes_make_copy(code, code.num, sec->arena);
+    s->size = code.num;
+}
+
+
 void sections_close(sections *sec, uint32_t id)
 {
     RC_ASSERT(sec != NULL && id != sections_default && sections_is_open(sec, id));
@@ -355,6 +369,62 @@ void sections_close(sections *sec, uint32_t id)
 
 
 // ---- cross-pass bookkeeping ----
+
+static uint32_t transform_index(const sections *sec, rc_str name)
+{
+    for (uint32_t i = 0; i < sec->transforms.num; i++) {
+        if (rc_str_is_equal(rc_array_section_transform_get(&sec->transforms, i).name, name)) {
+            return i;
+        }
+    }
+    return RC_INDEX_NONE;
+}
+
+
+uint32_t sections_transform_reserved(const sections *sec, rc_str name)
+{
+    RC_ASSERT(sec != NULL);
+    uint32_t i = transform_index(sec, name);
+    return i == RC_INDEX_NONE ? 0 : rc_array_section_transform_get(&sec->transforms, i).output.num;
+}
+
+
+section_transform_lookup sections_transform_lookup(const sections *sec, rc_str name, rc_view_bytes input)
+{
+    RC_ASSERT(sec != NULL);
+    uint32_t i = transform_index(sec, name);
+    if (i == RC_INDEX_NONE) {
+        return (section_transform_lookup) {0};
+    }
+
+    section_transform t = rc_array_section_transform_get(&sec->transforms, i);
+    bool same = t.input.num == input.num && (input.num == 0 || memcmp(t.input.data, input.data, input.num) == 0);
+    return (section_transform_lookup) {.found = same, .output = same ? t.output : (rc_view_bytes) {0}};
+}
+
+
+bool sections_transform_note(sections *sec, rc_str name, rc_view_bytes input, rc_view_bytes output)
+{
+    RC_ASSERT(sec != NULL);
+
+    uint32_t reserved = sections_transform_reserved(sec, name);
+    section_transform t = {
+        .name   = rc_mstr_from_str(name, name.len, sec->permanent).view,
+        .input  = rc_array_bytes_make_copy(input, input.num, sec->permanent).view,
+        .output = rc_array_bytes_make_copy(output, output.num, sec->permanent).view,
+    };
+
+    uint32_t i = transform_index(sec, name);
+    if (i == RC_INDEX_NONE) {
+        rc_array_section_transform_push(&sec->transforms, t, sec->permanent);
+    }
+    else {
+        rc_array_section_transform_set(&sec->transforms, i, t);
+    }
+
+    return output.num != reserved;
+}
+
 
 // CRC-32 (the standard reflected polynomial), bitwise - no table. The inputs are one program's object
 // code once per settling pass, so simplicity beats speed.

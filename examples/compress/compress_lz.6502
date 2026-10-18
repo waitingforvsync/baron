@@ -1,0 +1,206 @@
+\ **************************************************************************
+\ *
+\ *    Compressed title screen: LZ
+\ *
+\ *    The Blurp title screen (Retro Software): MODE 5, 26 character rows,
+\ *    8320 bytes. It is INCBINned into a section of its own, which Baron
+\ *    compresses with lz.6502's transform as it assembles; the compressed
+\ *    bytes land in the loader, whose small decompressor unpacks them
+\ *    straight into screen memory.
+\ *
+\ *    Build:  baron boot.6502 compress_lz.6502 compress_exo.6502 --opt 3 -o compress.ssd
+\ *    Run:    SHIFT-BREAK boots it; *RUN EXO shows the same screen through
+\ *            compress_exo.6502's Exomizer-style compressor
+\ *
+\ **************************************************************************
+
+INCLUDE "lz.6502"
+
+oswrch = &FFEE
+screen = &5800
+
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "LZ", guard = screen
+
+ZA_POOL &70..&8F
+ZA_AUTO2 dest, copy, limit, count
+ZA_AUTO1 bitbuf, temp, length, ob1
+
+.entry
+    ZA_ENTRY
+    LDX #0                      ; MODE 5, cursor off
+.@  LDA vdu,X
+    JSR oswrch
+    INX
+    CPX #vdu_end - vdu
+    BNE @-
+
+    LDA #LO(packed)
+    STA src
+    LDA #HI(packed)
+    STA src+1
+    LDA #LO(screen)
+    STA dest
+    LDA #HI(screen)
+    STA dest+1
+    JSR unpack
+.hang
+    JMP hang
+
+.vdu
+    EQUB 22, 5
+    EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+.vdu_end
+
+
+\ Unpack the stream at src to dest.
+
+.unpack
+    LDA #&80                    ; an empty bit buffer: just the sentinel
+    STA bitbuf
+    LDX #15                     ; LEN, so where the output stops
+    JSR getbits
+    CLC
+    ADC dest
+    STA limit
+    LDA temp
+    ADC dest+1
+    STA limit+1
+    LDA #0                      ; OB, kept as OB - 1: the X count for its bits
+    LDX #2
+    JSR getbits
+    SEC
+    SBC #1
+    STA ob1
+
+.literals                       ; a literal run: its count, then each byte in 8 bits
+    JSR run_count
+.literal
+    LDX #7
+    JSR getbits
+    LDY #0
+    STA (dest),Y
+    INC dest
+    BNE @+
+    INC dest+1
+.@  JSR counted
+    BNE literal
+
+.matches                        ; a match run: its count, then each match
+    JSR run_count
+.match
+    JSR getgamma                ; length - 1, at most 255: lz.6502 keeps matches to 256 bytes
+    STA length
+    JSR getgamma                ; HI: offset - 1 is HI - 1, then OB more bits
+    SEC
+    SBC #1
+    BCS @+
+    DEC temp
+.@  LDX ob1
+    BMI @+
+    JSR getbits
+.@  EOR #&FF                    ; copy = dest - (offset - 1) - 1
+    CLC
+    ADC dest
+    STA copy
+    LDA dest+1
+    SBC temp
+    STA copy+1
+    LDY #&FF                    ; the copy may overlap what it writes: it reads it back
+.@  INY
+    LDA (copy),Y
+    STA (dest),Y
+    CPY length
+    BNE @-
+    TYA                         ; dest += Y + 1, C being set by CPY
+    ADC dest
+    STA dest
+    BCC @+
+    INC dest+1
+.@  JSR counted
+    BNE match
+    BEQ literals
+
+
+\ The next run's count into count. Once the output is complete there is no next run: unpack is
+\ done, so drop its return address and go straight back to whoever called it.
+
+.run_count
+    LDA dest
+    CMP limit
+    BNE @+
+    LDA dest+1
+    CMP limit+1
+    BNE @+
+    PLA
+    PLA
+    RTS
+.@  JSR getgamma
+    STA count
+    LDA temp
+    STA count+1
+    RTS
+
+\ Count down one; Z set when count reaches 0.
+
+.counted
+    LDA count
+    BNE @+
+    DEC count+1
+.@  DEC count
+    LDA count
+    ORA count+1
+    RTS
+
+\ An Elias gamma code into A (low) and temp (high): some zeroes, then a 1 and that many more bits.
+\ X starts at -2, so after the 1 it is one short of the number of zeroes - the X getbits wants.
+
+.getgamma
+    LDX #0
+    STX temp
+    LDX #254
+    LDA #1
+.@  JSR getbit
+    INX
+    BCC @-
+    BPL getbits
+    RTS
+
+\ X + 1 more bits, shifted in under A (low) and temp (high). Leaves X at -1.
+
+.getbits
+    JSR getbit
+    ROL A
+    ROL temp
+    DEX
+    BPL getbits
+    RTS
+
+\ The next bit into C, keeping A and X (Y is used). bitbuf holds the bits still to come with a
+\ sentinel 1 below them. Shifting out the sentinel empties the byte and leaves C set, so ROL brings it
+\ straight back in under the next byte's bits.
+
+.getbit
+    ASL bitbuf
+    BNE @+
+src = P% + 1                    ; the next byte's address: this operand, moved on as we go
+    LDY &FFFF
+    INC src
+    BNE got_byte
+    INC src+1
+.got_byte
+    STY bitbuf
+    ROL bitbuf
+.@  RTS
+
+
+\ The screen, compressed by the lz FUNCTION as the section closes.
+
+.packed
+SECTION Screen, org = screen, transform = "lz"
+    INCBIN "blurpscreen.bin"
+ENDSECTION
+.packed_end
+
+ENDSECTION
+
+PRINT "LZ: screen packed from 8320 to ", packed_end - packed, " bytes; decompressor ", packed - unpack, " bytes"

@@ -40,6 +40,10 @@ typedef struct baron {
     uint32_t            macro_depth;
     uint32_t            function_depth;
     unsettled_note      unsettled;       // for the no_convergence report
+    bool                has_transforms;  // a section with a transform was seen: the output pass must run
+    bool                resized;         // this round's output pass gave a transform a size it was not laid out for
+    rc_str              resized_name;    // ...the last such section, and its SECTION statement, for the report
+    cursor              resized_at;
 } baron;
 
 // Build a fresh baron on the desc's borrowed arenas, seeding the root scope and default section.

@@ -107,6 +107,12 @@ typedef enum error_type {
     error_type_duplicate_function,    // a second body defined for a function arity already given one
     error_type_function_not_defined,  // a function invoked while only forward-declared (its body never supplied)
     error_type_function_too_deep,     // function recursion hit the depth cap - a missing/wrong recursion base case
+    error_type_unknown_function,      // a name looked up as a FUNCTION (a section transform's) that no FUNCTION has
+    error_type_transform_name,        // a transform attribute that is not a string naming a FUNCTION
+    error_type_transform_not_bytes,   // a transform FUNCTION whose result is not a list of bytes (or a string)
+    error_type_transform_unsettled,   // transformed sizes still moving after the round limit
+    error_type_transform_virtual,     // a transform on a virtual section, which keeps no bytes
+    error_type_transform_reopened,    // a transformed section written again: its bytes were transformed whole
     error_type_called_from,           // the companion frame: points at the use of a FUNCTION whose body failed
     error_type_spliced_from,          // the companion frame: points at the '{' of a BASIC line splice that failed fatally
 

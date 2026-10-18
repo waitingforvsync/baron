@@ -26,6 +26,7 @@ switch, keyword and operator live in the [reference](reference.md).
 - [Predefined symbols](#predefined-symbols)
 - [Macros](#macros)
 - [Functions](#functions)
+- [Section transforms](#section-transforms)
 - [Logging](#logging)
 - [The symbol dump](#the-symbol-dump)
 - [Saving your work](#saving-your-work)
@@ -931,6 +932,10 @@ same name is an error rather than a silent no-op (`x = x + 1` is asking for a lo
 recursion is the loop). Assigning the same name in an `IF` and its `ELSE` is fine; only one arm runs.
 They bind in order, too: a local can be read only once its assignment has run.
 
+Recursion can go 128 calls deep; deeper than that is an error (usually a missing base case). To walk a
+long list, split it in half and recurse on each half: the depth then grows with the number of halvings,
+so even thousands of elements stay a dozen calls deep.
+
 An error inside a body is reported on the body line that caused it, followed by a note at the call it
 came from. A bad argument is the caller's mistake, so that one is reported at the call.
 
@@ -961,6 +966,87 @@ FUNCTION checked(w)
 
 Functions are powerful enough to be able to implement something like the quicksort algorithm, taking a list
 and returning it sorted! 
+
+## Section transforms ##
+
+A section can have its bytes rewritten as it closes - compressed, scrambled, checksummed - by a `FUNCTION`
+of your own. Name it in the section's `transform` attribute:
+
+```
+FUNCTION scramble(data) = data EOR &55
+
+SECTION Loader, org = &1900, filename = "LOADER"
+    ...                         ; the unscrambler
+.payload
+SECTION Code, org = &400, transform = "scramble"
+.start
+    ...                         ; the real code, assembled for &400
+ENDSECTION
+.payload_end
+ENDSECTION
+```
+
+The `FUNCTION` is given the section's bytes as a list of numbers, and returns the bytes to keep: a list of
+numbers 0-255, or a string. Those are what the section holds and what its parent receives - here, the
+loader holds the scrambled bytes between `.payload` and `.payload_end`. The section's own labels stay where
+the original code will run once it is unscrambled, so `JMP start` still means &400.
+
+The transform runs once everything else has settled - every label resolved, zero-page variables
+allocated, `INCBIN` files loaded - so it sees the bytes exactly as they will be. If it changes their size,
+whatever comes after the section moves, so Baron goes round again until the sizes hold still. Given the
+same bytes again, a transform is not run again. (A transform whose output size depends on where it lands
+may never settle, which is reported.)
+
+`-v` lists a transformed section as it was assembled, followed by a note of what the transform made of it:
+
+```
+ENDSECTION
+; transform "scramble": 312 -> 312 bytes
+```
+
+### Bit fields ###
+
+A compressor writes fields of so many bits. In Baron, a field of `n` bits holding `v` is the single number
+`2^n + v`: the top set bit marks the width, and is not part of the value. Two builtins work with them:
+
+- `BITLEN(x)` is how many bits `x` needs (`BITLEN(5)` is 3), so a field's width is `BITLEN(f) - 1`.
+- `BITPACK(fields)` concatenates a list of fields into bytes, most significant bit first, padding the last
+  byte with zeroes.
+
+Encodings are then ordinary `FUNCTION`s, and like any arithmetic they work on whole lists at once:
+
+```
+FUNCTION bits(v, n) = 2^n + v                   ; v in n bits
+FUNCTION gamma(n)   = 2^(2 * BITLEN(n) - 1) + n ; an Elias gamma code, n >= 1
+
+BITPACK({bits(5, 3), gamma(5)})                 ; 101, then 00101: {165}
+```
+
+### Compression ###
+
+`LZ_PARSE(data, literal_run, literal, match_run, length, offset)` finds the cheapest way to write `data` as
+runs that alternate between literal bytes and matches (copies of earlier bytes), literals first, each
+run's count written before its contents. It knows nothing of how any field is written. Instead, five tables
+give the cost in bits of every value a field could hold, by value, with a negative entry meaning
+"impossible". The tables come straight from the encodings: `BITLEN(gamma(0..n)) - 1` is the width of the
+gamma code for every count up to `n`, and `gamma(0)` is no field at all, so a count of 0 comes out
+impossible on its own.
+
+It returns `{bits, runs}`: the smallest size there is under those costs, and the runs that achieve it -
+`{0, bytes}` for a literal run, `{1, {offsets, lengths}}` for a match run - for your `FUNCTION`s to encode
+and `BITPACK`. (It assumes a match is at least two bytes, and that neither an offset nor a match run's
+count ever gets cheaper as it grows.)
+
+`examples/compress` puts it all together, twice:
+
+- `lz.6502` is a complete compressor in a few dozen lines. It tries every offset split and keeps the
+  smallest.
+- `exo.6502` works like Exomizer. It fits a table of bit widths to the counts, lengths and offsets a
+  parse used, parses again with those tables, and repeats while that saves anything. The fitting is
+  written with lists too.
+
+Each has a loader whose decompressor unpacks the same title screen straight into screen memory, and both
+loaders go on one disc.
 
 ## Logging ##
 
@@ -1177,7 +1263,8 @@ half-built discs.
 ## Examples ##
 
 Take a look in the `examples/` directory for some Baron source code samples, including the obligatory
-spinning star globe (now with even more dots!).
+spinning star globe (now with even more dots!), and a title screen compressed two ways by
+[section transforms](#section-transforms) as it assembles.
 
 ---
 

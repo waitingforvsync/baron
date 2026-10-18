@@ -58,6 +58,26 @@ typedef struct section_emission {
 #include "richc/template/array.h"
 
 
+// What a transformed section's transform last made of its bytes: the input it was given and the output
+// it produced, kept (in permanent) across passes and rounds. The same input never runs the FUNCTION
+// twice, and the output's size is the room the section takes in its parent until the transform runs
+// again - during settling passes, which never run it.
+typedef struct section_transform {
+    rc_str        name;     // the section's name
+    rc_view_bytes input;
+    rc_view_bytes output;
+} section_transform;
+
+#define RC_ARRAY_TYPE section_transform
+#define RC_ARRAY_NAME section_transform
+#include "richc/template/array.h"
+
+// A cached transform output: found only if the transform has run on exactly these input bytes.
+typedef struct section_transform_lookup {
+    bool          found;
+    rc_view_bytes output;
+} section_transform_lookup;
+
 // The section manager: sections addressed by index, in the same spirit as scopes is for symbols.
 // Emission appends to the innermost open section's own bytes. Sections are per-pass (object code is only
 // read from the final pass's output), rebuilt by sections_reset each pass; only the emission fingerprints
@@ -68,6 +88,7 @@ typedef struct sections {
     rc_arena                  *permanent;   // borrowed: backs emissions, the only cross-pass state
     rc_array_section           nodes;       // index 0 is the default section
     rc_view_section_emission   emissions;   // per-section {size, crc}, rebuilt in full each settling pass
+    rc_array_section_transform transforms;  // in permanent: each transformed section's last input and output
 } sections;
 
 enum { sections_default = 0 };   // index of the default section
@@ -173,6 +194,11 @@ bool sections_take_overrun(sections *sec, uint32_t id);
 // Reopen a closed section that sections_can_reopen allows: its next piece carries on where it stopped.
 void sections_reopen(sections *sec, uint32_t id);
 
+// Replace section id's bytes (and size) with code - what its transform produced, or the zeroes standing
+// in for that during a settling pass. Its pc, and so its labels, are left alone: they are where the
+// untransformed bytes will run.
+void sections_set_code(sections *sec, uint32_t id, rc_view_bytes code);
+
 // ENDSECTION bookkeeping: close section id and settle it with the parent it was first written inside.
 //   - parent is the default: nothing (a top-level section stands alone)
 //   - real child, real parent: the child's bytes are copied onto the parent's, whose pc moves past them
@@ -190,6 +216,17 @@ void sections_close(sections *sec, uint32_t id);
 // the final pass legitimately differs at INCBINs, the output pass at ZA_AUTO addresses.
 bool sections_emission_changed(sections *sec);
 
+
+// The room transformed section name takes in its parent until its transform runs: the size of what it
+// last produced, or 0 if it has never run.
+uint32_t sections_transform_reserved(const sections *sec, rc_str name);
+
+// What section name's transform produced from exactly these input bytes, if it has run on them before.
+section_transform_lookup sections_transform_lookup(const sections *sec, rc_str name, rc_view_bytes input);
+
+// Record what section name's transform made of input (both copied into permanent). True when the output's
+// size differs from the room reserved for it: everything laid out after it was laid out wrongly.
+bool sections_transform_note(sections *sec, rc_str name, rc_view_bytes input, rc_view_bytes output);
 
 // ---- copying ----
 

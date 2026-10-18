@@ -102,6 +102,12 @@ rc_str error_type_name(error_type e)
         case error_type_duplicate_function:      return RC_STR("Duplicate function arity");
         case error_type_function_not_defined:    return RC_STR("Function body is not defined");
         case error_type_function_too_deep:       return RC_STR("Function recursion nested too deeply");
+        case error_type_unknown_function:        return RC_STR("Unknown FUNCTION: '%'");
+        case error_type_transform_name:          return RC_STR("A transform must name a FUNCTION, as a string");
+        case error_type_transform_not_bytes:     return RC_STR("Transform did not return bytes: '%'");
+        case error_type_transform_unsettled:     return RC_STR("Transformed section size did not settle: '%'");
+        case error_type_transform_virtual:       return RC_STR("A virtual section has no bytes to transform: '%'");
+        case error_type_transform_reopened:      return RC_STR("A transformed section cannot be written again: '%'");
         case error_type_called_from:             return RC_STR("Note: Called from here");
         case error_type_spliced_from:            return RC_STR("Note: In the BASIC splice opened here");
         case error_type_divide_by_zero:          return RC_STR("Division by zero");
