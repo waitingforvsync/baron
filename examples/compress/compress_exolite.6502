@@ -1,24 +1,24 @@
 \ **************************************************************************
 \ *
-\ *    Compressed title screen: Exomizer-style
+\ *    Compressed title screen: Exolite
 \ *
-\ *    The same screen as compress_lz.6502, compressed by exo.6502 instead:
+\ *    The same screen as compress_lz.6502, compressed by exolite.6502 instead:
 \ *    every count, length and offset is written with a table fitted to
 \ *    the screen. The decompressor rebuilds the tables from the stream's
 \ *    header, then unpacks straight into screen memory.
 \ *
-\ *    Build:  baron boot.6502 compress_lz.6502 compress_exo.6502 --opt 3 -o compress.ssd
-\ *    Run:    *RUN EXO
+\ *    Build:  baron boot.6502 compress_lz.6502 compress_exolite.6502 compress_zx02.6502 compress_exomizer.6502 --opt 3 -o compress.ssd
+\ *    Run:    *RUN EXOLITE
 \ *
 \ **************************************************************************
 
-INCLUDE "exo.6502"
+INCLUDE "exolite.6502"
 
 oswrch = &FFEE
 screen = &5800
 tables = screen - 3 * 49                ; the rebuilt tables, just below the screen
 
-SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "EXO", guard = tables
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "EXOLITE", guard = tables
 
 ZA_POOL &70..&8F
 ZA_AUTO2 dest, copy, limit, count
@@ -111,7 +111,7 @@ ZA_AUTO1 bitbuf, temp, length
 .matches                        ; a match run: its count, then each match's length - 1 and offset
     JSR run_count
 .match
-    LDX #lengths - 1            ; at most 255: exo.6502 keeps matches to 256 bytes
+    LDX #lengths - 1            ; at most 255: exolite.6502 keeps matches to 256 bytes
     JSR getvalue
     STY length
     LDX #offsets - 1
@@ -223,10 +223,10 @@ src = P% + 1                    ; the next byte's address: this operand, moved o
 .@  RTS
 
 
-\ The screen, compressed by the exo FUNCTION as the section closes.
+\ The screen, compressed by the exolite FUNCTION as the section closes.
 
 .packed
-SECTION Screen, org = screen, transform = "exo"
+SECTION Screen, org = screen, transform = "exolite"
     INCBIN "blurpscreen.bin"
 ENDSECTION
 .packed_end
@@ -239,4 +239,4 @@ ENDSECTION
 
 ENDSECTION
 
-PRINT "Exo: screen packed from 8320 to ", packed_end - packed, " bytes; decompressor ", packed - unpack, " bytes"
+PRINT "Exolite: screen packed from 8320 to ", packed_end - packed, " bytes; decompressor ", packed - unpack, " bytes"

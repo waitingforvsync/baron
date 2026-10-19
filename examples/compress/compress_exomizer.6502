@@ -1,0 +1,65 @@
+\ **************************************************************************
+\ *
+\ *    Compressed title screen: Exomizer
+\ *
+\ *    The same screen as compress_lz.6502, compressed by exomizer.6502 into
+\ *    Exomizer's own format and unpacked by Exomizer's own 6502 decruncher
+\ *    (exodecrunch.6502), which rebuilds its tables from the stream's
+\ *    header, then unpacks straight into screen memory.
+\ *
+\ *    Build:  baron boot.6502 compress_lz.6502 compress_exolite.6502 compress_zx02.6502 compress_exomizer.6502 --opt 3 -o compress.ssd
+\ *    Run:    *RUN EXO
+\ *
+\ **************************************************************************
+
+INCLUDE "exomizer.6502"
+
+oswrch = &FFEE
+screen = &5800
+decrunch_table = screen - 156           ; the decruncher's tables, just below the screen
+
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "EXO", guard = decrunch_table
+
+.entry
+    LDX #0                      ; MODE 5, cursor off
+.@  LDA vdu,X
+    JSR oswrch
+    INX
+    CPX #vdu_end - vdu
+    BNE @-
+    JSR decrunch
+.hang
+    JMP hang
+
+.vdu
+    EQUB 22, 5
+    EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+.vdu_end
+
+
+\ The next byte of the stream into A, keeping X, Y, C and V, as the
+\ decruncher asks.
+
+.get_crunched_byte
+    LDA packed                  ; this operand moves on through the stream
+    INC get_crunched_byte + 1
+    BNE @+
+    INC get_crunched_byte + 2
+.@  RTS
+
+INCLUDE "exodecrunch.6502"
+
+
+\ The stream: where it unpacks to, which the decruncher reads first, then
+\ the screen, compressed by the exomizer FUNCTION as the section closes.
+
+.packed
+    EQUB HI(screen), LO(screen)
+SECTION Screen, org = screen, transform = "exomizer"
+    INCBIN "blurpscreen.bin"
+ENDSECTION
+.packed_end
+
+ENDSECTION
+
+PRINT "Exomizer: screen packed from 8320 to ", packed_end - packed, " bytes; decruncher ", decrunch_end - get_crunched_byte, " bytes"

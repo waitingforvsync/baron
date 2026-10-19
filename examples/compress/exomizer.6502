@@ -1,0 +1,297 @@
+\ **************************************************************************
+\ *
+\ *    The compressor: Exomizer's own format, written as Baron FUNCTIONs
+\ *
+\ *    The raw stream Magnus Lind's Exomizer 3 writes when asked for no
+\ *    literal sequences, no offset reuse and matches under 256 bytes
+\ *    (exomizer raw -P7 -T5 -M256), so its 6502 decruncher unpacks it:
+\ *
+\ *      52 widths, 4 bits each: 16 for lengths, then 16 each for the
+\ *        offsets of matches of 3 bytes or more and of 2 bytes, and 4
+\ *        for the offsets of 1-byte matches
+\ *      the first byte, as it is
+\ *      then literals and matches, each with a flag:
+\ *        literal   1, then the byte
+\ *        match     0, then bucket i of the length as i zeros and a 1,
+\ *                  its place in the bucket, then the offset's bucket
+\ *                  (2 bits for a 1-byte match, else 4) and its place
+\ *      the end: 0, then sixteen zeros and a 1
+\ *
+\ *    A table splits the numbers from 1 up into buckets, bucket i holding
+\ *    2^width[i] of them. Bits go most significant first; a place of 8
+\ *    bits or more is its top bits, then its low byte whole. Literals are
+\ *    whole bytes too, and each byte of bits sits in the stream where the
+\ *    decruncher first needs it - the first byte holding just the bits
+\ *    left over, and a marker bit.
+\ *
+\ **************************************************************************
+
+FUNCTION bits(v, n) = 2^n + v                           ; v in n bits
+FUNCTION cost(f)    = BITLEN(f) - 1                     ; a field's width; -1 if impossible
+
+never = 2^40                                            ; dearer than any real total
+
+\ The tables, as lists of widths: {lengths, offsets of 1-byte matches,
+\ 2-byte matches, longer matches}, and what each bucket's number costs
+\ before its place: a length's flag and i zeros and a 1, an offset's 2 or
+\ 4 bits. The search starts from tables that grow steadily.
+
+start   = {{0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 1..4, {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 0..15}
+indices = {2 + (0..15), REPEATED(4, 2), REPEATED(16, 4), REPEATED(16, 4)}
+
+\ What every number from 1 to limit costs under one table (0 has no code),
+\ and which bucket each falls in.
+
+FUNCTION bucket_costs(widths, idx, i, left)
+    IF i == LEN(widths) OR left <= 0
+        r = {}
+    ELSE
+        k = MIN({2^widths[i], left})
+        r = CONCAT(REPEATED(k, idx[i] + widths[i]), bucket_costs(widths, idx, i + 1, left - k))
+    ENDIF
+= r
+
+FUNCTION bucket_of(widths, i, left)
+    IF i == LEN(widths) OR left <= 0
+        r = {}
+    ELSE
+        k = MIN({2^widths[i], left})
+        r = CONCAT(REPEATED(k, i), bucket_of(widths, i + 1, left - k))
+    ENDIF
+= r
+
+FUNCTION cost_table(widths, idx, limit) = CONCAT({-1}, bucket_costs(widths, idx, 0, limit))
+
+\ The search. A literal costs its flag and 8 bits, so a run of n costs n
+\ bits of flags; matches carry their own flags, so a run of them costs
+\ nothing more. Lengths stop at 255, as the decruncher wants them to.
+
+FUNCTION parse_with(t, data)
+    n    = LEN(data)
+    runs = CONCAT({-1}, 1..n)
+    lits = REPEATED(256, 8)
+    none = CONCAT({-1}, REPEATED(n, 0))
+    lens = cost_table(t[0], indices[0], 255)
+    offs = {cost_table(t[1], indices[1], n), cost_table(t[2], indices[2], n), cost_table(t[3], indices[3], n)}
+= LZ_PARSE(data, runs, lits, none, lens, offs)
+
+
+\ ---- fitting a table ----
+
+\ How many of the numbers are below s, for each s from 0 to e. Every s is
+\ added once so FIND always finds it. A 0 counts below every bucket, so it
+\ costs nothing: that is how a number is left out of a table.
+
+FUNCTION below_counts(values, e) = FIND(SORT(CONCAT(values, 0..e)), 0..e) - (0..e)
+
+FUNCTION smaller(a, b) = b + (a < b) * (a - b)          ; element by element
+
+\ The search runs from the last bucket back to the first: a layer holds, for
+\ every s from 0 to e, the fewest bits for the numbers from s up using buckets
+\ i onwards. Bucket i, w wide, costs idx[i] + w bits for each number in it
+\ and moves on to s + 2^w. Past the largest number (s = e) nothing is left to
+\ pay for. The lists are padded so reaching past e reads as reaching e, and
+\ every shift is a slice.
+
+FUNCTION in_reach(b, e, w)                              ; how many numbers are in s..s + 2^w - 1, by width
+    c = b[2^w..e + 2^w] - b[0..e]
+    IF w == 0
+        r = {c}
+    ELSE
+        r = CONCAT(in_reach(b, e, w - 1), {c})
+    ENDIF
+= r
+
+FUNCTION best_of(c, w, counts, g, e)                    ; the cheapest width from 0 to w
+    t = counts[w] * (c + w) + g[2^w..e + 2^w]
+    IF w == 0
+        r = t
+    ELSE
+        r = smaller(t, best_of(c, w - 1, counts, g, e))
+    ENDIF
+= r
+
+FUNCTION layers(i, counts, e, wmax, idx)                ; the layers for buckets i onwards
+    IF i == LEN(idx)
+        r = {CONCAT(REPEATED(e, never), {0})}
+    ELSE
+        rest = layers(i + 1, counts, e, wmax, idx)
+        g    = CONCAT(rest[0], REPEATED(2^wmax, 0))
+        r    = CONCAT({best_of(idx[i], wmax, counts, g, e)}, rest)
+    ENDIF
+= r
+
+\ Back from the front: at each bucket, the narrowest width that does best.
+\ Buckets past the largest number get width 15, to reach as far as they can.
+
+FUNCTION trace(ls, below, e, wmax, idx, i, s)
+    IF i == LEN(idx)
+        r = {}
+    ELIF s == e
+        r = REPEATED(LEN(idx) - i, 15)
+    ELSE
+        ws    = 0..wmax
+        to    = smaller(s + 2^ws, e)
+        cands = (below[to] - below[s]) * (idx[i] + ws) + ls[i + 1][to]
+        w     = FIND(cands, MIN(cands))
+        r     = CONCAT({w}, trace(ls, below, e, wmax, idx, i + 1, smaller(s + 2^w, e)))
+    ENDIF
+= r
+
+\ The widths that write these numbers in the fewest bits, one per index cost.
+
+FUNCTION fit(values, idx)
+    vs     = FLATTEN(values)
+    e      = MAX(CONCAT({1}, vs)) + 1
+    below  = below_counts(vs, e)
+    wmax   = MIN({15, BITLEN(e)})
+    counts = in_reach(CONCAT(below, REPEATED(2^wmax, below[e])), e, wmax)
+= trace(layers(0, counts, e, wmax, idx), below, e, wmax, idx, 0, 1)
+
+
+\ ---- what a parse wrote ----
+
+\ The numbers in each table, gathered by halving the list of runs: every
+\ length, and each offset under its match's length (0 elsewhere).
+
+FUNCTION run_values(run)
+    IF run[0] == 0
+        r = {{}, {}, {}, {}}
+    ELSE
+        offs = run[1][0]
+        lens = run[1][1]
+        r = {lens, offs * (lens == 1), offs * (lens == 2), offs * (lens >= 3)}
+    ENDIF
+= r
+
+FUNCTION run_list_values(runs)
+    n = LEN(runs)
+    IF n == 0
+        r = {{}, {}, {}, {}}
+    ELIF n == 1
+        r = run_values(runs[0])
+    ELSE
+        h = n DIV 2
+        r = ZIP(run_list_values(runs[0..<h]), run_list_values(runs[h..<n]))
+    ENDIF
+= r
+
+FUNCTION fit_all(runs)
+    v = run_list_values(runs)
+= {fit(v[0], indices[0]), fit(v[1], indices[1]), fit(v[2], indices[2]), fit(v[3], indices[3])}
+
+\ Fit tables to what a parse wrote, parse again with them, and keep going
+\ while that saves anything. The result is the best {widths, parse} found.
+
+FUNCTION settle(widths, p, data, tries)
+    next = fit_all(p[1])
+    q    = parse_with(next, data)
+    IF q[0] >= p[0]
+        r = {widths, p}
+    ELIF tries == 1
+        r = {next, q}
+    ELSE
+        r = settle(next, q, data, tries - 1)
+    ENDIF
+= r
+
+
+\ ---- the stream ----
+
+\ Tokens in the order the decruncher takes them: a bit is 0 or 1, a whole
+\ byte b is 256 + b.
+
+FUNCTION bit_list(v, n) = (v >> REVERSE(0..<n)) AND 1    ; v's n bits, first out first
+
+FUNCTION place(v, w)                                    ; v in w bits, a low byte whole from 8 bits up
+    IF w > 7
+        r = CONCAT(bit_list(v >> 8, w - 8), 256 + (v AND 255))
+    ELSE
+        r = bit_list(v, w)
+    ENDIF
+= r
+
+\ A table ready for writing: {widths, each number's bucket, each bucket's
+\ first number}.
+
+FUNCTION bases(widths, i, b)
+    IF i == LEN(widths)
+        r = {}
+    ELSE
+        r = CONCAT(b, bases(widths, i + 1, b + 2^widths[i]))
+    ENDIF
+= r
+
+FUNCTION coder(widths, limit) = {widths, CONCAT({0}, bucket_of(widths, 0, limit)), bases(widths, 0, 1)}
+
+FUNCTION match_tokens(off, len, c)
+    i  = c[0][1][len]
+    t  = MIN({len, 3})
+    j  = c[t][1][off]
+    ob = indices[t][0]
+= CONCAT(REPEATED(i + 1, 0), 1, place(len - c[0][2][i], c[0][0][i]), bit_list(j, ob), place(off - c[t][2][j], c[t][0][j]))
+
+FUNCTION matches_tokens(offs, lens, c)
+    n = LEN(offs)
+    IF n == 1
+        r = match_tokens(offs[0], lens[0], c)
+    ELSE
+        h = n DIV 2
+        r = {matches_tokens(offs[0..<h], lens[0..<h], c), matches_tokens(offs[h..<n], lens[h..<n], c)}
+    ENDIF
+= r
+
+FUNCTION run_tokens(run, c)
+    IF run[0] == 0
+        r = ZIP(REPEATED(LEN(run[1]), 1), 256 + run[1])
+    ELSE
+        r = matches_tokens(run[1][0], run[1][1], c)
+    ENDIF
+= r
+
+FUNCTION tokens(runs, c)
+    n = LEN(runs)
+    IF n == 1
+        r = run_tokens(runs[0], c)
+    ELSE
+        h = n DIV 2
+        r = {tokens(runs[0..<h], c), tokens(runs[h..<n], c)}
+    ENDIF
+= r
+
+\ The widths as the decruncher reads them: lengths, then the offset tables
+\ for long, 2-byte and 1-byte matches, each width's low 3 bits then its top.
+
+FUNCTION width_tokens(t)
+    ws = CONCAT(t[0], t[3], t[2], t[1])
+= FLATTEN(ZIP((ws >> 2) AND 1, (ws >> 1) AND 1, ws AND 1, ws >> 3))
+
+\ Into bytes. The decruncher fetches a byte of bits just as it needs the
+\ first of them, so that byte goes where its first bit is, ahead of every
+\ whole byte after it; sorting by position puts everything in that order.
+\ The very first byte is read before anything else, so it takes the bits
+\ left over when the rest make whole bytes, and a 1 to mark where they end.
+
+FUNCTION stream(t)
+    n     = LEN(t)
+    whole = t DIV 256                                   ; 1 for a whole byte, 0 for a bit
+    order = SORT((0..<n) + whole * n)                   ; the bits' positions, then the bytes'
+    nbits = n - SUM(whole)
+    at    = order[0..<nbits]
+    bytes = order[nbits..<n] - n
+    k     = nbits MOD 8
+    first = BITPACK(CONCAT(2 + t[at[0..<k]], 3))
+    packs = BITPACK(2 + t[at[k..<nbits]])               ; eight bits to a byte
+    keys  = CONCAT(at[k + 8 * (0..<LEN(packs))] * 256 + packs, bytes * 256 + t[bytes] - 256)
+= CONCAT(first, SORT(keys) AND 255)
+
+\ The transform: settle the tables, then write the widths, the runs (the
+\ first literal without its flag) and the end.
+
+FUNCTION exomizer(data)
+    n    = LEN(data)
+    best = settle(start, parse_with(start, data), data, 8)
+    w    = best[0]
+    c    = {coder(w[0], 255), coder(w[1], n), coder(w[2], n), coder(w[3], n)}
+    t    = FLATTEN(tokens(best[1][1], c))
+= stream(CONCAT(width_tokens(w), t[1..<LEN(t)], 0, REPEATED(16, 0), 1))

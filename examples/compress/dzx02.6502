@@ -1,0 +1,138 @@
+\ **************************************************************************
+\ *
+\ *    The decompressor: ZX02
+\ *
+\ *    A port of dmsc's zx02-optim.asm, the size- and speed-optimised 6502
+\ *    decoder from https://github.com/dmsc/zx02. Its zero page comes from
+\ *    the allocator, and the caller sets src and dst instead of copying in
+\ *    an initialisation block; the rest is dmsc's code as written.
+\ *
+\ *    The original carries "(c) 2022 DMSC, code under MIT license", and
+\ *    its LICENSE file reads:
+\ *
+\ *      MIT License
+\ *
+\ *      Copyright (c) 2020 Daniel Serpell
+\ *
+\ *      Permission is hereby granted, free of charge, to any person
+\ *      obtaining a copy of this software and associated documentation
+\ *      files (the "Software"), to deal in the Software without
+\ *      restriction, including without limitation the rights to use,
+\ *      copy, modify, merge, publish, distribute, sublicense, and/or sell
+\ *      copies of the Software, and to permit persons to whom the
+\ *      Software is furnished to do so, subject to the following
+\ *      conditions:
+\ *
+\ *      The above copyright notice and this permission notice shall be
+\ *      included in all copies or substantial portions of the Software.
+\ *
+\ *      THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+\ *      EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+\ *      OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+\ *      NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+\ *      HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+\ *      WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+\ *      FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+\ *      OTHER DEALINGS IN THE SOFTWARE.
+\ *
+\ **************************************************************************
+
+ZA_AUTO2 src, dst, pntr                 ; the next byte in, the next byte out, a match's source
+ZA_AUTO1 offset_hi, bitr                ; the last offset's high byte, the bit reservoir
+
+\ Unpack the ZX02 stream at src to dst.
+
+.unpack
+    LDA #&80                            ; an empty reservoir: just the sentinel bit
+    STA bitr
+    LDA #&FF                            ; the last offset starts at 1: the low byte of
+    STA pntr                            ; offset - 1, EOR &FF
+    LDX #0
+    STX offset_hi
+    LDY #0
+
+\ A literal run: gamma(count), then the bytes.
+
+.decode_literal
+    INX
+    JSR get_elias
+.cop0
+    LDA (src),Y
+    INC src
+    BNE @+
+    INC src+1
+.@  STA (dst),Y
+    INC dst
+    BNE @+
+    INC dst+1
+.@  DEX
+    BNE cop0
+
+    ASL bitr
+    BCS new_offset
+
+\ A repeat: gamma(length), copying from the last offset again.
+
+    INX
+    JSR get_elias
+.copy
+    LDA dst+1
+    SBC offset_hi                       ; C = 0 from get_elias
+    STA pntr+1
+.cop1
+    LDY dst
+    LDA (pntr),Y
+    LDY #0
+    STA (dst),Y
+    INC dst
+    BNE @+
+    INC dst+1
+    INC pntr+1
+.@  DEX
+    BNE cop1
+
+    ASL bitr
+    BCC decode_literal
+
+\ A new offset: gamma of its high part, its low 7 bits, then gamma(length - 1).
+
+.new_offset
+    INX
+    JSR get_elias
+    BEQ exit                            ; a high part of 256: the end
+    DEX                                 ; decrease and halve
+    TXA
+    LSR A
+    STA offset_hi
+    LDA (src),Y                         ; the low part, a literal 7 bits
+    INC src
+    BNE @+
+    INC src+1
+.@  ROR A                               ; halve
+    EOR #&FF
+    STA pntr
+    LDX #1                              ; the length, starting with the bit already in C
+    JSR elias_skip1
+    INX
+    BCC copy
+
+\ An interlaced Elias gamma code into X (and A).
+
+.elias_get
+    ASL bitr                            ; the next data bit into the result
+    ROL A
+    TAX
+.get_elias
+    ASL bitr                            ; one bit
+    BNE elias_skip1
+    LDA (src),Y                         ; a new byte of bits from the stream
+    INC src
+    BNE @+
+    INC src+1
+.@  ROL A                               ; C = 1 from the sentinel
+    STA bitr
+.elias_skip1
+    TXA
+    BCS elias_get
+.exit                                   ; the ending bit: done
+    RTS

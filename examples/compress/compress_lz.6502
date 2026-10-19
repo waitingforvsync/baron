@@ -8,9 +8,11 @@
 \ *    bytes land in the loader, whose small decompressor unpacks them
 \ *    straight into screen memory.
 \ *
-\ *    Build:  baron boot.6502 compress_lz.6502 compress_exo.6502 --opt 3 -o compress.ssd
-\ *    Run:    SHIFT-BREAK boots it; *RUN EXO shows the same screen through
-\ *            compress_exo.6502's Exomizer-style compressor
+\ *    Build:  baron boot.6502 compress_lz.6502 compress_exolite.6502 compress_zx02.6502 compress_exomizer.6502 --opt 3 -o compress.ssd
+\ *    Run:    SHIFT-BREAK boots it; *RUN EXOLITE, *RUN ZX02 and *RUN EXO show
+\ *            the same screen through compress_exolite.6502's Exomizer-
+\ *            inspired format, compress_zx02.6502's ZX02 and
+\ *            compress_exomizer.6502's Exomizer
 \ *
 \ **************************************************************************
 

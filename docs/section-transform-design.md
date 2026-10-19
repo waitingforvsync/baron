@@ -560,9 +560,10 @@ general enough for both target formats:
 - **Flag-per-move formats** (Exomizer, LZSS): the header tables are linear (one flag bit per item),
   and a long literal run's escape code is just a cheaper entry further along the literal table.
 
-What it does not cover: formats that remember state between moves, such as "repeat the last offset"
-(ZX0, LZSA), and formats whose one token byte holds two lengths (LZ4). Those need the parse to grow,
-as formats demand. That is the same C work under Option A, whose engine would need the same new
+What it does not cover: formats whose one token byte holds two lengths (LZ4), and formats that remember
+more state between moves than ZX0's rule ("the first match after a literal run may reuse the last
+offset", which round 12 added as the optional `repeat` table; LZMA-style rep queues remain out). Those
+need the parse to grow, as formats demand. That is the same C work under Option A, whose engine would need the same new
 states, so it is not a point in Option A's favour.
 
 ### 5.10 Exomizer-style fitting as FUNCTIONs
@@ -1033,3 +1034,47 @@ and `getbit` now keeps Y, at one byte's cost, so `getbits` can count in Y); 1.30
 Building the disc takes 2.1 s in release (the exo fit is most of it). Checked by a Python decoder, a
 Python 6502 interpreter running both loaders, and beebjit booting each. Found on the way: `DIV` works in
 32 bits, so `2^40 DIV 2` is 0.
+
+**Round 12 (2026-10-19).** ZX02 joined the disc, and `LZ_PARSE` gained repeat matches to make it worth
+doing. Research first: on the title screen dmsc's zx02 gives 3104 bytes and his 6502 decoder is 132 bytes
+and 2.6 times faster than ours (literals and offset low bytes are whole bytes in the stream), but
+`LZ_PARSE` without repeats only reaches 3238 - repeats are worth about 110 bytes, mostly "a match, one odd
+byte, the match carries on" (206 of zx02's 308 repeats follow a single literal). The user asked whether
+the offset in hand could be carried like the run counts: it can, but it has no order to prune by, so it is
+kept per offset - queues of closed match runs that left each offset in hand and of the literal runs after
+them, short because a repeat only opens a match run. Only a run's last match decides the offset in hand,
+so the staircase and the nearest-offset rule still serve the matches before it; the last match tries every
+offset whose bytes match (per-byte chains), and entries are reference counted (a scratch prototype without
+that needed 900 MB on a 20 KB screen; with it, under 75K live entries). A record more than one written-out
+match above the best at its position is dropped (it saves 15-35% of the time, never changes the answer).
+New assumptions, only with repeats: literal-run counts and repeat lengths never cheaper as they grow. Length
+1 is now allowed everywhere (ZX02 needs 1-byte repeats; both earlier examples already mark it impossible).
+A repeat comes back as offset 0. Checked against an independent brute force that tracks the offset in hand,
+and bit for bit against the prototype over the 11-file beebcrunch corpus (0.4 to 2.4 s per file, whole
+assembly included). The starting offset ZX02 assumes (1) was left out by agreement: worth at most a byte on
+any corpus file, it is the byte that makes the title screen 3104 rather than 3103. `zx02.6502` is the
+compressor as FUNCTIONs: the stream is a token list (bits 0/1, whole bytes 256 + b) laid out by two sorts
+on position, so each byte of bits lands where the decoder first needs it. `dzx02.6502` is dmsc's decoder
+with its MIT notice, 129 bytes here (the caller sets the pointers). 3104 bytes, 466,842 cycles (0.23 s),
+checked by dzx02, the Python 6502 interpreter and a beebjit boot; LZ and EXO byte-identical, disc builds in
+2.6 s.
+
+**Round 13 (2026-10-19).** `exo` became `exolite` (files, transform, disc name `EXOLITE`), since the format is
+inspired by Exomizer but is not Exomizer's. Then a look at real Exomizer support, `exomizer raw -c` with its
+own 6502 decruncher (scratch work only). The decruncher ports to Baron line for line and unpacks Exomizer's
+streams; the stream side needs `LZ_PARSE` to grow in two ways. Offsets are priced by three tables, by match
+length (1, 2, 3 or more). And Exomizer's fitted offset tables are not monotone - a narrow bucket can sit on a
+popular far offset (320, a MODE 5 character row, at 7 bits while 200 costs 11) - so every match must try every
+offset, not the nearest per length: under Exomizer's own tables an exact search of that kind gives 2980 bytes
+to Exomizer's 2985, but the nearest-offset rule gives 3015. Exomizer's matches carry their own flags (no run
+counts), so the per-offset search added for repeats can serve every match exactly. Its default format also
+reuses offsets, but only straight after a single literal, and every match there pays a 1-bit flag; worth 492
+bytes over the corpus, though it costs a little on screens. Table fitting stays FUNCTIONs (exolite's fit, with
+a fixed index cost for offsets), but needs a better start than gamma tables: 2997 against 2975 from Exomizer's. Then built, without offset reuse: `offset` may now be a list of tables by length,
+and where match runs cost the same whatever their count, every match tries every offset (a closed run may
+simply carry on, which costs nothing there), so offset prices need no order; counted runs keep the staircase.
+ZX02 takes the new path too, with the same sizes. `exomizer.6502` and its loader write Exomizer's raw format
+and unpack with Exomizer's decruncher: 2989 bytes to Exomizer's 2985. The parse is exact; the gap is where
+the table search starts (from Exomizer's own tables it reaches 2975), and seeding it the way Exomizer does,
+from statistics over every candidate match, would need `LZ_PARSE`'s candidates as a value.
+

@@ -1807,14 +1807,16 @@ static cost_table cost_table_make(value v, rc_arena *arena)
     return (cost_table) {.costs = costs.view, .err = value_make_none()};
 }
 
-// LZ_PARSE(data, literal_run, literal, match_run, length, offset): the cheapest way to write data (a list
-// of bytes, or a string) as alternating literal and match runs, literals first, each run's count before
-// its contents (lzparse.h has the search). The five tables give the cost in bits of each value a field
-// can hold, indexed by that value. The result is {bits, runs}: a literal run is {0, bytes}, a match run
-// {1, {offsets, lengths}} - two lists, so a format's field FUNCTIONs encode a whole run in one call.
+// LZ_PARSE(data, literal_run, literal, match_run, length, offset [, repeat]): the cheapest way to write
+// data (a list of bytes, or a string) as alternating literal and match runs, literals first, each run's
+// count before its contents (lzparse.h has the search). The tables give the cost in bits of each value a
+// field can hold, indexed by that value; offset may be a list of tables, one per match length from 1 (the
+// last serving every longer match); the optional sixth prices a repeat match by its length. The
+// result is {bits, runs}: a literal run is {0, bytes}, a match run {1, {offsets, lengths}} - two lists,
+// so a format's field FUNCTIONs encode a whole run in one call - with offset 0 for a repeat.
 static value fn_lz_parse(rc_view_value args, rc_arena *arena)
 {
-    if (args.num != 6) {
+    if (args.num != 6 && args.num != 7) {
         return value_make_error(error_type_incorrect_parameters);
     }
 
@@ -1846,12 +1848,30 @@ static value fn_lz_parse(rc_view_value args, rc_arena *arena)
         return value_make_error(error_type_type_mismatch);
     }
 
-    cost_table tables[5];
-    for (uint32_t i = 0; i < 5; i++) {
+    cost_table tables[6] = {0};
+    for (uint32_t i = 0; i + 1 < args.num; i++) {
+        if (i == 4) {
+            continue;   // the offsets come next, and may be several tables
+        }
         tables[i] = cost_table_make(rc_view_value_get(args, i + 1), arena);
         if (!value_is_none(tables[i].err)) {
             return tables[i].err;
         }
+    }
+
+    // The offsets: one table for every length, or a list of them - one per length from 1, the last
+    // serving every longer match.
+    value          offs     = rc_view_value_get(args, 5);
+    bool           several  = value_is_list(offs) && offs.list.num != 0
+                           && (value_is_list(rc_view_value_get(offs.list, 0)) || value_is_range(rc_view_value_get(offs.list, 0)));
+    uint32_t       count    = several ? offs.list.num : 1;
+    rc_array_lz_table offsets = rc_array_lz_table_make(count, arena);
+    for (uint32_t i = 0; i < count; i++) {
+        cost_table t = cost_table_make(several ? rc_view_value_get(offs.list, i) : offs, arena);
+        if (!value_is_none(t.err)) {
+            return t.err;
+        }
+        rc_array_lz_table_push(&offsets, t.costs, arena);
     }
 
     lz_parse_result r = lz_parse(bytes.view, (lz_costs) {
@@ -1859,7 +1879,8 @@ static value fn_lz_parse(rc_view_value args, rc_arena *arena)
         .literal     = tables[1].costs,
         .match_run   = tables[2].costs,
         .length      = tables[3].costs,
-        .offset      = tables[4].costs,
+        .offset      = offsets.view,
+        .repeat      = tables[5].costs,
     }, arena);
     if (!r.ok) {
         return value_make_error(error_type_domain);   // no parse fits these tables
@@ -3621,6 +3642,14 @@ RC_TEST_STEP(expression, lz_parse, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE(\"ABABABAB\", " LZ_TABLES ")"),
                                  VAL("LZ_PARSE({65, 66, 65, 66, 65, 66, 65, 66}, " LZ_TABLES ")")));
     RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE({}, " LZ_TABLES ")"), VAL("{0, {}}")));
+
+    // A match, a hole, then a repeat copying from the same offset again (offset 0) for 1 + 3 bits:
+    // without the repeat table the last match must write its offset out
+    RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE(\"abcdefghabcdQfgh\", " LZ_TABLES ", " LZ_GAMMA ")"),
+                                 VAL("{95, {{0, CODES(\"abcdefgh\")}, {1, {{8}, {4}}}, {0, {81}}, {1, {{0}, {3}}}}}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE(\"abcdefghabcdQfgh\", " LZ_TABLES ")"),
+                                 VAL("{102, {{0, CODES(\"abcdefgh\")}, {1, {{8}, {4}}}, {0, {81}}, {1, {{8}, {3}}}}}")));
+    RC_CHECK_TRUE(VAL("LZ_PARSE({1}, " LZ_TABLES ", " LZ_GAMMA ", 5)").error.code == error_type_incorrect_parameters);
 
     RC_CHECK_TRUE(VAL("LZ_PARSE({256}, " LZ_TABLES ")").error.code == error_type_domain);   // data is bytes
     RC_CHECK_TRUE(VAL("LZ_PARSE({1}, 5, full(256, 8), 5, 5, 5)").error.code == error_type_type_mismatch);

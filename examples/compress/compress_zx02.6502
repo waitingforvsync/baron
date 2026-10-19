@@ -1,0 +1,63 @@
+\ **************************************************************************
+\ *
+\ *    Compressed title screen: ZX02
+\ *
+\ *    The same screen as compress_lz.6502, compressed by zx02.6502 into
+\ *    dmsc's ZX02 format: literals and offsets go in as whole bytes, so
+\ *    the decompressor (dzx02.6502) unpacks much faster than the others,
+\ *    and a repeat match copies from the last offset again for a few bits.
+\ *
+\ *    Build:  baron boot.6502 compress_lz.6502 compress_exolite.6502 compress_zx02.6502 compress_exomizer.6502 --opt 3 -o compress.ssd
+\ *    Run:    *RUN ZX02
+\ *
+\ **************************************************************************
+
+INCLUDE "zx02.6502"
+
+oswrch = &FFEE
+screen = &5800
+
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "ZX02", guard = screen
+
+ZA_POOL &70..&8F
+
+INCLUDE "dzx02.6502"
+
+.entry
+    ZA_ENTRY
+    LDX #0                      ; MODE 5, cursor off
+.@  LDA vdu,X
+    JSR oswrch
+    INX
+    CPX #vdu_end - vdu
+    BNE @-
+
+    LDA #LO(packed)
+    STA src
+    LDA #HI(packed)
+    STA src+1
+    LDA #LO(screen)
+    STA dst
+    LDA #HI(screen)
+    STA dst+1
+    JSR unpack
+.hang
+    JMP hang
+
+.vdu
+    EQUB 22, 5
+    EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+.vdu_end
+
+
+\ The screen, compressed by the zx02 FUNCTION as the section closes.
+
+.packed
+SECTION Screen, org = screen, transform = "zx02"
+    INCBIN "blurpscreen.bin"
+ENDSECTION
+.packed_end
+
+ENDSECTION
+
+PRINT "ZX02: screen packed from 8320 to ", packed_end - packed, " bytes; decompressor ", entry - unpack, " bytes"

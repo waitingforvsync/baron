@@ -2137,12 +2137,19 @@ static const token print_token_entries[] = {
 };
 static const token_table print_tokens = RC_VIEW(print_token_entries);
 
-// True on the one pass whose PRINT output the caller receives: the output pass when one runs, the
-// final pass otherwise. Everything has settled by either, so each PRINT speaks exactly once.
+// Whether the output pass runs after the final pass: for the listing, the zero-page allocator, or a
+// transform. The one test, for the pass loop and PRINT alike, so the two never disagree.
+static bool output_pass_runs(const baron *b)
+{
+    return b->want_verbose || zeropage_is_enabled(&b->zeropage) || b->has_transforms;
+}
+
+// True on the one pass whose PRINT output the caller receives: the output pass when one runs (it starts
+// the channels afresh), the final pass otherwise. Everything has settled by either, so each PRINT speaks
+// exactly once.
 static bool print_on(const baron *b, parse_flags flags)
 {
-    bool extra_pass = b->want_verbose || zeropage_is_enabled(&b->zeropage);
-    return flags.active && (extra_pass ? flags.output : flags.final);
+    return flags.active && (output_pass_runs(b) ? flags.output : flags.final);
 }
 
 
@@ -4484,7 +4491,7 @@ static uint32_t run_round(baron *b, uint32_t source, rc_arena scratch)
             // addresses, whose sections ARE the result; -v rides it for the listing. Re-emission
             // cannot move anything (a ZA_AUTO address is typed and the accepting contexts are
             // width-stable); final=false, so nothing records twice. It is also where transforms run.
-            if (b->want_verbose || zeropage_is_enabled(&b->zeropage) || b->has_transforms) {
+            if (output_pass_runs(b)) {
                 parse_result out = run_pass(b, source,
                     (parse_flags) {
                         .active  = true,
@@ -5201,6 +5208,19 @@ RC_TEST_STEP(assemble, transform_sees_final_bytes, fix)
     // The listing notes what the transform made of the section, after its ENDSECTION.
     RC_CHECK_TRUE(rc_str_find_first(VERB(), RC_STR("ENDSECTION\n; transform \"id\": 8 -> 8 bytes\n")) != RC_INDEX_NONE);
     rc_file_delete(RC_STR("transform_blob.bin"));
+}
+
+RC_TEST_STEP(assemble, print_speaks_with_a_transform, fix)
+{
+    // A transform makes the output pass run even with no listing and no ZA_AUTO; PRINT must speak on
+    // that pass, since it starts the channels afresh (speaking on the final pass, it said nothing).
+    RC_CHECK_TRUE(ASM("FUNCTION id(data) = data\n"
+                      "PRINT \"before\"\n"
+                      "SECTION code, org=&400, transform=\"id\"\nEQUB 1, 2\nENDSECTION\n"
+                      "PRINT \"after \", *") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(VERB().len, ==, 15u);   // guards the compare: an empty channel has no storage to compare
+    RC_CHECK_TRUE(VERB().len == 15 && rc_str_is_equal(VERB(), RC_STR("before\nafter 0\n")));
 }
 
 RC_TEST_STEP(assemble, transform_errors, fix)

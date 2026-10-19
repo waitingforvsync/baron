@@ -1,0 +1,123 @@
+\ **************************************************************************
+\ *
+\ *    The compressor: ZX02, written as Baron FUNCTIONs
+\ *
+\ *    ZX02 is dmsc's 6502-friendly take on Einar Saukas's ZX0. The stream
+\ *    alternates literal runs and matches, each one a flag bit and an
+\ *    interlaced Elias gamma code (every bit below the top one sent after
+\ *    a 1, then a closing 0) for a count from 1 to 256:
+\ *
+\ *      literal run    0, gamma(count), then the bytes whole
+\ *      repeat match   0, gamma(length), straight after a literal run:
+\ *                       copy from the last match's offset again
+\ *      new match      1, gamma((offset - 1) DIV 128 + 1), then
+\ *                       ((offset - 1) MOD 128) * 2 as a whole byte, its
+\ *                       bit 0 the first bit of gamma(length - 1), then
+\ *                       the rest of that gamma (length 1 is gamma(256))
+\ *      end            1, gamma(256)
+\ *
+\ *    The first literal run's flag is left out. Bits are read eight to a
+\ *    byte, most significant first, from bytes that sit in the stream
+\ *    wherever their first bit is first needed, between the whole bytes.
+\ *
+\ **************************************************************************
+
+FUNCTION cost(f) = BITLEN(f) - 1                        ; a field's width; -1 if impossible
+
+\ An interlaced gamma code for n from 1 to 256, as a field (2^width + bits).
+\ Below the top bit of n there are t more; each pair "1, bit" lands two
+\ places up, so spread moves bit i of a byte to bit 2i, and the pairs' 1s
+\ add up to 2 * (4^t - 1) / 3. Doubling leaves room for the closing 0.
+
+FUNCTION spread(x)
+    a = (x OR (x << 4)) AND &0F0F
+    b = (a OR (a << 2)) AND &3333
+= (b OR (b << 1)) AND &5555
+
+FUNCTION gamma(n)
+    t = BITLEN(n) - 1
+= 2^(2 * t + 1) + 2 * (2 * (4^t - 1) / 3 + spread(n - 2^t))
+
+\ The search, with every field's cost in bits. A literal run's count and a
+\ repeat's length are each a flag and a gamma code. A new match is a flag,
+\ the offset's gamma and byte, and the length's gamma - less the one bit of
+\ it that rides in the offset's byte - so 8 + gamma bits for the offset
+\ and gamma(length - 1) for the length. Matches carry their own flags, so a
+\ match run's count costs nothing.
+
+FUNCTION zx02_parse(data)
+    n    = LEN(data)
+    runs = CONCAT({-1}, 1 + cost(gamma(1..256)))        ; a flag and a count, 1 to 256
+    lits = REPEATED(256, 8)
+    none = CONCAT({-1}, REPEATED(n, 0))
+    lens = CONCAT({-1}, cost(gamma(CONCAT(256, 1..255)))) ; length - 1, with 1 as 256
+    offs = CONCAT({-1}, 8 + cost(gamma((0..<MIN({n, 32768})) DIV 128 + 1)))
+= LZ_PARSE(data, runs, lits, none, lens, offs, runs)
+
+\ The stream as a list of tokens in the order the decompressor takes them:
+\ a bit is 0 or 1, a whole byte b is 256 + b.
+
+FUNCTION bit_list(f) = (f >> REVERSE(0..<cost(f))) AND 1  ; a field's bits, first out first
+
+FUNCTION match_tokens(off, len)
+    IF off == 0                                         ; a repeat
+        r = CONCAT(0, bit_list(gamma(len)))
+    ELSE
+        g = bit_list(gamma(len - 1 + 256 * (len == 1)))
+        r = CONCAT(1, bit_list(gamma((off - 1) DIV 128 + 1)), 256 + ((off - 1) MOD 128) * 2 + g[0], g[1..<LEN(g)])
+    ENDIF
+= r
+
+\ Halving the lists, as lz.6502's encode does, keeps the recursion shallow.
+
+FUNCTION matches_tokens(offs, lens)
+    n = LEN(offs)
+    IF n == 1
+        r = match_tokens(offs[0], lens[0])
+    ELSE
+        h = n DIV 2
+        r = {matches_tokens(offs[0..<h], lens[0..<h]), matches_tokens(offs[h..<n], lens[h..<n])}
+    ENDIF
+= r
+
+FUNCTION run_tokens(run)
+    IF run[0] == 0
+        r = CONCAT(0, bit_list(gamma(LEN(run[1]))), 256 + run[1])
+    ELSE
+        r = matches_tokens(run[1][0], run[1][1])
+    ENDIF
+= r
+
+FUNCTION tokens(runs)
+    n = LEN(runs)
+    IF n == 1
+        r = run_tokens(runs[0])
+    ELSE
+        h = n DIV 2
+        r = {tokens(runs[0..<h]), tokens(runs[h..<n])}
+    ENDIF
+= r
+
+\ Into bytes. The decompressor fetches a byte of bits just as it needs the
+\ first of them, so that byte goes where its first bit is, ahead of every
+\ whole byte after it. Sorting by position puts everything in that order:
+\ first the bits' positions apart from the bytes', then the packed bits and
+\ the whole bytes together, each keyed by position * 256 + value.
+
+FUNCTION stream(t)
+    n     = LEN(t)
+    whole = t DIV 256                                   ; 1 for a whole byte, 0 for a bit
+    order = SORT((0..<n) + whole * n)                   ; the bits' positions, then the bytes'
+    nbits = n - SUM(whole)
+    at    = order[0..<nbits]
+    bytes = order[nbits..<n] - n
+    packs = BITPACK(2 + t[at])                          ; eight bits to a byte
+    keys  = CONCAT(at[8 * (0..<LEN(packs))] * 256 + packs, bytes * 256 + t[bytes] - 256)
+= SORT(keys) AND 255
+
+\ The transform: search, list the tokens (less the first literal run's
+\ flag), add the end, and lay them out.
+
+FUNCTION zx02(data)
+    t = FLATTEN(tokens(zx02_parse(data)[1]))
+= stream(CONCAT(t[1..<LEN(t)], 1, bit_list(gamma(256))))

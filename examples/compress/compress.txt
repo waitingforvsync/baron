@@ -171,13 +171,13 @@ ENDSECTION
 ENDSECTION
 
 LZ: screen packed from 8320 to 3142 bytes; decompressor 205 bytes
-  0000                              INCLUDE "exo.6502"
+  0000                              INCLUDE "exolite.6502"
 never = 1.099511628e+12 [2^40]
 gammas = {0..15, 0..15, 0..15}
 oswrch = 65518 [&FFEE]
 screen = 22528 [&5800]
 tables = 22381 [screen - 3 * 49]
-SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "EXO", guard = tables
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "EXOLITE", guard = tables
 dest = &70 [auto]
 copy = &72 [auto]
 limit = &74 [auto]
@@ -362,10 +362,10 @@ src = 6686 [P% + 1]
   1A2C  .@
   1A2C  60                          RTS
   1A2D  .packed
-SECTION Screen, org = screen, transform = "exo"
+SECTION Screen, org = screen, transform = "exolite"
   5800  0F 0F 0F 0F 0F 0F 0F 0F...  INCBIN "blurpscreen.bin"
 ENDSECTION
-; transform "exo": 8320 -> 3066 bytes
+; transform "exolite": 8320 -> 3066 bytes
 
   2627  .packed_end
 SECTION Tables, org = tables, guard = screen, virtual = TRUE
@@ -379,4 +379,348 @@ ENDSECTION
 
 ENDSECTION
 
-Exo: screen packed from 8320 to 3066 bytes; decompressor 252 bytes
+Exolite: screen packed from 8320 to 3066 bytes; decompressor 252 bytes
+  0000                              INCLUDE "zx02.6502"
+oswrch = 65518 [&FFEE]
+screen = 22528 [&5800]
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "ZX02", guard = screen
+  1900                              INCLUDE "dzx02.6502"
+src = &70 [auto]
+dst = &72 [auto]
+pntr = &74 [auto]
+offset_hi = &76 [auto]
+bitr = &77 [auto]
+  1900  .unpack
+  1900  A9 80                       LDA #&80
+  1902  85 77                       STA bitr
+  1904  A9 FF                       LDA #&FF
+  1906  85 74                       STA pntr
+  1908  A2 00                       LDX #0
+  190A  86 76                       STX offset_hi
+  190C  A0 00                       LDY #0
+  190E  .decode_literal
+  190E  E8                          INX
+  190F  20 6E 19                    JSR get_elias
+  1912  .cop0
+  1912  B1 70                       LDA (src),Y
+  1914  E6 70                       INC src
+  1916  D0 02                       BNE @+
+  1918  E6 71                       INC src+1
+  191A  .@
+  191A  91 72                       STA (dst),Y
+  191C  E6 72                       INC dst
+  191E  D0 02                       BNE @+
+  1920  E6 73                       INC dst+1
+  1922  .@
+  1922  CA                          DEX
+  1923  D0 ED                       BNE cop0
+  1925  06 77                       ASL bitr
+  1927  B0 21                       BCS new_offset
+  1929  E8                          INX
+  192A  20 6E 19                    JSR get_elias
+  192D  .copy
+  192D  A5 73                       LDA dst+1
+  192F  E5 76                       SBC offset_hi
+  1931  85 75                       STA pntr+1
+  1933  .cop1
+  1933  A4 72                       LDY dst
+  1935  B1 74                       LDA (pntr),Y
+  1937  A0 00                       LDY #0
+  1939  91 72                       STA (dst),Y
+  193B  E6 72                       INC dst
+  193D  D0 04                       BNE @+
+  193F  E6 73                       INC dst+1
+  1941  E6 75                       INC pntr+1
+  1943  .@
+  1943  CA                          DEX
+  1944  D0 ED                       BNE cop1
+  1946  06 77                       ASL bitr
+  1948  90 C4                       BCC decode_literal
+  194A  .new_offset
+  194A  E8                          INX
+  194B  20 6E 19                    JSR get_elias
+  194E  F0 30                       BEQ exit
+  1950  CA                          DEX
+  1951  8A                          TXA
+  1952  4A                          LSR A
+  1953  85 76                       STA offset_hi
+  1955  B1 70                       LDA (src),Y
+  1957  E6 70                       INC src
+  1959  D0 02                       BNE @+
+  195B  E6 71                       INC src+1
+  195D  .@
+  195D  6A                          ROR A
+  195E  49 FF                       EOR #&FF
+  1960  85 74                       STA pntr
+  1962  A2 01                       LDX #1
+  1964  20 7D 19                    JSR elias_skip1
+  1967  E8                          INX
+  1968  90 C3                       BCC copy
+  196A  .elias_get
+  196A  06 77                       ASL bitr
+  196C  2A                          ROL A
+  196D  AA                          TAX
+  196E  .get_elias
+  196E  06 77                       ASL bitr
+  1970  D0 0B                       BNE elias_skip1
+  1972  B1 70                       LDA (src),Y
+  1974  E6 70                       INC src
+  1976  D0 02                       BNE @+
+  1978  E6 71                       INC src+1
+  197A  .@
+  197A  2A                          ROL A
+  197B  85 77                       STA bitr
+  197D  .elias_skip1
+  197D  8A                          TXA
+  197E  B0 EA                       BCS elias_get
+  1980  .exit
+  1980  60                          RTS
+  1981  .entry
+  1981  A2 00                       LDX #0
+  1983  .@
+  1983  BD A4 19                    LDA vdu,X
+  1986  20 EE FF                    JSR oswrch
+  1989  E8                          INX
+  198A  E0 0C                       CPX #vdu_end - vdu
+  198C  D0 F5                       BNE @-
+  198E  A9 B0                       LDA #LO(packed)
+  1990  85 70                       STA src
+  1992  A9 19                       LDA #HI(packed)
+  1994  85 71                       STA src+1
+  1996  A9 00                       LDA #LO(screen)
+  1998  85 72                       STA dst
+  199A  A9 58                       LDA #HI(screen)
+  199C  85 73                       STA dst+1
+  199E  20 00 19                    JSR unpack
+  19A1  .hang
+  19A1  4C A1 19                    JMP hang
+  19A4  .vdu
+  19A4  16 05                       EQUB 22, 5
+  19A6  17 01 00 00 00 00 00 00...  EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+  19B0  .vdu_end
+  19B0  .packed
+SECTION Screen, org = screen, transform = "zx02"
+  5800  0F 0F 0F 0F 0F 0F 0F 0F...  INCBIN "blurpscreen.bin"
+ENDSECTION
+; transform "zx02": 8320 -> 3104 bytes
+
+  25D0  .packed_end
+ENDSECTION
+
+ZX02: screen packed from 8320 to 3104 bytes; decompressor 129 bytes
+  0000                              INCLUDE "exomizer.6502"
+never = 1.099511628e+12 [2^40]
+start = {{0, 1, 1, 2, 2, 3, 3, 4, ...}, 1..4, {0, 1, 1, 2, 2, 3, 3, 4, ...}, 0..15} [{{0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 1..4, {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 0..15}]
+indices = {{2, 3, 4, 5, 6, 7, 8, 9, ...}, {2, 2, 2, 2}, {4, 4, 4, 4, 4, 4, 4, 4, ...}, {4, 4, 4, 4, 4, 4, 4, 4, ...}} [{2 + (0..15), REPEATED(4, 2), REPEATED(16, 4), REPEATED(16, 4)}]
+oswrch = 65518 [&FFEE]
+screen = 22528 [&5800]
+decrunch_table = 22372 [screen - 156]
+SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename = "EXO", guard = decrunch_table
+  1900  .entry
+  1900  A2 00                       LDX #0
+  1902  .@
+  1902  BD 13 19                    LDA vdu,X
+  1905  20 EE FF                    JSR oswrch
+  1908  E8                          INX
+  1909  E0 0C                       CPX #vdu_end - vdu
+  190B  D0 F5                       BNE @-
+  190D  20 48 19                    JSR decrunch
+  1910  .hang
+  1910  4C 10 19                    JMP hang
+  1913  .vdu
+  1913  16 05                       EQUB 22, 5
+  1915  17 01 00 00 00 00 00 00...  EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+  191F  .vdu_end
+  191F  .get_crunched_byte
+  191F  AD 0F 1A                    LDA packed
+  1922  EE 20 19                    INC get_crunched_byte + 1
+  1925  D0 03                       BNE @+
+  1927  EE 21 19                    INC get_crunched_byte + 2
+  192A  .@
+  192A  60                          RTS
+  192B                              INCLUDE "exodecrunch.6502"
+INLINE_GET_BITS = 0
+LITERAL_SEQUENCES_NOT_USED = 1
+MAX_SEQUENCE_LENGTH_256 = 1
+EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE = 0
+DONT_REUSE_OFFSET = 1
+DECRUNCH_FORWARDS = 1
+ENABLE_SPLIT_ENCODING = 0
+zp_len_lo = 112 [&70]
+zp_len_hi = 113 [&71]
+zp_src_lo = 114 [&72]
+zp_src_hi = 115 [zp_src_lo + 1]
+zp_bits_hi = 116 [&74]
+zp_bitbuf = 118 [&76]
+zp_dest_lo = 119 [zp_bitbuf + 1]
+zp_dest_hi = 120 [zp_bitbuf + 2]
+encoded_entries = 52
+tabl_bi = 22372 [decrunch_table]
+tabl_lo = 22424 [decrunch_table + encoded_entries]
+tabl_hi = 22476 [decrunch_table + encoded_entries * 2]
+  192B  .get_bits
+  192B  69 80                       ADC #&80
+  192D  0A                          ASL A
+  192E  10 0F                       BPL gb_skip
+  1930  .gb_next
+  1930  06 76                       ASL zp_bitbuf
+  1932  D0 08                       BNE gb_ok
+  1934                              mac_refill_bits
+  1934  48                          PHA
+  1935  20 1F 19                    JSR get_crunched_byte
+  1938  2A                          ROL A
+  1939  85 76                       STA zp_bitbuf
+  193B  68                          PLA
+  193C  .gb_ok
+  193C  2A                          ROL A
+  193D  30 F1                       BMI gb_next
+  193F  .gb_skip
+  193F  70 01                       BVS gb_get_hi
+  1941  60                          RTS
+  1942  .gb_get_hi
+  1942  38                          SEC
+  1943  85 74                       STA zp_bits_hi
+  1945  4C 1F 19                    JMP get_crunched_byte
+  1948  .decrunch
+  1948  A2 03                       LDX #3
+  194A                              mac_init_zp
+{
+  194A  .init_zp
+  194A  20 1F 19                    JSR get_crunched_byte
+  194D  95 75                       STA zp_bitbuf - 1,X
+  194F  CA                          DEX
+  1950  D0 F8                       BNE init_zp
+}
+  1952  A0 00                       LDY #0
+  1954  18                          CLC
+  1955  .table_gen
+  1955  AA                          TAX
+  1956  98                          TYA
+  1957  29 0F                       AND #&0F
+  1959  99 98 57                    STA tabl_lo,Y
+  195C  F0 0C                       BEQ shortcut
+  195E  8A                          TXA
+  195F  79 97 57                    ADC tabl_lo - 1,Y
+  1962  99 98 57                    STA tabl_lo,Y
+  1965  A5 71                       LDA zp_len_hi
+  1967  79 CB 57                    ADC tabl_hi - 1,Y
+  196A  .shortcut
+  196A  99 CC 57                    STA tabl_hi,Y
+  196D  A9 01                       LDA #&01
+  196F  85 71                       STA zp_len_hi
+  1971  A9 78                       LDA #&78
+  1973                              mac_get_bits
+  1973  20 2B 19                    JSR get_bits
+  1976  4A                          LSR A
+  1977  AA                          TAX
+  1978  F0 09                       BEQ rolled
+  197A  08                          PHP
+  197B  .rolle
+  197B  06 71                       ASL zp_len_hi
+  197D  38                          SEC
+  197E  6A                          ROR A
+  197F  CA                          DEX
+  1980  D0 F9                       BNE rolle
+  1982  28                          PLP
+  1983  .rolled
+  1983  6A                          ROR A
+  1984  99 64 57                    STA tabl_bi,Y
+  1987  30 05                       BMI no_fixup_lohi
+  1989  A5 71                       LDA zp_len_hi
+  198B  86 71                       STX zp_len_hi
+  198D  24                          BITZP
+  198E  .no_fixup_lohi
+  198E  8A                          TXA
+  198F  C8                          INY
+  1990  C0 34                       CPY #encoded_entries
+  1992  D0 C1                       BNE table_gen
+  1994  A4 77                       LDY zp_dest_lo
+  1996  86 77                       STX zp_dest_lo
+  1998  86 74                       STX zp_bits_hi
+  199A  .literal_start1
+  199A  20 1F 19                    JSR get_crunched_byte
+  199D  91 77                       STA (zp_dest_lo),Y
+  199F  C8                          INY
+  19A0  D0 02                       BNE skip_hi_incr
+  19A2  E6 78                       INC zp_dest_hi
+  19A4  .skip_hi_incr
+  19A4  .next_round
+  19A4  CA                          DEX
+  19A5  A5 76                       LDA zp_bitbuf
+  19A7  .no_literal1
+  19A7  0A                          ASL A
+  19A8  D0 04                       BNE nofetch8
+  19AA  20 1F 19                    JSR get_crunched_byte
+  19AD  2A                          ROL A
+  19AE  .nofetch8
+  19AE  E8                          INX
+  19AF  90 F6                       BCC no_literal1
+  19B1  85 76                       STA zp_bitbuf
+  19B3  F0 E5                       BEQ literal_start1
+  19B5  E0 11                       CPX #&11
+  19B7  B0 53                       BCS exit_or_lit_seq
+  19B9  BD 63 57                    LDA tabl_bi - 1,X
+  19BC                              mac_get_bits
+  19BC  20 2B 19                    JSR get_bits
+  19BF  7D 97 57                    ADC tabl_lo - 1,X
+  19C2  85 70                       STA zp_len_lo
+  19C4  AA                          TAX
+  19C5  A9 E1                       LDA #&E1
+  19C7  E0 03                       CPX #&03
+  19C9  B0 03                       BCS gbnc2_next
+  19CB  BD 0C 1A                    LDA tabl_bit - 1,X
+  19CE  .gbnc2_next
+  19CE  06 76                       ASL zp_bitbuf
+  19D0  D0 08                       BNE gbnc2_ok
+  19D2  AA                          TAX
+  19D3  20 1F 19                    JSR get_crunched_byte
+  19D6  2A                          ROL A
+  19D7  85 76                       STA zp_bitbuf
+  19D9  8A                          TXA
+  19DA  .gbnc2_ok
+  19DA  2A                          ROL A
+  19DB  B0 F1                       BCS gbnc2_next
+  19DD  AA                          TAX
+  19DE  BD 64 57                    LDA tabl_bi,X
+  19E1                              mac_get_bits
+  19E1  20 2B 19                    JSR get_bits
+  19E4  18                          CLC
+  19E5  7D 98 57                    ADC tabl_lo,X
+  19E8  49 FF                       EOR #&FF
+  19EA  85 72                       STA zp_src_lo
+  19EC  A5 74                       LDA zp_bits_hi
+  19EE  7D CC 57                    ADC tabl_hi,X
+  19F1  49 FF                       EOR #&FF
+  19F3  65 78                       ADC zp_dest_hi
+  19F5  85 73                       STA zp_src_hi
+  19F7  18                          CLC
+  19F8  A6 70                       LDX zp_len_lo
+  19FA  .copy_next
+  19FA  B1 72                       LDA (zp_src_lo),Y
+  19FC  .literal_byte_gotten
+  19FC  91 77                       STA (zp_dest_lo),Y
+  19FE  C8                          INY
+  19FF  D0 04                       BNE copy_skip_hi
+  1A01  E6 78                       INC zp_dest_hi
+  1A03  E6 73                       INC zp_src_hi
+  1A05  .copy_skip_hi
+  1A05  CA                          DEX
+  1A06  D0 F2                       BNE copy_next
+  1A08  86 74                       STX zp_bits_hi
+  1A0A  F0 98                       BEQ next_round
+  1A0C  .exit_or_lit_seq
+  1A0C  60                          RTS
+  1A0D  .tabl_bit
+  1A0D  8C E2                       EQUB &8C, &E2
+  1A0F  .decrunch_end
+  1A0F  .packed
+  1A0F  58 00                       EQUB HI(screen), LO(screen)
+SECTION Screen, org = screen, transform = "exomizer"
+  5800  0F 0F 0F 0F 0F 0F 0F 0F...  INCBIN "blurpscreen.bin"
+ENDSECTION
+; transform "exomizer": 8320 -> 2989 bytes
+
+  25BE  .packed_end
+ENDSECTION
+
+Exomizer: screen packed from 8320 to 2991 bytes; decruncher 240 bytes

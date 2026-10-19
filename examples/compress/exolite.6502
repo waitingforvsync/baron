@@ -1,6 +1,7 @@
 \ **************************************************************************
 \ *
-\ *    The compressor: an Exomizer-style format written as Baron FUNCTIONs
+\ *    The compressor: Exolite, a format inspired by Exomizer (but not
+\ *    Exomizer's own), written as Baron FUNCTIONs
 \ *
 \ *    The same runs as lz.6502 - literals, matches, literals, ... until
 \ *    LEN bytes are out - but every number is written with a table of
@@ -201,7 +202,7 @@ FUNCTION encode(runs, t)
 \ The transform: start from gamma codes, settle the tables, then write them
 \ and the runs.
 
-FUNCTION exo(data)
+FUNCTION exolite(data)
     n    = LEN(data)
     best = settle(gammas, parse_with(tables(gammas, n), data), data, 8)
     t    = tables(best[0], n)

@@ -1,0 +1,482 @@
+\ **************************************************************************
+\ *
+\ *    The decruncher: Exomizer's
+\ *
+\ *    exodecrs/exodecrunch.s from Exomizer 3.1.2 (Magnus Lind,
+\ *    https://bitbucket.org/magli143/exomizer), ported to Baron.
+\ *
+\ *    THIS IS AN ALTERED VERSION. Changes from the original: Baron syntax
+\ *    throughout; the options below are set here rather than by .IFNDEF
+\ *    defaults; zero page moved to &70-&78 (the original's &9E-&AF and
+\ *    &FD-&FF are BBC OS workspace, &FF the Escape flag); and the 156-byte
+\ *    table, decrunch_table, placed by the includer, as the original
+\ *    allows. The code itself is the original's, line for line. The
+\ *    includer also supplies get_crunched_byte.
+\ *
+\ *    The original's notice:
+\ *
+\ *      Copyright (c) 2002 - 2020 Magnus Lind.
+\ *
+\ *      This software is provided 'as-is', without any express or implied
+\ *      warranty. In no event will the authors be held liable for any
+\ *      damages arising from the use of this software.
+\ *
+\ *      Permission is granted to anyone to use this software for any
+\ *      purpose, including commercial applications, and to alter it and
+\ *      redistribute it freely, subject to the following restrictions:
+\ *
+\ *        1. The origin of this software must not be misrepresented; you
+\ *        must not claim that you wrote the original software. If you use
+\ *        this software in a product, an acknowledgment in the product
+\ *        documentation would be appreciated but is not required.
+\ *
+\ *        2. Altered source versions must be plainly marked as such, and
+\ *        must not be misrepresented as being the original software.
+\ *
+\ *        3. This notice may not be removed or altered from any
+\ *        distribution.
+\ *
+\ *        4. The names of this software and/or it's copyright holders may
+\ *        not be used to endorse or promote products derived from this
+\ *        software without specific prior written permission.
+\ *
+\ **************************************************************************
+
+\ The options, as the original's comments describe them. These match the
+\ streams exomizer.6502 writes: no literal sequences (exomizer's -c), matches
+\ under 256 bytes (-M256 -T5), no offset reuse (-P-32), decrunching forwards.
+
+INLINE_GET_BITS = 0
+LITERAL_SEQUENCES_NOT_USED = 1
+MAX_SEQUENCE_LENGTH_256 = 1
+EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE = 0
+DONT_REUSE_OFFSET = 1
+DECRUNCH_FORWARDS = 1
+ENABLE_SPLIT_ENCODING = 0
+
+zp_len_lo = &70
+zp_len_hi = &71
+
+zp_src_lo  = &72
+zp_src_hi  = zp_src_lo + 1
+
+zp_bits_hi = &74
+IF DONT_REUSE_OFFSET = 0
+zp_ro_state = &75
+ENDIF
+
+zp_bitbuf  = &76
+zp_dest_lo = zp_bitbuf + 1      ; dest addr lo
+zp_dest_hi = zp_bitbuf + 2      ; dest addr hi
+
+IF EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE <> 0
+encoded_entries = 68
+ELSE
+encoded_entries = 52
+ENDIF
+
+tabl_bi = decrunch_table
+tabl_lo = decrunch_table + encoded_entries
+tabl_hi = decrunch_table + encoded_entries * 2
+
+        ;; refill bits is always inlined
+MACRO mac_refill_bits
+        PHA
+        JSR get_crunched_byte
+        ROL A
+        STA zp_bitbuf
+        PLA
+ENDMACRO
+
+MACRO mac_get_bits
+IF INLINE_GET_BITS <> 0
+{
+        ADC #&80                ; needs c=0, affects v
+        ASL A
+        BPL gb_skip
+.gb_next
+        ASL zp_bitbuf
+        BNE gb_ok
+        mac_refill_bits
+.gb_ok
+        ROL A
+        BMI gb_next
+.gb_skip
+        BVC skip
+.gb_get_hi
+        SEC
+        STA zp_bits_hi
+        JSR get_crunched_byte
+.skip
+}
+ELSE
+        JSR get_bits
+ENDIF
+ENDMACRO
+
+MACRO mac_init_zp
+{
+; -------------------------------------------------------------------
+; init zeropage and x reg. (8 bytes)
+;
+.init_zp
+        JSR get_crunched_byte
+        STA zp_bitbuf - 1,X
+        DEX
+        BNE init_zp
+}
+ENDMACRO
+
+IF INLINE_GET_BITS = 0
+.get_bits
+        ADC #&80                ; needs c=0, affects v
+        ASL A
+        BPL gb_skip
+.gb_next
+        ASL zp_bitbuf
+        BNE gb_ok
+        mac_refill_bits
+.gb_ok
+        ROL A
+        BMI gb_next
+.gb_skip
+        BVS gb_get_hi
+        RTS
+.gb_get_hi
+        SEC
+        STA zp_bits_hi
+        JMP get_crunched_byte
+ENDIF
+
+.decrunch
+IF ENABLE_SPLIT_ENCODING <> 0
+        LDX #3
+        JSR internal_gentable
+        JMP normal_decrunch
+.split_gentable
+        LDX #1
+.internal_gentable
+        JSR split_init_zp
+ELSE
+        LDX #3
+        mac_init_zp
+ENDIF
+; -------------------------------------------------------------------
+; calculate tables (64 bytes) + get_bits macro
+; x must be #0 when entering
+;
+        LDY #0
+        CLC
+.table_gen
+        TAX
+        TYA
+        AND #&0F
+        STA tabl_lo,Y
+        BEQ shortcut            ; start a new sequence
+; -------------------------------------------------------------------
+        TXA
+        ADC tabl_lo - 1,Y
+        STA tabl_lo,Y
+        LDA zp_len_hi
+        ADC tabl_hi - 1,Y
+.shortcut
+        STA tabl_hi,Y
+; -------------------------------------------------------------------
+        LDA #&01
+        STA zp_len_hi
+        LDA #&78                ; %01111000
+        mac_get_bits
+; -------------------------------------------------------------------
+        LSR A
+        TAX
+        BEQ rolled
+        PHP
+.rolle
+        ASL zp_len_hi
+        SEC
+        ROR A
+        DEX
+        BNE rolle
+        PLP
+.rolled
+        ROR A
+        STA tabl_bi,Y
+        BMI no_fixup_lohi
+        LDA zp_len_hi
+        STX zp_len_hi
+        BITZP                   ; .BYTE $24
+.no_fixup_lohi
+        TXA
+; -------------------------------------------------------------------
+        INY
+        CPY #encoded_entries
+        BNE table_gen
+; -------------------------------------------------------------------
+IF ENABLE_SPLIT_ENCODING <> 0
+        RTS
+.split_decrunch
+        LDX #3
+        JSR split_init_zp
+; X reg must be 0 here
+        SEC
+.normal_decrunch
+ENDIF
+; -------------------------------------------------------------------
+; prepare for main decruncher
+IF DONT_REUSE_OFFSET = 0
+        ROR zp_ro_state
+        SEC
+ENDIF
+        LDY zp_dest_lo
+        STX zp_dest_lo
+        STX zp_bits_hi
+; -------------------------------------------------------------------
+; copy one literal byte to destination (11 bytes)
+;
+.literal_start1
+IF DECRUNCH_FORWARDS = 0
+        TYA
+        BNE no_hi_decr
+        DEC zp_dest_hi
+IF DONT_REUSE_OFFSET = 0
+        DEC zp_src_hi
+ENDIF
+.no_hi_decr
+        DEY
+ENDIF
+        JSR get_crunched_byte
+        STA (zp_dest_lo),Y
+IF DECRUNCH_FORWARDS <> 0
+        INY
+        BNE skip_hi_incr
+        INC zp_dest_hi
+IF DONT_REUSE_OFFSET = 0
+        INC zp_src_hi
+ENDIF
+.skip_hi_incr
+ENDIF
+; -------------------------------------------------------------------
+; fetch sequence length index (15 bytes)
+; x must be #0 when entering and contains the length index + 1
+; when exiting or 0 for literal byte
+.next_round
+IF DONT_REUSE_OFFSET = 0
+        ROR zp_ro_state
+ENDIF
+        DEX
+        LDA zp_bitbuf
+.no_literal1
+        ASL A
+        BNE nofetch8
+        JSR get_crunched_byte
+        ROL A
+.nofetch8
+        INX
+        BCC no_literal1
+        STA zp_bitbuf
+; -------------------------------------------------------------------
+; check for literal byte (2 bytes)
+;
+        BEQ literal_start1
+; -------------------------------------------------------------------
+; check for decrunch done and literal sequences (4 bytes)
+;
+        CPX #&11
+IF INLINE_GET_BITS <> 0
+        BCC skip_jmp
+        JMP exit_or_lit_seq
+.skip_jmp
+ELSE
+        BCS exit_or_lit_seq
+ENDIF
+; -------------------------------------------------------------------
+; calulate length of sequence (zp_len) (18(11) bytes) + get_bits macro
+;
+        LDA tabl_bi - 1,X
+        mac_get_bits
+        ADC tabl_lo - 1,X       ; we have now calculated zp_len_lo
+        STA zp_len_lo
+IF MAX_SEQUENCE_LENGTH_256 = 0
+        LDA zp_bits_hi
+        ADC tabl_hi - 1,X       ; c = 0 after this.
+        STA zp_len_hi
+; -------------------------------------------------------------------
+; here we decide what offset table to use (27(26) bytes) + get_bits_nc macro
+; z-flag reflects zp_len_hi here
+;
+        LDX zp_len_lo
+ELSE
+        TAX
+ENDIF
+IF MAX_SEQUENCE_LENGTH_256 = 0
+        LDA #0
+ENDIF
+IF DONT_REUSE_OFFSET = 0
+; -------------------------------------------------------------------
+; here we decide to reuse latest offset or not (13(15) bytes)
+;
+        BIT zp_ro_state
+        BMI test_reuse
+.no_reuse
+ENDIF
+; -------------------------------------------------------------------
+; here we decide what offset table to use (17(15) bytes)
+;
+IF MAX_SEQUENCE_LENGTH_256 = 0
+        STA zp_bits_hi
+ENDIF
+        LDA #&E1
+IF EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE <> 0
+        CPX #&04
+ELSE
+        CPX #&03
+ENDIF
+        BCS gbnc2_next
+        LDA tabl_bit - 1,X
+.gbnc2_next
+        ASL zp_bitbuf
+        BNE gbnc2_ok
+        TAX
+        JSR get_crunched_byte
+        ROL A
+        STA zp_bitbuf
+        TXA
+.gbnc2_ok
+        ROL A
+        BCS gbnc2_next
+        TAX
+; -------------------------------------------------------------------
+; calulate absolute offset (zp_src) (17 bytes) + get_bits macro
+;
+        LDA tabl_bi,X
+        mac_get_bits
+IF DECRUNCH_FORWARDS = 0
+        ADC tabl_lo,X
+        STA zp_src_lo
+        LDA zp_bits_hi
+        ADC tabl_hi,X
+        ADC zp_dest_hi
+        STA zp_src_hi
+ELSE
+        CLC
+        ADC tabl_lo,X
+        EOR #&FF
+        STA zp_src_lo
+        LDA zp_bits_hi
+        ADC tabl_hi,X
+        EOR #&FF
+        ADC zp_dest_hi
+        STA zp_src_hi
+        CLC
+ENDIF
+; -------------------------------------------------------------------
+; prepare for copy loop (2 bytes)
+;
+        LDX zp_len_lo
+; -------------------------------------------------------------------
+; main copy loop (30 bytes)
+;
+.copy_next
+IF DECRUNCH_FORWARDS = 0
+        TYA
+        BNE copy_skip_hi
+        DEC zp_dest_hi
+        DEC zp_src_hi
+.copy_skip_hi
+        DEY
+ENDIF
+IF LITERAL_SEQUENCES_NOT_USED = 0
+        BCS get_literal_byte
+ENDIF
+        LDA (zp_src_lo),Y
+.literal_byte_gotten
+        STA (zp_dest_lo),Y
+IF DECRUNCH_FORWARDS <> 0
+        INY
+        BNE copy_skip_hi
+        INC zp_dest_hi
+        INC zp_src_hi
+.copy_skip_hi
+ENDIF
+        DEX
+        BNE copy_next
+IF MAX_SEQUENCE_LENGTH_256 = 0
+        LDA zp_len_hi
+IF INLINE_GET_BITS <> 0
+        BNE copy_next_hi
+ENDIF
+ENDIF
+        STX zp_bits_hi
+IF INLINE_GET_BITS = 0
+        BEQ next_round
+ELSE
+        JMP next_round
+ENDIF
+IF MAX_SEQUENCE_LENGTH_256 = 0
+.copy_next_hi
+        DEC zp_len_hi
+        JMP copy_next
+ENDIF
+IF DONT_REUSE_OFFSET = 0
+; -------------------------------------------------------------------
+; test for offset reuse (11 bytes)
+;
+.test_reuse
+        BVS no_reuse
+IF MAX_SEQUENCE_LENGTH_256 <> 0
+        LDA #&00                ; fetch one bit
+ENDIF
+        ASL zp_bitbuf
+        BNE gbnc1_ok
+        PHA
+        JSR get_crunched_byte
+        ROL A
+        STA zp_bitbuf
+        PLA
+.gbnc1_ok
+        ROL A
+        BEQ no_reuse            ; bit == 0 => C=0, no reuse
+        BNE copy_next           ; bit != 0 => C=0, reuse previous offset
+ENDIF
+; -------------------------------------------------------------------
+; exit or literal sequence handling (16(12) bytes)
+;
+.exit_or_lit_seq
+IF LITERAL_SEQUENCES_NOT_USED = 0
+        BEQ decr_exit
+        JSR get_crunched_byte
+IF MAX_SEQUENCE_LENGTH_256 = 0
+        STA zp_len_hi
+ENDIF
+        JSR get_crunched_byte
+        TAX
+        BCS copy_next
+.decr_exit
+ENDIF
+        RTS
+IF LITERAL_SEQUENCES_NOT_USED = 0
+.get_literal_byte
+        JSR get_crunched_byte
+        BCS literal_byte_gotten
+ENDIF
+IF EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE <> 0
+; -------------------------------------------------------------------
+; the static stable used for bits+offset for lengths 1, 2 and 3 (3 bytes)
+; bits 2, 4, 4 and offsets 64, 48, 32 corresponding to
+; %10010000, %11100011, %11100010
+.tabl_bit
+        EQUB &90, &E3, &E2
+ELSE
+; -------------------------------------------------------------------
+; the static stable used for bits+offset for lengths 1 and 2 (2 bytes)
+; bits 2, 4 and offsets 48, 32 corresponding to %10001100, %11100010
+.tabl_bit
+        EQUB &8C, &E2
+ENDIF
+
+IF ENABLE_SPLIT_ENCODING <> 0
+.split_init_zp
+        mac_init_zp
+        RTS
+ENDIF
+.decrunch_end

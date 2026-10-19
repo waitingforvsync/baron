@@ -1034,19 +1034,58 @@ impossible on its own.
 
 It returns `{bits, runs}`: the smallest size there is under those costs, and the runs that achieve it -
 `{0, bytes}` for a literal run, `{1, {offsets, lengths}}` for a match run - for your `FUNCTION`s to encode
-and `BITPACK`. (It assumes a match is at least two bytes, and that neither an offset nor a match run's
-count ever gets cheaper as it grows.)
+and `BITPACK`.
 
-`examples/compress` puts it all together, twice:
+Some formats price an offset by the length of its match - a short match can only reach so far back,
+say. Then `offset` can be a list of tables, one for each length from 1, the last serving every longer
+match: `{off1, off2, off3}` prices 1-byte, 2-byte, and longer matches differently.
+
+#### What it assumes ####
+
+How a format marks its runs decides what the search can take for granted:
+
+- If every match carries its own flag, so a match run costs the same whatever its count, every match
+  tries every offset. Offsets may then cost anything: a fitted table that makes offset 320 cheaper than
+  offset 200 is fine.
+- If a match run's count is written, the count must never get cheaper as it grows, and each match takes
+  the nearest offset that reaches its length - so an offset must never get cheaper as offsets grow,
+  either.
+
+#### Repeat matches ####
+
+Some formats also have *repeat* matches, which copy from the same offset as the match before: the
+first match after a literal run may say "same offset again" in a few bits instead of writing the offset
+out. That pays because data so often agrees with an earlier stretch except for the odd byte - a match, a
+literal, then the match carries on. A seventh table, `repeat`, gives a repeat's cost by its length:
+
+```
+LZ_PARSE(data, literal_run, literal, match_run, length, offset, repeat)
+```
+
+A repeat comes back with an offset of 0. The search is still exact, though it has more to keep track of:
+which offset is worth having in hand depends on the bytes still to come, so it tries every offset for the
+last match of each run. It assumes too that neither a literal run's count nor a repeat's length ever gets
+cheaper as it grows.
+
+#### Examples ####
+
+`examples/compress` puts it all together, four times:
 
 - `lz.6502` is a complete compressor in a few dozen lines. It tries every offset split and keeps the
   smallest.
-- `exo.6502` works like Exomizer. It fits a table of bit widths to the counts, lengths and offsets a
-  parse used, parses again with those tables, and repeats while that saves anything. The fitting is
-  written with lists too.
+- `exolite.6502` is a format inspired by Exomizer, though not Exomizer's own. It fits a table of bit
+  widths to the counts, lengths and offsets a parse used, parses again with those tables, and repeats
+  while that saves anything. The fitting is written with lists too.
+- `zx02.6502` writes dmsc's ZX02 format, repeat matches included. Its literals and offsets sit in the
+  stream as whole bytes between the bytes of bits, and the `FUNCTION`s lay them out by sorting on
+  position.
+- `exomizer.6502` writes Exomizer's own format (as `exomizer raw -P7 -T5 -M256` would), fitting its 52
+  bucket widths the way `exolite.6502` does, with an offset table each for 1-byte, 2-byte and longer
+  matches. Exomizer's own 6502 decruncher unpacks it.
 
-Each has a loader whose decompressor unpacks the same title screen straight into screen memory, and both
-loaders go on one disc.
+Each has a loader whose decompressor unpacks the same title screen straight into screen memory, and all
+four loaders go on one disc. ZX02's decompressor is the smallest and quickest to unpack; Exomizer packs
+the screen smallest.
 
 ## Logging ##
 
