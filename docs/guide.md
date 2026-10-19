@@ -809,7 +809,9 @@ has a whole guide to itself: [Zero page allocation](zero-page-allocation.md).
 
 `IF` / `ELIF` / `ELSE` / `ENDIF` assembles conditionally. The condition is any expression - a boolean
 (`TRUE`, `FALSE`, a comparison), or a number read as nonzero-is-true - and a dead branch emits nothing
-at all:
+at all. Nor does it compute anything: its lines are read only to find where the branch ends, so a
+`FUNCTION` call, a builtin like `LZ_PARSE` or an `RND` in it costs nothing and draws nothing. The same goes
+for the branches of an `IF` inside a `FUNCTION`.
 
 ```
 debugrasters = FALSE
@@ -1056,7 +1058,7 @@ How a format marks its runs decides what the search can take for granted:
 Some formats also have *repeat* matches, which copy from the same offset as the match before: the
 first match after a literal run may say "same offset again" in a few bits instead of writing the offset
 out. That pays because data so often agrees with an earlier stretch except for the odd byte - a match, a
-literal, then the match carries on. A seventh table, `repeat`, gives a repeat's cost by its length:
+literal, then the match carries on. A seventh argument, `repeat`, gives a repeat's cost by its length:
 
 ```
 LZ_PARSE(data, literal_run, literal, match_run, length, offset, repeat)
@@ -1064,8 +1066,19 @@ LZ_PARSE(data, literal_run, literal, match_run, length, offset, repeat)
 
 A repeat comes back with an offset of 0. The search is still exact, though it has more to keep track of:
 which offset is worth having in hand depends on the bytes still to come, so it tries every offset for the
-last match of each run. It assumes too that neither a literal run's count nor a repeat's length ever gets
-cheaper as it grows.
+last match of each run.
+
+Some formats allow a repeat only after certain literal runs, and make every match there pay to say
+whether it is one. Exomizer, for instance, allows one only straight after a single literal, where every
+match carries a flag bit. Then `repeat` is a pair, `{lengths, after}`: `after` gives, by the count of the
+literal run before, what any match there pays first, with a negative entry where no repeat can follow:
+
+```
+LZ_PARSE(data, literal_run, literal, match_run, length, offset, {repeat, {-1, 1}})   ; Exomizer's rule
+```
+
+(The first literal run never has an offset in hand, so it pays nothing.) The search assumes that neither a
+literal run's count, with what a match after it pays, nor a repeat's length ever gets cheaper as it grows.
 
 #### Examples ####
 
@@ -1079,9 +1092,9 @@ cheaper as it grows.
 - `zx02.6502` writes dmsc's ZX02 format, repeat matches included. Its literals and offsets sit in the
   stream as whole bytes between the bytes of bits, and the `FUNCTION`s lay them out by sorting on
   position.
-- `exomizer.6502` writes Exomizer's own format (as `exomizer raw -P7 -T5 -M256` would), fitting its 52
+- `exomizer.6502` writes Exomizer's own format (as `exomizer raw -T5 -M256` would), fitting its 52
   bucket widths the way `exolite.6502` does, with an offset table each for 1-byte, 2-byte and longer
-  matches. Exomizer's own 6502 decruncher unpacks it.
+  matches, and offset reuse switched on or off by the loader. Exomizer's own 6502 decruncher unpacks it.
 
 Each has a loader whose decompressor unpacks the same title screen straight into screen memory, and all
 four loaders go on one disc. ZX02's decompressor is the smallest and quickest to unpack; Exomizer packs

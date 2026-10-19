@@ -14,6 +14,8 @@
 //
 // A format may also have repeat matches: the first match of a match run can reuse the offset of the
 // match just before the literal run, costing a repeat (by its length) instead of a length and an offset.
+// It may allow them only after literal runs of some counts, making every match there - repeat or not -
+// pay for the choice (Exomizer: a flag bit, after exactly one literal).
 // And it may price offsets differently by the match's length: one offset table for each length from 1,
 // the last one serving every longer match.
 //
@@ -26,7 +28,8 @@
 //   every offset, so offsets may cost anything. Otherwise a match run's count never gets cheaper as it
 //   grows, and the nearest offset is taken for each length, so an offset never gets cheaper as offsets
 //   grow (in each table).
-// - With repeats, neither a literal run's count nor a repeat's length ever gets cheaper as it grows.
+// - With repeats, neither a literal run's count (with what a match pays after it, where a repeat may
+//   follow) nor a repeat's length ever gets cheaper as it grows.
 
 typedef rc_view_i32 lz_table;
 
@@ -41,6 +44,8 @@ typedef struct lz_costs {
     rc_view_i32      length;        // a match's length, by length
     rc_view_lz_table offset;        // a match's offset, by offset: one table per length from 1, the last for all longer
     rc_view_i32      repeat;        // a repeat match, by its length; empty for a format without them
+    rc_view_i32      repeat_after;  // by the count of a literal run after a match: what the next match pays
+                                    // there, negative where no repeat can follow; empty: nothing, anywhere
 } lz_costs;
 
 typedef struct lz_match {

@@ -94,8 +94,9 @@ separator_result peek_separator(baron *b, cursor at);
 parse_result require_separator(baron *b, cursor at);
 
 // Evaluate one expression in the assembler's current context - the single place that projects
-// baron into an expr_env.
-expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch);
+// baron into an expr_env. Not live (an inactive statement), it is parsed for its extent but runs no
+// FUNCTION or builtin call, its value a placeholder.
+expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, bool live, rc_arena scratch);
 
 // How a non-emitting statement sits in the listing.
 typedef enum verbose_text_kind {

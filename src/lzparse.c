@@ -165,12 +165,14 @@ static void stairs_offer(lz_pool *pool, uint32_t q, lz_entry e, rc_arena *arena)
 }
 
 
-// A band of literal-run counts [lo, hi] sharing one header cost, with a sliding-window minimum over
-// the candidate run starts: for a run ending at j, a start i in [j - hi, j - lo].
+// A band of literal-run counts [lo, hi] whose header cost is flat or rises by a fixed step (a cost per
+// literal), with a sliding-window minimum over the candidate run starts: for a run ending at j, a start
+// i in [j - hi, j - lo]. Keyed so the step cancels: start i's key is match_end[i] - lits[i] - slope * i.
 typedef struct lz_band {
     uint32_t    lo;
     uint32_t    hi;
-    int64_t     cost;
+    int64_t     cost;    // at count lo
+    int64_t     slope;   // and this much more for each count above
     rc_span_u32 deque;   // run starts, best first
     uint32_t    first;
     uint32_t    last;    // one past the back
@@ -181,34 +183,57 @@ typedef struct lz_band {
 #include "richc/template/array.h"
 
 enum { lz_max_bands = 64 };   // beyond this a table is not banded enough to be worth it: try every start
+enum { lz_short_reach = 16 };  // literal runs this short before a repeat: worth looking ahead for one
 
-// The literal-run table's bands of equal cost, impossible counts left out. An empty result with more
-// than lz_max_bands bands means "scan instead".
-static rc_array_lz_band literal_bands(rc_view_i32 table, uint32_t n, rc_arena *arena)
+// The literal-run table's bands, impossible counts left out: runs of counts that cost the same, or -
+// when there are too many of those (a table charging per literal) - that rise by a fixed step. No bands
+// (more than lz_max_bands either way) means "scan instead". Stepped bands stand in for that scan, so
+// they also settle ties the way it does: the earliest start, the longest run.
+typedef struct lz_bands {
+    rc_array_lz_band bands;
+    bool             stepped;
+} lz_bands;
+
+static lz_bands literal_bands(rc_view_i32 table, uint32_t n, rc_arena *arena)
 {
-    rc_array_lz_band bands = {0};
     uint32_t top = table_top(table) < n ? table_top(table) : n;
-    for (uint32_t c = 1; c <= top; c++) {
-        int64_t cost = table_cost(table, c);
-        if (cost < 0) {
-            continue;
-        }
-        if (bands.num != 0) {
-            lz_band *b = rc_array_lz_band_at(&bands, bands.num - 1);
-            if (b->hi == c - 1 && b->cost == cost) {
-                b->hi = c;
+    for (uint32_t sloped = 0; sloped < 2; sloped++) {
+        rc_array_lz_band bands = {0};
+        bool             fits  = true;
+        for (uint32_t c = 1; c <= top && fits; c++) {
+            int64_t cost = table_cost(table, c);
+            if (cost < 0) {
                 continue;
             }
+            if (bands.num != 0) {
+                lz_band *b = rc_array_lz_band_at(&bands, bands.num - 1);
+                if (b->hi == c - 1) {
+                    int64_t step = cost - (b->cost + b->slope * (int64_t) (b->hi - b->lo));
+                    if (sloped && b->lo == b->hi) {
+                        b->slope = step;   // a band's second count sets its step
+                        b->hi    = c;
+                        continue;
+                    }
+                    if (step == b->slope) {
+                        b->hi = c;
+                        continue;
+                    }
+                }
+            }
+            if (bands.num == lz_max_bands) {
+                fits = false;
+                break;
+            }
+            rc_array_lz_band_push(&bands, (lz_band) {.lo = c, .hi = c, .cost = cost}, arena);
         }
-        if (bands.num == lz_max_bands) {
-            return (rc_array_lz_band) {0};
+        if (fits) {
+            for (uint32_t b = 0; b < bands.num; b++) {
+                rc_array_lz_band_at(&bands, b)->deque = rc_array_u32_resize(&(rc_array_u32) {0}, n + 1, arena);
+            }
+            return (lz_bands) {.bands = bands, .stepped = sloped == 1};
         }
-        rc_array_lz_band_push(&bands, (lz_band) {.lo = c, .hi = c, .cost = cost}, arena);
     }
-    for (uint32_t b = 0; b < bands.num; b++) {
-        rc_array_lz_band_at(&bands, b)->deque = rc_array_u32_resize(&(rc_array_u32) {0}, n + 1, arena);
-    }
-    return bands;
+    return (lz_bands) {0};
 }
 
 
@@ -239,6 +264,28 @@ typedef struct lz_ending {
 #define RC_ARRAY_TYPE lz_ending
 #define RC_ARRAY_NAME lz_ending
 #include "richc/template/array.h"
+
+// One offset's state, together so a matching pair touches one place: how its bytes have matched up to
+// here, and (repeats only) the heads of its two queues.
+typedef struct lz_offset {
+    uint32_t matched;    // how many bytes up to here match at this offset
+    uint32_t last;       // one past the last position whose byte matched here (0: none)
+    uint32_t runs;       // closed match runs that left it in hand
+    uint32_t literals;   // literal runs after those, ending in the current stretch
+} lz_offset;
+
+#define RC_ARRAY_TYPE lz_offset
+#define RC_ARRAY_NAME lz_offset
+#include "richc/template/array.h"
+
+static rc_span_lz_offset offsets_filled(uint32_t num, rc_arena *arena)
+{
+    rc_span_lz_offset s = rc_array_lz_offset_resize(&(rc_array_lz_offset) {0}, num, arena);
+    for (uint32_t i = 0; i < num; i++) {
+        rc_span_lz_offset_set(s, i, (lz_offset) {.runs = RC_INDEX_NONE, .literals = RC_INDEX_NONE});
+    }
+    return s;
+}
 
 // A repeat that opens a match run at the current position, header unpaid.
 typedef struct lz_repeat_start {
@@ -304,8 +351,7 @@ typedef struct lz_search {
     // The per-offset search: every match when runs are flat, the last of each run for repeats.
     bool               flat;
     bool               repeats;
-    rc_span_u32        matched;     // per offset: how many bytes up to here match at that offset
-    rc_span_u32        last;        // per offset: one past the last position whose byte matched there
+    rc_span_lz_offset  offsets;     // per offset (1..n - 1)
     rc_span_i64        open;        // per position: the cheapest place to write a run's next match from,
     rc_span_u32        open_by;     //   header included, and the entry it extends
     rc_span_i64        reach_cost;  // per length: the cheapest match ending here of at most that length,
@@ -313,33 +359,54 @@ typedef struct lz_search {
     uint32_t           reached;     // how far reach_cost is filled in at this position
     rc_array_lz_ending endings;
 
+    // Literal runs: banded unless the table has too many bands to be worth it.
+    rc_array_lz_band   bands;
+    bool               stepped;     // bands that stand in for the scan, ties and all (literal_bands)
+    bool               scan_literals;
+    bool               gated;       // repeats only after some literal-run counts, matches there paying extra
+    rc_view_i32        opening;     // a literal run's price when a match follows it (gated: with that extra)
+
     // Repeats only.
-    rc_span_i64        savings;     // per offset table: the most a repeat it serves saves (see holding_worth)
+    uint32_t           literal_reach;  // the longest literal run a repeat may follow
+    rc_span_i64        worth;       // per offset: see holding_worths
     rc_array_lz_queued queued;
     uint32_t           queued_free;
-    rc_span_u32        runs;        // per offset: closed match runs that left it in hand
-    rc_span_u32        literals;    // per offset: literal runs after those, ending in the current stretch
 } lz_search;
 
-// How much more than the best at its position a record holding offset off can cost and still be worth
-// keeping: the best could always write that offset out in full where the record would repeat it, for at
-// most the offset's cost and the table's saving more. lz_impossible: some repeat has no stand-in, so keep
-// everything.
-static int64_t holding_worth(const lz_search *s, uint32_t off)
+// Per offset, how much more than the best at its position a record holding that offset can cost and
+// still be worth keeping: the best could always write the offset out in full where the record would
+// repeat it, for at most the offset's cost and its table's saving more. lz_impossible: some repeat has no
+// stand-in, so keep everything. savings is per offset table: the most a repeat it serves saves, INT64_MIN
+// for one serving no repeat length.
+static rc_span_i64 holding_worths(rc_view_lz_table offsets, rc_span_i64 savings, uint32_t furthest, rc_arena *arena)
 {
-    int64_t worth = 0;
-    for (uint32_t t = 0; t < s->savings.num; t++) {
-        int64_t save = rc_span_i64_get(s->savings, t);
-        if (save == INT64_MIN) {
-            continue;   // this table serves no repeat length
+    rc_span_i64 worth = i64_filled(furthest + 1, 0, arena);
+    for (uint32_t off = 1; off <= furthest; off++) {
+        int64_t w = 0;
+        for (uint32_t t = 0; t < savings.num && w < lz_impossible; t++) {
+            int64_t save = rc_span_i64_get(savings, t);
+            if (save == INT64_MIN) {
+                continue;
+            }
+            int64_t ocost = table_cost(rc_view_lz_table_get(offsets, t), off);
+            w = save >= lz_impossible || ocost < 0 ? lz_impossible : (ocost + save > w ? ocost + save : w);
         }
-        int64_t ocost = table_cost(rc_view_lz_table_get(s->costs.offset, t), off);
-        if (save >= lz_impossible || ocost < 0) {
-            return lz_impossible;
-        }
-        worth = ocost + save > worth ? ocost + save : worth;
+        rc_span_i64_set(worth, off, w);
     }
     return worth;
+}
+
+// Whether a repeat at offset off could start within reach of a literal run beginning after p: some byte
+// that far ahead matching at that offset (the data is all known). Only asked when the reach is short.
+static bool repeat_ahead(const lz_search *s, uint32_t p, uint32_t off)
+{
+    uint32_t end = p + s->literal_reach < s->data.num ? p + s->literal_reach : s->data.num - 1;
+    for (uint32_t q = p + 1; q <= end; q++) {
+        if (q >= off && rc_view_bytes_get(s->data, q) == rc_view_bytes_get(s->data, q - off)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void queue_drop(lz_search *s, uint32_t i)
@@ -354,10 +421,10 @@ static void queue_drop(lz_search *s, uint32_t i)
     }
 }
 
-// Queue a record at heads[at], dropping the older ones it makes useless.
-static void queue_push(lz_search *s, rc_span_u32 heads, uint32_t at, lz_queued item, rc_arena *arena)
+// Queue a record at the queue whose head is *head, dropping the older ones it makes useless.
+static void queue_push(lz_search *s, uint32_t *head_at, lz_queued item, rc_arena *arena)
 {
-    uint32_t head = rc_span_u32_get(heads, at);
+    uint32_t head = *head_at;
     while (head != RC_INDEX_NONE && rc_array_lz_queued_get(&s->queued, head).key >= item.key) {
         uint32_t next = rc_array_lz_queued_get(&s->queued, head).next;
         rc_array_lz_queued_at(&s->queued, head)->next = RC_INDEX_NONE;
@@ -376,7 +443,73 @@ static void queue_push(lz_search *s, rc_span_u32 heads, uint32_t at, lz_queued i
         i = rc_array_lz_queued_push(&s->queued, item, arena);
     }
     pool_hold(&s->pool, item.entry);
-    rc_span_u32_set(heads, at, i);
+    *head_at = i;
+}
+
+// Offer the literal run [i, p) at the given header cost as the way to reach p.
+static void literal_offer(lz_search *s, uint32_t p, uint32_t i, int64_t header)
+{
+    int64_t from = rc_span_i64_get(s->match_end, i);
+    if (header < 0 || from >= lz_impossible) {
+        return;
+    }
+    int64_t c = from + header + rc_span_i64_get(s->lits, p) - rc_span_i64_get(s->lits, i);
+    if (c < rc_span_i64_get(s->lit_end, p)) {
+        rc_span_i64_set(s->lit_end, p, c);
+        rc_span_u32_set(s->lit_from, p, i);
+    }
+}
+
+// The cheapest literal run ending at p, from wherever a match run (or the start) left off. Before the
+// end a match follows it, so its price includes what that match pays for coming after it (the opening
+// table) - unless it is the first run, which no offset in hand follows. At the end, the plain price.
+static void literal_runs(lz_search *s, uint32_t p)
+{
+    if (s->gated && p == s->data.num) {
+        for (uint32_t i = 0; i < p; i++) {
+            literal_offer(s, p, i, table_cost(s->costs.literal_run, p - i));
+        }
+        return;
+    }
+    uint32_t first = s->gated ? 1 : 0;   // gated: the first run is priced apart, below
+    if (s->scan_literals) {
+        for (uint32_t i = first; i < p; i++) {
+            literal_offer(s, p, i, table_cost(s->opening, p - i));
+        }
+    }
+    else {
+        for (uint32_t k = 0; k < s->bands.num; k++) {
+            // Stepped bands go longest runs first, and an equal key keeps the older start: the scan's
+            // choice on a tie. Flat bands keep their own order.
+            lz_band *band = rc_array_lz_band_at(&s->bands, s->stepped ? s->bands.num - 1 - k : k);
+            if (p >= band->lo + first) {
+                uint32_t i = p - band->lo;   // a newly possible start, its match_end already final
+                if (rc_span_i64_get(s->match_end, i) < lz_impossible) {
+                    int64_t key = rc_span_i64_get(s->match_end, i) - rc_span_i64_get(s->lits, i) - band->slope * i;
+                    while (band->last > band->first) {
+                        uint32_t back = rc_span_u32_get(band->deque, band->last - 1);
+                        int64_t  bkey = rc_span_i64_get(s->match_end, back) - rc_span_i64_get(s->lits, back)
+                                      - band->slope * back;
+                        if (bkey < key || (s->stepped && bkey == key)) {
+                            break;
+                        }
+                        band->last--;
+                    }
+                    rc_span_u32_set(band->deque, band->last++, i);
+                }
+            }
+            while (band->last > band->first && rc_span_u32_get(band->deque, band->first) + band->hi < p) {
+                band->first++;   // that start is now further back than this band's longest run
+            }
+            if (band->last > band->first) {
+                uint32_t i = rc_span_u32_get(band->deque, band->first);
+                literal_offer(s, p, i, band->cost + band->slope * (int64_t) (p - i - band->lo));
+            }
+        }
+    }
+    if (s->gated && p > 0) {
+        literal_offer(s, p, 0, table_cost(s->costs.literal_run, p));
+    }
 }
 
 // Fill reach_cost in up to length m at position p: the cheapest way to write a match there of at most m
@@ -414,9 +547,10 @@ static lz_repeat_start end_runs(lz_search *s, uint32_t p, rc_arena *arena)
         if (off > s->furthest) {
             break;
         }
-        uint32_t run = p >= 2 && rc_span_u32_get(s->last, off) == p - 1 ? rc_span_u32_get(s->matched, off) + 1 : 1;
-        rc_span_u32_set(s->matched, off, run);
-        rc_span_u32_set(s->last, off, p);
+        lz_offset *state = rc_span_lz_offset_at(s->offsets, off);
+        uint32_t   run   = p >= 2 && state->last == p - 1 ? state->matched + 1 : 1;
+        state->matched = run;
+        state->last    = p;
 
         // A new match: each length with a table of its own, then the longer ones together.
         lz_ending e = {.cost = lz_impossible};
@@ -452,7 +586,7 @@ static lz_repeat_start end_runs(lz_search *s, uint32_t p, rc_arena *arena)
         }
 
         // A repeat from a literal run in this stretch: the stretch is what makes its bytes match.
-        uint32_t *link = s->repeats ? rc_span_u32_at(s->literals, off) : &(uint32_t) {RC_INDEX_NONE};
+        uint32_t *link = s->repeats ? &state->literals : &(uint32_t) {RC_INDEX_NONE};
         while (*link != RC_INDEX_NONE) {
             lz_queued q = rc_array_lz_queued_get(&s->queued, *link);
             if (p - q.pos > rep_max) {
@@ -549,20 +683,21 @@ static void end_literals(lz_search *s, uint32_t p, rc_arena *arena)
     if (p == s->data.num) {
         return;
     }
-    uint32_t lit_max = table_top(s->costs.literal_run);
+    uint32_t lit_max = s->literal_reach;
     for (uint32_t j = rc_span_u32_get(s->seen, rc_view_bytes_get(s->data, p)); j != RC_INDEX_NONE; j = rc_span_u32_get(s->previous, j)) {
         uint32_t off = p - j;
         if (off > s->furthest) {
             break;
         }
-        if (rc_span_u32_get(s->last, off) != p) {
-            queue_drop(s, rc_span_u32_get(s->literals, off));
-            rc_span_u32_set(s->literals, off, RC_INDEX_NONE);
+        lz_offset *state = rc_span_lz_offset_at(s->offsets, off);
+        if (state->last != p) {
+            queue_drop(s, state->literals);
+            state->literals = RC_INDEX_NONE;
         }
 
         int64_t   best = lz_impossible;
         lz_queued from = {0};
-        uint32_t *link = rc_span_u32_at(s->runs, off);
+        uint32_t *link = &state->runs;
         while (*link != RC_INDEX_NONE) {
             lz_queued q = rc_array_lz_queued_get(&s->queued, *link);
             if (p - q.pos > lit_max) {
@@ -571,8 +706,9 @@ static void end_literals(lz_search *s, uint32_t p, rc_arena *arena)
                 break;
             }
             int64_t header = table_cost(s->costs.literal_run, p - q.pos);
-            if (header >= 0 && q.key + header < best) {
-                best = q.key + header;
+            int64_t extra  = s->gated ? table_cost(s->costs.repeat_after, p - q.pos) : 0;
+            if (header >= 0 && extra >= 0 && q.key + header + extra < best) {
+                best = q.key + header + extra;
                 from = q;
             }
             link = &rc_array_lz_queued_at(&s->queued, *link)->next;
@@ -581,7 +717,7 @@ static void end_literals(lz_search *s, uint32_t p, rc_arena *arena)
             continue;
         }
         best += rc_span_i64_get(s->lits, p);
-        int64_t worth = holding_worth(s, off);
+        int64_t worth = rc_span_i64_get(s->worth, off);
         if (worth < lz_impossible && best >= rc_span_i64_get(s->lit_end, p) + worth) {
             continue;   // the cheapest literal run here could write this offset out and still win
         }
@@ -592,7 +728,7 @@ static void end_literals(lz_search *s, uint32_t p, rc_arena *arena)
             .length  = p - from.pos,
             .literal = true,
         }, arena);
-        queue_push(s, s->literals, off, (lz_queued) {.key = best, .pos = p, .entry = e}, arena);
+        queue_push(s, &state->literals, (lz_queued) {.key = best, .pos = p, .entry = e}, arena);
     }
 }
 
@@ -602,9 +738,12 @@ static void keep_endings(lz_search *s, uint32_t p, rc_arena *arena)
     int64_t best = rc_span_i64_get(s->match_end, p);
     for (uint32_t i = 0; i < s->endings.num; i++) {
         lz_ending e     = rc_array_lz_ending_get(&s->endings, i);
-        int64_t   worth = holding_worth(s, e.held);
+        int64_t   worth = rc_span_i64_get(s->worth, e.held);
         if (worth < lz_impossible && e.cost >= best + worth) {
             continue;
+        }
+        if (s->literal_reach <= lz_short_reach && !repeat_ahead(s, p, e.held)) {
+            continue;   // no repeat at this offset could follow a literal run from here
         }
         uint32_t entry = pool_add(&s->pool, (lz_entry) {
             .prev   = e.prev,
@@ -612,12 +751,14 @@ static void keep_endings(lz_search *s, uint32_t p, rc_arena *arena)
             .length = p - e.from,
             .offset = e.offset,
         }, arena);
-        queue_push(s, s->runs, e.held, (lz_queued) {.key = e.cost - rc_span_i64_get(s->lits, p), .pos = p, .entry = entry}, arena);
+        queue_push(s, &rc_span_lz_offset_at(s->offsets, e.held)->runs,
+                   (lz_queued) {.key = e.cost - rc_span_i64_get(s->lits, p), .pos = p, .entry = entry}, arena);
     }
 }
 
 
-lz_parse_result lz_parse(rc_view_bytes data, lz_costs costs, rc_arena *arena)
+// The search; banded false scans every literal-run start instead (what the bands must agree with).
+static lz_parse_result parse(rc_view_bytes data, lz_costs costs, bool banded, rc_arena *arena)
 {
     uint32_t n       = data.num;
     uint32_t tables  = costs.offset.num;
@@ -639,9 +780,25 @@ lz_parse_result lz_parse(rc_view_bytes data, lz_costs costs, rc_arena *arena)
             repeats = true;
         }
     }
+    // Gated repeats: a literal run before a match costs, in effect, what that match pays after it.
+    bool        gated   = repeats && costs.repeat_after.num != 0;
+    rc_span_i32 opening = {0};
+    uint32_t    reach   = table_top(costs.literal_run);
+    if (gated) {
+        opening = rc_array_i32_resize(&(rc_array_i32) {0}, costs.literal_run.num, arena);
+        reach   = 0;
+        for (uint32_t c = 0; c < costs.literal_run.num; c++) {
+            int64_t header = table_cost(costs.literal_run, c);
+            int64_t extra  = table_cost(costs.repeat_after, c);
+            rc_span_i32_set(opening, c, (int32_t) (header < 0 ? -1 : header + (extra > 0 ? extra : 0)));
+            reach = header >= 0 && extra >= 0 ? c : reach;
+        }
+    }
+    rc_view_i32      open_table = gated ? opening.view : costs.literal_run;
+    lz_bands         bands      = banded ? literal_bands(open_table, n, arena) : (lz_bands) {0};
+
     bool     per_offset = flat || repeats;
     uint32_t window     = per_offset ? n + 1 : 0;   // per-offset state, offsets 1..n - 1
-    uint32_t held       = repeats ? n + 1 : 0;
     uint32_t lengths    = per_offset ? (table_top(costs.length) < n ? table_top(costs.length) : n) + 1 : 0;
 
     lz_search s = {
@@ -662,21 +819,21 @@ lz_parse_result lz_parse(rc_view_bytes data, lz_costs costs, rc_arena *arena)
         .furthest    = offset_top(costs.offset),
         .flat        = flat,
         .repeats     = repeats,
-        .matched     = u32_filled(window, 0, arena),
-        .last        = u32_filled(window, 0, arena),
+        .offsets     = offsets_filled(window, arena),
         .open        = i64_filled(window, lz_impossible, arena),
         .open_by     = u32_filled(window, RC_INDEX_NONE, arena),
         .reach_cost  = i64_filled(lengths, lz_impossible, arena),
         .reach_len   = u32_filled(lengths, 0, arena),
-        .savings     = repeats ? savings : (rc_span_i64) {0},
+        .bands         = bands.bands,
+        .stepped       = bands.stepped,
+        .scan_literals = bands.bands.num == 0,
+        .gated         = gated,
+        .opening       = open_table,
+        .literal_reach = reach,
+        .worth       = repeats ? holding_worths(costs.offset, savings, offset_top(costs.offset), arena) : (rc_span_i64) {0},
         .queued_free = RC_INDEX_NONE,
-        .runs        = u32_filled(held, RC_INDEX_NONE, arena),
-        .literals    = u32_filled(held, RC_INDEX_NONE, arena),
     };
     rc_span_i64_set(s.match_end, 0, 0);   // the start: literals come first
-
-    rc_array_lz_band bands = literal_bands(costs.literal_run, n, arena);
-    bool scan_literals = bands.num == 0;
 
     // Hash chains over each position's first two bytes, nearest first; best_offset[len] is the nearest
     // offset reaching at least len bytes at the current position, the cheapest for that length.
@@ -716,52 +873,7 @@ lz_parse_result lz_parse(rc_view_bytes data, lz_costs costs, rc_arena *arena)
             }
         }
 
-        // The best literal run ending at p, from wherever a match run (or the start) left off.
-        if (scan_literals) {
-            for (uint32_t i = 0; i < p; i++) {
-                int64_t header = table_cost(costs.literal_run, p - i);
-                int64_t from   = rc_span_i64_get(s.match_end, i);
-                if (header < 0 || from >= lz_impossible) {
-                    continue;
-                }
-                int64_t c = from + header + rc_span_i64_get(s.lits, p) - rc_span_i64_get(s.lits, i);
-                if (c < rc_span_i64_get(s.lit_end, p)) {
-                    rc_span_i64_set(s.lit_end, p, c);
-                    rc_span_u32_set(s.lit_from, p, i);
-                }
-            }
-        }
-        else {
-            for (uint32_t b = 0; b < bands.num; b++) {
-                lz_band *band = rc_array_lz_band_at(&bands, b);
-                if (p >= band->lo) {
-                    uint32_t i = p - band->lo;   // a newly possible start, its match_end already final
-                    if (rc_span_i64_get(s.match_end, i) < lz_impossible) {
-                        int64_t key = rc_span_i64_get(s.match_end, i) - rc_span_i64_get(s.lits, i);
-                        while (band->last > band->first) {
-                            uint32_t back = rc_span_u32_get(band->deque, band->last - 1);
-                            if (rc_span_i64_get(s.match_end, back) - rc_span_i64_get(s.lits, back) < key) {
-                                break;
-                            }
-                            band->last--;
-                        }
-                        rc_span_u32_set(band->deque, band->last++, i);
-                    }
-                }
-                while (band->last > band->first && rc_span_u32_get(band->deque, band->first) + band->hi < p) {
-                    band->first++;   // that start is now further back than this band's longest run
-                }
-                if (band->last > band->first) {
-                    uint32_t i = rc_span_u32_get(band->deque, band->first);
-                    int64_t  c = rc_span_i64_get(s.match_end, i) + band->cost
-                               + rc_span_i64_get(s.lits, p) - rc_span_i64_get(s.lits, i);
-                    if (c < rc_span_i64_get(s.lit_end, p)) {
-                        rc_span_i64_set(s.lit_end, p, c);
-                        rc_span_u32_set(s.lit_from, p, i);
-                    }
-                }
-            }
-        }
+        literal_runs(&s, p);
 
         if (per_offset) {
             open_runs(&s, p);
@@ -790,6 +902,11 @@ lz_parse_result lz_parse(rc_view_bytes data, lz_costs costs, rc_arena *arena)
                 uint32_t off = p - q;
                 if (off > s.furthest) {
                     break;
+                }
+                // Only a match longer than the best so far adds anything, and the byte just past the best
+                // says at once whether this one could be.
+                if (best >= 2 && rc_view_bytes_get(data, q + best) != rc_view_bytes_get(data, p + best)) {
+                    continue;
                 }
                 uint32_t len = 2;
                 while (len < max_len && rc_view_bytes_get(data, q + len) == rc_view_bytes_get(data, p + len)) {
@@ -909,6 +1026,12 @@ lz_parse_result lz_parse(rc_view_bytes data, lz_costs costs, rc_arena *arena)
 }
 
 
+lz_parse_result lz_parse(rc_view_bytes data, lz_costs costs, rc_arena *arena)
+{
+    return parse(data, costs, true, arena);
+}
+
+
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
@@ -934,6 +1057,7 @@ typedef struct test_tables {
     rc_span_i32      lens;
     rc_view_lz_table offs;
     rc_span_i32      reps;
+    rc_span_i32      after;   // gated repeats: by the count of the literal run before; empty: ungated
 } test_tables;
 
 static rc_span_i32 test_table(uint32_t n, rc_arena *arena)
@@ -982,13 +1106,19 @@ static test_tables repeat_tables(uint32_t n, uint32_t ob, uint32_t flavour, rc_a
             rc_span_i32_set(t.mruns, v, v == 0 ? -1 : 0);
         }
     }
+    if (flavour == 3) {   // gated: repeats only after 1, 2 or 3 literals, every match there paying 0, 1 or 2
+        t.after = rc_array_i32_resize(&(rc_array_i32) {0}, 4, arena);
+        for (uint32_t c = 0; c < 4; c++) {
+            rc_span_i32_set(t.after, c, c == 0 ? -1 : (int32_t) c - 1);
+        }
+    }
     return t;
 }
 
 // Exomizer's shape: a flag per literal and per match (none per run), and an offset table for each of
 // lengths 1, 2 and 3 or more whose costs follow no order (as fitted buckets do), the length 1 table
 // reaching only so far. With repeats or without.
-static test_tables exo_tables(uint32_t n, uint32_t seed, bool repeats, rc_arena *arena)
+static test_tables exo_tables(uint32_t n, uint32_t seed, bool repeats, bool gated, rc_arena *arena)
 {
     test_tables t       = pitch_tables(n, 0, arena);
     rc_span_i32 offs[3] = {test_table(n, arena), test_table(n, arena), test_table(n, arena)};
@@ -1014,18 +1144,24 @@ static test_tables exo_tables(uint32_t n, uint32_t seed, bool repeats, rc_arena 
             rc_span_i32_set(t.reps, v, v == 0 ? -1 : gamma_bits(v) + 1);
         }
     }
+    if (gated) {   // Exomizer's rule: a repeat only after exactly one literal, every match there paying a flag
+        t.after = rc_array_i32_resize(&(rc_array_i32) {0}, 2, arena);
+        rc_span_i32_set(t.after, 0, -1);
+        rc_span_i32_set(t.after, 1, 1);
+    }
     return t;
 }
 
 static lz_costs pitch_costs(test_tables t)
 {
     return (lz_costs) {
-        .literal_run = t.runs.view,
-        .literal     = t.lits.view,
-        .match_run   = t.mruns.view,
-        .length      = t.lens.view,
-        .offset      = t.offs,
-        .repeat      = t.reps.view,
+        .literal_run  = t.runs.view,
+        .literal      = t.lits.view,
+        .match_run    = t.mruns.view,
+        .length       = t.lens.view,
+        .offset       = t.offs,
+        .repeat       = t.reps.view,
+        .repeat_after = t.after.view,
     };
 }
 
@@ -1042,6 +1178,20 @@ static int64_t test_offset_cost(test_tables t, uint32_t len, uint32_t off)
     return test_cost(rc_view_lz_table_get(t.offs, k), off);
 }
 
+// What a literal run of count c leaves for the match after it: -1 means no repeat can come there (and
+// nothing extra to pay), else a repeat may, and every match there pays that much first. A run from the
+// start leaves no offset in hand.
+static int32_t test_gate(test_tables t, uint32_t c, bool after_match)
+{
+    if (!after_match) {
+        return -1;
+    }
+    if (t.after.num == 0) {
+        return 0;
+    }
+    return (int32_t) test_cost(t.after.view, c);
+}
+
 // Replay a parse the way a decoder would, checking it rebuilds data and costs what it claims. A
 // repeat (offset 0) must open a match run and copies from the offset in hand.
 static bool replays(rc_view_bytes data, lz_parse_result r, test_tables t)
@@ -1050,6 +1200,7 @@ static bool replays(rc_view_bytes data, lz_parse_result r, test_tables t)
     uint32_t pos  = 0;
     uint32_t held = 0;
     int64_t  bits = 0;
+    int32_t  gate = -1;
     for (uint32_t i = 0; i < r.runs.num; i++) {
         lz_run run = rc_view_lz_run_get(r.runs, i);
         if (i > 0 && run.is_match == rc_view_lz_run_get(r.runs, i - 1).is_match) {
@@ -1063,6 +1214,9 @@ static bool replays(rc_view_bytes data, lz_parse_result r, test_tables t)
             return false;
         }
         bits += header;
+        if (!run.is_match) {
+            gate = test_gate(t, run.count, i > 0);
+        }
         for (uint32_t k = 0; k < run.count; k++) {
             if (run.is_match) {
                 lz_match m   = rc_view_lz_match_get(r.matches, run.start + k);
@@ -1070,9 +1224,12 @@ static bool replays(rc_view_bytes data, lz_parse_result r, test_tables t)
                 int64_t  lc  = test_cost(t.lens.view, m.length);
                 int64_t  oc  = m.offset == 0 ? 0 : test_offset_cost(t, m.length, m.offset);
                 int64_t  c   = m.offset == 0 ? test_cost(t.reps.view, m.length) : lc + oc;
-                if ((m.offset == 0 && (k != 0 || held == 0)) || off == 0 || off > pos || c < 0
+                if ((m.offset == 0 && (k != 0 || held == 0 || gate < 0)) || off == 0 || off > pos || c < 0
                     || (m.offset != 0 && (lc < 0 || oc < 0))) {
                     return false;
+                }
+                if (k == 0 && gate > 0) {
+                    bits += gate;   // what every match after that literal run pays
                 }
                 for (uint32_t c2 = 0; c2 < m.length; c2++, pos++) {
                     out[pos] = out[pos - off];
@@ -1105,13 +1262,13 @@ enum { brute_max = 12 };
 typedef struct brute {
     rc_view_bytes data;
     test_tables   t;
-    int64_t       lit[brute_max + 1][brute_max + 1];                   // literals next at pos (or the end)
-    int64_t       match[brute_max + 1][brute_max + 1][brute_max + 1];  // in a match run at pos with k matches
+    int64_t       lit[brute_max + 1][brute_max + 1];                      // literals next at pos (or the end)
+    int64_t       match[brute_max + 1][brute_max + 1][brute_max + 1][4];  // in a match run at pos, k matches in
     bool          lit_done[brute_max + 1][brute_max + 1];
-    bool          match_done[brute_max + 1][brute_max + 1][brute_max + 1];
+    bool          match_done[brute_max + 1][brute_max + 1][brute_max + 1][4];
 } brute;
 
-static int64_t brute_match(brute *b, uint32_t pos, uint32_t k, uint32_t held);
+static int64_t brute_match(brute *b, uint32_t pos, uint32_t k, uint32_t held, int32_t gate);
 
 static int64_t brute_literal(brute *b, uint32_t pos, uint32_t held)
 {
@@ -1122,7 +1279,7 @@ static int64_t brute_literal(brute *b, uint32_t pos, uint32_t held)
         int64_t best = INT64_MAX;
         for (uint32_t len = 1; pos + len <= b->data.num; len++) {
             int64_t header = test_cost(b->t.runs.view, len);
-            int64_t rest   = pos + len == b->data.num ? 0 : brute_match(b, pos + len, 0, held);
+            int64_t rest   = pos + len == b->data.num ? 0 : brute_match(b, pos + len, 0, held, test_gate(b->t, len, held != 0));
             if (header >= 0 && rest != INT64_MAX) {
                 int64_t c = header + 8 * (int64_t) len + rest;
                 best = c < best ? c : best;
@@ -1134,9 +1291,11 @@ static int64_t brute_literal(brute *b, uint32_t pos, uint32_t held)
     return b->lit[pos][held];
 }
 
-static int64_t brute_match(brute *b, uint32_t pos, uint32_t k, uint32_t held)
+static int64_t brute_match(brute *b, uint32_t pos, uint32_t k, uint32_t held, int32_t gate)
 {
-    if (!b->match_done[pos][k][held]) {
+    RC_ASSERT(gate >= -1 && gate <= 2);
+    uint32_t g = (uint32_t) (gate + 1);
+    if (!b->match_done[pos][k][held][g]) {
         int64_t best = INT64_MAX;
         if (k > 0) {
             int64_t header = test_cost(b->t.mruns.view, k);
@@ -1145,8 +1304,9 @@ static int64_t brute_match(brute *b, uint32_t pos, uint32_t k, uint32_t held)
                 best = header + rest;
             }
         }
+        int64_t extra = k == 0 && gate > 0 ? gate : 0;   // the first match pays what the literal run left
         for (uint32_t off = 1; off <= pos; off++) {
-            bool repeat = k == 0 && off == held;
+            bool repeat = k == 0 && off == held && gate >= 0;
             for (uint32_t len = 1; pos + len <= b->data.num; len++) {
                 if (rc_view_bytes_get(b->data, pos + len - 1) != rc_view_bytes_get(b->data, pos + len - 1 - off)) {
                     break;
@@ -1154,22 +1314,22 @@ static int64_t brute_match(brute *b, uint32_t pos, uint32_t k, uint32_t held)
                 int64_t lcost = test_cost(b->t.lens.view, len);
                 int64_t ocost = test_offset_cost(b->t, len, off);
                 int64_t rcost = repeat ? test_cost(b->t.reps.view, len) : -1;
-                int64_t rest  = brute_match(b, pos + len, k + 1, off);
+                int64_t rest  = brute_match(b, pos + len, k + 1, off, -1);
                 if (rest == INT64_MAX) {
                     continue;
                 }
-                if (lcost >= 0 && ocost >= 0 && lcost + ocost + rest < best) {
-                    best = lcost + ocost + rest;
+                if (lcost >= 0 && ocost >= 0 && lcost + ocost + extra + rest < best) {
+                    best = lcost + ocost + extra + rest;
                 }
-                if (rcost >= 0 && rcost + rest < best) {
-                    best = rcost + rest;
+                if (rcost >= 0 && rcost + extra + rest < best) {
+                    best = rcost + extra + rest;
                 }
             }
         }
-        b->match[pos][k][held]      = best;
-        b->match_done[pos][k][held] = true;
+        b->match[pos][k][held][g]      = best;
+        b->match_done[pos][k][held][g] = true;
     }
-    return b->match[pos][k][held];
+    return b->match[pos][k][held][g];
 }
 
 RC_TEST(lzparse, matches_brute_force_on_small_inputs)
@@ -1213,7 +1373,7 @@ RC_TEST(lzparse, repeats_match_brute_force_on_small_inputs)
             bytes[i] = (uint8_t) ((seed >> 16) % (2 + trial % 2));
         }
         rc_view_bytes data = {.data = bytes, .num = n};
-        for (uint32_t flavour = 0; flavour < 3; flavour++) {
+        for (uint32_t flavour = 0; flavour < 4; flavour++) {
             test_tables     t = repeat_tables(n, trial % 3, flavour, &arena);
             lz_parse_result r = lz_parse(data, pitch_costs(t), &arena);
             RC_CHECK_TRUE(r.ok);
@@ -1243,8 +1403,8 @@ RC_TEST(lzparse, exomizer_shape_matches_brute_force)
             bytes[i] = (uint8_t) ((seed >> 16) % (2 + trial % 2));
         }
         rc_view_bytes data = {.data = bytes, .num = n};
-        for (uint32_t repeats = 0; repeats < 2; repeats++) {
-            test_tables     t = exo_tables(n, seed ^ trial, repeats == 1, &arena);
+        for (uint32_t shape = 0; shape < 3; shape++) {   // no repeats, repeats anywhere, Exomizer's rule
+            test_tables     t = exo_tables(n, seed ^ trial, shape != 0, shape == 2, &arena);
             lz_parse_result r = lz_parse(data, pitch_costs(t), &arena);
             RC_CHECK_TRUE(r.ok);
             RC_CHECK_TRUE(replays(data, r, t));
@@ -1273,7 +1433,8 @@ RC_TEST(lzparse, repeats_replay_on_longer_inputs)
             }
         }
         rc_view_bytes data = {.data = bytes, .num = n};
-        test_tables     t = trial % 4 == 3 ? exo_tables(n, trial, true, &arena) : repeat_tables(n, trial % 3, trial % 3, &arena);
+        test_tables     t = trial % 4 == 3 ? exo_tables(n, trial, true, trial % 8 == 7, &arena)
+                                           : repeat_tables(n, trial % 3, trial % 4, &arena);
         lz_parse_result r = lz_parse(data, pitch_costs(t), &arena);
         RC_CHECK_TRUE(r.ok);
         RC_CHECK_TRUE(replays(data, r, t));
@@ -1281,9 +1442,50 @@ RC_TEST(lzparse, repeats_replay_on_longer_inputs)
         // Repeats never make it dearer than the same tables without them.
         test_tables     plain = t;
         plain.reps            = (rc_span_i32) {0};
+        plain.after           = (rc_span_i32) {0};
         lz_parse_result r0    = lz_parse(data, pitch_costs(plain), &arena);
         RC_CHECK_TRUE(r0.ok && replays(data, r0, plain));
         RC_CHECK(r.bits, <=, r0.bits);
+    }
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(lzparse, bands_agree_with_scanning)
+{
+    // Literal runs are found through bands of counts that cost the same or rise by a fixed step (a cost
+    // per literal, which makes too many flat ones); on longer inputs they must find what trying every
+    // start finds - for gamma counts, per-literal flags, and with repeats gated by the run before.
+    rc_arena arena = rc_arena_make_default();
+    uint32_t seed = 31337;
+    for (uint32_t trial = 0; trial < 12; trial++) {
+        uint8_t  bytes[300];
+        uint32_t n = 150 + trial * 12;
+        for (uint32_t i = 0; i < n; i++) {
+            seed = seed * 1103515245u + 12345u;
+            bytes[i] = i < 6 || (seed >> 8) % 5 == 0 ? (uint8_t) (seed >> 20) : bytes[i - 1 - (seed >> 16) % 6];
+        }
+        rc_view_bytes data = {.data = bytes, .num = n};
+        test_tables   t    = trial % 3 == 0 ? pitch_tables(n, 1, &arena)
+                           : exo_tables(n, trial, trial % 3 == 2, trial % 3 == 2, &arena);
+        lz_parse_result banded  = parse(data, pitch_costs(t), true, &arena);
+        lz_parse_result scanned = parse(data, pitch_costs(t), false, &arena);
+        RC_CHECK_TRUE(banded.ok && scanned.ok);
+        RC_CHECK_TRUE(replays(data, banded, t));
+        RC_CHECK(banded.bits, ==, scanned.bits);
+        if (trial % 3 != 0) {   // per-literal flags: stepped bands, which choose exactly as the scan does
+            bool same = banded.runs.num == scanned.runs.num && banded.matches.num == scanned.matches.num;
+            for (uint32_t i = 0; same && i < banded.runs.num; i++) {
+                lz_run a = rc_view_lz_run_get(banded.runs, i);
+                lz_run b = rc_view_lz_run_get(scanned.runs, i);
+                same = a.is_match == b.is_match && a.start == b.start && a.count == b.count;
+            }
+            for (uint32_t i = 0; same && i < banded.matches.num; i++) {
+                lz_match a = rc_view_lz_match_get(banded.matches, i);
+                lz_match b = rc_view_lz_match_get(scanned.matches, i);
+                same = a.offset == b.offset && a.length == b.length;
+            }
+            RC_CHECK_TRUE(same);
+        }
     }
     rc_arena_deinit(&arena);
 }

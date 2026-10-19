@@ -59,7 +59,7 @@ FUNCTION parse_with(t, data)
 
 FUNCTION below_counts(values, e) = FIND(SORT(CONCAT(values, 0..e)), 0..e) - (0..e)
 
-FUNCTION smaller(a, b) = b + (a < b) * (a - b)          ; element by element
+FUNCTION smaller(a, b) = MIN({a, b}, 0)                  ; element by element
 
 \ The search runs from the last bucket back to the first: a layer holds, for
 \ every s from 0 to e, the fewest bits for the numbers from s up using buckets

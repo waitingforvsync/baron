@@ -675,7 +675,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
         after = start;                     // leave the terminator for require_separator
     }
     else if (peek.token.type == lexeme_type_hash) {
-        expr_result e = eval(b, cursor_at(at, peek.next), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, peek.next), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -685,7 +685,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     }
     else if (peek.token.type == lexeme_type_open_paren) {
         operand_base = peek.next;   // the pointer expression inside the parentheses
-        expr_result e = eval(b, cursor_at(at, peek.next), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, peek.next), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -746,7 +746,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
         }
         if (!handled) {
             operand_base = start;   // the zero-page / absolute operand expression
-            expr_result e = eval(b, cursor_at(at, start), scope, section, scratch);
+            expr_result e = eval(b, cursor_at(at, start), scope, section, flags.active, scratch);
             if (e.error != expr_error_none) {
                 return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
             }

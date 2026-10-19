@@ -44,13 +44,18 @@
 
 \ The options, as the original's comments describe them. These match the
 \ streams exomizer.6502 writes: no literal sequences (exomizer's -c), matches
-\ under 256 bytes (-M256 -T5), no offset reuse (-P-32), decrunching forwards.
+\ under 256 bytes (-M256 -T5), decrunching forwards, and offset reuse as the
+\ includer's exo_reuse says (TRUE or FALSE).
 
 INLINE_GET_BITS = 0
 LITERAL_SEQUENCES_NOT_USED = 1
 MAX_SEQUENCE_LENGTH_256 = 1
 EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE = 0
+IF exo_reuse
+DONT_REUSE_OFFSET = 0
+ELSE
 DONT_REUSE_OFFSET = 1
+ENDIF
 DECRUNCH_FORWARDS = 1
 ENABLE_SPLIT_ENCODING = 0
 

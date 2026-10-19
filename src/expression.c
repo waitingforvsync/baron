@@ -10,6 +10,7 @@
 #include "richc/mstr.h"
 #include "richc/macros.h"
 #include <math.h>
+#include <string.h>
 
 
 // ---- precedence ladder (higher binds tighter) ----
@@ -711,6 +712,85 @@ value range_to_list(value_range r, rc_arena *arena)
 }
 
 
+// A number, or a flat list of nothing but numbers: the shape list arithmetic takes most of the time.
+static bool numbers_only(value v)
+{
+    if (value_is_number(v)) {
+        return true;
+    }
+    if (!value_is_list(v)) {
+        return false;
+    }
+    for (uint32_t i = 0; i < v.list.num; i++) {
+        if (!value_is_number(rc_view_value_get(v.list, i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The busiest operators on two numbers, picked out once per call so the loops below need not ask the
+// handler for every element. Anything else goes to its handler; either way the result is the handler's
+// (< and > read the same as compare_values even for NaN, which <=, >=, == and != would not, so those
+// keep their handlers).
+typedef enum numeric_kind {
+    numeric_other,
+    numeric_add,
+    numeric_sub,
+    numeric_mul,
+    numeric_lt,
+    numeric_gt,
+    numeric_min,
+    numeric_max,
+} numeric_kind;
+
+static numeric_kind numeric_kind_of(value (*apply)(value, value, rc_arena *))
+{
+    return apply == op_add ? numeric_add
+         : apply == op_sub ? numeric_sub
+         : apply == op_mul ? numeric_mul
+         : apply == op_lt  ? numeric_lt
+         : apply == op_gt  ? numeric_gt
+         : apply == op_min ? numeric_min
+         : apply == op_max ? numeric_max
+         : numeric_other;
+}
+
+// Numbers and flat lists of numbers, broadcast in one loop (a length-1 list repeats, a number holds
+// over every element) - just what the general broadcast below would make of them, without recursing
+// for every element. The caller has ruled out a length mismatch.
+static value numeric_broadcast(lexeme_binary_op op, value a, value b, rc_arena *arena)
+{
+    bool         la   = value_is_list(a);
+    bool         lb   = value_is_list(b);
+    uint32_t     na   = la ? a.list.num : 1;
+    uint32_t     nb   = lb ? b.list.num : 1;
+    uint32_t     n    = !la ? nb : (!lb ? na : (na == 1 ? nb : na));
+    numeric_kind kind = numeric_kind_of(op.apply);
+
+    rc_span_value out = rc_array_value_resize(&(rc_array_value) {0}, n, arena);
+    for (uint32_t i = 0; i < n; i++) {
+        value  ai = la ? rc_view_value_get(a.list, na == 1 ? 0 : i) : a;
+        value  bi = lb ? rc_view_value_get(b.list, nb == 1 ? 0 : i) : b;
+        double x  = ai.numeric;
+        double y  = bi.numeric;
+        value  r;
+        switch (kind) {
+            case numeric_add: r = value_make_numeric(x + y); break;
+            case numeric_sub: r = value_make_numeric(x - y); break;
+            case numeric_mul: r = value_make_numeric(x * y); break;
+            case numeric_lt:  r = value_make_bool(x < y); break;
+            case numeric_gt:  r = value_make_bool(x > y); break;
+            case numeric_min: r = value_make_numeric(x < y ? x : y); break;
+            case numeric_max: r = value_make_numeric(x > y ? x : y); break;
+            default:          r = op.apply(ai, bi, arena); break;
+        }
+        rc_span_value_set(out, i, r);
+    }
+    return value_make_list(out.view);
+}
+
+
 // Apply a binary operator, broadcasting component-wise over lists (NumPy-style) by recursing into
 // itself - so a ragged tail just broadcasts on its own. Two simple operands fall straight through to
 // the handler; errors propagate; the per-axis rules sit at the branches below.
@@ -728,6 +808,14 @@ static value apply_binary(lexeme_binary_op op, value a, value b, rc_arena *arena
     if (value_is_range(b)) b = range_to_list(b.range, arena);
     if (value_is_error(a)) return a;   // an unbounded range could not be enumerated
     if (value_is_error(b)) return b;
+
+    if (numbers_only(a) && numbers_only(b)) {
+        bool mismatch = value_is_list(a) && value_is_list(b) && a.list.num != b.list.num
+                     && a.list.num != 1 && b.list.num != 1;
+        if (!mismatch) {
+            return numeric_broadcast(op, a, b, arena);
+        }
+    }
 
     uint32_t ra = rank_of(a);
     uint32_t rb = rank_of(b);
@@ -1056,8 +1144,27 @@ static value fold(rc_view_value elems, value (*op)(value, value, rc_arena *), va
         return value_make_error(error_type_domain);   // an empty reduction with no identity
     }
 
-    value acc = has_identity ? identity : rc_view_value_get(elems, 0);
-    for (uint32_t i = has_identity ? 0 : 1; i < elems.num; i++) {
+    value    acc = has_identity ? identity : rc_view_value_get(elems, 0);
+    uint32_t i   = has_identity ? 0 : 1;
+
+    // A run of plain numbers folds in place, in the same order, so to the same result.
+    numeric_kind kind = numeric_kind_of(op);
+    bool foldable = kind == numeric_add || kind == numeric_mul || kind == numeric_min || kind == numeric_max;
+    if (foldable && value_is_number(acc) && i < elems.num && value_is_number(rc_view_value_get(elems, i))) {
+        double x = acc.numeric;
+        for (; i < elems.num && value_is_number(rc_view_value_get(elems, i)); i++) {
+            double y = rc_view_value_get(elems, i).numeric;
+            switch (kind) {
+                case numeric_add: x = x + y; break;
+                case numeric_mul: x = x * y; break;
+                case numeric_min: x = x < y ? x : y; break;
+                default:          x = x > y ? x : y; break;
+            }
+        }
+        acc = value_make_numeric(x);
+    }
+
+    for (; i < elems.num; i++) {
         acc = apply_binary(binop, acc, rc_view_value_get(elems, i), arena);
     }
 
@@ -1536,10 +1643,67 @@ static value not_found(value needle, rc_arena *arena)
 }
 
 
+// A list haystack's numbers, each found by value at its first position: then many needles cost one
+// pass over the haystack and a lookup each, not a scan each. Open addressing on the number's bits,
+// with -0 folded into 0 and NaN left out, so a lookup finds just what == would. Only numbers: a
+// boolean or anything else equals nothing of another type, so other needles still scan. No slots
+// means no index.
+typedef struct find_index {
+    rc_span_u32 slots;   // a haystack position, or RC_INDEX_NONE
+} find_index;
+
+static uint32_t find_hash(double d)
+{
+    if (d == 0.0) {
+        d = 0.0;
+    }
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof bits);
+    return (uint32_t) ((bits * UINT64_C(0x9E3779B97F4A7C15)) >> 32);
+}
+
+static uint32_t find_index_get(find_index idx, rc_view_value hay, double d)
+{
+    uint32_t mask = idx.slots.num - 1;
+    for (uint32_t h = find_hash(d) & mask; rc_span_u32_get(idx.slots, h) != RC_INDEX_NONE; h = (h + 1) & mask) {
+        uint32_t at = rc_span_u32_get(idx.slots, h);
+        if (rc_view_value_get(hay, at).numeric == d) {
+            return at;
+        }
+    }
+    return RC_INDEX_NONE;
+}
+
+static find_index find_index_make(rc_view_value hay, rc_arena *arena)
+{
+    uint32_t size = 16;
+    while (size < 2 * hay.num) {
+        size *= 2;
+    }
+    rc_span_u32 slots = rc_array_u32_resize(&(rc_array_u32) {0}, size, arena);
+    for (uint32_t h = 0; h < size; h++) {
+        rc_span_u32_set(slots, h, RC_INDEX_NONE);
+    }
+
+    find_index idx = {.slots = slots};
+    for (uint32_t i = 0; i < hay.num; i++) {
+        value v = rc_view_value_get(hay, i);
+        if (!value_is_numeric(v) || isnan(v.numeric) || find_index_get(idx, hay, v.numeric) != RC_INDEX_NONE) {
+            continue;   // not indexed, or a later copy: the first stays
+        }
+        uint32_t h = find_hash(v.numeric) & (size - 1);
+        while (rc_span_u32_get(slots, h) != RC_INDEX_NONE) {
+            h = (h + 1) & (size - 1);
+        }
+        rc_span_u32_set(slots, h, i);
+    }
+    return idx;
+}
+
 // One find: the zero-based index of needle's first occurrence in hay. A compound needle broadcasts
 // to a same-shape list of indices (the character-map idiom). A miss anywhere fails the WHOLE call:
 // an embedded error element would only garble into "subscript out of range" downstream.
-static value find_one(value hay, value needle, rc_arena *arena)
+static value find_one(value hay, value needle, find_index idx, rc_arena *arena)
 {
     if (value_is_error(needle)) {
         return needle;
@@ -1555,7 +1719,7 @@ static value find_one(value hay, value needle, rc_arena *arena)
     if (value_is_list(needle)) {
         rc_array_value out = rc_array_value_make(needle.list.num, arena);
         for (uint32_t i = 0; i < needle.list.num; i++) {
-            value r = find_one(hay, rc_view_value_get(needle.list, i), arena);
+            value r = find_one(hay, rc_view_value_get(needle.list, i), idx, arena);
             if (value_is_error(r)) {
                 return r;
             }
@@ -1578,6 +1742,11 @@ static value find_one(value hay, value needle, rc_arena *arena)
             }
         }
         return not_found(needle, arena);
+    }
+
+    if (idx.slots.num != 0 && value_is_numeric(needle)) {
+        uint32_t at = find_index_get(idx, hay.list, needle.numeric);
+        return at != RC_INDEX_NONE ? value_make_numeric((double) at) : not_found(needle, arena);
     }
 
     for (uint32_t i = 0; i < hay.list.num; i++) {
@@ -1615,7 +1784,13 @@ static value fn_find(rc_view_value args, rc_arena *arena)
         return value_make_error(error_type_type_mismatch);   // a scalar has nothing to search
     }
 
-    return find_one(hay, rc_view_value_get(args, 1), arena);
+    // Many needles in a list haystack: index it once (find_index).
+    value needle = rc_view_value_get(args, 1);
+    if (value_is_range(needle)) {
+        needle = range_to_list(needle.range, arena);
+    }
+    bool many = value_is_list(hay) && hay.list.num >= 8 && value_is_list(needle) && needle.list.num >= 4;
+    return find_one(hay, needle, many ? find_index_make(hay.list, arena) : (find_index) {0}, arena);
 }
 
 
@@ -1811,7 +1986,8 @@ static cost_table cost_table_make(value v, rc_arena *arena)
 // data (a list of bytes, or a string) as alternating literal and match runs, literals first, each run's
 // count before its contents (lzparse.h has the search). The tables give the cost in bits of each value a
 // field can hold, indexed by that value; offset may be a list of tables, one per match length from 1 (the
-// last serving every longer match); the optional sixth prices a repeat match by its length. The
+// last serving every longer match); the optional repeat prices a repeat match by its length, or is a pair
+// {by length, by the count of the literal run before it} (lzparse.h: repeat_after). The
 // result is {bits, runs}: a literal run is {0, bytes}, a match run {1, {offsets, lengths}} - two lists,
 // so a format's field FUNCTIONs encode a whole run in one call - with offset 0 for a repeat.
 static value fn_lz_parse(rc_view_value args, rc_arena *arena)
@@ -1848,10 +2024,30 @@ static value fn_lz_parse(rc_view_value args, rc_arena *arena)
         return value_make_error(error_type_type_mismatch);
     }
 
+    // The repeat: one table, or a pair {by length, by the count of the literal run before}.
+    value repeat = args.num == 7 ? rc_view_value_get(args, 6) : value_make_none();
+    bool  pair   = value_is_list(repeat) && repeat.list.num == 2
+                && (value_is_list(rc_view_value_get(repeat.list, 0)) || value_is_range(rc_view_value_get(repeat.list, 0)));
+    cost_table after = {.err = value_make_none()};
+    if (pair) {
+        after  = cost_table_make(rc_view_value_get(repeat.list, 1), arena);
+        repeat = rc_view_value_get(repeat.list, 0);
+        if (!value_is_none(after.err)) {
+            return after.err;
+        }
+    }
+
     cost_table tables[6] = {0};
     for (uint32_t i = 0; i + 1 < args.num; i++) {
         if (i == 4) {
             continue;   // the offsets come next, and may be several tables
+        }
+        if (i == 5) {
+            tables[i] = cost_table_make(repeat, arena);
+            if (!value_is_none(tables[i].err)) {
+                return tables[i].err;
+            }
+            continue;
         }
         tables[i] = cost_table_make(rc_view_value_get(args, i + 1), arena);
         if (!value_is_none(tables[i].err)) {
@@ -1861,10 +2057,10 @@ static value fn_lz_parse(rc_view_value args, rc_arena *arena)
 
     // The offsets: one table for every length, or a list of them - one per length from 1, the last
     // serving every longer match.
-    value          offs     = rc_view_value_get(args, 5);
-    bool           several  = value_is_list(offs) && offs.list.num != 0
-                           && (value_is_list(rc_view_value_get(offs.list, 0)) || value_is_range(rc_view_value_get(offs.list, 0)));
-    uint32_t       count    = several ? offs.list.num : 1;
+    value             offs    = rc_view_value_get(args, 5);
+    bool              several = value_is_list(offs) && offs.list.num != 0
+                             && (value_is_list(rc_view_value_get(offs.list, 0)) || value_is_range(rc_view_value_get(offs.list, 0)));
+    uint32_t          count   = several ? offs.list.num : 1;
     rc_array_lz_table offsets = rc_array_lz_table_make(count, arena);
     for (uint32_t i = 0; i < count; i++) {
         cost_table t = cost_table_make(several ? rc_view_value_get(offs.list, i) : offs, arena);
@@ -1875,12 +2071,13 @@ static value fn_lz_parse(rc_view_value args, rc_arena *arena)
     }
 
     lz_parse_result r = lz_parse(bytes.view, (lz_costs) {
-        .literal_run = tables[0].costs,
-        .literal     = tables[1].costs,
-        .match_run   = tables[2].costs,
-        .length      = tables[3].costs,
-        .offset      = offsets.view,
-        .repeat      = tables[5].costs,
+        .literal_run  = tables[0].costs,
+        .literal      = tables[1].costs,
+        .match_run    = tables[2].costs,
+        .length       = tables[3].costs,
+        .offset       = offsets.view,
+        .repeat       = tables[5].costs,
+        .repeat_after = after.costs,
     }, arena);
     if (!r.ok) {
         return value_make_error(error_type_domain);   // no parse fits these tables
@@ -2088,9 +2285,9 @@ static uint32_t frame_find(const frame *f, rc_str name)
 // ---- the parser ----
 
 // The invariants for one parse, bundled so the recursive helpers stay readable. live is false during
-// a FUNCTION-body definition scan or inside a dead body branch: a user-FUNCTION call then
-// short-circuits rather than executing (the branch is still PARSED, to find where it ends, so its
-// calls must not run).
+// a FUNCTION-body definition scan, inside a dead body branch, or for an inactive assembler statement:
+// the text is still PARSED, to find where it ends, but nothing runs - no call, builtin or operator
+// (not_live).
 typedef struct parser {
     rc_str          text;
     const expr_env *env;
@@ -2100,6 +2297,14 @@ typedef struct parser {
     bool            live;      // a call executes its body only when live
     bool            in_body;   // parsing a FUNCTION body, so an error raised here records its origin
 } parser;
+
+// What a parse that is not live (an arm not taken, a definition scan) yields where it would compute: no
+// call runs and no operator applies - the arm is read only to find where it ends. The same placeholder an
+// inactive FUNCTION call yields.
+static value not_live(void)
+{
+    return value_make_error(error_type_unknown_symbol);
+}
 
 // The operand table to lex from: the dynamic one the env carries (base + user-FUNCTION names) when present,
 // else the static base. A bare env (expression.c's own tests) leaves operand_tokens {0} and gets the base.
@@ -2243,7 +2448,7 @@ static expr_result parse_call_args(const parser *p, lexeme_function fn, uint32_t
         return r;
     }
 
-    return ok(fn.apply(args.view, p->arena), r.next);
+    return ok(p->live ? fn.apply(args.view, p->arena) : not_live(), r.next);   // see not_live
 }
 
 
@@ -2756,7 +2961,7 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
                     return arg;   // missing/garbled argument: malformed
                 }
 
-                return expect_close_paren(p, apply_unary(lex.unary_op, arg.value, p->arena), arg.next);
+                return expect_close_paren(p, p->live ? apply_unary(lex.unary_op, arg.value, p->arena) : not_live(), arg.next);
             }
 
             expr_result arg = parse_precedence(p, lr.next, lex.unary_op.precedence);
@@ -2764,7 +2969,7 @@ static expr_result parse_operand(const parser *p, uint32_t pos)
                 return arg;   // nothing to apply the operator to: soft fail bubbles up
             }
 
-            return ok(apply_unary(lex.unary_op, arg.value, p->arena), arg.next);
+            return ok(p->live ? apply_unary(lex.unary_op, arg.value, p->arena) : not_live(), arg.next);
         }
 
         case lexeme_type_function:
@@ -2826,7 +3031,7 @@ static expr_result parse_subscript(const parser *p, value target, uint32_t pos)
         }
 
         if (lr.token.type == lexeme_type_close_bracket) {
-            return ok(subscript(target, indices.view, p->arena), lr.next);
+            return ok(p->live ? subscript(target, indices.view, p->arena) : not_live(), lr.next);
         }
 
         return fail(expr_error_expected_close_bracket, pos);
@@ -2869,7 +3074,7 @@ static expr_result parse_precedence(const parser *p, uint32_t pos, uint8_t min_p
                     return rhs;   // a real error on the right-hand side: propagate
                 }
 
-                lhs.value = apply_binary(op, lhs.value, rhs.value, p->arena);
+                lhs.value = p->live ? apply_binary(op, lhs.value, rhs.value, p->arena) : not_live();
                 lhs.next  = rhs.next;
                 break;
             }
@@ -2934,7 +3139,7 @@ expr_result expression_parse(rc_str text, uint32_t pos, const expr_env *env, rc_
         .env   = env,
         .arena = arena,
         .spare = spare,
-        .live  = true,
+        .live  = !env->scan,
     };
 
     return parse_precedence(&p, pos, 0);
@@ -3651,6 +3856,13 @@ RC_TEST_STEP(expression, lz_parse, fix)
                                  VAL("{102, {{0, CODES(\"abcdefgh\")}, {1, {{8}, {4}}}, {0, {81}}, {1, {{8}, {3}}}}}")));
     RC_CHECK_TRUE(VAL("LZ_PARSE({1}, " LZ_TABLES ", " LZ_GAMMA ", 5)").error.code == error_type_incorrect_parameters);
 
+    // The repeat as a pair, gated by the literal run before: after exactly one literal, with a flag bit
+    // every match there pays (Exomizer's rule) - and a repeat ruled out after one literal is written out.
+    RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE(\"abcdefghabcdQfgh\", " LZ_TABLES ", {" LZ_GAMMA ", {-1, 1}})"),
+                                 VAL("{96, {{0, CODES(\"abcdefgh\")}, {1, {{8}, {4}}}, {0, {81}}, {1, {{0}, {3}}}}}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("LZ_PARSE(\"abcdefghabcdQfgh\", " LZ_TABLES ", {" LZ_GAMMA ", {-1, -1, 0}})"),
+                                 VAL("{102, {{0, CODES(\"abcdefgh\")}, {1, {{8}, {4}}}, {0, {81}}, {1, {{8}, {3}}}}}")));
+
     RC_CHECK_TRUE(VAL("LZ_PARSE({256}, " LZ_TABLES ")").error.code == error_type_domain);   // data is bytes
     RC_CHECK_TRUE(VAL("LZ_PARSE({1}, 5, full(256, 8), 5, 5, 5)").error.code == error_type_type_mismatch);
     RC_CHECK_TRUE(VAL("LZ_PARSE({1}, {-1}, full(256, 8), {-1}, {-1}, {-1})").error.code == error_type_domain);
@@ -3944,6 +4156,40 @@ RC_TEST_STEP(expression, find, fix)
     RC_CHECK_TRUE(value_is_error(VAL("FIND(\"hello\", 5)")));   // a number is not a substring
     RC_CHECK_TRUE(value_is_error(VAL("FIND(5, 1)")));           // a scalar has nothing to search
     RC_CHECK_TRUE(value_is_error(VAL("FIND({1,2})")));          // arity
+
+    // Many needles in a long haystack go through an index, which must find just what the scan does:
+    // first occurrences, -0 as 0, a boolean or string apart from numbers, nested needles, the first miss.
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND({9, 4, TRUE, 4, -0, \"x\", 1, 9, 0, 7}, {4, 9, 0, 1, TRUE, \"x\", {7, 0}})"),
+                                 VAL("{1, 0, 4, 6, 2, 5, {9, 4}}")));
+    value imiss = VAL("FIND({9, 4, 5, 4, 3, 2, 1, 0}, {4, 6, 8, 5})");
+    RC_CHECK_TRUE(imiss.error.code == error_type_not_found);
+    RC_CHECK(imiss.error.detail, ==, RC_STR("6"));
+    RC_CHECK_TRUE(value_is_equal(VAL("FIND(0..99, 99..0)[{0, 50, 99}]"), VAL("{99, 49, 0}")));   // ranges too
+}
+
+RC_TEST_STEP(expression, numeric_fast_paths, fix)
+{
+    // Flat lists of numbers broadcast in one loop and fold in place; the results are the general ones.
+    RC_CHECK_TRUE(value_is_equal(VAL("{1, 2, 3} + {10, 20, 30}"), VAL("{11, 22, 33}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("{1, 2, 3} - 1"), VAL("{0, 1, 2}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("2 * {1, 2, 3}"), VAL("{2, 4, 6}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("{5} * {1, 2}"), VAL("{5, 10}")));            // length 1 repeats
+    RC_CHECK_TRUE(value_is_equal(VAL("{} + 1"), VAL("{}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("{1, 5} < {3, 3}"), VAL("{TRUE, FALSE}")));
+    RC_CHECK_TRUE(value_is_equal(VAL("({1, 5} < 3) * 10"), VAL("{10, 0}")));       // booleans count as numbers
+    RC_CHECK_TRUE(value_is_equal(VAL("{1, 5} <= {1, 4}"), VAL("{TRUE, FALSE}")));   // through its handler
+    value div = VAL("{4, 2} / {2, 0}");                                             // a bad element stays put
+    RC_CHECK_TRUE(value_is_equal(rc_view_value_get(div.list, 0), value_make_numeric(2)));
+    RC_CHECK_TRUE(rc_view_value_get(div.list, 1).error.code == error_type_divide_by_zero);
+    RC_CHECK_TRUE(VAL("{1, 2, 3} + {1, 2}").error.code == error_type_shape_mismatch);
+    RC_CHECK_TRUE(value_is_equal(VAL("{1, 2} + {{10}, {20}}"), VAL("{{11, 12}, {21, 22}}")));   // nested: the general way
+
+    RC_CHECK_TRUE(value_is_equal(VAL("SUM({1, 2, 3, 4})"), value_make_numeric(10)));
+    RC_CHECK_TRUE(value_is_equal(VAL("PRODUCT(1..5)"), value_make_numeric(120)));
+    RC_CHECK_TRUE(value_is_equal(VAL("MIN({3, 1, 2})"), value_make_numeric(1)));
+    RC_CHECK_TRUE(value_is_equal(VAL("MAX({TRUE, FALSE})"), value_make_numeric(1)));   // one step makes a number
+    RC_CHECK_TRUE(value_is_equal(VAL("MIN({TRUE})"), value_make_bool(true)));          // no step leaves it be
+    RC_CHECK_TRUE(VAL("SUM({1, \"a\"})").error.code == error_type_type_mismatch);     // the rest the general way
 }
 
 RC_TEST_STEP(expression, type_predicates, fix)

@@ -508,6 +508,7 @@ ENDSECTION
 ENDSECTION
 
 ZX02: screen packed from 8320 to 3104 bytes; decompressor 129 bytes
+exo_reuse = TRUE
   0000                              INCLUDE "exomizer.6502"
 never = 1.099511628e+12 [2^40]
 start = {{0, 1, 1, 2, 2, 3, 3, 4, ...}, 1..4, {0, 1, 1, 2, 2, 3, 3, 4, ...}, 0..15} [{{0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 1..4, {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 0..15}]
@@ -532,7 +533,7 @@ SECTION Loader, org = &1900, load = &FFFF1900, exec = &FFFF0000+entry, filename 
   1915  17 01 00 00 00 00 00 00...  EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
   191F  .vdu_end
   191F  .get_crunched_byte
-  191F  AD 0F 1A                    LDA packed
+  191F  AD 2F 1A                    LDA packed
   1922  EE 20 19                    INC get_crunched_byte + 1
   1925  D0 03                       BNE @+
   1927  EE 21 19                    INC get_crunched_byte + 2
@@ -543,7 +544,7 @@ INLINE_GET_BITS = 0
 LITERAL_SEQUENCES_NOT_USED = 1
 MAX_SEQUENCE_LENGTH_256 = 1
 EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE = 0
-DONT_REUSE_OFFSET = 1
+DONT_REUSE_OFFSET = 0
 DECRUNCH_FORWARDS = 1
 ENABLE_SPLIT_ENCODING = 0
 zp_len_lo = 112 [&70]
@@ -551,6 +552,7 @@ zp_len_hi = 113 [&71]
 zp_src_lo = 114 [&72]
 zp_src_hi = 115 [zp_src_lo + 1]
 zp_bits_hi = 116 [&74]
+zp_ro_state = 117 [&75]
 zp_bitbuf = 118 [&76]
 zp_dest_lo = 119 [zp_bitbuf + 1]
 zp_dest_hi = 120 [zp_bitbuf + 2]
@@ -634,93 +636,114 @@ tabl_hi = 22476 [decrunch_table + encoded_entries * 2]
   198F  C8                          INY
   1990  C0 34                       CPY #encoded_entries
   1992  D0 C1                       BNE table_gen
-  1994  A4 77                       LDY zp_dest_lo
-  1996  86 77                       STX zp_dest_lo
-  1998  86 74                       STX zp_bits_hi
-  199A  .literal_start1
-  199A  20 1F 19                    JSR get_crunched_byte
-  199D  91 77                       STA (zp_dest_lo),Y
-  199F  C8                          INY
-  19A0  D0 02                       BNE skip_hi_incr
-  19A2  E6 78                       INC zp_dest_hi
-  19A4  .skip_hi_incr
-  19A4  .next_round
-  19A4  CA                          DEX
-  19A5  A5 76                       LDA zp_bitbuf
-  19A7  .no_literal1
-  19A7  0A                          ASL A
-  19A8  D0 04                       BNE nofetch8
-  19AA  20 1F 19                    JSR get_crunched_byte
-  19AD  2A                          ROL A
-  19AE  .nofetch8
-  19AE  E8                          INX
-  19AF  90 F6                       BCC no_literal1
-  19B1  85 76                       STA zp_bitbuf
-  19B3  F0 E5                       BEQ literal_start1
-  19B5  E0 11                       CPX #&11
-  19B7  B0 53                       BCS exit_or_lit_seq
-  19B9  BD 63 57                    LDA tabl_bi - 1,X
-  19BC                              mac_get_bits
-  19BC  20 2B 19                    JSR get_bits
-  19BF  7D 97 57                    ADC tabl_lo - 1,X
-  19C2  85 70                       STA zp_len_lo
-  19C4  AA                          TAX
-  19C5  A9 E1                       LDA #&E1
-  19C7  E0 03                       CPX #&03
-  19C9  B0 03                       BCS gbnc2_next
-  19CB  BD 0C 1A                    LDA tabl_bit - 1,X
-  19CE  .gbnc2_next
-  19CE  06 76                       ASL zp_bitbuf
-  19D0  D0 08                       BNE gbnc2_ok
-  19D2  AA                          TAX
-  19D3  20 1F 19                    JSR get_crunched_byte
-  19D6  2A                          ROL A
-  19D7  85 76                       STA zp_bitbuf
-  19D9  8A                          TXA
-  19DA  .gbnc2_ok
-  19DA  2A                          ROL A
-  19DB  B0 F1                       BCS gbnc2_next
+  1994  66 75                       ROR zp_ro_state
+  1996  38                          SEC
+  1997  A4 77                       LDY zp_dest_lo
+  1999  86 77                       STX zp_dest_lo
+  199B  86 74                       STX zp_bits_hi
+  199D  .literal_start1
+  199D  20 1F 19                    JSR get_crunched_byte
+  19A0  91 77                       STA (zp_dest_lo),Y
+  19A2  C8                          INY
+  19A3  D0 04                       BNE skip_hi_incr
+  19A5  E6 78                       INC zp_dest_hi
+  19A7  E6 73                       INC zp_src_hi
+  19A9  .skip_hi_incr
+  19A9  .next_round
+  19A9  66 75                       ROR zp_ro_state
+  19AB  CA                          DEX
+  19AC  A5 76                       LDA zp_bitbuf
+  19AE  .no_literal1
+  19AE  0A                          ASL A
+  19AF  D0 04                       BNE nofetch8
+  19B1  20 1F 19                    JSR get_crunched_byte
+  19B4  2A                          ROL A
+  19B5  .nofetch8
+  19B5  E8                          INX
+  19B6  90 F6                       BCC no_literal1
+  19B8  85 76                       STA zp_bitbuf
+  19BA  F0 E1                       BEQ literal_start1
+  19BC  E0 11                       CPX #&11
+  19BE  B0 6C                       BCS exit_or_lit_seq
+  19C0  BD 63 57                    LDA tabl_bi - 1,X
+  19C3                              mac_get_bits
+  19C3  20 2B 19                    JSR get_bits
+  19C6  7D 97 57                    ADC tabl_lo - 1,X
+  19C9  85 70                       STA zp_len_lo
+  19CB  AA                          TAX
+  19CC  24 75                       BIT zp_ro_state
+  19CE  30 47                       BMI test_reuse
+  19D0  .no_reuse
+  19D0  A9 E1                       LDA #&E1
+  19D2  E0 03                       CPX #&03
+  19D4  B0 03                       BCS gbnc2_next
+  19D6  BD 2C 1A                    LDA tabl_bit - 1,X
+  19D9  .gbnc2_next
+  19D9  06 76                       ASL zp_bitbuf
+  19DB  D0 08                       BNE gbnc2_ok
   19DD  AA                          TAX
-  19DE  BD 64 57                    LDA tabl_bi,X
-  19E1                              mac_get_bits
-  19E1  20 2B 19                    JSR get_bits
-  19E4  18                          CLC
-  19E5  7D 98 57                    ADC tabl_lo,X
-  19E8  49 FF                       EOR #&FF
-  19EA  85 72                       STA zp_src_lo
-  19EC  A5 74                       LDA zp_bits_hi
-  19EE  7D CC 57                    ADC tabl_hi,X
-  19F1  49 FF                       EOR #&FF
-  19F3  65 78                       ADC zp_dest_hi
-  19F5  85 73                       STA zp_src_hi
-  19F7  18                          CLC
-  19F8  A6 70                       LDX zp_len_lo
-  19FA  .copy_next
-  19FA  B1 72                       LDA (zp_src_lo),Y
-  19FC  .literal_byte_gotten
-  19FC  91 77                       STA (zp_dest_lo),Y
-  19FE  C8                          INY
-  19FF  D0 04                       BNE copy_skip_hi
-  1A01  E6 78                       INC zp_dest_hi
-  1A03  E6 73                       INC zp_src_hi
-  1A05  .copy_skip_hi
-  1A05  CA                          DEX
-  1A06  D0 F2                       BNE copy_next
-  1A08  86 74                       STX zp_bits_hi
-  1A0A  F0 98                       BEQ next_round
-  1A0C  .exit_or_lit_seq
-  1A0C  60                          RTS
-  1A0D  .tabl_bit
-  1A0D  8C E2                       EQUB &8C, &E2
-  1A0F  .decrunch_end
-  1A0F  .packed
-  1A0F  58 00                       EQUB HI(screen), LO(screen)
+  19DE  20 1F 19                    JSR get_crunched_byte
+  19E1  2A                          ROL A
+  19E2  85 76                       STA zp_bitbuf
+  19E4  8A                          TXA
+  19E5  .gbnc2_ok
+  19E5  2A                          ROL A
+  19E6  B0 F1                       BCS gbnc2_next
+  19E8  AA                          TAX
+  19E9  BD 64 57                    LDA tabl_bi,X
+  19EC                              mac_get_bits
+  19EC  20 2B 19                    JSR get_bits
+  19EF  18                          CLC
+  19F0  7D 98 57                    ADC tabl_lo,X
+  19F3  49 FF                       EOR #&FF
+  19F5  85 72                       STA zp_src_lo
+  19F7  A5 74                       LDA zp_bits_hi
+  19F9  7D CC 57                    ADC tabl_hi,X
+  19FC  49 FF                       EOR #&FF
+  19FE  65 78                       ADC zp_dest_hi
+  1A00  85 73                       STA zp_src_hi
+  1A02  18                          CLC
+  1A03  A6 70                       LDX zp_len_lo
+  1A05  .copy_next
+  1A05  B1 72                       LDA (zp_src_lo),Y
+  1A07  .literal_byte_gotten
+  1A07  91 77                       STA (zp_dest_lo),Y
+  1A09  C8                          INY
+  1A0A  D0 04                       BNE copy_skip_hi
+  1A0C  E6 78                       INC zp_dest_hi
+  1A0E  E6 73                       INC zp_src_hi
+  1A10  .copy_skip_hi
+  1A10  CA                          DEX
+  1A11  D0 F2                       BNE copy_next
+  1A13  86 74                       STX zp_bits_hi
+  1A15  F0 92                       BEQ next_round
+  1A17  .test_reuse
+  1A17  70 B7                       BVS no_reuse
+  1A19  A9 00                       LDA #&00
+  1A1B  06 76                       ASL zp_bitbuf
+  1A1D  D0 08                       BNE gbnc1_ok
+  1A1F  48                          PHA
+  1A20  20 1F 19                    JSR get_crunched_byte
+  1A23  2A                          ROL A
+  1A24  85 76                       STA zp_bitbuf
+  1A26  68                          PLA
+  1A27  .gbnc1_ok
+  1A27  2A                          ROL A
+  1A28  F0 A6                       BEQ no_reuse
+  1A2A  D0 D9                       BNE copy_next
+  1A2C  .exit_or_lit_seq
+  1A2C  60                          RTS
+  1A2D  .tabl_bit
+  1A2D  8C E2                       EQUB &8C, &E2
+  1A2F  .decrunch_end
+  1A2F  .packed
+  1A2F  58 00                       EQUB HI(screen), LO(screen)
 SECTION Screen, org = screen, transform = "exomizer"
   5800  0F 0F 0F 0F 0F 0F 0F 0F...  INCBIN "blurpscreen.bin"
 ENDSECTION
-; transform "exomizer": 8320 -> 2989 bytes
+; transform "exomizer": 8320 -> 2975 bytes
 
-  25BE  .packed_end
+  25D0  .packed_end
 ENDSECTION
 
-Exomizer: screen packed from 8320 to 2991 bytes; decruncher 240 bytes
+Exomizer: screen packed from 8320 to 2977 bytes; decruncher 272 bytes

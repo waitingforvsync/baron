@@ -3,8 +3,9 @@
 \ *    The compressor: Exomizer's own format, written as Baron FUNCTIONs
 \ *
 \ *    The raw stream Magnus Lind's Exomizer 3 writes when asked for no
-\ *    literal sequences, no offset reuse and matches under 256 bytes
-\ *    (exomizer raw -P7 -T5 -M256), so its 6502 decruncher unpacks it:
+\ *    literal sequences and matches under 256 bytes (exomizer raw -T5
+\ *    -M256), with offset reuse or without (-P39 or -P7), so its 6502
+\ *    decruncher unpacks it. The includer chooses with exo_reuse:
 \ *
 \ *      52 widths, 4 bits each: 16 for lengths, then 16 each for the
 \ *        offsets of matches of 3 bytes or more and of 2 bytes, and 4
@@ -16,6 +17,10 @@
 \ *                  its place in the bucket, then the offset's bucket
 \ *                  (2 bits for a 1-byte match, else 4) and its place
 \ *      the end: 0, then sixteen zeros and a 1
+\ *
+\ *    With offset reuse, a match straight after a single literal (one
+\ *    that follows a match) has a flag after its length: 1 to copy from
+\ *    the last match's offset again, writing no offset, 0 for its own.
 \ *
 \ *    A table splits the numbers from 1 up into buckets, bucket i holding
 \ *    2^width[i] of them. Bits go most significant first; a place of 8
@@ -66,6 +71,10 @@ FUNCTION cost_table(widths, idx, limit) = CONCAT({-1}, bucket_costs(widths, idx,
 \ bits of flags; matches carry their own flags, so a run of them costs
 \ nothing more. Lengths stop at 255, as the decruncher wants them to.
 
+\ With offset reuse, a repeat costs its length's code, and every match after
+\ a run of exactly one literal pays the flag: the pair's second table says
+\ so, by the count of the literal run before.
+
 FUNCTION parse_with(t, data)
     n    = LEN(data)
     runs = CONCAT({-1}, 1..n)
@@ -73,7 +82,12 @@ FUNCTION parse_with(t, data)
     none = CONCAT({-1}, REPEATED(n, 0))
     lens = cost_table(t[0], indices[0], 255)
     offs = {cost_table(t[1], indices[1], n), cost_table(t[2], indices[2], n), cost_table(t[3], indices[3], n)}
-= LZ_PARSE(data, runs, lits, none, lens, offs)
+    IF exo_reuse
+        r = LZ_PARSE(data, runs, lits, none, lens, offs, {lens, {-1, 1}})
+    ELSE
+        r = LZ_PARSE(data, runs, lits, none, lens, offs)
+    ENDIF
+= r
 
 
 \ ---- fitting a table ----
@@ -84,7 +98,7 @@ FUNCTION parse_with(t, data)
 
 FUNCTION below_counts(values, e) = FIND(SORT(CONCAT(values, 0..e)), 0..e) - (0..e)
 
-FUNCTION smaller(a, b) = b + (a < b) * (a - b)          ; element by element
+FUNCTION smaller(a, b) = MIN({a, b}, 0)                  ; element by element
 
 \ The search runs from the last bucket back to the first: a layer holds, for
 \ every s from 0 to e, the fewest bits for the numbers from s up using buckets
@@ -152,7 +166,8 @@ FUNCTION fit(values, idx)
 \ ---- what a parse wrote ----
 
 \ The numbers in each table, gathered by halving the list of runs: every
-\ length, and each offset under its match's length (0 elsewhere).
+\ length, and each offset under its match's length (0 elsewhere - a repeat's
+\ offset is 0 too, since it writes none).
 
 FUNCTION run_values(run)
     IF run[0] == 0
@@ -224,38 +239,59 @@ FUNCTION bases(widths, i, b)
 
 FUNCTION coder(widths, limit) = {widths, CONCAT({0}, bucket_of(widths, 0, limit)), bases(widths, 0, 1)}
 
-FUNCTION match_tokens(off, len, c)
-    i  = c[0][1][len]
-    t  = MIN({len, 3})
-    j  = c[t][1][off]
-    ob = indices[t][0]
-= CONCAT(REPEATED(i + 1, 0), 1, place(len - c[0][2][i], c[0][0][i]), bit_list(j, ob), place(off - c[t][2][j], c[t][0][j]))
+\ A match: its length, then - flag set - the reuse flag, then its offset
+\ (none for a repeat, offset 0).
 
-FUNCTION matches_tokens(offs, lens, c)
+FUNCTION match_tokens(off, len, c, flag)
+    i = c[0][1][len]
+    l = CONCAT(REPEATED(i + 1, 0), 1, place(len - c[0][2][i], c[0][0][i]))
+    IF off == 0
+        r = CONCAT(l, 1)
+    ELSE
+        t = MIN({len, 3})
+        j = c[t][1][off]
+        o = CONCAT(bit_list(j, indices[t][0]), place(off - c[t][2][j], c[t][0][j]))
+        IF flag
+            r = CONCAT(l, 0, o)
+        ELSE
+            r = CONCAT(l, o)
+        ENDIF
+    ENDIF
+= r
+
+FUNCTION matches_tokens(offs, lens, c, flag)            ; only the first match can have the flag
     n = LEN(offs)
     IF n == 1
-        r = match_tokens(offs[0], lens[0], c)
+        r = match_tokens(offs[0], lens[0], c, flag)
     ELSE
         h = n DIV 2
-        r = {matches_tokens(offs[0..<h], lens[0..<h], c), matches_tokens(offs[h..<n], lens[h..<n], c)}
+        r = {matches_tokens(offs[0..<h], lens[0..<h], c, flag), matches_tokens(offs[h..<n], lens[h..<n], c, FALSE)}
     ENDIF
 = r
 
-FUNCTION run_tokens(run, c)
-    IF run[0] == 0
-        r = ZIP(REPEATED(LEN(run[1]), 1), 256 + run[1])
+\ Runs come in pairs, a literal run and the match run after it (the last
+\ pair perhaps without one). A match run has the flag when its literal run
+\ is a single literal that follows a match - so not in the first pair. The
+\ halving passes slices down, with the index of the first pair in each.
+
+FUNCTION pair_tokens(runs, k, c)                        ; {literals} or {literals, matches}
+    lit = runs[0][1]
+    l   = ZIP(REPEATED(LEN(lit), 1), 256 + lit)
+    IF LEN(runs) == 2
+        m = runs[1][1]
+        r = {l, matches_tokens(m[0], m[1], c, exo_reuse AND k > 0 AND LEN(lit) == 1)}
     ELSE
-        r = matches_tokens(run[1][0], run[1][1], c)
+        r = l
     ENDIF
 = r
 
-FUNCTION tokens(runs, c)
-    n = LEN(runs)
+FUNCTION tokens(runs, c, k)
+    n = (LEN(runs) + 1) DIV 2                           ; pairs
     IF n == 1
-        r = run_tokens(runs[0], c)
+        r = pair_tokens(runs, k, c)
     ELSE
         h = n DIV 2
-        r = {tokens(runs[0..<h], c), tokens(runs[h..<n], c)}
+        r = {tokens(runs[0..<2 * h], c, k), tokens(runs[2 * h..<LEN(runs)], c, k + h)}
     ENDIF
 = r
 
@@ -293,5 +329,5 @@ FUNCTION exomizer(data)
     best = settle(start, parse_with(start, data), data, 8)
     w    = best[0]
     c    = {coder(w[0], 255), coder(w[1], n), coder(w[2], n), coder(w[3], n)}
-    t    = FLATTEN(tokens(best[1][1], c))
+    t    = FLATTEN(tokens(best[1][1], c, 0))
 = stream(CONCAT(width_tokens(w), t[1..<LEN(t)], 0, REPEATED(16, 0), 1))

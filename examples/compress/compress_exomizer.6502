@@ -12,6 +12,12 @@
 \ *
 \ **************************************************************************
 
+\ Offset reuse: a match straight after a single literal may copy from the
+\ last offset again, for a flag bit that every match there pays. It pays off
+\ on code and data, less often on screens; the decruncher follows suit.
+
+exo_reuse = TRUE
+
 INCLUDE "exomizer.6502"
 
 oswrch = &FFEE

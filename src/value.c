@@ -10,12 +10,6 @@ value value_make_none(void)
 }
 
 
-value value_make_numeric(double n)
-{
-    return (value) {.type = value_type_numeric, .numeric = n};
-}
-
-
 // --beebasm-true: truth spelt -1.0 (BBC BASIC's all-bits-set), constant for a whole run.
 static bool beebasm_true;
 
@@ -270,23 +264,6 @@ int64_t value_range_step(value_range r)
 }
 
 
-value_type value_type_of(value v)  { return (value_type) v.type; }
-bool value_is_none(value v)        { return v.type == value_type_none; }
-bool value_is_numeric(value v)     { return v.type == value_type_numeric; }
-bool value_is_boolean(value v)     { return v.type == value_type_boolean; }
-bool value_is_number(value v)      { return value_is_numeric(v) || value_is_boolean(v); }
-bool value_is_string(value v)      { return v.type == value_type_string; }
-bool value_is_list(value v)        { return v.type == value_type_list; }
-bool value_is_range(value v)       { return v.type == value_type_range; }
-bool value_is_error(value v)       { return v.type == value_type_error; }
-bool value_is_za_auto(value v)      { return v.type == value_type_za_auto; }
-
-// Simple values stand alone; compound values gather others (a list, a range that enumerates to one);
-// none belongs to neither. za_auto and boolean being simple is load-bearing: it routes them through
-// the broadcast machinery as scalars, reaching the operator handlers (whose type checks accept or
-// refuse them) instead of the list paths.
-bool value_is_simple(value v)      { return value_is_number(v) || value_is_string(v) || value_is_error(v) || value_is_za_auto(v); }
-bool value_is_compound(value v)    { return value_is_list(v) || value_is_range(v); }
 
 
 bool value_is_equal(value a, value b)

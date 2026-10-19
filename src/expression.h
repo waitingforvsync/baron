@@ -47,6 +47,7 @@ typedef struct expr_env {
     const functions    *functions;      // a lexeme_type_user_function index -> its signatures (params + body)
     const source_files *sources;        // to fetch a function body's source text (it may be a different file)
     uint32_t           *call_depth;     // FUNCTION recursion guard (points at baron.function_depth); may be NULL
+    bool                scan;           // parse for the extent only, running no calls (an arm not taken)
 } expr_env;
 
 // The static base operand (even) table - mnemonic-free, just the builtin operators / functions / constants /

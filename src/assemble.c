@@ -672,7 +672,7 @@ parse_result require_separator(baron *b, cursor at)
 
 // The one place that projects baron into an expr_env; the cursor's source+pos double as the parse
 // start and the use site (for the impure @- / @+ locals).
-static expr_env eval_env(baron *b, cursor at, uint32_t scope, uint32_t section)
+static expr_env eval_env(baron *b, cursor at, uint32_t scope, uint32_t section, bool live)
 {
     return (expr_env) {
         .scopes         = &b->scopes,
@@ -684,6 +684,7 @@ static expr_env eval_env(baron *b, cursor at, uint32_t scope, uint32_t section)
         .functions      = &b->functions,
         .sources        = &b->source_files,
         .call_depth     = &b->function_depth,
+        .scan           = !live,
     };
 }
 
@@ -692,10 +693,10 @@ static expr_env eval_env(baron *b, cursor at, uint32_t scope, uint32_t section)
 // into its own scratch while still holding the value tramples it (the scratch-arena aliasing trap).
 // Stage such work in per_pass instead (see flatten_to_list's call sites). FUNCTION calls do their own
 // work in a copy of per_pass, the evaluator's spare, beyond everything staged there so far.
-expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, rc_arena scratch)
+expr_result eval(baron *b, cursor at, uint32_t scope, uint32_t section, bool live, rc_arena scratch)
 {
     rc_str   src = source_files_text(&b->source_files, at.source);
-    expr_env env = eval_env(b, at, scope, section);
+    expr_env env = eval_env(b, at, scope, section, live);
     return expression_parse(src, at.pos, &env, &scratch, *b->per_pass);
 }
 
@@ -733,7 +734,7 @@ static parse_result fold(parse_result r, parse_result sub)
 static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -779,7 +780,7 @@ static parse_result handle_skip(baron *b, cursor stmt, cursor at, uint32_t scope
 static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -827,7 +828,7 @@ static parse_result handle_skipto(baron *b, cursor stmt, cursor at, uint32_t sco
 static parse_result handle_align(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
 
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -963,7 +964,7 @@ static void apply_transform(baron *b, cursor stmt, uint32_t id, rc_str name, uin
             rc_array_value_push(&input, value_make_numeric(rc_view_bytes_get(raw, i)), &work);
         }
         value    arg = value_make_list(input.view);
-        expr_env env = eval_env(b, t.at, scope, id);
+        expr_env env = eval_env(b, t.at, scope, id, true);
         value    res = expression_call_function(source_files_text(&b->source_files, t.at.source), t.at.pos, &env,
                                                 function, (rc_view_value) {.data = &arg, .num = 1}, &work,
                                                 *b->per_pass);
@@ -1071,7 +1072,7 @@ static parse_result handle_section(baron *b, cursor stmt, cursor at, uint32_t sc
         if (eq.token.type != lexeme_type_assign) {
             return syntax_error(b, error_type_expected_assign, cursor_at(at, key.next));
         }
-        expr_result e = eval(b, cursor_at(at, eq.next), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, eq.next), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -1394,7 +1395,7 @@ static parse_result handle_za_pool(baron *b, cursor stmt, cursor at, uint32_t sc
     }
 
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -1519,7 +1520,7 @@ static parse_result handle_za_auto_n(baron *b, cursor stmt, cursor at, uint32_t 
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -1664,7 +1665,7 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
     uint32_t site = flags.final ? annotation_site(b, kind) : RC_INDEX_NONE;
 
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -1751,7 +1752,7 @@ static parse_result handle_za_discard(baron *b, cursor stmt, cursor at, uint32_t
     uint32_t pos = at.pos;
     bool unresolved = false;
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -1908,7 +1909,7 @@ static parse_result handle_za_indexedby(baron *b, cursor stmt, cursor at, uint32
 
     index_fold acc = {0};
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -2042,7 +2043,7 @@ static parse_result handle_equ(baron *b, cursor stmt, cursor at, uint32_t scope,
     uint32_t code0 = sections_code(&b->sections, section).num;
 
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -2203,7 +2204,7 @@ static parse_result handle_print(baron *b, cursor stmt, cursor at, uint32_t scop
 
     bool unresolved = false;
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -2267,7 +2268,7 @@ static parse_result user_error_statement(baron *b, cursor stmt, cursor at, uint3
     rc_mstr msg = {0};
 
     while (true) {
-        expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+        expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
         }
@@ -2325,7 +2326,7 @@ static parse_result handle_assert(baron *b, cursor stmt, cursor at, uint32_t sco
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -2578,7 +2579,7 @@ static parse_result handle_if(baron *b, cursor stmt, cursor at, uint32_t scope, 
 {
     rc_str src = source_files_text(&b->source_files, at.source);
 
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));   // a syntax error always aborts
     }
@@ -2719,7 +2720,7 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
         return syntax_error(b, error_type_expected_assign, cursor_at(at, at.pos));   // not an assignment: malformed
     }
 
-    expr_result e = eval(b, cursor_at(at, eq.next), scope, section, scratch);
+    expr_result e = eval(b, cursor_at(at, eq.next), scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -2828,7 +2829,7 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
         return syntax_error(b, error_type_expected_assign, cursor_at(at, var.next));
     }
 
-    expr_result e = eval(b, cursor_at(at, eq.next), scope, section, scratch);
+    expr_result e = eval(b, cursor_at(at, eq.next), scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -2929,7 +2930,7 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
 {
 
     // A string operand, needed on the spot: the file loads this very pass.
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -3004,7 +3005,7 @@ static parse_result handle_include(baron *b, cursor stmt, cursor at, uint32_t sc
 // bytes. A missing / unreadable file is FATAL: the output would be the wrong size.
 static parse_result handle_incbin(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    expr_result e = eval(b, at, scope, section, scratch);
+    expr_result e = eval(b, at, scope, section, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
     }
@@ -3246,7 +3247,7 @@ static parse_result handle_function(baron *b, cursor stmt, cursor at, uint32_t s
 
     // Scan the body (in the evaluator) to find the top-level '=' return and its extent. Inactive
     // and side-effect-free; it also reports whether this is a forward declaration.
-    expr_env env = eval_env(b, body, scope, section);
+    expr_env env = eval_env(b, body, scope, section, true);
     function_body_scan fs = expression_scan_function_body(src, body.pos, &env, &scratch, *b->per_pass);
     if (fs.error != error_type_none) {
         return syntax_error(b, fs.error, cursor_at(at, fs.error_at));   // a structurally broken body aborts
@@ -3295,7 +3296,7 @@ static macro_match macro_try_match(baron *b, rc_str src, cursor at, macro *m, ma
             pos = lr.next;
         }
         else {
-            expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+            expr_result e = eval(b, cursor_at(at, pos), scope, section, false, scratch);   // its extent only
             if (e.error != expr_error_none) {
                 return (macro_match) {0};   // no operand here (or a broken one): this overload does not fit
             }
@@ -3381,7 +3382,7 @@ static parse_result handle_macro_invocation(baron *b, cursor stmt, cursor at, ui
             pos = lexer_next(src, pos, m->literal_table.view).next;   // already matched; just step over it
         }
         else {
-            expr_result e = eval(b, cursor_at(at, pos), scope, section, scratch);
+            expr_result e = eval(b, cursor_at(at, pos), scope, section, flags.active, scratch);
             scopes_set_symbol(&b->scopes, child, slot.name, (symbol) {
                 .v       = e.value,
                 .def     = at,
@@ -3593,7 +3594,7 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
         return syntax_error(b, error_type_expected_assign, (cursor) {.source = src, .pos = sym.next});
     }
 
-    expr_result e = eval(b, (cursor) {.source = src, .pos = eq.next}, 0, sections_default, scratch);
+    expr_result e = eval(b, (cursor) {.source = src, .pos = eq.next}, 0, sections_default, flags.active, scratch);
     if (e.error != expr_error_none) {
         return syntax_error(b, error_type_expression, (cursor) {.source = src, .pos = e.error_at});
     }
@@ -5208,6 +5209,53 @@ RC_TEST_STEP(assemble, transform_sees_final_bytes, fix)
     // The listing notes what the transform made of the section, after its ENDSECTION.
     RC_CHECK_TRUE(rc_str_find_first(VERB(), RC_STR("ENDSECTION\n; transform \"id\": 8 -> 8 bytes\n")) != RC_INDEX_NONE);
     rc_file_delete(RC_STR("transform_blob.bin"));
+}
+
+RC_TEST_STEP(assemble, inactive_arms_run_nothing, fix)
+{
+    // An arm not taken is read only to find where it ends: no FUNCTION, builtin or operator runs in it.
+    // RND shows it - a draw in a dead arm would move every later draw along.
+    RC_CHECK_TRUE(ASM("z = RND(1000000)") != 0);
+    value plain = baron_result_symbol(&fix->r, RC_STR("z"));
+    RC_CHECK_TRUE(ASM("FUNCTION f(x) = RND(1000) + x\n"
+                      "IF FALSE\ny = f(0) + RND(10) + LEN({1, 2})\nELIF TRUE\nELIF f(1)\nELSE\ny = f(2)\nENDIF\n"
+                      "FUNCTION g(c)\n    IF c\n        r = 0\n    ELSE\n        r = f(3)\n    ENDIF\n= r\n"
+                      "w = g(TRUE)\n"
+                      "MACRO m v\nEQUB v\nENDMACRO\n"
+                      "IF FALSE\nm f(4)\nENDIF\n"
+                      "z = RND(1000000)") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("z")), plain));
+
+    // Matching a macro call's arguments is structural too, so an argument is evaluated once, when bound.
+    RC_CHECK_TRUE(ASM("EQUB RND(256), RND(256)") != 0);
+    rc_view_bytes direct = baron_result_code(&fix->r);
+    uint8_t expect[2] = {rc_view_bytes_get(direct, 0), rc_view_bytes_get(direct, 1)};
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("MACRO m v\nEQUB v\nENDMACRO\nm RND(256)\nEQUB RND(256)"), expect, 2));
+}
+
+RC_TEST_STEP(assemble, inactive_arms_still_parse, fix)
+{
+    // Not evaluated is not skipped: a dead arm goes through the parser like any other, so a list across
+    // lines, a call inside it, and ENDIF as a name or in a string all read correctly...
+    RC_CHECK_TRUE(ASM("FUNCTION f(x) = x * 2\n"
+                      "IF FALSE\n"
+                      "    x = {1,\n         f(2),\n         {3, ENDIF}[0]}\n"
+                      "    y = SUM({4,\n             5}) : EQUB \"ENDIF\"\n"
+                      "ELSE\n"
+                      "    z = SUM({f(1),\n             2})\n"
+                      "ENDIF\n"
+                      "FUNCTION g(c)\n    IF c\n        r = 0\n    ELSE\n        r = SUM({f(1),\n                 2})\n    ENDIF\n= r\n"
+                      "w = g(TRUE)") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("z")), value_make_numeric(4)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("w")), value_make_numeric(0)));
+    RC_CHECK_TRUE(baron_result_code(&fix->r).num == 0);   // the dead EQUB emitted nothing
+
+    // ...and a malformed expression in a dead arm is still an error, in the assembler and in a body.
+    RC_CHECK_TRUE(ERR("IF FALSE\n    x = (1 +\nENDIF") == error_type_expression);
+    RC_CHECK_TRUE(ERR("FUNCTION h(c)\n    IF c\n        r = 1\n    ELSE\n        r = (2 +\n    ENDIF\n= r\n"
+                      "v = h(TRUE)") == error_type_expression);
 }
 
 RC_TEST_STEP(assemble, print_speaks_with_a_transform, fix)

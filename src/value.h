@@ -113,7 +113,10 @@ void value_set_beebasm_true(bool enable);
 
 // Constructors (by value).
 value value_make_none(void);
-value value_make_numeric(double n);
+static inline value value_make_numeric(double n)
+{
+    return (value) {.type = value_type_numeric, .numeric = n};
+}
 value value_make_bool(bool b);
 value value_make_string(rc_str s);
 value value_make_error(error_type e);
@@ -155,19 +158,27 @@ static inline int64_t value_to_i64(double d)
     return (int64_t) d;
 }
 
-// Type queries.
-value_type value_type_of(value v);
-bool value_is_none(value v);
-bool value_is_numeric(value v);
-bool value_is_boolean(value v);
-bool value_is_number(value v);     // numeric or boolean: anything that coerces to a number
-bool value_is_string(value v);
-bool value_is_list(value v);
-bool value_is_range(value v);
-bool value_is_error(value v);
-bool value_is_za_auto(value v);
-bool value_is_simple(value v);     // numeric, boolean, string, error, or za_auto: stands alone
-bool value_is_compound(value v);   // list or range: gathers other values
+// Type queries - inline, being in every evaluator loop.
+static inline value_type value_type_of(value v) { return (value_type) v.type; }
+static inline bool value_is_none(value v)       { return v.type == value_type_none; }
+static inline bool value_is_numeric(value v)    { return v.type == value_type_numeric; }
+static inline bool value_is_boolean(value v)    { return v.type == value_type_boolean; }
+static inline bool value_is_number(value v)     { return value_is_numeric(v) || value_is_boolean(v); }   // coerces to a number
+static inline bool value_is_string(value v)     { return v.type == value_type_string; }
+static inline bool value_is_list(value v)       { return v.type == value_type_list; }
+static inline bool value_is_range(value v)      { return v.type == value_type_range; }
+static inline bool value_is_error(value v)      { return v.type == value_type_error; }
+static inline bool value_is_za_auto(value v)    { return v.type == value_type_za_auto; }
+
+// Simple values stand alone; compound values gather others (a list, a range that enumerates to one);
+// none belongs to neither. za_auto and boolean being simple is load-bearing: it routes them through
+// the broadcast machinery as scalars, reaching the operator handlers (whose type checks accept or
+// refuse them) instead of the list paths.
+static inline bool value_is_simple(value v)
+{
+    return value_is_number(v) || value_is_string(v) || value_is_error(v) || value_is_za_auto(v);
+}
+static inline bool value_is_compound(value v)   { return value_is_list(v) || value_is_range(v); }
 
 // Structural equality: types must match, then compared field-wise (lists
 // element-wise, recursively).

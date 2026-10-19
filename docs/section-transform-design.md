@@ -1078,3 +1078,14 @@ and unpack with Exomizer's decruncher: 2989 bytes to Exomizer's 2985. The parse 
 the table search starts (from Exomizer's own tables it reaches 2975), and seeding it the way Exomizer does,
 from statistics over every candidate match, would need `LZ_PARSE`'s candidates as a value.
 
+**Round 14 (2026-10-19).** Offset reuse, and dead branches. `repeat` may now be a pair, `{lengths, after}`:
+`after` says, by the count of the literal run before, what any match there pays, and where no repeat can
+follow - Exomizer's rule is `{-1, 1}`, a repeat only straight after one literal and a flag bit on every match
+there. Kept exact by pricing a literal run that a match follows with that match's toll (the first run, with
+no offset in hand, and the last, with no match after it, at their plain prices). `exomizer.6502` takes
+`exo_reuse` from its loader, as the decruncher does: 2977 bytes with reuse (Exomizer's own, 2987), 2991
+without, though the reuse decruncher is 32 bytes bigger. Along the way: both arms of an `IF` in a FUNCTION
+body were running `LZ_PARSE`, since builtins ignored the parser's live flag, and the assembler evaluated its
+own dead arms in full, FUNCTION calls and all. Now a parse that is not live - a dead arm anywhere, a
+definition scan, matching a macro's arguments - runs no call, builtin or operator.
+
