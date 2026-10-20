@@ -343,6 +343,11 @@ transfer on its own authority - the leader pass 1 plants just past a `JMP` may s
 A *branch's* not-taken edge gets no such favour: it stays pure pc arithmetic, because a not-taken
 branch into data is a broken program, not a continuation.
 
+Nor does a block of labels alone. Labels record size-0 markers, so labels on data can make a block
+holding no instruction at all - a not-taken edge landing on a labelled table reaches one. Control
+there has run into the data, so the block gets no skip either: it falls through only to code starting
+exactly where its markers sit, which happens only where a reopened section's next piece begins.
+
 ### The BIT-skip records ###
 
 `BITZP`/`BITABS` record as a real one-byte instruction with `zp_flow_skip`: a lone `BIT` opcode

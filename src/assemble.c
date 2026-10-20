@@ -7445,6 +7445,33 @@ RC_TEST_STEP(assemble, za_auto_za_unreachable_after_jsr, fix)
     RC_CHECK(zp_addr(&fix->r, "quit.q"), ==, 0x71);
 }
 
+RC_TEST_STEP(assemble, za_branch_into_labelled_data_goes_nowhere, fix)
+{
+    // Issue #34: bar.cut's BNE always branches, but its not-taken edge lands on two labelled tables.
+    // That once reached bonus, the next code after them, which calls frame - a false recursion error
+    // on frame's n. A branch running into data goes nowhere.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&8F\n"
+                      ".entry ZA_ENTRY : JSR frame : JSR bonus : RTS\n"
+                      ".frame { ZA_AUTO1 n : LDA #3 : STA n : JSR bar.cut : LDA n : STA &3000 : RTS }\n"
+                      ".bar { LDX #0\n"
+                      ".loop LDA table,X : STA &3002,X : INX : CPX #3 : BNE loop : RTS\n"
+                      ".cut LDX #1 : BNE loop }\n"
+                      ".table EQUB 1, 2, 3\n"
+                      ".table2 EQUB 4, 5, 6\n"
+                      ".bonus JSR frame : RTS") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+
+    // A label ending one piece of a reopened section still leads into the next piece.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      "SECTION code, org=&2000\n"
+                      ".start ZA_ENTRY : LDA #1 : STA keep : BNE cont\n"
+                      ".cont\n"
+                      "ENDSECTION\n"
+                      "SECTION other, org=&3000 : RTS : ENDSECTION\n"
+                      "SECTION code : LDA keep : RTS : ENDSECTION") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+}
+
 RC_TEST_STEP(assemble, za_auto_jsr_data_end_of_section, fix)
 {
     // Trailing data after the last instruction: there is nothing to resume at, which is a clean end of the

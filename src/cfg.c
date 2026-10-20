@@ -272,6 +272,19 @@ static bool cflow_at(rc_view_zp_cflow cflows, zp_cflow_kind kind, uint32_t secti
 }
 
 
+// Does block b hold a real instruction, or only size-0 markers (labels on data, say)?
+static bool holds_code(rc_view_zp_insn insns, basic_block b)
+{
+    for (uint32_t i = 0; i < b.num_insns; i++) {
+        if (rc_view_zp_insn_get(insns, b.first_insn + i).size > 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
 // Mark a leader wherever a direct transfer's target may land, by push_target_blocks' rule - with starts
 // (where records begin, per section) standing in for the blocks, which do not exist yet.
 static void mark_target_leaders(rc_bitset *leaders, const rc_bitset *starts, uint32_t num_sections, target_loc tl)
@@ -576,6 +589,23 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 // annotation says), or ZA_UNREACHABLE - sited just past a never-returning call - severs it.
                 // A rerouted arm with no block is off the assembled stream: no edge, no taint (finalize
                 // warns, since a resumption point we did not assemble is almost always a mistyped label).
+                //
+                // A block of nothing but size-0 markers is labels on data, and control reaching it has run
+                // into the data (a not-taken branch landing on a table, say). It gets no data-gap skip -
+                // that is a real instruction's continuation past inline data - so, like a branch's
+                // not-taken edge, it goes only where pc arithmetic says: to code starting exactly where its
+                // markers sit. That is another block only where a reopened section's next piece begins.
+                if (!holds_code(insns, *block)) {
+                    for (uint32_t j = 0; j < blocks.num; j++) {
+                        basic_block cand = rc_array_basic_block_get(&blocks, j);
+                        if (j != bi && cand.section == last.section && cand.pc == after) {
+                            add_succ(&succs, block, j, arena);
+                            break;
+                        }
+                    }
+                    break;
+                }
+
                 bool redirected = false;
                 if (last.flow == zp_flow_call) {
                     for (uint32_t i = 0; i < cflows.num; i++) {
@@ -1175,6 +1205,62 @@ RC_TEST(cfg, gap_skip_call_fall_through)
     basic_block bt = rc_view_basic_block_get(gt.blocks, 0);
     RC_CHECK(bt.succ_count, ==, 0u);
     RC_CHECK_FALSE(bt.unknown_succ);
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(cfg, labels_on_data_go_nowhere)
+{
+    // Issue #34: a branch's not-taken edge lands on a table carrying two labels. Their markers make a
+    // block of their own, which once took the data-gap skip to the next code - an edge no run takes.
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();
+    rc_array_zp_insn insns = rc_array_zp_insn_make(8, &arena);
+
+    //   2000  LDX #
+    //   2002  BNE 200A   (always, in practice: the not-taken edge runs into the table)
+    //   2004  .table     6 data bytes
+    //   2007  .table2
+    //   200A  .next LDA # : RTS
+    uint32_t pc = 0x2000;
+    pc = push_insn(&insns, pc, 2, zp_flow_normal, RC_INDEX_NONE, &arena);
+    pc = push_insn(&insns, pc, 2, zp_flow_branch, 0x200A, &arena);
+    push_marker(&insns, 0x2004, zp_marker_label, &arena);
+    push_marker(&insns, 0x2007, zp_marker_label, &arena);
+    push_marker(&insns, 0x200A, zp_marker_label, &arena);
+    pc = push_insn(&insns, 0x200A, 2, zp_flow_normal, RC_INDEX_NONE, &arena);
+    push_insn(&insns, pc, 1, zp_flow_return, RC_INDEX_NONE, &arena);
+
+    cfg g = cfg_build(insns.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    uint32_t data = cfg_block_at(g, 0, 0x2004);
+    RC_CHECK_TRUE(data != RC_INDEX_NONE);
+    basic_block d = rc_view_basic_block_get(g.blocks, data);
+    RC_CHECK(d.num_insns, ==, 2u);      // both labels' markers
+    RC_CHECK(d.succ_count, ==, 0u);     // no gap skip to .next
+    RC_CHECK_FALSE(d.unknown_succ);
+
+    // A label ending one piece of a reopened section, where the next piece begins: its block falls
+    // through to that piece by plain pc arithmetic (it once looped on itself, losing the piece).
+    rc_array_zp_insn pieces = rc_array_zp_insn_make(8, &arena);
+    push_insn(&pieces, 0x2000, 2, zp_flow_normal, RC_INDEX_NONE, &arena);
+    push_insn(&pieces, 0x2002, 2, zp_flow_branch, 0x2004, &arena);
+    push_marker(&pieces, 0x2004, zp_marker_label, &arena);
+    rc_array_zp_insn_push(&pieces, (zp_insn) {.pc = 0x3000, .size = 1, .flow = zp_flow_return, .section = 1,
+                                              .vreg = RC_INDEX_NONE, .target = RC_INDEX_NONE,
+                                              .target_scope = RC_INDEX_NONE, .target_def = cursor_none()},
+                          &arena);
+    push_insn(&pieces, 0x2004, 2, zp_flow_normal, RC_INDEX_NONE, &arena);
+    push_insn(&pieces, 0x2006, 1, zp_flow_return, RC_INDEX_NONE, &arena);
+
+    cfg gp = cfg_build(pieces.view, (rc_view_zp_cflow) {0}, (rc_view_zp_label) {0}, (rc_view_zp_entry) {0}, &arena, scratch);
+    basic_block m = rc_view_basic_block_get(gp.blocks, cfg_block_at(gp, 0, 0x2004));
+    RC_CHECK(m.num_insns, ==, 1u);
+    RC_CHECK(m.succ_count, ==, 1u);
+    basic_block next = rc_view_basic_block_get(gp.blocks, cfg_succ(gp, m, 0));
+    RC_CHECK(next.section, ==, 0u);
+    RC_CHECK(next.pc, ==, 0x2004u);
+    RC_CHECK(next.num_insns, ==, 2u);   // the second piece's LDA and RTS
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
