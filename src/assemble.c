@@ -218,6 +218,28 @@ static void note_address_uses(baron *b, parse_flags flags, uint32_t section, val
 }
 
 
+// The unknown-symbol error v is, or holds anywhere in its lists, or none. A forward reference tucked
+// inside a list ({reader}) owes a pass just as a bare one does - bound as an ordinary list, it would
+// let the first pass look settled and then change on the final one.
+static value unknown_symbol_in(value v)
+{
+    if (value_is_error(v)) {
+        return v.error.code == error_type_unknown_symbol ? v : value_make_none();
+    }
+
+    if (value_is_list(v)) {
+        for (uint32_t i = 0; i < v.list.num; i++) {
+            value u = unknown_symbol_in(rc_view_value_get(v.list, i));
+            if (!value_is_none(u)) {
+                return u;
+            }
+        }
+    }
+
+    return value_make_none();
+}
+
+
 // Remember the pass's FIRST binding that would not settle; if we give up on settling, this is the
 // culprit we point at (changes cascade down the file, so the earliest is nearest the root cause).
 static void note_unsettled(baron *b, cursor at, rc_str name, value from, value to)
@@ -2759,16 +2781,15 @@ static parse_result handle_assignment(baron *b, cursor stmt, cursor at, uint32_t
             }
         }
         else {
-            if (value_is_error(e.value)) {
-                if (e.value.error.code == error_type_unknown_symbol) {
-                    semantic_error_cause(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
-                                         e.value.error);
-                    if (!flags.final) r.unresolved = true;   // a forward reference in the value; settles on a later pass
-                }
-                else {
-                    semantic_error_cause(b, flags, e.value.error.code, cursor_at(at, eq.next),
-                                         e.value.error);   // e.g. x = 1/0
-                }
+            value unknown = unknown_symbol_in(e.value);
+            if (!value_is_none(unknown)) {
+                semantic_error_cause(b, flags, error_type_undefined_symbol, cursor_at(at, eq.next),
+                                     unknown.error);
+                if (!flags.final) r.unresolved = true;   // a forward reference in the value; settles on a later pass
+            }
+            else if (value_is_error(e.value)) {
+                semantic_error_cause(b, flags, e.value.error.code, cursor_at(at, eq.next),
+                                     e.value.error);   // e.g. x = 1/0
             }
             if (st == symbol_status_changed) {
                 note_unsettled(b, at, name, was, e.value);
@@ -3628,16 +3649,15 @@ static parse_result apply_define(baron *b, rc_str define, parse_flags flags, rc_
         }
     }
     else {
-        if (value_is_error(e.value)) {
-            if (e.value.error.code == error_type_unknown_symbol) {
-                semantic_error_cause(b, flags, error_type_undefined_symbol,
-                                     (cursor) {.source = src, .pos = eq.next}, e.value.error);
-                if (!flags.final) r.unresolved = true;   // a forward reference into the source; settles on a later pass
-            }
-            else {
-                semantic_error_cause(b, flags, e.value.error.code,
-                                     (cursor) {.source = src, .pos = eq.next}, e.value.error);
-            }
+        value unknown = unknown_symbol_in(e.value);
+        if (!value_is_none(unknown)) {
+            semantic_error_cause(b, flags, error_type_undefined_symbol,
+                                 (cursor) {.source = src, .pos = eq.next}, unknown.error);
+            if (!flags.final) r.unresolved = true;   // a forward reference into the source; settles on a later pass
+        }
+        else if (value_is_error(e.value)) {
+            semantic_error_cause(b, flags, e.value.error.code,
+                                 (cursor) {.source = src, .pos = eq.next}, e.value.error);
         }
         r.changed = (st == symbol_status_changed);
     }
@@ -8577,6 +8597,36 @@ RC_TEST_STEP(assemble, forward_reference_is_order_independent, fix)
     uint32_t passes = ASM("LDA foo : foo = &70");
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA5, 0x70}, 2));
     RC_CHECK_TRUE(passes >= 2u);
+}
+
+RC_TEST_STEP(assemble, forward_reference_inside_a_list, fix)
+{
+    // Issue #31: a forward reference tucked inside a list owes a pass just as a bare one does. Bound
+    // as an ordinary list, it once let the first pass look settled, and the final pass then saw the
+    // list change - "did not settle", unless something else referred to the label.
+    RC_CHECK_TRUE(ASM("targets = {reader}\n"
+                      "nested = {1, {reader}}\n"
+                      "moved = {reader} + 1\n"
+                      "SKIP 2\n"
+                      ".reader RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    value targets = baron_result_symbol(&fix->r, RC_STR("targets"));
+    RC_CHECK_TRUE(value_is_list(targets) && targets.list.num == 1);
+    RC_CHECK_TRUE(value_is_label(rc_view_value_get(targets.list, 0)));
+    RC_CHECK(rc_view_value_get(targets.list, 0).numeric, ==, 2.0);
+    value moved = baron_result_symbol(&fix->r, RC_STR("moved"));
+    RC_CHECK_TRUE(value_is_list(moved) && rc_view_value_get(moved.list, 0).numeric == 3.0);
+
+    // A -D defines the same way.
+    static const rc_str defs[] = {RC_STR_INIT("table={reader}")};
+    fix->desc.defines = (rc_view_str) RC_VIEW(defs);
+    RC_CHECK_TRUE(ASM("SKIP 2\n.reader RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    fix->desc.defines = (rc_view_str) {0};
+
+    // One that never appears is undefined, named, like a bare one.
+    RC_CHECK_TRUE(ERR("targets = {1, {ghost}}") == error_type_undefined_symbol);
+    RC_CHECK(diag_payload(&fix->r, error_type_undefined_symbol), ==, RC_STR("ghost"));
 }
 
 RC_TEST_STEP(assemble, forward_reference_to_absolute, fix)
