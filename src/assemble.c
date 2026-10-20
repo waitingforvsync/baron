@@ -6141,6 +6141,15 @@ RC_TEST_STEP(assemble, za_auto_immediate_address_works, fix)
     RC_CHECK_TRUE(code_is(&fix->r, passes,
         (uint8_t[]) {0xA9, 0x72, 0x85, 0x70, 0xA9, 0x00, 0x85, 0x71,
                      0x85, 0x72, 0xA5, 0x72, 0xB1, 0x70, 0x60}, 15));
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
+
+    // Issue #33: patching a pointer's address into a later operand. The immediate takes the address and
+    // touches nothing, so it is no indexed access (it once warned that it was).
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&8F : ZA_AUTO2 ptr\n"
+                      ".entry ZA_ENTRY : LDA #ptr : STA patch+1\n"
+                      "LDA #&00 : STA ptr : LDA #&30 : STA ptr+1 : LDY #0\n"
+                      ".patch LDA (ptr),Y : RTS") != 0);
+    RC_CHECK(fix->r.diagnostics.num, ==, 0u);
 }
 
 RC_TEST_STEP(assemble, za_auto_alias_attributes, fix)

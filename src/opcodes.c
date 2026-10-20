@@ -574,8 +574,9 @@ static void record_insn(baron *b, cursor at, uint32_t section, parse_flags flags
         .var_scope      = is_var ? id_scope : RC_INDEX_NONE,
         .var_def        = is_var ? id_def : cursor_none(),
         // Indexed / indexed-indirect modes reach past the addressed byte (outside the envelope); (var),Y and
-        // (var) dereference it as a two-byte pointer.
-        .var_indexed    = is_control ? vector_var && via == zp_target_via_table : is_var && !mode_in_var_envelope(mode),
+        // (var) dereference it as a two-byte pointer. An immediate reaches nothing: it only takes the address.
+        .var_indexed    = is_control ? vector_var && via == zp_target_via_table
+                                     : is_var && mode != addr_mode_imm && !mode_in_var_envelope(mode),
         .var_indirect   = is_control ? vector_var && via == zp_target_via_vector
                                      : is_var && (mode == addr_mode_indy || mode == addr_mode_ind),
 
