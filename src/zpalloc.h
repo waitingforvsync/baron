@@ -21,9 +21,11 @@ typedef struct zp_coloring {
 // share bytes only when their live ranges are disjoint (they do not interfere), and a width-2 variable gets
 // two CONSECUTIVE reserved bytes. A variable the analysis never saw touched (class unused) is SKIPPED - it
 // gets no address at all (the finalizer warns and undefines it), so it costs nothing. First-fit-decreasing:
-// the wider variables are placed first, each at the lowest feasible base. Results live in arena; scratch
-// (by value) is reserved for future ordering needs. vreg id == index into vars.
-zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *reserved,
+// the wider variables are placed first, each at the lowest feasible base. floors holds each variable's
+// lowest allowed base - an access below its start (v-4,X) needs the operand byte to stay in page zero -
+// and a variable past its end, or an empty view, has none. Results live in arena; scratch (by value) is
+// reserved for future ordering needs. vreg id == index into vars.
+zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, rc_view_u32 floors, const rc_bitset *reserved,
                      rc_arena *arena, rc_arena scratch);
 
 

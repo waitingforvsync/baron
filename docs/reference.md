@@ -136,13 +136,13 @@ A filename destined for a disc image follows DFS rules: an optional single-chara
 | `ZA_AUTO2 names` | Declare two-byte variables (pointer pairs). |
 | `ZA_AUTO n, names` | Declare `n`-byte variables (1-256). |
 | `ZA_UNREACHABLE` | Assert control cannot fall through to this point - a branch's dead arm, or the continuation of a never-returning `JSR`; that path is pruned. |
-| `ZA_CANCALL targets` | After a computed/self-modified `JSR`: the routines it may reach. Targets flatten like `EQUB` data, so a list-valued symbol works. |
-| `ZA_CANJUMP targets` | After a computed/indirect `JMP`, a self-modified branch, or an RTS-dispatch: the labels it may land on, replacing any literal operand. Targets flatten like `EQUB` data. |
+| `ZA_CANCALL targets` | After a computed/self-modified `JSR`: the routines it may reach. Targets flatten like `EQUB` data, so a list-valued symbol works. Name your own code by label (an alias or `label+n` works too); a plain number landing on assembled code is refused. |
+| `ZA_CANJUMP targets` | After a computed/indirect `JMP`, a self-modified branch, or an RTS-dispatch: the labels it may land on, replacing any literal operand. Targets flatten like `EQUB` data, and follow `ZA_CANCALL`'s label rule. |
 | `ZA_RETURN` | Declare the preceding jump/branch a return to this routine's caller (the inline-data trick's computed exit). |
 | `ZA_RETURNTO targets` | Declare where the preceding `JSR` resumes, replacing its fall-through (a data-consuming callee that resumes somewhere other than just past the data). |
 | `ZA_DISCARD vars` | Promise the named `ZA_AUTO` variables' current values are dead - later reads see only later writes. For arrays rebuilt via `STA arr,X`, whose writes prove nothing. Binds to the path it is written on; below a label it applies to every path through that point. |
 | `ZA_WIPE` | Promise that the sweep just before it has written the whole pool (the boot-time zero-page wipe): place it directly after the wipe loop. Every variable counts as freshly written from the marker, and the sweep's own fixed-base stores are not warned about. Binds like `ZA_DISCARD`: written inside a branch arm it stays on that arm. |
-| `ZA_INDEXEDBY values` | Declare the index values the register can hold at the indexed `ZA_AUTO` access just before it (`var,X` / `var,Y` / `(var,X)`). Ranges and lists flatten like `EQUB` data; each value 0-255. The access is then bounds-checked against the variable's width (refused if any declared index reaches past the end) and the default-level unchecked-index warning goes quiet. |
+| `ZA_INDEXEDBY values` | Declare the index values the register can hold at the indexed `ZA_AUTO` access just before it (`var,X` / `var,Y` / `(var,X)`). Ranges and lists flatten like `EQUB` data; each value 0-255. The access is then bounds-checked against the variable's width (refused if any declared index reaches outside it - the base itself may sit below the variable, as in `var-4,X : ZA_INDEXEDBY 4..7`) and the default-level unchecked-index warning goes quiet. |
 | `ZA_ENTRY` | Mark the routine it opens as an externally-called entry point (a reachability root). Any `ZA_ENTRY` replaces the default "each section starts a routine" presumption. |
 | `ZA_INTERRUPT` | Mark the routine it opens as an interrupt handler: a root whose variables are kept apart from the rest of the program. |
 

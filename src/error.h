@@ -80,11 +80,13 @@ typedef enum error_type {
     error_type_za_discard_needs_var,  // a ZA_DISCARD operand that is not a whole ZA_AUTO variable
     error_type_za_pool_store,         // opt-in warning: a store whose fixed address / indexed base lies inside the ZA_POOL
     error_type_za_indexedby_needs_indexed, // a ZA_INDEXEDBY that does not follow an indexed ZA_AUTO access
+    error_type_za_auto_below_start,   // an indexed access whose base sits below its variable, with no ZA_INDEXEDBY
     error_type_za_indexedby_out_of_range,  // a declared index takes the access past the variable's end
     error_type_za_entry_no_code,      // a ZA_ENTRY/ZA_INTERRUPT marker whose pc begins no assembled instruction
     error_type_za_entry_input,        // warning: a ZA_ENTRY routine reads a ZA_AUTO before writing it - callers cannot know its address
     error_type_za_auto_unreachable,   // warning: ZA_AUTO-touching code unreachable from every declared/default root
     error_type_za_returnto_no_code,   // warning: a ZA_RETURNTO target that begins no assembled instruction
+    error_type_za_target_needs_label, // an annotation target given as a number that lands on our own code
     error_type_skip_spans_instruction, // a BITZP/BITABS resume address landing inside a recorded instruction
     error_type_undefined_symbol,      // a reference still unresolved on the final pass
     error_type_duplicate_symbol,      // a name defined twice in one scope

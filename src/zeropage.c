@@ -190,10 +190,11 @@ rc_view_zp_insn zeropage_insns(const zeropage *zp)
 }
 
 
-void zeropage_set_index_max(zeropage *zp, uint32_t index, uint8_t max)
+void zeropage_set_index_bounds(zeropage *zp, uint32_t index, uint8_t min, uint8_t max)
 {
     RC_ASSERT(zp != NULL);
     zp_insn *n = rc_array_zp_insn_at(&zp->insns, index);
+    n->index_min   = n->index_valid && n->index_min < min ? n->index_min : min;
     n->index_max   = n->index_valid && n->index_max > max ? n->index_max : max;
     n->index_valid = true;
 }

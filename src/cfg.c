@@ -9,78 +9,80 @@ enum {
 };
 
 
-// A resolved target location: which (section, pc) a control transfer lands on. found is false for a computed
-// / unregistered / absent target (the caller then leaves the edge unknown).
+// The marker for the label (scope, def), or RC_INDEX_NONE: no label at all, or one placed nowhere we record
+// (a virtual section's, say).
+static uint32_t find_label(rc_view_zp_label labels, uint32_t scope, cursor def)
+{
+    if (scope == RC_INDEX_NONE) {
+        return RC_INDEX_NONE;
+    }
+
+    for (uint32_t i = 0; i < labels.num; i++) {
+        zp_label l = rc_view_zp_label_get(labels, i);
+        if (l.scope == scope && cursor_is_equal(l.def, def)) {
+            return i;
+        }
+    }
+
+    return RC_INDEX_NONE;
+}
+
+
+// How a control transfer's own operand places its destination.
+typedef enum target_kind {
+    target_kind_computed = 0,   // nothing we can name: a computed operand, a dispatch table, a vector we own
+    target_kind_external,       // through a vector cell we did not assemble (JMP (&FFFC)): out of the program
+    target_kind_label,          // a label's value: exactly (section, pc), in the label's own section
+    target_kind_number,         // a plain number: (section, pc) in the transfer's own section first
+} target_kind;
+
 typedef struct target_loc {
+    uint8_t  kind;      // target_kind
     uint32_t section;
     uint32_t pc;
-    bool     found;
 } target_loc;
 
-// Where does n's control-transfer target land? A named-label target (target_scope set) resolves through the
-// markers to the label's OWN section - this is what crosses a section, because the label picks the bank the
-// raw address never could. If it named no label, or a label with no marker (a bare constant), we fall back to
-// the numeric target, resolved WITHIN n's own section only. A computed / absent target is found = false -
-// and so is ANY indirect jump: its operand names the vector cell it dispatches through, never the place
-// control lands, so there is no direct location to hand back.
+// Where does n's control-transfer target land? A label's value carries the label, so it lands in the
+// label's OWN section - which is what crosses sections, the label picking the bank the raw address never
+// could - at the value's address, offsets and all (JMP lab+2). A plain number has only its address.
+// An indirect jump's operand names the vector CELL it dispatches through, never the place control lands:
+// a cell we own (one of our labels, or a ZA_AUTO) may hold anything, us included, so it is computed
+// (annotate with ZA_CANJUMP); any other cell (JMP (&FFFC), or wrchv = &20E) is an OS vector, and whatever
+// it dispatches to is by policy external.
 static target_loc resolve_target_loc(rc_view_zp_label labels, zp_insn n)
 {
-    if (n.target_via != zp_target_via_direct) {
-        return (target_loc) {0};   // not found
+    if (n.target_via == zp_target_via_vector) {
+        bool ours = n.target_is_zpvar || find_label(labels, n.target_scope, n.target_def) != RC_INDEX_NONE;
+        return (target_loc) {.kind = ours ? target_kind_computed : target_kind_external};
     }
 
-    if (n.target_scope != RC_INDEX_NONE) {
-        for (uint32_t i = 0; i < labels.num; i++) {
-            zp_label l = rc_view_zp_label_get(labels, i);
-            if (l.scope == n.target_scope && cursor_is_equal(l.def, n.target_def)) {
-                return (target_loc) {
-                    .section = l.section,
-                    .pc      = l.pc,
-                    .found   = true,
-                };
-            }
-        }
-
-        // A symbolic target with no marker (e.g. a name = expr constant, not a code label): treat the
-        // resolved value as a bare address in n's own section, exactly like a numeric target.
+    if (n.target_via == zp_target_via_table || n.target == RC_INDEX_NONE) {
+        return (target_loc) {.kind = target_kind_computed};   // JMP (table,X), or a ZA_AUTO destination
     }
 
-    if (n.target != RC_INDEX_NONE) {
-        return (target_loc) {
-            .section = n.section,
-            .pc      = n.target,
-            .found   = true,
-        };
-    }
-
-    return (target_loc) {0};   // not found
+    uint32_t li = find_label(labels, n.target_scope, n.target_def);
+    return (target_loc) {
+        .kind    = li != RC_INDEX_NONE ? target_kind_label : target_kind_number,
+        .section = li != RC_INDEX_NONE ? rc_view_zp_label_get(labels, li).section : n.section,
+        .pc      = n.target,
+    };
 }
 
 
-// The section a declared annotation target (ZA_CANJUMP / ZA_CANCALL / ZA_RETURNTO) lands in. Like a
-// literal operand (resolve_target_loc), a target that named a label sits in the label's OWN section -
-// so a declared set can reach code in another section, just as the JMP it annotates can. The marker
-// must sit at the target address itself: an offset from a label (lab+3), or a symbol bound to a target
-// table (handlers = {a, b}), names no label's position. Anything else is a bare address, resolved
-// within the annotated site's section.
-static uint32_t cflow_target_section(rc_view_zp_label labels, zp_cflow cf, uint32_t site_section)
+// The section a declared annotation target (ZA_CANJUMP / ZA_CANCALL / ZA_RETURNTO) lands in: like a
+// literal operand, a label's value sits in the label's OWN section, so a declared set can reach code in
+// another section just as the JMP it annotates can. A plain number stays in the site's section (one
+// naming our own code is refused before the CFG is built).
+static uint32_t cflow_target_section(rc_view_zp_label labels, zp_cflow cf)
 {
-    if (cf.target_scope != RC_INDEX_NONE) {
-        for (uint32_t i = 0; i < labels.num; i++) {
-            zp_label l = rc_view_zp_label_get(labels, i);
-            if (l.scope == cf.target_scope && cursor_is_equal(l.def, cf.target_def)) {
-                return l.pc == cf.target ? l.section : site_section;
-            }
-        }
-    }
-
-    return site_section;
+    uint32_t li = find_label(labels, cf.target_scope, cf.target_def);
+    return li != RC_INDEX_NONE ? rc_view_zp_label_get(labels, li).section : cf.section;
 }
 
 
-uint32_t cfg_cflow_target_section(cfg g, zp_cflow cf, uint32_t site_section)
+uint32_t cfg_cflow_target_section(cfg g, zp_cflow cf)
 {
-    return cflow_target_section(g.labels, cf, site_section);
+    return cflow_target_section(g.labels, cf);
 }
 
 
@@ -92,21 +94,22 @@ static uint32_t leader_index(uint32_t section, uint32_t pc)
 }
 
 
-// Is (section, pc) the leader (entry) of a basic block? Leaders come from: the first instruction, every
-// section boundary, every branch/jump/call TARGET, and the instruction after any branch / jump / return. A
-// JSR does NOT boundary its fall-through (a call is in-block) but its target IS a leader (the callee's entry).
-static bool addr_is_leader(const rc_bitset *leaders, uint32_t section, uint32_t pc)
+// Is (section, pc) marked in a per-section location set? Two such sets exist: the leaders, and where
+// records start. Leaders - the entries of basic blocks - come from: the first instruction, every section
+// boundary, every branch/jump/call TARGET, and the instruction after any branch / jump / return. A JSR
+// does NOT boundary its fall-through (a call is in-block) but its target IS a leader (the callee's entry).
+static bool loc_is_marked(const rc_bitset *set, uint32_t section, uint32_t pc)
 {
-    return pc < cfg_addr_space && rc_bitset_is_set(leaders, leader_index(section, pc));
+    return pc < cfg_addr_space && rc_bitset_is_set(set, leader_index(section, pc));
 }
 
 
-// Mark (section, pc) a leader, ignoring a pc past 0xFFFF (a target past the address space, or the fall-through
-// of the last byte of memory - neither names a real block).
-static void mark_leader(rc_bitset *leaders, uint32_t section, uint32_t pc)
+// Mark (section, pc) in a location set, ignoring a pc past 0xFFFF (a target past the address space, or the
+// fall-through of the last byte of memory - neither names a real block).
+static void mark_loc(rc_bitset *set, uint32_t section, uint32_t pc)
 {
     if (pc < cfg_addr_space) {
-        rc_bitset_set(leaders, leader_index(section, pc));
+        rc_bitset_set(set, leader_index(section, pc));
     }
 }
 
@@ -136,54 +139,59 @@ uint32_t cfg_block_at(cfg g, uint32_t section, uint32_t pc)
 }
 
 
-// Does n's control transfer leave the assembled program for EXTERNAL code (an OS or ROM entry)? Only
-// meaningful once the caller has failed to place the target as a block. The policy: a CONSTANT
-// destination matching nothing we assembled is a transfer OUT of the program, and external code
-// cannot touch a ZA_AUTO (ZA_POOL names precisely the bytes nothing outside the program uses) - so
-// no annotation is required. Only flow whose destination we cannot pin down stays conservative.
-static bool target_is_external(rc_view_zp_label labels, zp_insn n)
+// Push the blocks a placed (label or number) target lands on. A label's lands exactly where it says. A
+// plain number lands in its own section if code starts there (BNE *-3); failing that, wherever code starts
+// at that address in ANY section - a bare JSR &8003 into a paged bank cannot say which bank, so all of
+// them. Nothing pushed: it lands on nothing we assembled.
+static void push_target_blocks(rc_array_u32 *out, rc_view_basic_block blocks, target_loc tl, rc_arena *arena)
 {
-    switch (n.target_via) {
-        case zp_target_via_direct:
-            // A known constant (or a named non-label constant, or even a label off the code stream): the
-            // caller found no block there, so it points outside the program.
-            return resolve_target_loc(labels, n).found;
-        case zp_target_via_vector:
-            // A literal vector address (JMP (&FFFC)) - or a named constant standing for one (wrchv = &20E) -
-            // is a cell outside the program: whatever it dispatches to is by policy external. A vector that
-            // IS one of our labels - or a ZA_AUTO variable the allocator owns - is a cell we assembled, whose
-            // run-time contents may point anywhere, including back at us - that stays computed (annotate
-            // with ZA_CANJUMP).
-            if (n.target_is_zpvar) {
-                return false;
+    uint32_t own = block_at(blocks, tl.section, tl.pc);
+    if (own != RC_INDEX_NONE) {
+        rc_array_u32_push(out, own, arena);
+        return;
+    }
+
+    if (tl.kind == target_kind_number) {
+        for (uint32_t i = 0; i < blocks.num; i++) {
+            if (rc_view_basic_block_get(blocks, i).pc == tl.pc) {   // our own section has none here
+                rc_array_u32_push(out, i, arena);
             }
-            if (n.target_scope == RC_INDEX_NONE) {
-                return true;
-            }
-            for (uint32_t i = 0; i < labels.num; i++) {
-                zp_label l = rc_view_zp_label_get(labels, i);
-                if (l.scope == n.target_scope && cursor_is_equal(l.def, n.target_def)) {
+        }
+    }
+}
+
+
+// Does n's control transfer leave the assembled program for EXTERNAL code (an OS or ROM entry)? The
+// policy: a destination landing on nothing we assembled - a constant off the stream, or a label on
+// code we did not assemble (an INCBIN'd music player) - is a transfer OUT of the program, and external
+// code cannot touch a ZA_AUTO (ZA_POOL names precisely the bytes nothing outside the program uses), so
+// no annotation is required. Only flow whose destination we cannot pin down stays conservative.
+static bool target_is_external(rc_view_zp_label labels, rc_view_basic_block blocks, zp_insn n)
+{
+    target_loc tl = resolve_target_loc(labels, n);
+    switch ((target_kind) tl.kind) {
+        case target_kind_computed:
+            return false;
+        case target_kind_external:
+            return true;
+        case target_kind_label:
+            return block_at(blocks, tl.section, tl.pc) == RC_INDEX_NONE;
+        case target_kind_number:
+            for (uint32_t i = 0; i < blocks.num; i++) {
+                if (rc_view_basic_block_get(blocks, i).pc == tl.pc) {
                     return false;
                 }
             }
             return true;
-        case zp_target_via_table:
-        default:
-            return false;   // JMP (table,X): an indexed dispatch through our own memory - always computed
     }
+
+    RC_UNREACHABLE();
 }
 
 
 bool cfg_target_is_external(cfg g, zp_insn n)
 {
-    return target_is_external(g.labels, n);
-}
-
-
-uint32_t cfg_target_block(cfg g, zp_insn n)
-{
-    target_loc tl = resolve_target_loc(g.labels, n);
-    return tl.found ? block_at(g.blocks, tl.section, tl.pc) : RC_INDEX_NONE;
+    return target_is_external(g.labels, g.blocks, n);
 }
 
 
@@ -203,12 +211,12 @@ call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_aren
 
     for (uint32_t j = 0; j < cflows.num; j++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
-        if (cf.kind == zp_cflow_za_cancall && cf.site == n.pc) {
+        if (zp_cflow_is_at(cf, zp_cflow_za_cancall, n.section, n.pc)) {
             annotated = true;
 
             // Every declared target is a block leader, so an in-program address always has a block; one
             // without is an external arm and contributes nothing.
-            uint32_t tb = cfg_block_at(g, cfg_cflow_target_section(g, cf, n.section), cf.target);
+            uint32_t tb = cfg_block_at(g, cfg_cflow_target_section(g, cf), cf.target);
             if (tb != RC_INDEX_NONE) {
                 rc_array_u32_push(&blocks, tb, arena);
             }
@@ -219,15 +227,15 @@ call_targets cfg_call_targets(cfg g, rc_view_zp_cflow cflows, zp_insn n, rc_aren
     }
 
     if (!annotated) {
-        uint32_t tb = cfg_target_block(g, n);
-        if (tb != RC_INDEX_NONE) {
-            rc_array_u32_push(&blocks, tb, arena);
-        }
-        else if (cfg_target_is_external(g, n)) {
-            external = true;
+        target_loc tl = resolve_target_loc(g.labels, n);
+        if (tl.kind == target_kind_computed) {
+            unknown = true;   // a computed call we cannot follow
         }
         else {
-            unknown = true;   // a computed call we cannot follow
+            if (tl.kind != target_kind_external) {
+                push_target_blocks(&blocks, g.blocks, tl, arena);
+            }
+            external = blocks.num == 0;
         }
     }
 
@@ -250,17 +258,40 @@ static void add_succ(rc_array_u32 *succs, basic_block *block, uint32_t succ_bloc
 }
 
 
-// Does cflows carry an annotation of kind sited at pc? A linear scan - annotations are few.
-static bool cflow_at(rc_view_zp_cflow cflows, zp_cflow_kind kind, uint32_t pc)
+// Does cflows carry an annotation of kind sited at (section, pc)? A linear scan - annotations are few.
+static bool cflow_at(rc_view_zp_cflow cflows, zp_cflow_kind kind, uint32_t section, uint32_t pc)
 {
     for (uint32_t i = 0; i < cflows.num; i++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-        if (cf.kind == (uint8_t) kind && cf.site == pc) {
+        if (zp_cflow_is_at(cf, kind, section, pc)) {
             return true;
         }
     }
 
     return false;
+}
+
+
+// Mark a leader wherever a direct transfer's target may land, by push_target_blocks' rule - with starts
+// (where records begin, per section) standing in for the blocks, which do not exist yet.
+static void mark_target_leaders(rc_bitset *leaders, const rc_bitset *starts, uint32_t num_sections, target_loc tl)
+{
+    if (tl.kind != target_kind_label && tl.kind != target_kind_number) {
+        return;   // computed or external: nowhere of ours to mark
+    }
+
+    if (tl.kind == target_kind_label || loc_is_marked(starts, tl.section, tl.pc)) {
+        if (tl.section < num_sections) {
+            mark_loc(leaders, tl.section, tl.pc);
+        }
+        return;
+    }
+
+    for (uint32_t s = 0; s < num_sections; s++) {
+        if (loc_is_marked(starts, s, tl.pc)) {
+            mark_loc(leaders, s, tl.pc);
+        }
+    }
 }
 
 
@@ -293,26 +324,37 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // a call, the location after it (branch/jump/return end a block, a call falls through in-block). We model
     // BOTH edges of a conditional branch - the sound default for liveness (a spurious edge only lengthens live
     // ranges, never shortens them; a MISSING edge is the only unsound case, which is why computed flow taints).
+    //
+    // starts records where a block COULD begin - a real instruction or a label marker, the records pass 2
+    // cuts at - so a plain-number target can look for code in other sections before any block exists.
+    rc_bitset starts = rc_bitset_make(num_sections * cfg_addr_space, &scratch);
+    for (uint32_t i = 0; i < insns.num; i++) {
+        zp_insn insn = rc_view_zp_insn_get(insns, i);
+        if (insn.size > 0 || insn.marker == zp_marker_label) {
+            mark_loc(&starts, insn.section, insn.pc);
+        }
+    }
+
     rc_bitset leaders = rc_bitset_make(num_sections * cfg_addr_space, &scratch);
-    mark_leader(&leaders, rc_view_zp_insn_get(insns, 0).section, rc_view_zp_insn_get(insns, 0).pc);
+    mark_loc(&leaders, rc_view_zp_insn_get(insns, 0).section, rc_view_zp_insn_get(insns, 0).pc);
     for (uint32_t i = 0; i < insns.num; i++) {
         zp_insn insn = rc_view_zp_insn_get(insns, i);
         uint32_t after = insn.pc + insn.size;   // the fall-through is always in THIS instruction's section
         target_loc tl = resolve_target_loc(labels, insn);
         switch (insn.flow) {
             case zp_flow_branch:
-                if (tl.found) { mark_leader(&leaders, tl.section, tl.pc); }   // taken edge
-                mark_leader(&leaders, insn.section, after);                   // fall-through edge
+                mark_target_leaders(&leaders, &starts, num_sections, tl);   // taken edge
+                mark_loc(&leaders, insn.section, after);                    // fall-through edge
                 break;
             case zp_flow_jump:
-                if (tl.found) { mark_leader(&leaders, tl.section, tl.pc); }
-                mark_leader(&leaders, insn.section, after);   // boundary (block after an unconditional jump)
+                mark_target_leaders(&leaders, &starts, num_sections, tl);
+                mark_loc(&leaders, insn.section, after);   // boundary (block after an unconditional jump)
                 break;
             case zp_flow_call:
-                if (tl.found) { mark_leader(&leaders, tl.section, tl.pc); }   // callee entry (via call graph)
+                mark_target_leaders(&leaders, &starts, num_sections, tl);   // callee entry (via call graph)
                 break;
             case zp_flow_return:
-                mark_leader(&leaders, insn.section, after);    // boundary (block after a return)
+                mark_loc(&leaders, insn.section, after);    // boundary (block after a return)
                 break;
             case zp_flow_skip:
                 // The BIT-skip trick: the swallowed instruction at after runs only when branched to
@@ -320,8 +362,8 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 // fall-through resumes past the swallowed bytes - the resume point needs a block of its
                 // own even mid-run (the ZA_ENTRY precedent). A leader bit on a data address (nothing
                 // recorded at the resume) is harmless: pass 2 only consults leaders at recorded pcs.
-                mark_leader(&leaders, insn.section, after);
-                mark_leader(&leaders, insn.section, after + insn.skip_bytes);
+                mark_loc(&leaders, insn.section, after);
+                mark_loc(&leaders, insn.section, after + insn.skip_bytes);
                 break;
             case zp_flow_normal:
             default:
@@ -340,11 +382,11 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 bool fits = (insn.flow == zp_flow_call)
                                 ? cf.kind == zp_cflow_za_cancall || cf.kind == zp_cflow_za_returnto
                                 : cf.kind == zp_cflow_za_canjump;
-                if (fits && cf.site == insn.pc && cf.target != RC_INDEX_NONE) {
+                if (fits && cf.section == insn.section && cf.site == insn.pc && cf.target != RC_INDEX_NONE) {
                     // A label's section may hold no recorded insns: no leader span, and no block to find.
-                    uint32_t sec = cflow_target_section(labels, cf, insn.section);
+                    uint32_t sec = cflow_target_section(labels, cf);
                     if (sec < num_sections) {
-                        mark_leader(&leaders, sec, cf.target);
+                        mark_loc(&leaders, sec, cf.target);
                     }
                 }
             }
@@ -358,7 +400,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     for (uint32_t i = 0; i < entries.num; i++) {
         zp_entry e = rc_view_zp_entry_get(entries, i);
         if (e.section < num_sections) {
-            mark_leader(&leaders, e.section, e.pc);
+            mark_loc(&leaders, e.section, e.pc);
         }
     }
 
@@ -394,7 +436,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                          || rc_array_basic_block_get(&blocks, current).pc != insn.pc;
         if (i == 0 || insn.section != prev_sec
             || (new_addr && prev_cuts)
-            || (at_new_entry && addr_is_leader(&leaders, insn.section, insn.pc)
+            || (at_new_entry && loc_is_marked(&leaders, insn.section, insn.pc)
                 && (insn.marker == zp_marker_label || insn.size > 0))) {
             current = rc_array_basic_block_push(
                 &blocks,
@@ -416,10 +458,10 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
         prev_cuts = insn.flow == zp_flow_branch || insn.flow == zp_flow_jump || insn.flow == zp_flow_return
                  || insn.flow == zp_flow_skip
                  || (insn.flow == zp_flow_call
-                     && (cflow_at(cflows, zp_cflow_za_returnto, insn.pc)
-                      || cflow_at(cflows, zp_cflow_za_unreachable, insn.pc + insn.size)))
+                     && (cflow_at(cflows, zp_cflow_za_returnto, insn.section, insn.pc)
+                      || cflow_at(cflows, zp_cflow_za_unreachable, insn.section, insn.pc + insn.size)))
                  || (insn.flow == zp_flow_normal && insn.size > 0
-                     && cflow_at(cflows, zp_cflow_za_unreachable, insn.pc + insn.size));
+                     && cflow_at(cflows, zp_cflow_za_unreachable, insn.section, insn.pc + insn.size));
         prev_sec = insn.section;
         prev_pc  = insn.pc;
     }
@@ -427,13 +469,13 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
     // Pass 3: wire successor edges from each block's LAST instruction's control-flow class into the
     // shared pool. A branch has two (fall-through + target), a jump one, a return none, and a call /
     // normal terminator falls through to the next block. Fall-through stays in the block's own
-    // section; a named-label target may cross sections (resolve_target_loc). The annotations adjust
-    // each case as its comment below describes.
+    // section; a target may cross sections (resolve_target_loc, push_target_blocks). The annotations
+    // adjust each case as its comment below describes.
+    rc_array_u32 lands = rc_array_u32_make(4, &scratch);   // one transfer's target blocks, reused
     for (uint32_t bi = 0; bi < blocks.num; bi++) {
         basic_block *block = rc_array_basic_block_at(&blocks, bi);
         zp_insn last = rc_view_zp_insn_get(insns, block->first_insn + block->num_insns - 1);
         uint32_t after = last.pc + last.size;
-        target_loc tl  = resolve_target_loc(labels, last);
         block->succ_first = succs.num;
         switch (last.flow) {
             case zp_flow_branch:
@@ -443,7 +485,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                     // it. Pure pc arithmetic, deliberately without the call/normal arm's data-gap skip: a
                     // not-taken branch landing in inline data is a broken program, not a continuation.
                     uint32_t ft = block_at(blocks.view, last.section, after);
-                    if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
+                    if (ft != RC_INDEX_NONE && !cflow_at(cflows, zp_cflow_za_unreachable, last.section, after)) {
                         add_succ(&succs, block, ft, arena);
                     }
                 }
@@ -453,31 +495,34 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 // block" reliably means an EXTERNAL arm - no edge, no taint. ZA_RETURN contributes no
                 // edge either (block_returns makes it the routine's exit). Only an unannotated
                 // transfer falls back to the literal, tainting when computed and possibly ours.
-                bool returns   = cflow_at(cflows, zp_cflow_za_return, last.pc);
+                bool returns   = cflow_at(cflows, zp_cflow_za_return, last.section, last.pc);
                 bool annotated = false;
                 for (uint32_t i = 0; i < cflows.num; i++) {
                     zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-                    if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
+                    if (zp_cflow_is_at(cf, zp_cflow_za_canjump, last.section, last.pc)) {
                         annotated = true;
-                        uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf, last.section),
-                                               cf.target);
+                        uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf), cf.target);
                         if (tb != RC_INDEX_NONE) {
                             add_succ(&succs, block, tb, arena);
                         }
                     }
                 }
                 if (!annotated && !returns) {
-                    uint32_t taken = tl.found ? block_at(blocks.view, tl.section, tl.pc) : RC_INDEX_NONE;
-                    if (taken != RC_INDEX_NONE) {
-                        add_succ(&succs, block, taken, arena);
-                    }
-                    else if (!target_is_external(labels, last)) {
+                    target_loc tl = resolve_target_loc(labels, last);
+                    if (tl.kind == target_kind_computed) {
                         block->unknown_succ = true;   // a destination we cannot place -> conservative
                     }
+                    else if (tl.kind != target_kind_external) {
+                        rc_array_u32_resize(&lands, 0, &scratch);
+                        push_target_blocks(&lands, blocks.view, tl, &scratch);
+                        for (uint32_t j = 0; j < lands.num; j++) {
+                            add_succ(&succs, block, rc_array_u32_get(&lands, j), arena);
+                        }
+                    }
 
-                    // else: a transfer out of the program (a constant destination off the stream, or a
-                    // constant OS vector) - a clean exit, exactly like a return: control leaves for code
-                    // that touches none of our variables. No edge, no taint.
+                    // Nothing added and not computed: a transfer out of the program (a destination off
+                    // the stream, or an OS vector) - a clean exit, exactly like a return: control leaves
+                    // for code that touches none of our variables. No edge, no taint.
                 }
                 break;
             }
@@ -489,9 +534,8 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 // so it stays a trusted precondition, never a taint.
                 for (uint32_t i = 0; i < cflows.num; i++) {
                     zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-                    if (cf.kind == zp_cflow_za_canjump && cf.site == last.pc) {
-                        uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf, last.section),
-                                               cf.target);
+                    if (zp_cflow_is_at(cf, zp_cflow_za_canjump, last.section, last.pc)) {
+                        uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf), cf.target);
                         if (tb != RC_INDEX_NONE) {
                             add_succ(&succs, block, tb, arena);
                         }
@@ -506,7 +550,7 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 // data) falls through to the next recorded same-section instruction, insisting on
                 // pc >= resume - the plain gap-skip would land on the swallowed block itself.
                 uint32_t resume = after + last.skip_bytes;
-                if (!cflow_at(cflows, zp_cflow_za_unreachable, resume)) {
+                if (!cflow_at(cflows, zp_cflow_za_unreachable, last.section, resume)) {
                     uint32_t ft = block_at(blocks.view, last.section, resume);
                     if (ft != RC_INDEX_NONE) {
                         add_succ(&succs, block, ft, arena);
@@ -536,17 +580,16 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
                 if (last.flow == zp_flow_call) {
                     for (uint32_t i = 0; i < cflows.num; i++) {
                         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-                        if (cf.kind == zp_cflow_za_returnto && cf.site == last.pc) {
+                        if (zp_cflow_is_at(cf, zp_cflow_za_returnto, last.section, last.pc)) {
                             redirected = true;
-                            uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf, last.section),
-                                                   cf.target);
+                            uint32_t tb = block_at(blocks.view, cflow_target_section(labels, cf), cf.target);
                             if (tb != RC_INDEX_NONE) {
                                 add_succ(&succs, block, tb, arena);
                             }
                         }
                     }
                 }
-                if (!redirected && !cflow_at(cflows, zp_cflow_za_unreachable, after)) {
+                if (!redirected && !cflow_at(cflows, zp_cflow_za_unreachable, last.section, after)) {
                     uint32_t ft = block_at(blocks.view, last.section, after);
                     if (ft != RC_INDEX_NONE) {
                         add_succ(&succs, block, ft, arena);

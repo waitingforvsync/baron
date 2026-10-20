@@ -91,19 +91,20 @@ typedef struct zp_insn {
     uint8_t  skip_bytes;       // zp_flow_skip only: run-time bytes the BIT swallows (BITZP 1, BITABS 2); else 0
     uint8_t  rw;               // vref_rw, if it touches vreg (an indirect access READS its pointer, whatever else it does)
     uint32_t vreg;             // the ZA_AUTO it touches, or RC_INDEX_NONE (resolved post-pass)
-    uint32_t var_scope;        // scope the operand's base name was declared in (with var_def, the vreg identity)
-    cursor   var_def;          // def cursor of the operand's base name, or cursor_none
+    uint32_t var_scope;        // scope of the ZA_AUTO the operand's value names (with var_def, the vreg identity)
+    cursor   var_def;          // def cursor of that ZA_AUTO, or cursor_none
     bool     var_indexed;      // reached by an indexed / indexed-indirect mode: outside the envelope (finalize warns)
     bool     var_indirect;     // dereferenced as a zero-page POINTER ((var),Y / (var)): ZA_AUTO1 here is refused
     bool     var_indexed_ptr;  // the indexed access reads a 2-byte entry per slot ((var,X) / JMP (var,X))
     bool     index_valid;      // a ZA_INDEXEDBY declared this access's index set, so it is checked, not trusted...
-    uint8_t  index_max;        // ...and this is the set's largest value (what the bounds check reaches with)
-    uint32_t var_offset;       // compile-time byte offset into the var (k for var+k), or RC_INDEX_NONE if unknown
+    uint8_t  index_min;        // ...and these are the set's smallest and largest values (the reach of the
+    uint8_t  index_max;        // bounds check below and above the base)
+    int32_t  var_offset;       // compile-time byte offset from the var's start (k for var+k, -k for var-k); 0 with no var
     uint8_t  marker;           // zp_marker: which size-0 marker kind this record is, or none (size == 0 iff marker != none)
     uint32_t literal_addr;     // a non-ZA_AUTO zero-page operand's known address/base, or RC_INDEX_NONE (pool-store check)
-    uint32_t target;           // branch/jump/call target address (same section only), or RC_INDEX_NONE
-    uint32_t target_scope;     // scope of the target LABEL, when the operand named one, else RC_INDEX_NONE
-    cursor   target_def;       // def cursor of the target label, or cursor_none; with target_scope, its identity
+    uint32_t target;           // branch/jump/call target address, or RC_INDEX_NONE
+    uint32_t target_scope;     // scope of the LABEL the operand's value came from (lab, an alias, lab+2), else RC_INDEX_NONE
+    cursor   target_def;       // def cursor of that label, or cursor_none; with target_scope, its identity
     uint8_t  target_via;       // zp_target_via: how the transfer reaches its destination
     bool     target_is_zpvar;  // the target names a ZA_AUTO vector WE own: computed flow, never an external OS vector
     uint32_t section;          // which section this instruction's bytes live in (half of a block's identity)
@@ -142,9 +143,10 @@ typedef enum zp_cflow_kind {
 } zp_cflow_kind;
 
 typedef struct zp_cflow {
+    uint32_t section;       // the site's section: two banks at one address must not share annotations
     uint32_t site;          // pc of the annotated instruction: ZA_UNREACHABLE its own pc; others the JSR/JMP/branch pc
     uint32_t target;        // a target address (ZA_CANCALL/ZA_CANJUMP/ZA_RETURNTO); RC_INDEX_NONE for the bare markers
-    uint32_t target_scope;  // scope of the target LABEL, when the annotation named one, else RC_INDEX_NONE
+    uint32_t target_scope;  // scope of the LABEL the target value came from, else RC_INDEX_NONE
     cursor   target_def;    // def cursor of that label, or cursor_none; with target_scope, picks the target's section
     uint8_t  kind;          // zp_cflow_kind
     cursor   at;            // where the annotation sits, for diagnostics
@@ -154,14 +156,21 @@ typedef struct zp_cflow {
 #define RC_ARRAY_NAME zp_cflow
 #include "richc/template/array.h"
 
+// Is cf an annotation of kind, sited at (section, pc)? The one way to match a site.
+static inline bool zp_cflow_is_at(zp_cflow cf, zp_cflow_kind kind, uint32_t section, uint32_t pc)
+{
+    return cf.kind == (uint8_t) kind && cf.section == section && cf.site == pc;
+}
+
 
 // A label marker: where in the object a label sits. It ties the label's identity - its (scope, def), the same
-// pair scopes_resolve_symbol_def hands back for a reference - to its physical placement (section + address).
-// The CFG uses it to turn a control-transfer target that named a label into the exact block, which is what
-// lets two sections (paged banks) share an address yet resolve a JSR bank5.entry unambiguously - the label
-// picks the section, the raw address never could. Recorded by handle_label on the final pass, feature on.
+// pair a label value carries - to its physical placement (section + address). The CFG uses it to place a
+// control-transfer target that is a label's value in the label's own section, which is what lets two
+// sections (paged banks) share an address yet resolve a JSR bank5.entry unambiguously - the label picks
+// the section, the raw address never could. Recorded by handle_label / handle_local_label on the final
+// pass, feature on.
 typedef struct zp_label {
-    uint32_t scope;    // scope the label was defined in (matches scopes_resolve_symbol_def's .scope)
+    uint32_t scope;    // scope the label was defined in (a label value's label.scope)
     cursor   def;      // the label's def cursor - its identity across passes
     uint32_t section;  // the section the label sits in
     uint32_t pc;       // the label's address
@@ -262,9 +271,9 @@ uint32_t         zeropage_insn_count(const zeropage *zp);
 zp_insn          zeropage_insn_get(const zeropage *zp, uint32_t index);
 rc_view_zp_insn  zeropage_insns(const zeropage *zp);   // the whole insn list, for the CFG builder
 
-// Fold a ZA_INDEXEDBY declaration onto a recorded access: the largest declared index is what the
-// bounds check reaches with. A second declaration on the same access unions (the larger max wins).
-void zeropage_set_index_max(zeropage *zp, uint32_t index, uint8_t max);
+// Fold a ZA_INDEXEDBY declaration onto a recorded access: the smallest and largest declared indices are
+// what the bounds check reaches with. A second declaration on the same access unions (the wider bounds win).
+void zeropage_set_index_bounds(zeropage *zp, uint32_t index, uint8_t min, uint8_t max);
 
 // Record one control-flow annotation (final pass only). Returns its index.
 uint32_t         zeropage_add_cflow(zeropage *zp, zp_cflow cf);

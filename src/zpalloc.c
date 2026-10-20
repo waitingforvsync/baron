@@ -39,7 +39,7 @@ static bool spans_overlap(uint32_t a, uint32_t aw, uint32_t b, uint32_t bw)
 }
 
 
-zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *reserved,
+zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, rc_view_u32 floors, const rc_bitset *reserved,
                      rc_arena *arena, rc_arena scratch)
 {
     (void) scratch;
@@ -73,7 +73,8 @@ zp_coloring zp_color(const liveness *lv, rc_view_zp_var vars, const rc_bitset *r
             if (liveness_class_of(lv, v) == vreg_class_unused) {
                 continue;   // no instruction touches it: no address (base stays NONE, and NOT a spill)
             }
-            for (uint32_t at = 0; at + w <= zp_bytes; at++) {
+            uint32_t lowest = v < floors.num ? rc_view_u32_get(floors, v) : 0;
+            for (uint32_t at = lowest; at + w <= zp_bytes; at++) {
                 if (!span_reserved(reserved, at, w)) {
                     continue;
                 }
@@ -163,7 +164,7 @@ RC_TEST(zpalloc, disjoint_share_interfering_split)
     lv.classes = make_classes((uint8_t[]) {vreg_class_input, vreg_class_input, vreg_class_input}, 3, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x7F, &arena);
-    zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
+    zp_coloring col = zp_color(&lv, vars.view, (rc_view_u32) {0}, &reserved, &arena, scratch);
 
     RC_CHECK_FALSE(col.any_spilled);
     RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);   // first placed
@@ -191,7 +192,7 @@ RC_TEST(zpalloc, width_two_takes_consecutive_bytes)
     lv.classes = make_classes((uint8_t[]) {vreg_class_temp, vreg_class_temp}, 2, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x7F, &arena);
-    zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
+    zp_coloring col = zp_color(&lv, vars.view, (rc_view_u32) {0}, &reserved, &arena, scratch);
 
     RC_CHECK_FALSE(col.any_spilled);
     RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);   // 2-byte pointer, first by FFD, at 0x70-0x71
@@ -218,12 +219,44 @@ RC_TEST(zpalloc, unused_variable_is_skipped)
     lv.classes = make_classes((uint8_t[]) {vreg_class_temp, vreg_class_unused, vreg_class_temp}, 3, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x7F, &arena);
-    zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
+    zp_coloring col = zp_color(&lv, vars.view, (rc_view_u32) {0}, &reserved, &arena, scratch);
 
     RC_CHECK_FALSE(col.any_spilled);            // a skipped unused var is NOT a spill
     RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);
     RC_CHECK(rc_view_u32_get(col.base, 1), ==, RC_INDEX_NONE);   // no address at all
     RC_CHECK(rc_view_u32_get(col.base, 2), ==, 0x71u);           // packs as if v1 were never declared
+
+    rc_arena_deinit(&scratch);
+    rc_arena_deinit(&arena);
+}
+
+RC_TEST(zpalloc, floor_keeps_a_variable_high)
+{
+    rc_arena arena = rc_arena_make_default();
+    rc_arena scratch = rc_arena_make_default();
+
+    // Two variables that never interfere would share &00, but v1 is read as v1-4,X: its operand byte
+    // must stay in page zero, so it may sit no lower than &04.
+    rc_array_zp_var vars = rc_array_zp_var_make(4, &arena);
+    add_var(&vars, 1, &arena); add_var(&vars, 1, &arena);
+
+    liveness lv = {0};
+    lv.interfere = make_interfere(2, &arena);
+    lv.classes = make_classes((uint8_t[]) {vreg_class_temp, vreg_class_temp}, 2, &arena);
+
+    rc_bitset reserved = reserve_range(0x00, 0x0F, &arena);
+    uint32_t floors[] = {0, 4};
+    zp_coloring col = zp_color(&lv, vars.view, (rc_view_u32) RC_VIEW(floors), &reserved, &arena, scratch);
+
+    RC_CHECK_FALSE(col.any_spilled);
+    RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x00u);
+    RC_CHECK(rc_view_u32_get(col.base, 1), ==, 0x04u);
+
+    // A floor past every reserved byte leaves nowhere to go: a spill.
+    uint32_t too_high[] = {0, 0x10};
+    col = zp_color(&lv, vars.view, (rc_view_u32) RC_VIEW(too_high), &reserved, &arena, scratch);
+    RC_CHECK_TRUE(col.any_spilled);
+    RC_CHECK(rc_view_u32_get(col.base, 1), ==, RC_INDEX_NONE);
 
     rc_arena_deinit(&scratch);
     rc_arena_deinit(&arena);
@@ -244,7 +277,7 @@ RC_TEST(zpalloc, spill_when_out_of_bytes)
     lv.classes = make_classes((uint8_t[]) {vreg_class_temp, vreg_class_temp}, 2, &arena);
 
     rc_bitset reserved = reserve_range(0x70, 0x70, &arena);   // exactly one byte
-    zp_coloring col = zp_color(&lv, vars.view, &reserved, &arena, scratch);
+    zp_coloring col = zp_color(&lv, vars.view, (rc_view_u32) {0}, &reserved, &arena, scratch);
 
     RC_CHECK_TRUE(col.any_spilled);
     RC_CHECK(rc_view_u32_get(col.base, 0), ==, 0x70u);

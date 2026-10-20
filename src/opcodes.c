@@ -496,59 +496,11 @@ static bool mode_has_zp_operand(addr_mode mode)
 }
 
 
-// The attribution of one operand to a ZA_AUTO variable: the referenced binding's identity (def cursor + the
-// scope it was declared in) and how this instruction touches it. All-none when the operand names no bound
-// symbol.
-typedef struct operand_ref {
-    cursor   def;
-    uint32_t scope;
-    bool     outside_envelope;   // the variable is reached by an indexed / indexed-indirect mode (unsound)
-    bool     indirect;           // the variable is dereferenced as a zero-page POINTER ((var),Y / (var)) - it
-
-                                 // needs 2 bytes, so a 1-byte ZA_AUTO1 here is refused (see zeropage_finalize)
-} operand_ref;
-
-// If the operand's leading identifier resolves (with shadowing) to a bound symbol, return its identity;
-// otherwise an all-none ref. The identity is mapped to a concrete vreg LATER (zeropage_resolve_vregs),
-// once the whole ZA_AUTO registry is populated, so a use before the declaration still attributes.
-// operand_pos is where the operand expression begins, or RC_INDEX_NONE for a no-operand / immediate
-// instruction (never a variable).
-static operand_ref attribute_operand(baron *b, cursor at, uint32_t scope, addr_mode mode,
-                                     uint32_t operand_pos)
-{
-    operand_ref none = {
-        .def   = cursor_none(),
-        .scope = RC_INDEX_NONE,   // outside_envelope/indirect: zero-init
-    };
-    if (operand_pos == RC_INDEX_NONE) {
-        return none;
-    }
-
-    rc_str src = source_files_text(&b->source_files, at.source);
-    lexer_result lx = lexer_next(src, operand_pos, operand_tokens);
-    if (lx.token.type != lexeme_type_identifier) {
-        return none;   // a literal address or a register
-    }
-
-    symbol_ref ref = scopes_resolve_symbol_def(&b->scopes, scope, lx.token.identifier.name);
-    if (cursor_is_none(ref.def)) {
-        return none;   // resolves to nothing (undefined / not a bare symbol)
-    }
-
-    return (operand_ref) {
-        .def              = ref.def,
-        .scope            = ref.scope,
-        .outside_envelope = !mode_in_var_envelope(mode),
-        .indirect         = (mode == addr_mode_indy || mode == addr_mode_ind),
-    };
-}
-
-
 // Record one assembled instruction into the zero-page IR (final active pass, feature on), for the CFG +
 // liveness passes: its address + size, control-flow class + resolved target (branch/jump/call to a plain
 // abs/rel address; an indirect/computed target stays RC_INDEX_NONE), and its variable touch (if any).
-static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, mnemonic m,
-                        addr_mode mode, uint16_t cell, int_argument arg, uint32_t operand_base, uint32_t pc)
+static void record_insn(baron *b, cursor at, uint32_t section, parse_flags flags, mnemonic m,
+                        addr_mode mode, uint16_t cell, int_argument arg, uint32_t pc)
 {
     if (!zp_recording(b, flags, section)) {
         return;
@@ -570,22 +522,17 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
                       : (mode == addr_mode_ind16x) ? zp_target_via_table
                                                    : zp_target_via_direct;
 
-    operand_ref op = attribute_operand(b, at, scope, mode, operand_base);
-
-    // The operand's identity plays one of two roles by control-flow class: for a branch/jump/call it
-    // names the TARGET; for everything else it may name a ZA_AUTO VARIABLE the instruction touches.
-    // An indirect jump THROUGH a ZA_AUTO plays both at once: the variable is the dispatch target AND
-    // the jump READS its bytes at run time, so it must also count as a touch - or liveness would let
-    // another variable take the vector's bytes between its last store and the jump.
-    //
-    // WHERE the identity comes from differs too: a ZA_AUTO reference carries its own identity in its
-    // VALUE (so x = var : LDA x attributes through the alias), while a label target still resolves
-    // through attribute_operand's lex of the operand text (labels are plain numbers, nothing to carry).
+    // The operand's identity rides in its VALUE - a ZA_AUTO's or a label's - so it attributes however
+    // the operand was spelt (an alias, a macro argument, lab+2). It plays one of two roles by control-flow
+    // class: for a branch/jump/call it names the TARGET; for everything else, a ZA_AUTO VARIABLE the
+    // instruction touches. An indirect jump THROUGH a ZA_AUTO plays both at once: the variable is the
+    // dispatch target AND the jump READS its bytes at run time, so it must also count as a touch - or
+    // liveness would let another variable take the vector's bytes between its last store and the jump.
     bool is_control  = (flow == zp_flow_branch || flow == zp_flow_jump || flow == zp_flow_call);
     bool vector_var  = arg.za_auto && (via == zp_target_via_vector || via == zp_target_via_table);
-    bool is_var      = !is_control || vector_var;
-    uint32_t id_scope = arg.za_auto ? arg.zp_scope : op.scope;
-    cursor   id_def   = arg.za_auto ? arg.zp_def : op.def;
+    bool is_var      = arg.za_auto && (!is_control || vector_var);
+    uint32_t id_scope = arg.za_auto ? arg.zp_scope : (arg.labelled ? arg.label.scope : RC_INDEX_NONE);
+    cursor   id_def   = arg.za_auto ? arg.zp_def : (arg.labelled ? arg.label.def : cursor_none());
 
     // A statically known zero-page operand that is no ZA_AUTO reference: carried so the finalizer can warn
     // when a fixed address aims into the pool (the boot-wipe idiom, or a genuine stomp). The widened
@@ -626,16 +573,20 @@ static void record_insn(baron *b, cursor at, uint32_t scope, uint32_t section, p
         .vreg           = RC_INDEX_NONE,   // resolved from (var_scope, var_def) post-pass
         .var_scope      = is_var ? id_scope : RC_INDEX_NONE,
         .var_def        = is_var ? id_def : cursor_none(),
-        .var_indexed    = is_control ? (vector_var && via == zp_target_via_table) : op.outside_envelope,
-        .var_indirect   = is_control ? (vector_var && via == zp_target_via_vector) : op.indirect,
+        // Indexed / indexed-indirect modes reach past the addressed byte (outside the envelope); (var),Y and
+        // (var) dereference it as a two-byte pointer.
+        .var_indexed    = is_control ? vector_var && via == zp_target_via_table : is_var && !mode_in_var_envelope(mode),
+        .var_indirect   = is_control ? vector_var && via == zp_target_via_vector
+                                     : is_var && (mode == addr_mode_indy || mode == addr_mode_ind),
 
         // (var,X) and JMP (table,X) read a 2-byte entry AT the indexed offset, so a declared index
         // bound (ZA_INDEXEDBY) must leave room for the pair, not just the first byte.
         .var_indexed_ptr = mode == addr_mode_indx || mode == addr_mode_ind16x,
 
-        // A ZA_AUTO operand's known value IS the offset into the variable (0 for var, k for var+k) -
-        // the base does not exist yet. Kept so the finalize pass can bounds-check it against the width.
-        .var_offset     = (arg.za_auto && is_var) ? (uint32_t) arg.value : RC_INDEX_NONE,
+        // A ZA_AUTO operand's known value IS the offset from the variable's start (0 for var, k for
+        // var+k, -k for var-k) - the base does not exist yet. Kept so the finalize pass can bounds-check
+        // it against the width, and keep the variable high enough for an offset below it.
+        .var_offset     = is_var ? (int32_t) arg.value : 0,
         .literal_addr   = literal ? (uint32_t) arg.value : RC_INDEX_NONE,
         .target         = target,
         .target_scope   = is_control ? id_scope : RC_INDEX_NONE,
@@ -656,7 +607,6 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     uint32_t insn_pc = sections_pc(&b->sections, section);   // this instruction's address (before it emits)
     addr_mode mode;
     int_argument arg = {.type = int_argument_type_known};
-    uint32_t operand_base = RC_INDEX_NONE;   // where a memory operand's expression begins (for VAR observation)
     uint32_t  after;                       // past the operand shell, before the separator
 
     lexer_result peek = lexer_next(src, start, operand_tokens);   // dispatches '#' / '(' / plain below
@@ -684,7 +634,6 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
         after = e.next;
     }
     else if (peek.token.type == lexeme_type_open_paren) {
-        operand_base = peek.next;   // the pointer expression inside the parentheses
         expr_result e = eval(b, cursor_at(at, peek.next), scope, section, flags.active, scratch);
         if (e.error != expr_error_none) {
             return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
@@ -745,7 +694,6 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
             }
         }
         if (!handled) {
-            operand_base = start;   // the zero-page / absolute operand expression
             expr_result e = eval(b, cursor_at(at, start), scope, section, flags.active, scratch);
             if (e.error != expr_error_none) {
                 return syntax_error(b, error_type_expression, cursor_at(at, e.error_at));
@@ -762,7 +710,9 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
                 mode = addr_mode_rel;
             }
             else {
-                mode = resolve_direct(m, ix.reg, arg.type == int_argument_type_known, arg.value);
+                // A ZA_AUTO address always lands in page zero (the allocator sees to it, an offset below
+                // the variable included); its value here is only the offset, no address to size by.
+                mode = resolve_direct(m, ix.reg, arg.type == int_argument_type_known, arg.za_auto ? 0 : arg.value);
             }
             after = ix.next;
         }
@@ -793,7 +743,7 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
     }
 
     // Record this instruction into the ZP IR (final active pass, feature on) for the CFG + liveness passes.
-    record_insn(b, at, scope, section, flags, m, mode, cell, arg, operand_base, insn_pc);
+    record_insn(b, at, section, flags, m, mode, cell, arg, insn_pc);
 
     uint32_t code0 = sections_code(&b->sections, section).num;   // where this instruction's bytes begin
 
@@ -836,15 +786,17 @@ struct parse_result opcode_parse(baron *b, mnemonic m, cursor stmt, cursor at,
             sections_emit_u8(&b->sections, section, off);
         }
         else {
+            // A ZA_AUTO's offset stands in for an address it is no judge of: finalize bounds-checks the
+            // access, and the allocator keeps the real one in page zero.
             int64_t lo = (mode == addr_mode_imm) ? -128 : 0;   // immediates may be written signed (#-1)
-            if (arg.type == int_argument_type_known && (arg.value < lo || arg.value > 0xFF)) {
+            if (arg.type == int_argument_type_known && !arg.za_auto && (arg.value < lo || arg.value > 0xFF)) {
                 semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, start));
             }
             sections_emit_u8(&b->sections, section, (uint8_t)(arg.value & 0xFF));
         }
     }
     else if (width == 2) {
-        if (arg.type == int_argument_type_known && (arg.value < 0 || arg.value > 0xFFFF)) {
+        if (arg.type == int_argument_type_known && !arg.za_auto && (arg.value < 0 || arg.value > 0xFFFF)) {
             semantic_error(b, flags, error_type_value_out_of_range, cursor_at(at, start));
         }
 

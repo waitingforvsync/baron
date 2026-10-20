@@ -8,7 +8,8 @@
 
 // A basic block: a maximal straight-line run of instructions with a single entry and a single exit,
 // indexing into the instruction list rather than owning insns. (section, pc) is its identity - paged
-// banks may share a pc, and only a control transfer that names a label crosses sections.
+// banks may share a pc, and a control transfer crosses sections by a label's value (or, for a plain
+// number, by landing on code nowhere else - see cfg_call_targets).
 //
 // unknown_succ: control may ALSO leave to an address we cannot model (an unannotated indirect jump
 // through a vector WE assembled, an indexed dispatch, an unresolved target), so the succ slice is
@@ -38,7 +39,7 @@ typedef struct basic_block {
 typedef struct cfg {
     rc_view_basic_block  blocks;   // built in full by cfg_build; nothing grows or mutates it after
     rc_view_u32          succs;    // the shared successor pool; each block owns a contiguous slice of it
-    rc_view_zp_label     labels;   // retained so a labelled target resolves to its block on demand (cfg_target_block)
+    rc_view_zp_label     labels;   // retained so a label's value resolves to its block on demand (cfg_call_targets)
 } cfg;
 
 // Build the CFG for insns (recorded in program order, sections interleaving). labels resolve a
@@ -54,24 +55,18 @@ cfg cfg_build(rc_view_zp_insn insns, rc_view_zp_cflow cflows, rc_view_zp_label l
 // in-section target LOCATION to the block it enters (a linear scan - blocks are few).
 uint32_t cfg_block_at(cfg g, uint32_t section, uint32_t pc);
 
-// The block a control-transfer instruction n targets, or RC_INDEX_NONE. A named-label target resolves
-// through the markers to its own section's block (crossing sections); a bare numeric target resolves within
-// n's own section only; a computed / unregistered target resolves to nothing. This is the one place that
-// turns a target into a block, shared by the CFG's edge wiring and the callee-footprint walk.
-uint32_t cfg_target_block(cfg g, zp_insn n);
-
 // Does n's control transfer leave the assembled program for external code (an OS or ROM entry)? True for a
-// direct branch/jump/call whose constant destination matches no assembled code, and for an indirect JMP
-// through a vector that is not one of our own labels (a fixed OS vector). Meaningful once cfg_target_block
-// has come back RC_INDEX_NONE: it separates "went somewhere we did not assemble" (benign - external code
-// touches no ZA_AUTO, since ZA_POOL names bytes nothing outside the program uses) from "went somewhere we
-// cannot pin down" (the conservative taint / unknown-call case).
+// direct branch/jump/call whose destination lands on no assembled code (a constant off the stream, or a label
+// on code we did not assemble, like an INCBIN'd player), and for an indirect JMP through a vector that is
+// not one of our own labels (a fixed OS vector). It separates "went somewhere we did not assemble" (benign -
+// external code touches no ZA_AUTO, since ZA_POOL names bytes nothing outside the program uses) from "went
+// somewhere of ours" and "went somewhere we cannot pin down" (the conservative taint / unknown-call case).
 bool cfg_target_is_external(cfg g, zp_insn n);
 
-// The section a declared annotation target (ZA_CANJUMP / ZA_CANCALL / ZA_RETURNTO) at a site in
-// site_section lands in: a target that named a label is in the label's own section, as a literal
-// operand's is (cfg_target_block); a bare address stays in site_section.
-uint32_t cfg_cflow_target_section(cfg g, zp_cflow cf, uint32_t site_section);
+// The section a declared annotation target (ZA_CANJUMP / ZA_CANCALL / ZA_RETURNTO) lands in: a
+// label's value is in the label's own section, as a literal operand's is; a plain number stays in the
+// site's section.
+uint32_t cfg_cflow_target_section(cfg g, zp_cflow cf);
 
 // The i-th successor block index of b (i < b.succ_count). Reads the shared successor pool.
 uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
@@ -79,7 +74,10 @@ uint32_t cfg_succ(cfg g, basic_block b, uint32_t i);
 // The callee entry blocks a call site can reach - the single call-target policy, shared by the
 // footprint walk and the callee-input liveness injection. A ZA_CANCALL at the site overrides the
 // literal target with the declared set; a declared address with no block is an external arm, which
-// returns having touched nothing (so a must-write intersection over the arms is empty).
+// returns having touched nothing (so a must-write intersection over the arms is empty). Unannotated,
+// the operand decides: a label's value lands exactly where the label sits; a plain number on its own
+// section's code if there is any at that address, else on every section's (a bare JSR &8003 cannot
+// say which bank); nothing found is an external call.
 typedef struct call_targets {
     rc_view_u32  blocks;    // in-program callee entry block indices (zero-init = no arms)
     bool         unknown;   // an untrackable (computed, unannotated) arm

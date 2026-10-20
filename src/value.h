@@ -10,7 +10,7 @@
 
 
 // The single value type flowing through Baron's expression machinery: a tagged union of none, number,
-// boolean, string, list, range, error, or ZA_AUTO address. Evaluation errors (unknown symbol, divide
+// boolean, string, list, range, error, ZA_AUTO address, or label address. Evaluation errors (unknown symbol, divide
 // by zero, ...) are carried as a value rather than aborting, so they can propagate to the end of an
 // expression and let assembly continue across an as-yet-unresolvable reference.
 
@@ -41,6 +41,7 @@ typedef enum value_type {
     value_type_range,
     value_type_error,
     value_type_za_auto,   // the address of a ZA_AUTO variable, unknown until allocation
+    value_type_label,     // a label's address, still knowing its label; a number everywhere else
 } value_type;
 
 
@@ -84,14 +85,25 @@ typedef struct value_error {
 typedef struct value_za_auto {
     uint32_t scope;     // the variable's declaring scope index...
     cursor   def;       // ...and its ZA_AUTO statement's def cursor: together, its identity
-    int32_t  offset;    // byte offset within the variable
+    int32_t  offset;    // byte offset from the variable's start (below it for v-4)
     rc_str   name;      // the variable's name, for diagnostics (view into permanent backing)
 } value_za_auto;
+
+// Which label a label value came from: the label's scope and def cursor, the identity the zero-page
+// allocator's markers know it by. It rides with the address through aliases, macro arguments, lists
+// and offsets (lab+2), so the allocator can place a transfer in the right bank however it was written.
+typedef struct value_label {
+    uint32_t scope;
+    cursor   def;
+} value_label;
 
 struct value {
     uint8_t type;   // value_type
     union {
-        double       numeric;           // also the boolean payload, canonically 1.0 / 0.0
+        struct {
+            double      numeric;        // also the boolean and label payload; booleans canonically 1.0 / 0.0
+            value_label label;          // value_type_label only
+        };
         rc_str       string;            // view into source or arena; concat allocates
         value_list   list;              // rc_view_value: const value *, num
         value_range  range;
@@ -124,6 +136,10 @@ value value_make_error_detail(error_type e, rc_str detail);   // + a payload str
 value value_make_range(value_range r);
 value value_make_list(rc_view_value items);    // wraps the view; does not copy
 value value_make_za_auto(uint32_t scope, cursor def, int32_t offset, rc_str name);
+static inline value value_make_label(double address, value_label label)
+{
+    return (value) {.type = value_type_label, .numeric = address, .label = label};
+}
 
 // Deep-copy v into arena so it can outlive the (scratch) arena it was built in - the deliberate
 // promotion across the scratch-to-permanent boundary (a value is a non-owning handle, so a plain
@@ -161,7 +177,8 @@ static inline int64_t value_to_i64(double d)
 // Type queries - inline, being in every evaluator loop.
 static inline value_type value_type_of(value v) { return (value_type) v.type; }
 static inline bool value_is_none(value v)       { return v.type == value_type_none; }
-static inline bool value_is_numeric(value v)    { return v.type == value_type_numeric; }
+static inline bool value_is_label(value v)      { return v.type == value_type_label; }
+static inline bool value_is_numeric(value v)    { return v.type == value_type_numeric || value_is_label(v); }   // not a boolean
 static inline bool value_is_boolean(value v)    { return v.type == value_type_boolean; }
 static inline bool value_is_number(value v)     { return value_is_numeric(v) || value_is_boolean(v); }   // coerces to a number
 static inline bool value_is_string(value v)     { return v.type == value_type_string; }
@@ -181,7 +198,8 @@ static inline bool value_is_simple(value v)
 static inline bool value_is_compound(value v)   { return value_is_list(v) || value_is_range(v); }
 
 // Structural equality: types must match, then compared field-wise (lists
-// element-wise, recursively).
+// element-wise, recursively). Two labels must be the same label, not just the same address - this
+// is the settling test, and a binding that moves from one label to another has changed.
 bool value_is_equal(value a, value b);
 
 // Diagnostics.

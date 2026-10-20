@@ -133,20 +133,6 @@ cursor scopes_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
 // whose declaration holds no number (an unused variable, removed) is left as it is.
 void scopes_resolve_za_auto(scopes *s);
 
-// A resolved binding's IDENTITY: its def cursor plus the declaring scope. The def cursor ALONE is
-// not unique - a macro / FOR body shares one def across its instantiations - so the per-instantiation
-// scope is what tells two instances apart. cursor_none / RC_INDEX_NONE when the name is unbound.
-typedef struct symbol_ref {
-    cursor   def;
-    uint32_t scope;
-} symbol_ref;
-
-// Resolve a name from scope_index with the same rules as scopes_get_symbol - a bare name walks up the parent
-// chain (nearest enclosing definition wins), a dotted path (a.b.sym) descends the child scopes - but return
-// the binding's identity (def + declaring scope) rather than its value. Used by the ZP allocator to map an
-// operand to the exact variable instance it references, wherever it was declared.
-symbol_ref scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name);
-
 // Look a symbol up from scope_index: a bare name walks up the parent chain (nearest wins); a dotted
 // path (a.b.sym) finds its head the same way, then descends strictly through the child maps, reading
 // the final name in the leaf scope alone. Hands back value_make_none() if nothing matches.

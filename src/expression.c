@@ -39,9 +39,10 @@ typedef enum prec {
 static int32_t  as_i32(value v) { return (int32_t)value_to_i64(v.numeric); }
 static uint32_t as_u32(value v) { return (uint32_t)value_to_i64(v.numeric); }
 
-// Adjust a za_auto address by a numeric delta. The offset must stay an integral, non-negative byte
-// index into the variable; whether it stays within the declared WIDTH is checked later, at the
-// operand bounds check, where the width is known.
+// Adjust a za_auto address by a numeric delta. The offset must stay an integral byte offset; it may
+// fall below the variable (v-4,X with X from 4 up lands inside it), so whether an access stays within
+// the variable is judged later, at the operand bounds checks, where the width and any declared index
+// set are known.
 static value zp_offset_add(value zp, double delta)
 {
     if (floor(delta) != delta) {
@@ -49,12 +50,19 @@ static value zp_offset_add(value zp, double delta)
     }
 
     int64_t off = (int64_t) zp.za_auto.offset + (int64_t) delta;
-    if (off < 0 || off > INT32_MAX) {
+    if (off < INT32_MIN || off > INT32_MAX) {
         return value_make_error(error_type_domain);
     }
 
     zp.za_auto.offset = (int32_t) off;
     return zp;
+}
+
+
+// A number that is not a label's address: what a label can move by and stay a label.
+static bool plain_number(value v)
+{
+    return value_is_number(v) && !value_is_label(v);
 }
 
 
@@ -78,6 +86,16 @@ static value op_add(value a, value b, rc_arena *arena)
         return zp_offset_add(b, a.numeric);
     }
 
+    // A label plus a plain number is somewhere further on in the same label's code (lab+2), so it
+    // keeps the label; the sum of two labels is no address of either, so it is a plain number.
+    if (value_is_label(a) && plain_number(b)) {
+        return value_make_label(a.numeric + b.numeric, a.label);
+    }
+
+    if (plain_number(a) && value_is_label(b)) {
+        return value_make_label(a.numeric + b.numeric, b.label);
+    }
+
     NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric + b.numeric);
 }
@@ -97,6 +115,12 @@ static value op_sub(value a, value b, rc_arena *arena)
             return value_make_numeric((double) a.za_auto.offset - (double) b.za_auto.offset);
         }
         return value_make_error(error_type_domain);
+    }
+
+    // A label less a plain number keeps the label (lab-1); the distance between two labels, or a
+    // number less a label, is a plain number.
+    if (value_is_label(a) && plain_number(b)) {
+        return value_make_label(a.numeric - b.numeric, a.label);
     }
 
     NEEDS_NUM(value_is_number(a) && value_is_number(b));
@@ -399,8 +423,10 @@ static value fn_hex(value v, rc_arena *arena)
 {
     // A ZA_AUTO address stands in with its offset until allocation, exactly as an instruction operand
     // does; the real byte arrives on the output pass, which is the pass PRINT speaks on.
+    // Its stand-in keeps to one byte, as the real address will (an offset below the variable included),
+    // so the text is two digits on every pass and nothing after it moves.
     NEEDS_NUM(value_is_number(v) || value_is_za_auto(v));
-    uint32_t u = value_is_za_auto(v) ? (uint32_t) v.za_auto.offset : as_u32(v);
+    uint32_t u = value_is_za_auto(v) ? (uint32_t) v.za_auto.offset & 0xFFu : as_u32(v);
 
     rc_mstr m = rc_mstr_make(8, arena);
     if (u <= 0xFFu) {
@@ -713,16 +739,17 @@ value range_to_list(value_range r, rc_arena *arena)
 
 
 // A number, or a flat list of nothing but numbers: the shape list arithmetic takes most of the time.
+// Labels go the long way, through the handlers, which know when to keep them ({a, b} + 3).
 static bool numbers_only(value v)
 {
-    if (value_is_number(v)) {
+    if (plain_number(v)) {
         return true;
     }
     if (!value_is_list(v)) {
         return false;
     }
     for (uint32_t i = 0; i < v.list.num; i++) {
-        if (!value_is_number(rc_view_value_get(v.list, i))) {
+        if (!plain_number(rc_view_value_get(v.list, i))) {
             return false;
         }
     }
@@ -1749,8 +1776,11 @@ static value find_one(value hay, value needle, find_index idx, rc_arena *arena)
         return at != RC_INDEX_NONE ? value_make_numeric((double) at) : not_found(needle, arena);
     }
 
+    // A label is its address here, as anywhere a program compares values.
+    value plain = value_is_label(needle) ? value_make_numeric(needle.numeric) : needle;
     for (uint32_t i = 0; i < hay.list.num; i++) {
-        if (value_is_equal(rc_view_value_get(hay.list, i), needle)) {
+        value v = rc_view_value_get(hay.list, i);
+        if (value_is_equal(value_is_label(v) ? value_make_numeric(v.numeric) : v, plain)) {
             return value_make_numeric((double) i);
         }
     }

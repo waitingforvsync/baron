@@ -75,6 +75,8 @@ typedef struct int_argument {
     uint32_t zp_scope;
     cursor   zp_def;
     rc_str   zp_name;
+    bool     labelled;       // a label's address (or an offset from one): label is which label
+    value_label label;
 } int_argument;
 
 int_argument int_argument_make(value v, bool final_pass, uint32_t at);

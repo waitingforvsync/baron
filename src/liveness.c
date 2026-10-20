@@ -176,9 +176,9 @@ static bool extent_walk(cfg g, uint32_t e, rc_bitset *in_ext, rc_array_u32 *stac
 
 // Which of its variable's bytes an instruction touches, as offset windows within the variable.
 //   read  - bytes whose OLD value the instruction consumes: the addressed byte (two for an indirect
-//           pointer deref), or the whole variable for an indexed / unknown-offset access.
+//           pointer deref), or the whole variable for an indexed (or out-of-range) access.
 //   write - bytes the instruction PROVABLY redefines: a direct store's one byte. An indexed or
-//           unknown-offset store redefines nothing provable (it still pins the variable for interference).
+//           out-of-range store redefines nothing provable (it still pins the variable for interference).
 typedef struct touch_window {
     uint32_t read_first, read_count;
     uint32_t write_first, write_count;
@@ -192,18 +192,19 @@ static touch_window insn_window(zp_insn n, uint16_t width)
         return (touch_window) {.write_first = 0, .write_count = width};
     }
 
-    bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
-    bool narrow = direct && n.var_offset + (n.var_indirect ? 2u : 1u) <= width;
+    bool     direct = !n.var_indexed && n.var_offset >= 0 && (uint32_t) n.var_offset < width;
+    uint32_t at     = direct ? (uint32_t) n.var_offset : 0;
+    bool     narrow = direct && at + (n.var_indirect ? 2u : 1u) <= width;
     return (touch_window) {
-        // Reads: the addressed byte (two for an indirect pointer deref) when the offset is known and in
-        // range, else the whole variable - indexed / unknown offset may consume any byte's old value.
-        .read_first  = (n.rw & vref_read) && narrow ? n.var_offset : 0,
+        // Reads: the addressed byte (two for an indirect pointer deref) when the offset is in range, else
+        // the whole variable - an indexed access may consume any byte's old value.
+        .read_first  = (n.rw & vref_read) && narrow ? at : 0,
         .read_count  = !(n.rw & vref_read) ? 0
                      : narrow              ? (n.var_indirect ? 2u : 1u)
                                            : width,
 
         // Writes: only a direct store proves anything, and a 6502 store writes one byte.
-        .write_first = (n.rw & vref_write) && direct ? n.var_offset : 0,
+        .write_first = (n.rw & vref_write) && direct ? at : 0,
         .write_count = (n.rw & vref_write) && direct ? 1u : 0u,
     };
 }
@@ -238,7 +239,7 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
     bool annotated = false;
     for (uint32_t j = 0; j < cflows.num; j++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, j);
-        if (cf.site != last.pc) {
+        if (cf.section != last.section || cf.site != last.pc) {
             continue;
         }
         if (cf.kind == zp_cflow_za_return) {
@@ -246,7 +247,7 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         }
         if (cf.kind == zp_cflow_za_canjump) {
             annotated = true;
-            if (cfg_block_at(g, cfg_cflow_target_section(g, cf, last.section), cf.target) == RC_INDEX_NONE) {
+            if (cfg_block_at(g, cfg_cflow_target_section(g, cf), cf.target) == RC_INDEX_NONE) {
                 return true;   // an external arm hands back, via the external routine's RTS
             }
         }
@@ -260,11 +261,7 @@ static bool block_returns(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
         return true;   // a bare RTS/RTI returns
     }
 
-    if (cfg_target_block(g, last) != RC_INDEX_NONE) {
-        return false;   // a plain resolved jump/branch: an ordinary edge, not an exit
-    }
-
-    return cfg_target_is_external(g, last);   // an unannotated external jump/branch out
+    return cfg_target_is_external(g, last);   // an unannotated jump/branch out; one landing on our code is an edge
 }
 
 
@@ -288,7 +285,7 @@ static rc_bitset call_kill_bytes(call_targets ct, rc_view_bitset mwb, uint32_t n
 // The bytes an instruction MAY write - the gate for the entry-input harvest and the return-edge mask.
 // The allocator's insn_window counts only PROVABLE redefinitions (an indexed store proves nothing, so it
 // kills nothing); the may questions are the opposite one - "could this have supplied a value?" - so
-// here an indexed / unknown-offset store counts for its WHOLE variable (it may have written any byte),
+// here an indexed (or out-of-range) store counts for its WHOLE variable (it may have written any byte),
 // while a ZA_DISCARD counts for nothing at all: it declares the old value dead, it supplies no new one.
 static touch_window may_write_window(zp_insn n, uint16_t width)
 {
@@ -296,9 +293,9 @@ static touch_window may_write_window(zp_insn n, uint16_t width)
         return (touch_window) {0};
     }
 
-    bool direct = !n.var_indexed && n.var_offset != RC_INDEX_NONE && n.var_offset < width;
+    bool direct = !n.var_indexed && n.var_offset >= 0 && (uint32_t) n.var_offset < width;
     return (touch_window) {
-        .write_first = direct ? n.var_offset : 0,
+        .write_first = direct ? (uint32_t) n.var_offset : 0,
         .write_count = direct ? 1u : width,
     };
 }
@@ -876,7 +873,7 @@ liveness liveness_analyze(cfg g, rc_view_zp_insn insns, rc_view_zp_cflow cflows,
 
     // Interference, per instruction. Sweep each block backward from its byte live-out: at any WRITE
     // the variable is pinned to its bytes, interfering with the owner of every other live byte
-    // (indexed and unknown-offset stores pin too, even though they kill nothing); then advance the
+    // (indexed and out-of-range stores pin too, even though they kill nothing); then advance the
     // live set - remove the provably-rewritten bytes, add the read ones. A lone STA ptr removes only
     // the LSB's byte, so the MSB keeps the pointer live; once the MSB's store joins it the whole
     // variable goes dead and the range genuinely ends.
@@ -1330,7 +1327,7 @@ RC_TEST(liveness, loop_carries_value_across_back_edge)
 
 // touch() with an explicit byte window: offset into the variable, indirect for a 2-byte pointer deref.
 static uint32_t touch_at(rc_array_zp_insn *insns, uint32_t pc, uint16_t size, uint32_t vreg, uint8_t rw,
-                         uint32_t offset, bool indirect, rc_arena *arena)
+                         int32_t offset, bool indirect, rc_arena *arena)
 {
     rc_array_zp_insn_push(insns,
         (zp_insn) {.pc = pc, .size = size, .flow = zp_flow_normal, .rw = rw, .vreg = vreg,
@@ -1695,7 +1692,7 @@ RC_TEST(liveness, entry_inputs_are_may_write_gated)
     rc_array_zp_insn idx = rc_array_zp_insn_make(4, &arena);
     rc_array_zp_insn_push(&idx,
         (zp_insn) {.pc = 0x2000, .size = 2, .flow = zp_flow_normal, .rw = vref_write, .vreg = 0,
-                   .var_indexed = true, .var_offset = RC_INDEX_NONE, .target = RC_INDEX_NONE,
+                   .var_indexed = true, .target = RC_INDEX_NONE,
                    .target_scope = RC_INDEX_NONE, .target_def = cursor_none(), .at = (cursor) {0}},
         &arena);
     touch(&idx, 0x2002, 2, zp_flow_normal, RC_INDEX_NONE, 0, vref_read, &arena);

@@ -171,8 +171,8 @@ Two details worth knowing:
 - **Attribution comes from the VALUE.** A ZA_AUTO reference evaluates to the typed placeholder, which
   carries its own identity - so `record_insn` reads the touched variable straight off the evaluated
   operand. Dotted paths (`STA sub.wid`), locals, and even *aliases* (`x = var : LDA x` - the identity
-  rides through the assignment) all attribute through one uniform channel. Only control-transfer
-  TARGETS still resolve by lexing the operand text (labels are plain numbers, with nothing to carry).
+  rides through the assignment) all attribute through one uniform channel. Control-transfer TARGETS
+  work the same way, through label values (see [Targets resolve by label](#targets-resolve-by-label)).
 
   One instruction plays both roles at once: a `JMP` through a ZA_AUTO vector names the variable as
   its target *and* reads its bytes, so it is recorded as a pointer read too. Without that, liveness
@@ -197,12 +197,17 @@ treats an indexed touch as using all of it, so an index that stays within the de
 Whether it *does* stay within the width is the one thing no assembly-time check can know. That part
 is trusted to the user, and said out loud with a default-level warning.
 
-`ZA_INDEXEDBY` turns that trust into a check. Declaring the possible index values stamps the largest
-one onto the access record, and this loop then verifies the whole reach: the fixed offset plus the
-largest index must fit inside the variable, with two bytes of room for the pointer forms `(var,X)`
-and `JMP (table,X)`. Out of range is refused; in range, the warning is dropped - there is nothing
-left to warn about. Liveness is unchanged either way: the whole variable stays live on an indexed
-touch, declared or not.
+`ZA_INDEXEDBY` turns that trust into a check. Declaring the possible index values stamps the smallest
+and largest onto the access record, and this loop then verifies the whole reach: the fixed offset
+plus the smallest index must not fall below the variable, and the fixed offset plus the largest must
+fit inside it, with two bytes of room for the pointer forms `(var,X)` and `JMP (table,X)`. Out of
+range is refused; in range, the warning is dropped - there is nothing left to warn about. Liveness is
+unchanged either way: the whole variable stays live on an indexed touch, declared or not.
+
+So the fixed offset may be negative - `rows-4,X` with the index counting from 4. Undeclared, such an
+access is refused (`za_auto_below_start`): only a declared set says the index brings it back inside.
+A typed placeholder carries its offset signed, so `rows-4` evaluates fine everywhere, and an operand
+holding one is always sized as zero page whatever its offset says.
 
 **A store to a fixed address inside the pool is a warning too** (opt-in, `--warn 2`). Such a store -
 a plain fixed address, or an indexed store's fixed base - names no variable, so it writes memory the
@@ -258,6 +263,9 @@ Two paged banks may both sit at `&8000`, so a block's identity is the pair `(sec
 the address alone. Within one section the pc only ever moves forward (asserted in debug builds), so
 the pair is unambiguous.
 
+An annotation's site is the same pair. A `ZA_CANJUMP` on one bank's `JMP` at `&8000` belongs to that
+`JMP` alone, never to whatever the other bank has at `&8000`.
+
 That holds for a reopened section too. A reopening takes no `org`, so each piece carries on from the
 address the last one stopped at, and its bytes follow the last piece's in the output. The pieces'
 records interleave with other sections' in the stream, but within the section the addresses still
@@ -273,11 +281,28 @@ what it buys - over at the [Calls](#calls) section.
 
 ### Targets resolve by label ###
 
-A branch or jump to a label finds the label's block through the recorded `zp_label` markers
-(`cfg_target_block`) - which is how a transfer crosses sections and still lands in the right bank.
-A bare numeric target resolves within its own section only. A `ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO`
-target that names a label resolves the same way (`cfg_cflow_target_section`), so a declared set can
-reach another section just as the literal operand it replaces can.
+A label binds a *label value*: its address, plus which label it is (its scope and def cursor).
+Adding or subtracting a plain number keeps the label, so `lab+2` is two bytes into `lab`'s code; any
+other arithmetic gives a plain number. Because the label rides in the value, it survives aliases
+(`far = sub`), macro arguments and list elements (`handlers = {a, b}`).
+
+A transfer whose operand is a label value lands in the label's own section, at the value's address,
+found through the recorded `zp_label` markers (`resolve_target_loc`). That is how a transfer crosses
+sections and still lands in the right bank. Offsets count: `JMP lab+2` lands two bytes past `lab`.
+
+A plain number cannot say which section it means, so it is placed in three steps:
+
+1. Code of its own section at that address, if there is any (`BNE *-3`).
+2. Failing that, the code at that address in *every* section. A bare `JSR &8003` into a paged bank
+   cannot say which bank, so all of them are callees: sound, if pessimistic. Name the label to be
+   exact.
+3. Failing that, nowhere we assembled: an exit (below).
+
+A `ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO` target resolves the same way (`cfg_cflow_target_section`),
+so a declared set can reach another section just as the literal operand it replaces can. The one
+difference: a plain number that lands on our own code is refused (`za_target_needs_label`). A
+declaration is trusted outright, and one that could quietly pick the wrong bank is worse than none.
+A plain number landing on nothing we assembled is an external arm, as before.
 
 An indirect `JMP`'s operand is different: it names the vector *cell* the address will be fetched
 from, not the destination (`zp_insn.target_via`), so the cell's own address is never mistaken for
@@ -287,7 +312,8 @@ somewhere control goes.
 
 `JSR &FFEE`, a tail `JMP &FFEE`, a jump through a fixed OS vector like `JMP (&FFFC)`: the
 destination matches nothing we assembled, so control has left the program
-(`cfg_target_is_external`). External code cannot touch the pool - `ZA_POOL` names precisely the
+(`cfg_target_is_external`). So has a call to a label on bytes we did not assemble as code, such as
+an `INCBIN`'d music player's `JSR player+3`. External code cannot touch the pool - `ZA_POOL` names precisely the
 bytes nothing else uses - so an external exit is as clean as an `RTS`, and needs no annotation.
 
 ### Flow we cannot place taints its block ###
@@ -865,7 +891,7 @@ init on another.
 
 #### Coverage details ####
 
-- An indexed or unknown-offset store covers its WHOLE variable: it proves no byte, but may have
+- An indexed store covers its WHOLE variable: it proves no byte, but may have
   written any - the exact inverse of the allocator's kill rule.
 - A `ZA_DISCARD` covers nothing: it declares the old value dead and supplies no new one.
 - Unknown and external call arms contribute nothing - a warning must not demand annotations, and
@@ -881,6 +907,8 @@ With the interference graph built, `zp_color` (`src/zpalloc.c`) assigns addresse
 - each variable takes the lowest reserved base whose whole span `[base, base+width)` is free of every
   interfering neighbour's span (`span_reserved` / `spans_overlap` - width-generic, so a table packs
   exactly like a pointer, just wider);
+- a variable read through a base below it (`rows-4,X`) has a *floor*: its operand byte is `rows-4`
+  itself, which must stay a zero-page address, so `rows` may sit no lower than `&04`;
 - an `unused` variable (touched by no instruction) is skipped entirely: warned once per declaration
   site, given no address, and its binding *removed* at the rewrite - as if never declared. If its
   address was used anyway, the warning gives way to a refusal at each use (below);
@@ -919,8 +947,9 @@ The refusals (all fatal):
 
 | Code | Cause |
 |------|-------|
-| `za_auto_narrow_pointer` / `za_auto_out_of_bounds` | an access window past the declared width |
-| `za_indexedby_out_of_range` | a declared index set reaching past the variable (the `ZA_INDEXEDBY` bounds check) |
+| `za_auto_narrow_pointer` / `za_auto_out_of_bounds` | an access window outside the declared width |
+| `za_auto_below_start` | an indexed access whose base sits below its variable, with no `ZA_INDEXEDBY` |
+| `za_indexedby_out_of_range` | a declared index set reaching outside the variable (the `ZA_INDEXEDBY` bounds check) |
 | `za_auto_bad_width` | `ZA_AUTO n` outside 1-256 (at parse) |
 | `za_auto_address` | a ZA_AUTO address in a context needing a number now: a condition, a count, an `org`, a `ZA_POOL` byte, an annotation operand (the typed placeholder refused at the use site) |
 | `za_auto_address_untouched` | the address of an `unused` variable used anyway. The final pass records every use of an address alone (`zp_address_use`: an `EQU*` element, an operand that neither reads nor writes - `LDA #var`, `JMP var` - a `PRINT`, a section attribute); finalize refuses each one whose variable no instruction touches, once per use site |
@@ -960,15 +989,6 @@ And the trust points - the deliberate holes in the proof, each an explicit contr
 
 Deliberate limitations, all soundness-safe or documented trust points:
 
-- **Only a bare label crosses sections in an annotation.** A `ZA_CANCALL`/`ZA_CANJUMP`/`ZA_RETURNTO`
-  target written as a label resolves by label, like a literal operand. A number, an offset from a
-  label, or a symbol bound to a target list (`handlers = {a, b}`) is a bare address resolved in the
-  annotating instruction's section, so it cannot name a target in a different bank.
-  (`ZA_ENTRY`/`ZA_INTERRUPT` take no operand, so they are intrinsically in the right section.)
-- **Annotation sites are bare addresses.** Two banks sharing an address would cross-talk on
-  their annotations - and since `ZA_UNREACHABLE` can sever a call's fall-through, that cross-talk
-  could *remove* an edge (the unsound direction) rather than merely add one. Keep annotations and
-  their sites in one bank until sites carry a section.
 - **The reserved set is global.** One physical zero page, one pool.
 - **Fall-through never crosses a section boundary.** A transfer's fall-through resolves in its own
   section (which, for a reopened section, reaches its next piece). Runtime flow that walks off the

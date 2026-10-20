@@ -85,6 +85,7 @@ value value_make_copy(value v, rc_arena *arena)
         case value_type_numeric:
         case value_type_boolean:
         case value_type_range:
+        case value_type_label:
         case value_type_za_auto:   // the name view is into permanent source text, so no copy needed
             return v;   // wholly inline: nothing to deep-copy
 
@@ -278,6 +279,10 @@ bool value_is_equal(value a, value b)
         case value_type_numeric:
         case value_type_boolean:   // canonical 1.0 / 0.0 payload, so the numeric compare is exact
             return a.numeric == b.numeric;
+        case value_type_label:
+            return a.numeric == b.numeric
+                && a.label.scope == b.label.scope
+                && cursor_is_equal(a.label.def, b.label.def);
         case value_type_string:
             return rc_str_is_equal(a.string, b.string);
         case value_type_error:
@@ -317,6 +322,7 @@ static void format_value(rc_mstr *out, value v, uint32_t max_list_elements, rc_a
             rc_mstr_append(out, RC_STR("none"), arena);
             return;
         case value_type_numeric:
+        case value_type_label:   // just its address: which label is the allocator's business
             // 10 significant digits: every 32-bit integer renders exactly (no point, no
             // exponent), which matters for addresses; the default 6 would mangle &FFFF1900.
             rc_mstr_append_f64(out, v.numeric, (rc_float_format) {.precision = 10}, arena);
@@ -430,6 +436,7 @@ void value_append_json(rc_mstr *out, value v, rc_arena *arena)
 {
     switch ((value_type) v.type) {
         case value_type_numeric:
+        case value_type_label:
             if (!isfinite(v.numeric)) {
                 rc_mstr_append(out, RC_STR("null"), arena);   // JSON has no NaN or infinity
             }
@@ -550,6 +557,35 @@ RC_TEST(value, scalar_equality)
     RC_CHECK_TRUE(value_is_equal(value_make_none(), value_make_none()));
     RC_CHECK_TRUE(value_is_equal(value_make_string(RC_STR("a")), value_make_string(RC_STR("a"))));
     RC_CHECK_FALSE(value_is_equal(value_make_string(RC_STR("a")), value_make_string(RC_STR("b"))));
+}
+
+RC_TEST(value, label_values)
+{
+    // A label value is a number to everyone but the allocator: numeric, simple, formats as its address.
+    value_label l1 = {.scope = 0, .def = {.source = 0, .pos = 10}};
+    value_label l2 = {.scope = 0, .def = {.source = 0, .pos = 20}};
+    value lab = value_make_label(0x2000, l1);
+    RC_CHECK_TRUE(value_is_label(lab));
+    RC_CHECK_TRUE(value_is_numeric(lab));
+    RC_CHECK_TRUE(value_is_number(lab));
+    RC_CHECK_TRUE(value_is_simple(lab));
+    RC_CHECK(lab.numeric, ==, 8192.0);
+    RC_CHECK_FALSE(value_is_label(value_make_numeric(0x2000)));
+
+    // Settling needs the same LABEL, not just the same address: two banks' labels share &8000.
+    RC_CHECK_TRUE(value_is_equal(lab, value_make_label(0x2000, l1)));
+    RC_CHECK_FALSE(value_is_equal(lab, value_make_label(0x2000, l2)));
+    RC_CHECK_FALSE(value_is_equal(lab, value_make_label(0x2001, l1)));
+    RC_CHECK_FALSE(value_is_equal(lab, value_make_numeric(0x2000)));
+
+    rc_arena arena = rc_arena_make_default();
+    rc_mstr text = rc_mstr_make(16, &arena);
+    value_format(&text, lab, &arena);
+    rc_mstr_append_char(&text, ' ', &arena);
+    value_append_json(&text, lab, &arena);
+    RC_CHECK(text.view, ==, RC_STR("8192 8192"));
+    RC_CHECK_TRUE(value_is_equal(value_make_copy(lab, &arena), lab));
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST(value, range_equality)

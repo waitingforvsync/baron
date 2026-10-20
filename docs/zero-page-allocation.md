@@ -151,8 +151,10 @@ variable. These are the promises it makes:
   *both* bytes tells Baron you're done with the old value, and the pair is free again.
 - **Sections are free.** Use as many as you like, at any addresses - including two at the same address
   (paged banks), which happily share zero-page bytes since they are never resident together. Just name
-  your cross-section entry points: a `JSR label` finds the right bank; a bare `JSR &8003` is assumed to
-  leave the program.
+  your cross-section entry points: a `JSR label` finds the right bank, and so does an alias of the
+  label, a macro argument, or `label+3`. A bare `JSR &8003` can't say which bank it means, so Baron
+  counts every bank with code at `&8003` as a possible callee: safe, but it may keep apart bytes that
+  could have been shared.
 - **Correctness.** When in doubt, Baron plays it safe rather than emitting broken code, and if it meets
   something it can't reason about, it stops and asks you to annotate it rather than guessing.
 
@@ -371,7 +373,11 @@ Do annotate a self-modified call even when its placeholder operand looks like an
 the constant reads as a harmless OS call, which is not what the patched `JSR` does at runtime. A
 destination may be external (`ZA_CANCALL handler_a, &FFEE`): that arm contributes nothing. Targets
 may also arrive as a list-valued symbol - `subs = {handler_a, handler_b}` then `ZA_CANCALL subs` -
-flattened exactly like `EQUB` data (nested lists and ranges included).
+flattened exactly like `EQUB` data.
+
+Name your own code by its label: the label, an alias of it, a list holding it, or `label+3`. A
+plain number that lands on code you assembled is refused, because it can't say which bank it means.
+Ranges count as plain numbers here (`hB..<hB+1` names addresses, not labels).
 
 ### ZA_CANJUMP ###
 
@@ -441,7 +447,7 @@ past the data:
 .done
 ```
 
-It takes a target list like `ZA_CANCALL` (list-valued symbols and ranges flatten the same way) and
+It takes a target list like `ZA_CANCALL` (list-valued symbols flatten the same way) and
 REPLACES the call's normal continuation.
 
 You do not need it for the common shape - a callee that resumes just past the data resumes at the
@@ -559,8 +565,9 @@ ZA_AUTO 8, frames
 
 The operand flattens like `EQUB` data - a range (`0..7`), a list (`{0, 2, 4}`), a comma run, or a
 symbol bound to any of those - and each value must be 0-255 (an index register holds a byte). Baron
-checks that the constant base plus the *largest* declared index stays inside the variable; a
-`(table,X)` reads a two-byte pair at the indexed offset, so the pair's second byte must fit too:
+checks that the constant base plus *every* declared index, smallest to largest, stays inside the
+variable; a `(table,X)` reads a two-byte pair at the indexed offset, so the pair's second byte must
+fit too:
 
 ```
 ZA_AUTO 4, quad
@@ -569,6 +576,18 @@ ZA_AUTO 4, quad
     LDA quad+2,X : ZA_INDEXEDBY 0..1    ; fine - base 2 leaves room for 0..1
     LDA (quad,X) : ZA_INDEXEDBY 0..2    ; fine - the pair at offset 2 just fits
 ```
+
+The base may even sit *below* the variable, when the index counts from somewhere above zero:
+
+```
+ZA_AUTO 4, rows
+    LDA rows-4,X : ZA_INDEXEDBY 4..7    ; fine - X from 4 lands on rows+0 to rows+3
+    LDA rows-4,X : ZA_INDEXEDBY 2..7    ; refused - index 2 reaches rows-2
+    LDA rows-4,X                        ; refused - nothing says X makes up the difference
+```
+
+The operand byte is then `rows-4` itself, which must still be a zero-page address, so Baron places
+`rows` no lower than `&04`.
 
 An in-range declaration also quiets the unchecked-index warning for that access - there is
 nothing left to warn about. TRUSTED like every annotation, but a smaller promise than most: only
@@ -658,9 +677,10 @@ What the allocator will not accept, and what it trusts you with:
   call that never returns wants `ZA_UNREACHABLE` after it.
 - **A pointer dereference needs a `ZA_AUTO2`.** `(var),Y` reads two bytes; dereferencing a one-byte
   variable that way is refused - declare it `ZA_AUTO2` or wider.
-- **`var+n` must stay inside the variable.** `var+1` on a `ZA_AUTO1`, or `table+16` on a `ZA_AUTO 16`,
-  is refused - that byte belongs to someone else. The constant base of an indexed access is checked the
-  same way (`table+16,X` is off the end before X gets a say).
+- **`var+n` must stay inside the variable.** `var+1` on a `ZA_AUTO1`, `table+16` on a `ZA_AUTO 16`, or
+  `var-1` on anything, is refused - that byte belongs to someone else. The constant base of an indexed
+  access is checked the same way (`table+16,X` is off the end before X gets a say); a base below the
+  variable needs a `ZA_INDEXEDBY` to show the index brings it back inside.
 - **The run-time index is yours.** `table,X` is fine while X stays inside the declared width; Baron
   can't check that at assembly time, so it trusts you - and warns at every undeclared site (default
   level). A `ZA_INDEXEDBY` declaring the index set turns the trust into a real bounds check and the
@@ -709,7 +729,8 @@ What the allocator will not accept, and what it trusts you with:
       RTS                     ; and the caller reads n after: fine
   ```
 
-- **Cross-section transfers go through labels**, so Baron knows which bank you mean.
+- **Cross-section transfers go through labels**, so Baron knows which bank you mean. Annotation targets
+  must be labels too, wherever they name your own code.
 - **`STA arr,X` proves nothing.** An indexed store cannot say which byte it wrote, so an array rebuilt
   only that way looks permanently live. `ZA_DISCARD` it where the old value dies.
 - **Mark your ways in.** One `ZA_ENTRY` anywhere and Baron stops assuming sections are entered at the
@@ -757,12 +778,14 @@ fall back to a hand-placed address.
 | `No free zero-page byte for ZA_AUTO variable: '...'` | More variables needed at once than the pool has bytes. Reserve more, or shorten a lifetime. |
 | `ZA_AUTO variable live across an unanalysable JSR (annotate with ZA_CANCALL)` | A variable held across a call whose destination Baron cannot follow. |
 | `Computed jump reaches unknown code (annotate with ZA_CANJUMP)` | A jump table or indirect `JMP` the analysis cannot follow. |
+| `Annotation target names our own code by address (use its label)` | A `ZA_CANCALL`, `ZA_CANJUMP` or `ZA_RETURNTO` target is a plain number that lands on code you assembled. A number can't say which bank it means; the label can. |
 | `ZA_AUTO variable freshly written and held live across recursion: '...'` | A per-level value in a call cycle - one byte cannot hold a value per level. Every culprit is named. |
 | `ZA_AUTO1 dereferenced as a pointer (declare it ZA_AUTO2)` | `(var),Y` on a one-byte variable. |
-| `Access past the end of ZA_AUTO variable` | A `var+n` offset outside the declared width. Widen it or fix the offset. |
+| `Access outside ZA_AUTO variable` | A `var+n` offset outside the declared width, or a `var-n` below it. Widen it or fix the offset. |
+| `Indexed access starts below ZA_AUTO variable (declare its indices with ZA_INDEXEDBY): '...'` | An indexed access like `var-4,X` whose base sits below the variable, with no `ZA_INDEXEDBY` to say which indices bring it back inside. Declare them. |
 | `ZA_DISCARD needs a whole ZA_AUTO variable: '...'` | The operand was a number, a fixed address, or a `var+n` slice. Name a `ZA_AUTO` variable, whole. |
 | `ZA_INDEXEDBY must follow an indexed ZA_AUTO access` | The annotation describes the access before it; here the previous instruction was not an indexed access to a `ZA_AUTO` variable (or there was none). Put it right after the `var,X` / `var,Y` / `(var,X)` it bounds. |
-| `Declared index reaches past the end of ZA_AUTO variable: '...'` | The constant base plus the largest `ZA_INDEXEDBY` index (plus a pair's second byte, for `(var,X)`) lands outside the variable. Widen it, or shrink the declared set. |
+| `Declared index reaches outside ZA_AUTO variable: '...'` | The constant base plus the largest `ZA_INDEXEDBY` index (plus a pair's second byte, for `(var,X)`) lands past the end of the variable, or the base plus the smallest lands below it. Widen it, or shrink the declared set. |
 | `ZA_ENTRY/ZA_INTERRUPT does not mark an instruction` | The marker sits on data, or after the last instruction of its section. Move it to the top of its routine. |
 | `BITABS resumes in the middle of an instruction` | The instruction after a `BITABS`/`BITZP` runs past the skip's resume point (a 3-byte instruction under a `BITABS`, say), so the two streams interleave mid-instruction. Swallow something that fits. |
 

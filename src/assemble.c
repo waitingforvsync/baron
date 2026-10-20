@@ -73,8 +73,10 @@ int_argument int_argument_make(value v, bool final_pass, uint32_t at)
 {
     if (value_is_number(v)) {   // a boolean coerces: TRUE / FALSE are 1 / 0 here
         return (int_argument) {
-            .type = int_argument_type_known,
-            .value = value_to_i64(v.numeric)
+            .type     = int_argument_type_known,
+            .value    = value_to_i64(v.numeric),
+            .labelled = value_is_label(v),
+            .label    = value_is_label(v) ? v.label : (value_label) {0},
         };
     }
 
@@ -1564,6 +1566,7 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
     (void) scratch;
     if (zp_recording(b, flags, section)) {
         zeropage_add_cflow(&b->zeropage, (zp_cflow) {
+            .section      = section,
             .site         = sections_pc(&b->sections, section),
             .target       = RC_INDEX_NONE,
             .target_scope = RC_INDEX_NONE,
@@ -1580,6 +1583,7 @@ static parse_result handle_za_unreachable(baron *b, cursor stmt, cursor at, uint
 // The instruction a trailing annotation binds to: the last recorded one, skipping size-0 markers
 // (ZA_DISCARD / ZA_WIPE), IF its flow fits the annotation's kind (binding to nothing beats
 // mis-annotating). A BITZP/BITABS skip fits nothing: a real emitted byte detaches a trailing annotation.
+// Returns its index in the instruction stream, or RC_INDEX_NONE.
 static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
 {
     uint32_t ni = zeropage_insn_count(&b->zeropage);
@@ -1610,15 +1614,15 @@ static uint32_t annotation_site(const baron *b, zp_cflow_kind kind)
             break;
     }
 
-    return fits ? last.pc : RC_INDEX_NONE;
+    return fits ? ni - 1 : RC_INDEX_NONE;
 }
 
 
-// Record one annotation target value as cflows sited at site: the operand flattens like EQUB's
-// data (flatten_to_list), so a symbol bound to a whole target table (handlers = {a, b}) annotates
-// in one word. ref is the symbol the operand names (cursor_none when it names none): like a JMP's
-// operand, a label's identity lets the CFG place a target in the label's own section.
-static parse_result record_cflow_targets(baron *b, value v, symbol_ref ref, uint32_t site, zp_cflow_kind kind,
+// Record one annotation target value as cflows sited at the instruction site: the operand flattens
+// like EQUB's data (flatten_to_list), so a symbol bound to a whole target table (handlers = {a, b})
+// annotates in one word. Each target that is a label's value brings the label with it, which is what
+// places it in the label's own section, however the operand was spelt.
+static parse_result record_cflow_targets(baron *b, value v, zp_insn site, zp_cflow_kind kind,
                                          parse_flags flags, cursor at)
 {
     bool unresolved = false;
@@ -1629,10 +1633,11 @@ static parse_result record_cflow_targets(baron *b, value v, symbol_ref ref, uint
         switch ((int_argument_type) arg.type) {
             case int_argument_type_known:
                 zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-                    .site         = site,
+                    .section      = site.section,
+                    .site         = site.pc,
                     .target       = (uint32_t) (arg.value & 0xFFFF),
-                    .target_scope = cursor_is_none(ref.def) ? RC_INDEX_NONE : ref.scope,
-                    .target_def   = ref.def,
+                    .target_scope = arg.labelled ? arg.label.scope : RC_INDEX_NONE,
+                    .target_def   = arg.labelled ? arg.label.def : cursor_none(),
                     .kind         = (uint8_t) kind,
                     .at           = at,
                 });
@@ -1671,10 +1676,8 @@ static parse_result handle_can_targets(baron *b, cursor stmt, cursor at, uint32_
         }
 
         if (zp_recording(b, flags, section) && site != RC_INDEX_NONE) {
-            symbol_result sym = peek_symbol(b, cursor_at(at, pos));
-            symbol_ref ref = sym.name.len ? scopes_resolve_symbol_def(&b->scopes, scope, sym.name)
-                                          : (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};
-            parse_result rec = record_cflow_targets(b, e.value, ref, site, kind, flags, cursor_at(at, pos));
+            parse_result rec = record_cflow_targets(b, e.value, zeropage_insn_get(&b->zeropage, site), kind,
+                                                    flags, cursor_at(at, pos));
             unresolved |= rec.unresolved;
         }
 
@@ -1718,8 +1721,10 @@ static parse_result handle_za_return(baron *b, cursor stmt, cursor at, uint32_t 
     if (zp_recording(b, flags, section)) {
         uint32_t site = annotation_site(b, zp_cflow_za_return);
         if (site != RC_INDEX_NONE) {
+            zp_insn n = zeropage_insn_get(&b->zeropage, site);
             zeropage_add_cflow(&b->zeropage, (zp_cflow) {
-                .site         = site,
+                .section      = n.section,
+                .site         = n.pc,
                 .target       = RC_INDEX_NONE,
                 .target_scope = RC_INDEX_NONE,
                 .target_def   = cursor_none(),
@@ -1823,7 +1828,6 @@ static parse_result handle_za_wipe(baron *b, cursor stmt, cursor at, uint32_t sc
             .vreg         = RC_INDEX_NONE,
             .var_scope    = RC_INDEX_NONE,
             .var_def      = cursor_none(),
-            .var_offset   = RC_INDEX_NONE,
             .marker       = zp_marker_wipe,
             .literal_addr = RC_INDEX_NONE,
             .target       = RC_INDEX_NONE,
@@ -1838,15 +1842,16 @@ static parse_result handle_za_wipe(baron *b, cursor stmt, cursor at, uint32_t sc
 }
 
 
-// The running result of flattening a ZA_INDEXEDBY operand list: the largest index seen so far
-// (meaningful once any is), folded parse flags for the deferral plumbing.
+// The running result of flattening a ZA_INDEXEDBY operand list: the smallest and largest indices seen
+// so far (meaningful once any is), folded parse flags for the deferral plumbing.
 typedef struct index_fold {
     parse_result r;
+    uint32_t     min;
     uint32_t     max;
     bool         any;
 } index_fold;
 
-// Fold one ZA_INDEXEDBY value into the running maximum: the operand flattens like EQUB's data
+// Fold one ZA_INDEXEDBY value into the running bounds: the operand flattens like EQUB's data
 // (flatten_to_list), and each leaf must be a plain 0..255 value - an index register only holds a byte.
 static index_fold indexedby_fold(baron *b, value v, index_fold acc,
                                  parse_flags flags, cursor at)
@@ -1861,6 +1866,7 @@ static index_fold indexedby_fold(baron *b, value v, index_fold acc,
                     semantic_error(b, flags, error_type_value_out_of_range, at);
                 }
                 else {
+                    acc.min = acc.any && acc.min < (uint32_t) arg.value ? acc.min : (uint32_t) arg.value;
                     acc.max = acc.any && acc.max > (uint32_t) arg.value ? acc.max : (uint32_t) arg.value;
                     acc.any = true;
                 }
@@ -1922,7 +1928,7 @@ static parse_result handle_za_indexedby(baron *b, cursor stmt, cursor at, uint32
             continue;   // another index follows
         }
         if (site != RC_INDEX_NONE && acc.any) {
-            zeropage_set_index_max(&b->zeropage, site, (uint8_t) acc.max);
+            zeropage_set_index_bounds(&b->zeropage, site, (uint8_t) acc.min, (uint8_t) acc.max);
         }
         parse_result r = require_separator(b, cursor_at(at, e.next));
         r.unresolved = acc.r.unresolved;
@@ -2103,7 +2109,6 @@ static parse_result handle_bit_skip(baron *b, cursor stmt, cursor at, uint32_t s
                 .vreg         = RC_INDEX_NONE,
                 .var_scope    = RC_INDEX_NONE,
                 .var_def      = cursor_none(),
-                .var_offset   = RC_INDEX_NONE,
                 .target       = RC_INDEX_NONE,
                 .target_scope = RC_INDEX_NONE,
                 .target_def   = cursor_none(),
@@ -2380,7 +2385,6 @@ static void record_label_marker(baron *b, cursor at, uint32_t section)
         .vreg         = RC_INDEX_NONE,
         .var_scope    = RC_INDEX_NONE,
         .var_def      = cursor_none(),
-        .var_offset   = RC_INDEX_NONE,
         .marker       = zp_marker_label,
         .literal_addr = RC_INDEX_NONE,
         .target       = RC_INDEX_NONE,
@@ -2420,7 +2424,8 @@ static parse_result handle_label(baron *b, cursor stmt, cursor at, uint32_t scop
     // Bind name = current pc; a moved label drives another pass, and a second definition (a
     // different source position) is a duplicate. A dead branch instead REMOVES the name.
     if (flags.active) {
-        value pc  = value_make_numeric((double)sections_pc(&b->sections, section));
+        value pc  = value_make_label((double) sections_pc(&b->sections, section),
+                                     (value_label) {.scope = scope, .def = at});
         value was = {0};
         if (!b->unsettled.seen) {
             was = scopes_get_symbol(&b->scopes, scope, name);   // grabbed before the set clobbers it
@@ -2524,7 +2529,8 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
 
     parse_result r = {.next = at.pos};
     if (flags.active) {
-        value pc  = value_make_numeric((double) sections_pc(&b->sections, section));
+        value pc  = value_make_label((double) sections_pc(&b->sections, section),
+                                     (value_label) {.scope = scope, .def = at});
         value was = {0};
         if (!b->unsettled.seen) {
             was = scopes_get_symbol(&b->scopes, scope, key.view);
@@ -2540,9 +2546,10 @@ static parse_result handle_local_label(baron *b, cursor stmt, cursor at, uint32_
         }
         r.changed = (st == symbol_status_changed);   // a moved local label drives another pass, like any label
 
-        // No zeropage_add_label (@+/@- resolve by value, never by identity), but the stream marker
-        // still matters: a .@ is a branch target markers may need to sit on the right side of.
+        // Placed and marked like any label: @+ and @- carry its identity, and markers may need to
+        // sit on the right side of it.
         if (zp_recording(b, flags, section)) {
+            zeropage_add_label(&b->zeropage, scope, at, section, sections_pc(&b->sections, section));
             record_label_marker(b, at, section);
         }
     }
@@ -3896,9 +3903,11 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // Guard 0 (indexed access): the WHOLE variable is reserved and all live, so an in-width index
     // is sound; the run-time index is unprovable, so an overrun is on the user - a default-level
     // warning (silent assembly requires the annotation). A ZA_INDEXEDBY declaration changes the
-    // deal: the access becomes CHECKABLE (base offset plus the largest declared index, a pair's
-    // second byte for the indirect forms, must stay inside the variable), and in range the warning
-    // has nothing left to say.
+    // deal: the access becomes CHECKABLE (the base offset plus every declared index, a pair's
+    // second byte for the indirect forms, must stay inside the variable - so the base itself may
+    // sit below it, v-4,X for X from 4 up), and in range the warning has nothing left to say.
+    // Undeclared, a base below the variable is refused: only a declared set says the index makes
+    // up the difference.
     // Guard 0b (bounds): a var+offset access (2 bytes for a pointer deref) must lie WITHIN the
     // declared width; a 1-byte var used as a pointer gets the pointed "declare it ZA_AUTO2" message.
     for (uint32_t i = 0; i < insns.num; i++) {
@@ -3907,30 +3916,52 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
             warn_pool_store(b, insns, i);   // Guard 0c: a fixed address aimed into the pool
             continue;
         }
+        zp_var  var  = zeropage_var_get(&b->zeropage, n.vreg);
+        int64_t base = n.var_offset;
         if (n.var_indexed && n.index_valid) {
-            uint32_t base   = n.var_offset != RC_INDEX_NONE ? n.var_offset : 0;
-            uint32_t access = n.var_indexed_ptr ? 2u : 1u;
-            if ((uint64_t) base + n.index_max + access > zeropage_var_get(&b->zeropage, n.vreg).width) {
-                baron_error_payload(b, error_type_za_indexedby_out_of_range, n.at,
-                                    zeropage_var_get(&b->zeropage, n.vreg).name);
+            int64_t access = n.var_indexed_ptr ? 2 : 1;
+            if (base + n.index_min < 0 || base + n.index_max + access > var.width) {
+                baron_error_payload(b, error_type_za_indexedby_out_of_range, n.at, var.name);
                 refused = true;
             }
+            continue;   // the declared reach covers the base as well
         }
-        else if (n.var_indexed) {
+        if (n.var_indexed && base < 0) {
+            baron_error_payload(b, error_type_za_auto_below_start, n.at, var.name);
+            refused = true;
+            continue;
+        }
+        if (n.var_indexed) {
             // Default-visible: an unchecked run-time index is the one hole in the certainty
             // contract a user can close - declare the set with ZA_INDEXEDBY and it goes quiet.
-            baron_warning_payload(b, error_type_za_auto_indexed_access, n.at, severity_warning,
-                                  zeropage_var_get(&b->zeropage, n.vreg).name);
+            baron_warning_payload(b, error_type_za_auto_indexed_access, n.at, severity_warning, var.name);
         }
-        if (n.var_offset != RC_INDEX_NONE) {
-            uint32_t width  = zeropage_var_get(&b->zeropage, n.vreg).width;
-            uint32_t access = n.var_indirect ? 2u : 1u;
-            if ((uint64_t) n.var_offset + access > width) {
-                error_type code = (n.var_indirect && width < 2)
-                                      ? error_type_za_auto_narrow_pointer   // never wide enough to be a pointer
-                                      : error_type_za_auto_out_of_bounds;
-                baron_error(b, code, n.at);
+        int64_t access = n.var_indirect ? 2 : 1;
+        if (base < 0 || base + access > var.width) {
+            error_type code = (n.var_indirect && var.width < 2)
+                                  ? error_type_za_auto_narrow_pointer   // never wide enough to be a pointer
+                                  : error_type_za_auto_out_of_bounds;
+            baron_error(b, code, n.at);
+            refused = true;
+        }
+    }
+
+    // An annotation target given as a plain number that lands on our own code is refused: a number
+    // cannot say which section it means, so where banks share the address it would quietly pick one.
+    // A label's value - aliased, listed or offset as it may be - always can. A number landing on
+    // nothing we assembled is an external arm, and fine.
+    rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
+    for (uint32_t i = 0; i < cflows.num; i++) {
+        zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
+        if (cf.target == RC_INDEX_NONE || cf.target_scope != RC_INDEX_NONE) {
+            continue;   // a bare marker, or a label's value
+        }
+        for (uint32_t j = 0; j < insns.num; j++) {
+            zp_insn n = rc_view_zp_insn_get(insns, j);
+            if (n.size > 0 && n.pc == cf.target) {
+                baron_error(b, error_type_za_target_needs_label, cf.at);
                 refused = true;
+                break;
             }
         }
     }
@@ -3939,8 +3970,6 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     if (refused) {
         return;
     }
-
-    rc_view_zp_cflow cflows = zeropage_cflows(&b->zeropage);
 
     // cfg_build applies the control-flow annotations itself: an ZA_UNREACHABLE prunes a branch's dead fall-through
     // edge, and a ZA_CANJUMP wires a computed JMP's declared targets (clearing the taint that would refuse it).
@@ -4000,17 +4029,8 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     // The test is for a REAL instruction, not a block: a label on the data records a marker there.
     for (uint32_t i = 0; i < cflows.num; i++) {
         zp_cflow cf = rc_view_zp_cflow_get(cflows, i);
-        if (cf.kind != zp_cflow_za_returnto) {
-            continue;
-        }
-        for (uint32_t j = 0; j < insns.num; j++) {
-            zp_insn n = rc_view_zp_insn_get(insns, j);
-            if (n.flow == zp_flow_call && n.pc == cf.site) {
-                if (!code_at(insns, cfg_cflow_target_section(g, cf, n.section), cf.target)) {
-                    baron_warning(b, error_type_za_returnto_no_code, cf.at, severity_warning);
-                }
-                break;
-            }
+        if (cf.kind == zp_cflow_za_returnto && !code_at(insns, cfg_cflow_target_section(g, cf), cf.target)) {
+            baron_warning(b, error_type_za_returnto_no_code, cf.at, severity_warning);
         }
     }
 
@@ -4386,8 +4406,22 @@ static void zeropage_finalize(baron *b, rc_arena work, rc_arena scratch)
     }
 
     if (!refused) {
-        zp_coloring col = zp_color(&lv, zeropage_vars(&b->zeropage), zeropage_reserved(&b->zeropage),
-                                   &work, scratch);
+        // An access whose base sits below its variable (v-4,X, cleared above by its ZA_INDEXEDBY) still
+        // writes v-4 as the operand byte, which must stay in page zero: the variable may go no lower.
+        rc_span_u32 floors = rc_array_u32_resize(&(rc_array_u32) {0}, nv, &scratch);
+        for (uint32_t v = 0; v < nv; v++) {
+            rc_span_u32_set(floors, v, 0);
+        }
+        for (uint32_t i = 0; i < insns.num; i++) {
+            zp_insn n = rc_view_zp_insn_get(insns, i);
+            if (n.vreg != RC_INDEX_NONE && n.var_offset < 0
+                && (uint32_t) -(int64_t) n.var_offset > rc_span_u32_get(floors, n.vreg)) {
+                rc_span_u32_set(floors, n.vreg, (uint32_t) -(int64_t) n.var_offset);
+            }
+        }
+
+        zp_coloring col = zp_color(&lv, zeropage_vars(&b->zeropage), floors.view,
+                                   zeropage_reserved(&b->zeropage), &work, scratch);
         if (col.any_spilled) {
             // An unplaced USED variable is a spill; an unused one was deliberately skipped (warned above).
             for (uint32_t v = 0; v < nv; v++) {
@@ -4725,6 +4759,13 @@ static bool has_diag(const baron_result *r, error_type code)
     return false;
 }
 
+// Does the symbol at path hold the number n? A label's address counts: most of these are labels.
+static bool symbol_is(const baron_result *r, rc_str path, double n)
+{
+    value v = baron_result_symbol(r, path);
+    return value_is_numeric(v) && v.numeric == n;
+}
+
 // How many diagnostics carry code - for the once-per-region promises, where "fired" is not enough.
 static uint32_t diag_count(const baron_result *r, error_type code)
 {
@@ -4902,7 +4943,7 @@ RC_TEST_STEP(assemble, pc_overflow_reports_once, fix)
     // Filling memory right to the top is fine: the pc may reach &10000, it just cannot place a byte there.
     uint32_t passes = ASM("SECTION s, org=&FFFE : EQUB 1, 2 : .top : ENDSECTION");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("top")), value_make_numeric(0x10000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("top"), 0x10000));
 
     // One byte more is an error at the statement that went over, saying by how much.
     RC_CHECK_TRUE(ERR("SECTION s, org=&FFFE\nEQUB 1, 2, 3\nENDSECTION") == error_type_pc_overflow);
@@ -4930,7 +4971,7 @@ RC_TEST_STEP(assemble, pc_overflow_reports_once, fix)
     // A child opened in a parent filled exactly to the top starts at &10000, not back at address 0.
     passes = ASM("SECTION a, org=&FFFF : NOP : SECTION b : .inb : ENDSECTION : ENDSECTION");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("inb")), value_make_numeric(0x10000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("inb"), 0x10000));
     RC_CHECK_TRUE(ERR("SECTION a, org=&FFFF : NOP : SECTION b : NOP : ENDSECTION : ENDSECTION") == error_type_pc_overflow);
     RC_CHECK(diag_count(&fix->r, error_type_pc_overflow), ==, 1u);
 
@@ -4949,8 +4990,8 @@ RC_TEST_STEP(assemble, skip_advances_pc, fix)
     // SKIP moves pc, so a label after it sees the advanced address (default section, org 0).
     uint32_t passes = ASM(".a SKIP 4 : .b");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("a")), value_make_numeric(0)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("b")), value_make_numeric(4)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("a"), 0));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("b"), 4));
 }
 
 RC_TEST_STEP(assemble, section_selects_and_creates, fix)
@@ -4984,7 +5025,7 @@ RC_TEST_STEP(assemble, section_org_attribute, fix)
     // org on the SECTION line sets that section's start address; a label inside takes it, and the section's
     // pc advances past the emitted byte.
     RC_CHECK_TRUE(ASM("SECTION hi, org = &3000 : .here EQUB 0 : ENDSECTION") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x3000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 0x3000));
     RC_CHECK(rc_view_section_get(fix->r.sections, 1).pc, ==, 0x3001u);   // &3000 + 1 emitted byte
 }
 
@@ -4994,16 +5035,16 @@ RC_TEST_STEP(assemble, section_pc_continues_and_folds, fix)
     // stands alone, so the default's address follows only its own bytes: sibling b starts at 0, and
     // so does a label after both.
     RC_CHECK_TRUE(ASM("SECTION a, org=&2000 : .x EQUB 0 : ENDSECTION : SECTION b : .y EQUB 0 : ENDSECTION : .z") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x2000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x0000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("z")), value_make_numeric(0x0000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("x"), 0x2000));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("y"), 0x0000));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("z"), 0x0000));
 
     // A NESTED section with no org is transparent: p continues past o, and the parent's pc advances
     // through the child's bytes at ENDSECTION, so q follows p's two bytes.
     RC_CHECK_TRUE(ASM("SECTION outer, org=&3000 : .o EQUB 0 : SECTION inner : .p EQUB 0,0 : ENDSECTION : .q EQUB 0 : ENDSECTION") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("o")), value_make_numeric(0x3000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("p")), value_make_numeric(0x3001)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("q")), value_make_numeric(0x3003)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("o"), 0x3000));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("p"), 0x3001));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("q"), 0x3003));
 }
 
 RC_TEST_STEP(assemble, section_no_attribute_inheritance, fix)
@@ -5031,7 +5072,7 @@ RC_TEST_STEP(assemble, section_attribute_keys_are_own_namespace, fix)
     // An attribute key is a plain identifier in its own namespace: a macro sharing its spelling (a
     // user's MACRO ORG broke org=) or a keyword spelling must not steal the lex. The value still applies.
     RC_CHECK_TRUE(ASM("MACRO ORG : {} : ENDMACRO\nSECTION s, org=&2000, error=1 : .here EQUB 0 : ENDSECTION") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 0x2000));
 
     // A malformed key still errors where it always did.
     RC_CHECK_TRUE(ERR("SECTION s, = 1 : ENDSECTION") == error_type_unexpected_token);
@@ -5114,7 +5155,7 @@ RC_TEST_STEP(assemble, section_32bit_host_addresses, fix)
     // processor): org and guard accept the full value - labels and the guard check use the 6502's
     // low 16 bits, while the attribute bag keeps the whole thing for the output stage.
     RC_CHECK_TRUE(ASM("SECTION m, org=&FFFF2000\n.here EQUB 0\nENDSECTION") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 0x2000));
     RC_CHECK(result_section(&fix->r, RC_STR("m")).pc, ==, 0x2001u);
     attribute org = rc_view_attribute_get(result_section(&fix->r, RC_STR("m")).attributes.view, 0);
     RC_CHECK(org.key, ==, RC_STR("org"));
@@ -5248,8 +5289,8 @@ RC_TEST_STEP(assemble, inactive_arms_still_parse, fix)
                       "FUNCTION g(c)\n    IF c\n        r = 0\n    ELSE\n        r = SUM({f(1),\n                 2})\n    ENDIF\n= r\n"
                       "w = g(TRUE)") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("z")), value_make_numeric(4)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("w")), value_make_numeric(0)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("z"), 4));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("w"), 0));
     RC_CHECK_TRUE(baron_result_code(&fix->r).num == 0);   // the dead EQUB emitted nothing
 
     // ...and a malformed expression in a dead arm is still an error, in the assembler and in a body.
@@ -5304,9 +5345,9 @@ RC_TEST_STEP(assemble, section_relocation_workflow, fix)
                           "size = entry - payload");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("start")), value_make_numeric(0x400)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("entry")), value_make_numeric(0x1903)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("size")), value_make_numeric(3)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("start"), 0x400));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("entry"), 0x1903));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("size"), 3));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("Loader"),
                                   (uint8_t[]) {0xA9, 0x2A, 0x60, 0x4C, 0x00, 0x04}, 6));
     RC_CHECK(result_section(&fix->r, RC_STR("Loader")).pc, ==, 0x1906u);
@@ -5322,9 +5363,9 @@ RC_TEST_STEP(assemble, section_nesting_three_deep, fix)
                       ".midb EQUB 4\nENDSECTION\n"
                       ".enda EQUB 5\nENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("deep")), value_make_numeric(0x8000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("midb")), value_make_numeric(0x1003)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("enda")), value_make_numeric(0x1004)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("deep"), 0x8000));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("midb"), 0x1003));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("enda"), 0x1004));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("a"), (uint8_t[]) {1, 2, 3, 4, 5}, 5));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("b"), (uint8_t[]) {2, 3, 4}, 3));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("c"), (uint8_t[]) {3}, 1));
@@ -5342,7 +5383,7 @@ RC_TEST_STEP(assemble, section_nesting_converges, fix)
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("load"), (uint8_t[]) {0xAD, 0x34, 0x12}, 3));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("endlab")), value_make_numeric(0x3003)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("endlab"), 0x3003));
 }
 
 RC_TEST_STEP(assemble, section_virtual_emits_nothing, fix)
@@ -5359,12 +5400,12 @@ RC_TEST_STEP(assemble, section_virtual_emits_nothing, fix)
                       ".v4\nENDSECTION\n"
                       ".after EQUB 2\nENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v1")), value_make_numeric(0x400)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x403)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v3")), value_make_numeric(0x407)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("p")), value_make_numeric(0x70)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v4")), value_make_numeric(0x408)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("after")), value_make_numeric(0x2001)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v1"), 0x400));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v2"), 0x403));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v3"), 0x407));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("p"), 0x70));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v4"), 0x408));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("after"), 0x2001));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"), (uint8_t[]) {1, 2}, 2));
     RC_CHECK(result_section(&fix->r, RC_STR("ws")).code.num, ==, 0u);
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("inner"), (uint8_t[]) {9}, 1));
@@ -5381,8 +5422,8 @@ RC_TEST_STEP(assemble, section_virtual_reopens, fix)
                       ".r2 {\nSECTION ws\n.foo SKIP 2\nENDSECTION\nLDA foo\n}\n"
                       "ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r1.foo")), value_make_numeric(0x400)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r2.foo")), value_make_numeric(0x40A)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("r1.foo"), 0x400));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("r2.foo"), 0x40A));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("main"), (uint8_t[]) {0xBD, 0x00, 0x04, 0xAD, 0x0A, 0x04}, 6));
     RC_CHECK(result_section(&fix->r, RC_STR("ws")).pc, ==, 0x40Cu);
 
@@ -5394,7 +5435,7 @@ RC_TEST_STEP(assemble, section_virtual_reopens, fix)
                       "SECTION ws\n.bar SKIP 1\nENDSECTION\n"
                       "LDA bar\nENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("bar")), value_make_numeric(0x401)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("bar"), 0x401));
 
     // But a section that took room in its parent - here a real one inside the pool, carrying on from
     // its addresses - keeps its unique name: a second piece would have nowhere to go
@@ -5450,10 +5491,10 @@ RC_TEST_STEP(assemble, section_reopens, fix)
     RC_CHECK_TRUE(ASM(SEGMENTS) != 0);
     #undef SEGMENTS
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("draw.sintab")), value_make_numeric(0x5000)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("plot.costab")), value_make_numeric(0x5002)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("last")), value_make_numeric(0x5003)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("plot")), value_make_numeric(0x1903)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("draw.sintab"), 0x5000));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("plot.costab"), 0x5002));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("last"), 0x5003));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("plot"), 0x1903));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("tables"), (uint8_t[]) {1, 2, 3, 4}, 4));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"),
                                   (uint8_t[]) {0xBD, 0x00, 0x50, 0xBD, 0x02, 0x50, 0x60}, 7));
@@ -5506,9 +5547,9 @@ RC_TEST_STEP(assemble, section_memory_map, fix)
                       "SECTION data, filename=\"DATA\"\n.table EQUB 1,2,3,4\nENDSECTION\n"
                       ".free\nENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("entry")), value_make_numeric(0x1900)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("table")), value_make_numeric(0x1903)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("free")), value_make_numeric(0x1907)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("entry"), 0x1900));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("table"), 0x1903));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("free"), 0x1907));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"), (uint8_t[]) {0xA9, 0x01, 0x60}, 3));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("data"), (uint8_t[]) {1, 2, 3, 4}, 4));
     RC_CHECK(result_section(&fix->r, RC_STR("memmap")).code.num, ==, 0u);
@@ -5542,8 +5583,8 @@ RC_TEST_STEP(assemble, section_real_inside_virtual_is_analysed, fix)
         "SECTION code\nSTA v1 : STA v2 : LDA v1 : LDA v2 : RTS\nENDSECTION\nENDSECTION"
     RC_CHECK_TRUE(ASM(MAPPED_ZP) != 0);
     #undef MAPPED_ZP
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v1")), value_make_numeric(0x70)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x71)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v1"), 0x70));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v2"), 0x71));
     RC_CHECK_TRUE(section_code_is(&fix->r, RC_STR("code"),
                                   (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xA5, 0x70, 0xA5, 0x71, 0x60}, 9));
 }
@@ -5559,13 +5600,13 @@ RC_TEST_STEP(assemble, section_reopened_falls_through, fix)
         "SECTION other, org=&3000\nNOP : RTS\nENDSECTION\n" \
         "SECTION " second "\nLDA x : RTS\nENDSECTION"
     RC_CHECK_TRUE(ASM(PIECES("code")) != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x70)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x71)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("x"), 0x70));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("y"), 0x71));
 
     // The control: the same read in a section of its own is not reached by falling off the end, so x
     // dies at its store and y may share its byte
     RC_CHECK_TRUE(ASM(PIECES("apart, org=&2009")) != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("y")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("y"), 0x70));
     #undef PIECES
 }
 
@@ -5601,11 +5642,11 @@ RC_TEST_STEP(assemble, section_virtual_invisible_to_allocator, fix)
         "SECTION ghost, org=&3000" attrs "\nSTA v1 : STA v2 : LDA v1 : LDA v2 : RTS\nENDSECTION"
     RC_CHECK_TRUE(ASM(VIRTUAL_ZP(", virtual=TRUE")) != 0);
     RC_CHECK_TRUE(fix->r.diagnostics.num == 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v1")), value_make_numeric(0x70)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v1"), 0x70));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v2"), 0x70));
 
     RC_CHECK_TRUE(ASM(VIRTUAL_ZP("")) != 0);   // the control: the same code made real keeps them apart
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("v2")), value_make_numeric(0x71)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("v2"), 0x71));
     #undef VIRTUAL_ZP
 }
 
@@ -5629,7 +5670,7 @@ RC_TEST_STEP(assemble, basic_block_advances_pc, fix)
     // The records land in the section like any other emission, so a label after the block sits past
     // the whole program (5-byte line + 2-byte terminator).
     RC_CHECK_TRUE(ASM("BASIC\n10CLS\nENDBASIC\n.here") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(7)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 7));
 }
 
 RC_TEST_STEP(assemble, basic_dead_branch, fix)
@@ -5723,11 +5764,11 @@ RC_TEST_STEP(assemble, basic_splice_is_not_a_scope, fix)
     // Nothing after the '}' ends the line right there.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("BASIC\n10REM{\n.beep LDA #7 : JMP &FFEE\n}\nENDBASIC"),
                           (uint8_t[]) {0x0D, 0x00, 0x0A, 0x0A, 0xF4, 0xA9, 0x07, 0x4C, 0xEE, 0xFF, 0x0D, 0xFF}, 12));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("beep")), value_make_numeric(5)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("beep"), 5));
 
     // A virtual section keeps no bytes to put a length in, but the addresses still add up.
     RC_CHECK_TRUE(ASM("SECTION ws, org=&400, virtual=TRUE\nBASIC\n10REM{\n.inside NOP\n}\nENDBASIC\nENDSECTION") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("inside")), value_make_numeric(0x405)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("inside"), 0x405));
 
     // A dead branch walks the splice for its extent and emits nothing.
     RC_CHECK_TRUE(code_is(&fix->r, ASM("IF FALSE\nBASIC\n10REM{\nNOP\n}\nENDBASIC\nENDIF\nNOP"),
@@ -5804,8 +5845,8 @@ RC_TEST_STEP(assemble, za_auto_declares_scoped_var, fix)
                           "STA foo : STA ptr : LDA #&40 : STA ptr+1 : LDA (ptr),Y : ORA foo : RTS");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("ptr")), value_make_numeric(0x70)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("foo")), value_make_numeric(0x72)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("ptr"), 0x70));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("foo"), 0x72));
 
     // A comma-list declares several at once.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 p, q, r\n"
@@ -6092,7 +6133,7 @@ RC_TEST_STEP(assemble, za_auto_alias_attributes, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]) {0x85, 0x70, 0xA5, 0x70, 0x60}, 5));
     // The output pass re-binds the alias against the real address, so the result symbol is honest.
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(0x70)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("x"), 0x70));
 
     // Offset arithmetic rides through the alias too, and the derived binding CONVERGES (the za_auto
     // equality case) - a hi-byte alias of a pointer works end to end.
@@ -6633,6 +6674,50 @@ RC_TEST_STEP(assemble, za_indexedby_errors, fix)
     RC_CHECK(ASM("ZA_POOL &70..&7F : ZA_AUTO 4, t : STA t : LDA t : IF 0 : ZA_INDEXEDBY bogus : ENDIF : RTS"), ==, 2u);
 }
 
+RC_TEST_STEP(assemble, za_indexedby_base_below_the_variable, fix)
+{
+    // Issue #32: the index counts from 6, so the base sits four bytes below the variable, and every
+    // declared index still lands inside it (v+2, v+3). The operand byte is v-4 itself.
+    RC_CHECK_TRUE(ASM("ZA_POOL &20..&FB : ZA_AUTO 4, v\n"
+                      ".start ZA_ENTRY : LDA #1 : STA v : STA v+1 : STA v+2 : STA v+3\n"
+                      "LDX #6 : LDA v-4,X : ZA_INDEXEDBY {6, 7} : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x20);
+    rc_view_bytes code = baron_result_code(&fix->r);
+    RC_CHECK(rc_view_bytes_get(code, 12), ==, 0xB5);   // LDA zp,X - zero page, offset or no offset
+    RC_CHECK(rc_view_bytes_get(code, 13), ==, 0x1C);
+
+    // That operand byte must stay in page zero, so the variable goes no lower than &04 - even with the
+    // pool's first bytes free. The widened LDA abs,Y takes its base the same way.
+    RC_CHECK_TRUE(ASM("ZA_POOL &00..&0F : ZA_AUTO 4, v\n"
+                      ".start ZA_ENTRY : LDA #1 : STA v : STA v+1 : STA v+2 : STA v+3\n"
+                      "LDA v-4,Y : ZA_INDEXEDBY 4..7 : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(zp_addr(&fix->r, "v"), ==, 0x04);
+    code = baron_result_code(&fix->r);
+    RC_CHECK(rc_view_bytes_get(code, 10), ==, 0xB9);   // LDA abs,Y: no zp,Y form for LDA
+    RC_CHECK(rc_view_bytes_get(code, 11), ==, 0x00);
+    RC_CHECK(rc_view_bytes_get(code, 12), ==, 0x00);
+
+    // No room that high: a spill, not a negative operand.
+    RC_CHECK_TRUE(ERR("ZA_POOL &00..&0F : ZA_AUTO 4, v : STA v : LDA v-200,X : ZA_INDEXEDBY 200..203 : RTS")
+                  == error_type_zeropage_full);
+
+    // The declared set is judged at both ends: index 2 reaches v-2.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, v : STA v : LDA v-4,X : ZA_INDEXEDBY 2..7 : RTS")
+                  == error_type_za_indexedby_out_of_range);
+
+    // Undeclared, nothing says the index makes up the difference.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, v : STA v : LDA v-4,X : RTS")
+                  == error_type_za_auto_below_start);
+
+    // A direct access below the variable is outside it, like one past the end.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO 4, v : STA v : LDA v-1 : RTS")
+                  == error_type_za_auto_out_of_bounds);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO2 p : STA p : STA p+1 : LDA (p-1),Y : RTS")
+                  == error_type_za_auto_out_of_bounds);
+}
+
 RC_TEST_STEP(assemble, za_indexedby_does_not_discard, fix)
 {
     // A full-width declaration bounds WHERE the store can land; it says nothing about WHEN the old
@@ -6806,18 +6891,217 @@ RC_TEST_STEP(assemble, za_declared_targets_cross_sections, fix)
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
 
-    // A bare address names no label, so it still resolves within the annotated site's section: &0E00
-    // has no code in loader, the arm reads as external, and the routine there is unreachable.
-    RC_CHECK_TRUE(ASM("SECTION loader, org=&1900\n"
+    // A bare address cannot say which section it means, so one naming our own code is refused: name
+    // the label. (It once resolved in the site's section, found nothing, and made first unreachable.)
+    RC_CHECK_TRUE(ERR("SECTION loader, org=&1900\n"
                       "  ZA_POOL &70..&7F\n"
                       "  SECTION code, org=&0E00\n"
                       "  .first { ZA_AUTO1 t1 : STA t1 : LDA t1 : RTS }\n"
                       "  ENDSECTION\n"
                       ".start ZA_ENTRY : JMP (vector) : ZA_CANJUMP &0E00\n"
                       ".vector EQUW 0\n"
+                      "ENDSECTION") == error_type_za_target_needs_label);
+}
+
+RC_TEST_STEP(assemble, za_annotation_site_keeps_its_section, fix)
+{
+    // Issue #29: two banks share &8000, and an annotation belongs to its own bank's instruction only.
+    // Bank A's ZA_CANCALL sits on a JSR at &8004; so does bank B's JSR clobber. Once, B's call took
+    // A's declared target, count was no longer live across clobber, and the two shared a byte.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F\n"
+                      "SECTION main, org=&2000\n"
+                      ".main ZA_ENTRY : JSR a_entry : JSR b_routine : JSR clobber : RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION bank_a, org=&8000\n"
+                      ".a_entry NOP : NOP : NOP : NOP : JSR &FFFF : ZA_CANCALL handler : RTS\n"
+                      ".handler RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION bank_b, org=&8000\n"
+                      ".b_routine { ZA_AUTO1 count : LDA #3 : STA count\n"
+                      ".loop JSR clobber : DEC count : BNE loop : RTS }\n"
+                      ".clobber { ZA_AUTO1 tmp : LDA #9 : STA tmp : DEC tmp : LDA tmp : RTS }\n"
                       "ENDSECTION") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "b_routine.count") != zp_addr(&fix->r, "clobber.tmp"));
+
+    // A ZA_CANJUMP on bank A's JMP at &8000 once gave bank B's plain JMP there its targets too, so B's
+    // entry seemed to read v.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&8F : ZA_AUTO1 v\n"
+                      "SECTION bank_a, org=&8000\n"
+                      ".dispatch JMP (vector) : ZA_CANJUMP reader\n"
+                      ".reader LDA v : RTS\n"
+                      ".vector EQUW reader\n"
+                      ".entry_a ZA_ENTRY : LDA #1 : STA v : JMP dispatch\n"
+                      "ENDSECTION\n"
+                      "SECTION bank_b, org=&8000\n"
+                      ".entry_b ZA_ENTRY : JMP done\n"
+                      ".done RTS\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
+
+    // The same for a conditional branch sharing the annotated jump's address.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&8F : ZA_AUTO1 w\n"
+                      "SECTION bank_a, org=&8000, cmos=TRUE\n"
+                      ".a_entry ZA_ENTRY : LDA #1 : STA w : LDX #0 : JMP (a_tab,X) : ZA_CANJUMP a_target\n"
+                      ".a_tab EQUW a_target\n"
+                      ".a_target LDA w : RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION bank_b, org=&8000, cmos=TRUE\n"
+                      ".b_entry ZA_ENTRY : LDA #0 : LDA #0 : LDA #0 : BMI b_out : NOP\n"
+                      ".b_out RTS\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_entry_input), ==, 0u);
+
+    // ZA_UNREACHABLE at &8007 in bank A once severed bank B's JSR bsub, which ends there: keep's read
+    // looked unreachable, so keep was not live across the call and shared bsub's tmp.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep, tmp\n"
+                      "SECTION bank_a, org=&8000\n"
+                      ".a ZA_ENTRY : NOP : NOP : NOP : NOP : NOP : NOP : RTS : ZA_UNREACHABLE : RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION bank_b, org=&8000\n"
+                      ".b ZA_ENTRY : LDA #1 : STA keep : JSR bsub : LDA keep : RTS\n"
+                      ".bsub STA tmp : LDA tmp : RTS\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "tmp"));
+}
+
+// Do two label values name the same label?
+static bool same_label(value a, value b)
+{
+    return value_is_label(a) && value_is_label(b)
+        && a.label.scope == b.label.scope && cursor_is_equal(a.label.def, b.label.def);
+}
+
+RC_TEST_STEP(assemble, label_values_remember_their_label, fix)
+{
+    // A label binds its address AND which label it is. Moving it by a plain number keeps the label;
+    // anything else makes a plain number. Everywhere else it is just its address.
+    RC_CHECK_TRUE(ASM(".lab NOP : NOP\n"
+                      ".other NOP\n"
+                      ".@ NOP\n"
+                      "plus = lab + 2 : before = 1 + lab : minus = other - 1 : alias = lab : local = @-\n"
+                      "times = lab * 1 : apart = other - lab : high = HI(lab) : sum = lab + other\n"
+                      "moved = {lab, other} + 1\n"
+                      "found = FIND({5, other}, 2) : isnum = IS_NUMBER(lab) : same = lab == 0") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    value lab   = baron_result_symbol(&fix->r, RC_STR("lab"));
+    value other = baron_result_symbol(&fix->r, RC_STR("other"));
+    RC_CHECK_TRUE(value_is_label(lab));
+    RC_CHECK_FALSE(same_label(lab, other));
+
+    RC_CHECK_TRUE(same_label(baron_result_symbol(&fix->r, RC_STR("plus")), lab));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("plus"), 2));
+    RC_CHECK_TRUE(same_label(baron_result_symbol(&fix->r, RC_STR("before")), lab));
+    RC_CHECK_TRUE(same_label(baron_result_symbol(&fix->r, RC_STR("minus")), other));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("minus"), 1));
+    RC_CHECK_TRUE(same_label(baron_result_symbol(&fix->r, RC_STR("alias")), lab));
+    RC_CHECK_TRUE(value_is_label(baron_result_symbol(&fix->r, RC_STR("local"))));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("local"), 3));
+
+    RC_CHECK_FALSE(value_is_label(baron_result_symbol(&fix->r, RC_STR("times"))));
+    RC_CHECK_FALSE(value_is_label(baron_result_symbol(&fix->r, RC_STR("apart"))));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("apart"), 2));
+    RC_CHECK_FALSE(value_is_label(baron_result_symbol(&fix->r, RC_STR("high"))));
+    RC_CHECK_FALSE(value_is_label(baron_result_symbol(&fix->r, RC_STR("sum"))));
+
+    // Each list element keeps its own label.
+    value moved = baron_result_symbol(&fix->r, RC_STR("moved"));
+    RC_CHECK_TRUE(value_is_list(moved) && moved.list.num == 2);
+    RC_CHECK_TRUE(same_label(rc_view_value_get(moved.list, 0), lab));
+    RC_CHECK_TRUE(same_label(rc_view_value_get(moved.list, 1), other));
+
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("found"), 1));   // a label is its address to FIND
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("isnum")), value_make_bool(true)));
+    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("same")), value_make_bool(true)));
+}
+
+RC_TEST_STEP(assemble, za_label_values_place_targets, fix)
+{
+    // Issue #30: an annotation target from a list symbol lands in its label's own section. It once
+    // resolved in the site's section, found nothing there, and left reader unreachable.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&8F : ZA_AUTO1 v\n"
+                      "SECTION main, org=&1900\n"
+                      ".entry ZA_ENTRY : LDA #1 : STA v\n"
+                      ".dispatch JMP (vector) : ZA_CANJUMP targets\n"
+                      ".vector EQUW reader\n"
+                      "ENDSECTION\n"
+                      "SECTION bank, org=&8000 : .reader LDA v : RTS : ENDSECTION\n"
+                      "targets = {reader}") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
+
+    // An alias of a label in another bank calls the label: keep is live across the call, so it stays
+    // off sub's tmp. (Spelt as an alias, the call once read as external, and the two shared a byte.)
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      "SECTION main, org=&1900\n"
+                      ".start ZA_ENTRY : LDA #1 : STA keep : JSR far : LDA keep : RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION bank, org=&8000\n"
+                      ".sub { ZA_AUTO1 tmp : LDA #2 : STA tmp : LDA tmp : RTS }\n"
+                      "ENDSECTION\n"
+                      "far = sub") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "sub.tmp"));
+
+    // A macro argument is a value too.
+    RC_CHECK_TRUE(ASM("MACRO call_far r : JSR r : ENDMACRO\n"
+                      "ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      "SECTION main, org=&1900\n"
+                      ".start ZA_ENTRY : LDA #1 : STA keep : call_far sub : LDA keep : RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION bank, org=&8000\n"
+                      ".sub { ZA_AUTO1 tmp : LDA #2 : STA tmp : LDA tmp : RTS }\n"
+                      "ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "sub.tmp"));
+
+    // And a nested section is a section: the alias finds sub there.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      "SECTION main, org=&1900\n"
+                      ".start ZA_ENTRY : LDA #1 : STA keep : JSR far : LDA keep : RTS\n"
+                      "  SECTION lib\n"
+                      "  .sub { ZA_AUTO1 tmp : LDA #2 : STA tmp : LDA tmp : RTS }\n"
+                      "  ENDSECTION\n"
+                      "ENDSECTION\n"
+                      "far = sub") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "sub.tmp"));
+
+    // An offset counts: JMP lab+2 skips the STA v at lab, so v must survive to the read, and w cannot
+    // share its byte. (It was once wired to lab itself, and v and w shared &70.) The skipped store is
+    // genuinely unreachable, and says so.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 v, w\n"
+                      ".start ZA_ENTRY : LDA #1 : STA v : LDA #2 : STA w : LDA w : JMP lab+2\n"
+                      ".lab STA v : LDA v : RTS") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "v") != zp_addr(&fix->r, "w"));
     RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 1u);
+
+    // A plain number has no label to ask. One landing on no code of its own section lands on whatever
+    // code sits at that address in any section - every one of them, since it cannot say which bank.
+    RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      "SECTION main, org=&1900\n"
+                      ".start ZA_ENTRY : LDA #1 : STA keep : JSR &8000 : LDA keep : RTS\n"
+                      "ENDSECTION\n"
+                      "SECTION b1, org=&8000 : .s1 { ZA_AUTO1 t : LDA #2 : STA t : LDA t : RTS } : ENDSECTION\n"
+                      "SECTION b2, org=&8000 : .s2 { ZA_AUTO1 t : LDA #2 : STA t : LDA t : RTS } : ENDSECTION") != 0);
+    RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
+    RC_CHECK(diag_count(&fix->r, error_type_za_auto_unreachable), ==, 0u);
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "s1.t"));
+    RC_CHECK_TRUE(zp_addr(&fix->r, "keep") != zp_addr(&fix->r, "s2.t"));
+
+    // An indirect JMP through an alias of our own vector is through our own vector: computed, so it
+    // wants ZA_CANJUMP. (The alias once hid the label, and the jump read as an exit to the OS.)
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 keep\n"
+                      ".start ZA_ENTRY : LDA #1 : STA keep : JMP (myvec)\n"
+                      ".vec EQUW handler\n"
+                      ".handler LDA keep : RTS\n"
+                      "myvec = vec") == error_type_za_auto_computed_flow);
 }
 
 RC_TEST_STEP(assemble, za_auto_unreachable_prunes_dead_edge, fix)
@@ -7299,16 +7583,25 @@ RC_TEST_STEP(assemble, za_auto_annotation_list_targets, fix)
     RC_CHECK(zp_addr(&fix->r, "x"), ==, 0x70);
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
 
-    // A nested list with a range inside flattens the same way (hB..<hB+1 enumerates to just hB).
+    // A nested list flattens the same way, its elements still the labels' values.
     RC_CHECK_TRUE(ASM("ZA_POOL &70..&7F : ZA_AUTO1 x, w\n"
                       "STA x\n"
                       "STA w : LDA w\n"
-                      "JMP (vec) : ZA_CANJUMP {hA, {hB..<hB+1}}\n"
+                      "JMP (vec) : ZA_CANJUMP {hA, {hB}}\n"
                       ".vec EQUW hA\n"
                       ".hA LDA x : RTS\n"
                       ".hB RTS") != 0);
     RC_CHECK_TRUE(first_error(&fix->r) == error_type_none);
     RC_CHECK(zp_addr(&fix->r, "w"), ==, 0x71);
+
+    // A range enumerates plain numbers, not labels: hB..<hB+1 names our code by address, so it is refused.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 x, w\n"
+                      "STA x\n"
+                      "STA w : LDA w\n"
+                      "JMP (vec) : ZA_CANJUMP {hA, {hB..<hB+1}}\n"
+                      ".vec EQUW hA\n"
+                      ".hA LDA x : RTS\n"
+                      ".hB RTS") == error_type_za_target_needs_label);
 
     // The ZA_CANCALL twin: a self-modified JSR's declared arms as one list symbol; keep interferes with
     // the UNION of the arms' footprints, and the arms (never live together) share a byte.
@@ -8207,8 +8500,7 @@ RC_TEST_STEP(assemble, org_and_labels, fix)
     uint32_t passes = ASM("SECTION t, org=&2000 : LDA #1 : .here : ENDSECTION");
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xA9, 0x01}, 2));   // section "t" is index 1
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")),
-                                 value_make_numeric(0x2002)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 0x2002));
 }
 
 RC_TEST_STEP(assemble, local_label_backward, fix)
@@ -8295,10 +8587,8 @@ RC_TEST_STEP(assemble, forward_reference_to_absolute, fix)
 RC_TEST_STEP(assemble, named_scope_dotted_access, fix)
 {
     RC_CHECK_TRUE(ASM(".routine { .core LDA #0 } : x = routine.core") != 0);   // default section, org 0
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")),
-                                 value_make_numeric(0)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("routine.core")),
-                                 value_make_numeric(0)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("x"), 0));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("routine.core"), 0));
 }
 
 RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
@@ -8319,7 +8609,7 @@ RC_TEST_STEP(assemble, result_harvest_flattens_symbols, fix)
                   || rc_str_is_equal(e.path, RC_STR("routine"))
                   || rc_str_is_equal(e.path, RC_STR("routine.core"));
         RC_CHECK_TRUE(known);                                        // no stray / unspellable paths
-        RC_CHECK_TRUE(value_is_equal(e.sym.v, value_make_numeric(0)));   // every one resolves to org 0
+        RC_CHECK_TRUE(value_is_numeric(e.sym.v) && e.sym.v.numeric == 0);   // every one resolves to org 0
         seen++;
     }
     RC_CHECK(seen, ==, 3u);
@@ -8698,8 +8988,8 @@ RC_TEST_STEP(assemble, define_forward_reference, fix)
                                   RC_STR_INIT("second=10")};
     fix->desc.defines = (rc_view_str) RC_VIEW(defs);
     RC_CHECK_TRUE(ASM("SKIP 5\n.limit") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("total")), value_make_numeric(10)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("first")), value_make_numeric(11)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("total"), 10));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("first"), 11));
 }
 
 RC_TEST_STEP(assemble, define_duplicate_and_default_idiom, fix)
@@ -8859,8 +9149,7 @@ RC_TEST_STEP(assemble, named_scope_brace_after_separator, fix)
 {
     // The naming brace may sit on the next line (or after a ':').
     RC_CHECK_TRUE(ASM(".routine\n{\n.core LDA #0\n}\nx = routine.core") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("routine.core")),
-                                 value_make_numeric(0)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("routine.core"), 0));
 }
 
 RC_TEST_STEP(assemble, anonymous_scope_is_private, fix)
@@ -8874,7 +9163,7 @@ RC_TEST_STEP(assemble, label_does_not_own_following_statement, fix)
     // A label hands control straight back: a '}' may sit on the same line right after it (the label
     // no longer swallows what follows), and the inner label still binds to the current pc.
     RC_CHECK_TRUE(ASM(".r { .e }") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("r.e")), value_make_numeric(0)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("r.e"), 0));
 }
 
 RC_TEST_STEP(assemble, labels_share_keyword_spellings, fix)
@@ -9014,7 +9303,7 @@ RC_TEST_STEP(assemble, if_does_not_introduce_scope, fix)
     // here out of the zero page so LDA here is absolute (3 bytes).
     uint32_t passes = ASM("SECTION s, org=&2000 : IF 1 : .here : ENDIF : LDA here : ENDSECTION");
     RC_CHECK_TRUE(passes != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 0x2000));
     RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xAD, 0x00, 0x20}, 3));
 }
 
@@ -9060,10 +9349,10 @@ RC_TEST_STEP(assemble, dead_branch_does_not_clobber_live_binding, fix)
     // The inactive ELSE assigns blah too; it must NOT delete the live IF branch's binding (each dead-branch
     // assignment clears only what it owns). Likewise a dead branch must leave an OUTER binding of the name intact.
     RC_CHECK_TRUE(ASM("IF 1 : blah = 2 : ELSE : blah = 3 : ENDIF") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("blah")), value_make_numeric(2)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("blah"), 2));
 
     RC_CHECK_TRUE(ASM("x = 1\nIF 0 : x = 2 : ENDIF") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("x")), value_make_numeric(1)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("x"), 1));
 }
 
 RC_TEST_STEP(assemble, if_framing_errors, fix)
@@ -9156,7 +9445,7 @@ RC_TEST_STEP(assemble, nested_if_forward_ref, fix)
     // which already clears both thresholds - so on the next pass both NOPs come in and end settles at 8.
     uint32_t passes = ASM("LDA #0 : IF end >= 4 : NOP : IF end >= 6 : NOP : ENDIF : ENDIF : LDX #1 : LDY #2 : .end : RTS");
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA9, 0x00, 0xEA, 0xEA, 0xA2, 0x01, 0xA0, 0x02, 0x60}, 9));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("end")), value_make_numeric(8)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("end"), 8));
 }
 
 RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
@@ -9167,8 +9456,8 @@ RC_TEST_STEP(assemble, org_from_forward_ref_ends_at_address, fix)
                           ".progstart LDA #&41 : JSR &FFEE : JMP progstart : .progend\n"
                           "ENDSECTION");
     RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xA9, 0x41, 0x20, 0xEE, 0xFF, 0x4C, 0xF8, 0x0F}, 8));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("progstart")), value_make_numeric(0x0FF8)));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("progend")), value_make_numeric(0x1000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("progstart"), 0x0FF8));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("progend"), 0x1000));
 }
 
 RC_TEST_STEP(assemble, for_repeats_body, fix)
@@ -9277,7 +9566,7 @@ RC_TEST_STEP(assemble, equb_advances_pc, fix)
 {
     // The three bytes move pc, so a label after them sees the advanced address (default section, org 0).
     RC_CHECK_TRUE(ASM("EQUB 1, 2, 3 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(3)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 3));
 }
 
 RC_TEST_STEP(assemble, equb_forward_reference, fix)
@@ -9337,7 +9626,7 @@ RC_TEST_STEP(assemble, equw_signed_range_and_pc, fix)
     RC_CHECK_TRUE(ERR("EQUW -65536") == error_type_value_out_of_range);
     // Each word advances pc by 2; a label after two words sees +4 (default section, org 0).
     RC_CHECK_TRUE(ASM("EQUW 1, 2 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(4)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 4));
     // A forward reference is a 2-byte placeholder, so end - start = 2.
     uint32_t passes = ASM(".start EQUW end - start : .end");
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x02, 0x00}, 2));
@@ -9355,7 +9644,7 @@ RC_TEST_STEP(assemble, equd_emits_little_endian_dwords, fix)
     RC_CHECK_TRUE(ERR("EQUD 4294967296") == error_type_value_out_of_range);
     // Each dword advances pc by 4 (default section, org 0).
     RC_CHECK_TRUE(ASM("EQUD 1 : .here") != 0);
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(4)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 4));
 }
 
 RC_TEST_STEP(assemble, value_errors_promote_to_specific_codes, fix)
@@ -9483,7 +9772,7 @@ RC_TEST_STEP(assemble, pc_constant, fix)
     // Mid-program it reads the live PC: after LDA #0 (two bytes), * is org+2.
     uint32_t passes = ASM("SECTION s, org=&2000 : LDA #0 : here = * : RTS : ENDSECTION");
     RC_CHECK_TRUE(code_in_is(&fix->r, passes, 1, (uint8_t[]){0xA9, 0x00, 0x60}, 3));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("here")), value_make_numeric(0x2002)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("here"), 0x2002));
     // A comma list evaluates one element at a time, so the PC advances between them (org 0 here: 0, 1, 2)...
     RC_CHECK_TRUE(code_is(&fix->r, ASM("EQUB *, *, *"), (uint8_t[]){0x00, 0x01, 0x02}, 3));
     // ...but a list literal is one value computed at one instant, so every * is the same PC.
@@ -9530,7 +9819,7 @@ RC_TEST_STEP(assemble, include_splices_file, fix)
     // scope (no scope of its own).
     uint32_t passes = INC("include \"inc_child.6502\"");
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0xA2, 0x02}, 2));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("child")), value_make_numeric(0)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("child"), 0));
 }
 
 RC_TEST_STEP(assemble, function_frames_are_per_source, fix)
@@ -9563,7 +9852,7 @@ RC_TEST_STEP(assemble, include_joins_the_multi_pass, fix)
     // settles once the include is part of the pass loop. JMP is fixed-width, so this converges cleanly.
     uint32_t passes = INC("jmp target : include \"inc_fwd_child.6502\" : .target rts");
     RC_CHECK_TRUE(code_is(&fix->r, passes, (uint8_t[]){0x4C, 0x05, 0x00, 0xEA, 0xEA, 0x60}, 6));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("target")), value_make_numeric(5)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("target"), 5));
 }
 
 RC_TEST_STEP(assemble, include_reports_included_from_frame, fix)
@@ -9659,8 +9948,7 @@ RC_TEST_STEP(assemble, incbin_splices_file_bytes, fix)
     uint32_t passes = (fix->r = assemble_string(&fix->desc, RC_STR("t"),
                           RC_STR("incbin \"blob.bin\" : .after"))).passes;   // default section, org 0
     RC_CHECK_TRUE(code_is(&fix->r, passes, blob, (uint32_t) sizeof blob));
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("after")),
-                                 value_make_numeric(sizeof blob)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("after"), sizeof blob));
 
     rc_file_delete(RC_STR("blob.bin"));
 }
@@ -10068,9 +10356,9 @@ RC_TEST_STEP(assemble, stress_many_symbols_and_scopes, fix)
     RC_CHECK_TRUE(passes != 0);
     RC_CHECK(baron_result_code(&fix->r).num, ==, 2000u);   // 2000 bytes from the loop; the labels emit nothing
     // A symbol bound last, after every relocation, is still correct...
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("last")), value_make_numeric(0xBEEF)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("last"), 0xBEEF));
     // ...as is a label from the middle of the run (they all resolve to the post-loop pc).
-    RC_CHECK_TRUE(value_is_equal(baron_result_symbol(&fix->r, RC_STR("lbl250")), value_make_numeric(2000)));
+    RC_CHECK_TRUE(symbol_is(&fix->r, RC_STR("lbl250"), 2000));
 
     rc_arena_deinit(&build);
 }

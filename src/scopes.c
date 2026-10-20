@@ -366,23 +366,6 @@ static value view_get_from(scopes_view v, uint32_t scope_index, rc_str full_path
 }
 
 
-symbol_ref scopes_resolve_symbol_def(const scopes *s, uint32_t scope_index, rc_str name)
-{
-    RC_ASSERT(s != NULL);
-
-    // The same walk as a value lookup - bare names shadow up the parent chain, dotted paths descend the
-    // child scopes - but we return the binding's def (its identity) plus the scope it was found in: the
-    // two together uniquely identify a variable across instantiations.
-    scopes_view v   = scopes_view_make(s);
-    symbol_loc  loc = view_find_from(v, scope_index, name);
-    if (loc.index == RC_INDEX_NONE) {
-        return (symbol_ref) {.def = cursor_none(), .scope = RC_INDEX_NONE};
-    }
-
-    return (symbol_ref) {.def = rc_trie_symbol_value_get(&v.symbol_pool, loc.index).def, .scope = loc.scope};
-}
-
-
 // Look a symbol up during assembly, starting from scope_index (with parent-walk shadowing).
 value scopes_get_symbol(const scopes *s, uint32_t scope_index, rc_str full_path)
 {
@@ -754,30 +737,6 @@ RC_TEST_STEP(scopes, qualified_head_walks_up, fix)
     scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), (symbol) {.v = value_make_numeric(42.0), .def = (cursor){0, 40}});
 
     RC_CHECK_TRUE(value_is_equal(scopes_get_symbol(&fix->scopes, other, RC_STR("routine.core")), value_make_numeric(42.0)));
-}
-
-RC_TEST_STEP(scopes, resolve_def_follows_dotted_paths, fix)
-{
-    // The identity lookup obeys the same rules as the value lookup: a bare name shadows up the parents,
-    // a dotted path descends the child scopes - and it reports the LEAF scope as the declaring one, which
-    // is what makes a cross-scope ZA_AUTO operand resolve to the exact variable instance.
-    uint32_t routine = scopes_make_child(&fix->scopes, fix->root, RC_STR("routine"));
-    uint32_t other   = scopes_make_child(&fix->scopes, fix->root, RC_STR("other"));
-
-    scopes_set_symbol(&fix->scopes, routine, RC_STR("core"), (symbol) {.v = value_make_numeric(0x70), .def = (cursor){0, 30}});
-
-    symbol_ref ref = scopes_resolve_symbol_def(&fix->scopes, other, RC_STR("routine.core"));
-    RC_CHECK_TRUE(cursor_is_equal(ref.def, (cursor){0, 30}));
-    RC_CHECK(ref.scope, ==, routine);
-
-    // The dotted and bare routes land on the SAME identity.
-    symbol_ref bare = scopes_resolve_symbol_def(&fix->scopes, routine, RC_STR("core"));
-    RC_CHECK_TRUE(cursor_is_equal(bare.def, ref.def));
-    RC_CHECK(bare.scope, ==, ref.scope);
-
-    // Unknown leaf and unknown head both come up empty.
-    RC_CHECK_TRUE(cursor_is_none(scopes_resolve_symbol_def(&fix->scopes, other, RC_STR("routine.missing")).def));
-    RC_CHECK_TRUE(cursor_is_none(scopes_resolve_symbol_def(&fix->scopes, other, RC_STR("ghost.core")).def));
 }
 
 RC_TEST_STEP(scopes, nested_path_and_shadowing, fix)
