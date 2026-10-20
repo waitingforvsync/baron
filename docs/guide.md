@@ -644,7 +644,9 @@ M[.., 1..]      ; {{2, 3}, {5, 6}} - all rows, columns 1 onward
 
 Fewer selectors than axes just leaves the trailing axes whole - which is why `M[1]` is a row.
 
-Strings subscript like rank-1 lists of characters, and always give back a string:
+A string is a single value (see [Strings and character codes](#strings-and-character-codes)), but
+subscripts are one of the few things that look inside one. A string subscripts like a list of
+characters, and always gives back a string:
 
 ```
 "hello"[1]      ; "e"
@@ -659,7 +661,7 @@ Operators (and the element-wise functions) work on lists by mapping across them,
 rules, in the order they apply:
 
 1. A range becomes its list of elements.
-2. A scalar pairs with *everything* in the other side, however deep.
+2. A single value - a number, or a string - pairs with *everything* in the other side, however deep.
 3. When both sides are lists of the *same* depth, elements pair off - lengths must match, except that a
    length 1 list repeats itself.
 4. When one side is *shallower*, it is held whole and applied to each element of the deeper side.
@@ -705,7 +707,155 @@ ALIGN &100
 
 A full 256-entry sine table, one line.
 
+### What maps, and what doesn't ###
+
+Broadcasting belongs to the operators and the *element-wise* functions: `ABS`, `SIN`, `LO`, `ROUND`,
+`CODES` and the rest of [that table](reference.md#element-wise-functions). Each of them works on one
+value at a time, so given a list, it works on every single value inside it, however deep.
+
+Every other function takes its arguments *whole*. These are the ones that only make sense of a list
+as a list - its length, its order, its total:
+
+```
+ABS({-1, {-2, 3}})          ; {1, {2, 3}}      - element-wise: every value inside
+LEN({{1, 2}, {3, 4, 5}})    ; 2                - whole: the outer list has two elements
+REVERSE({{1, 2}, {3, 4}})   ; {{3, 4}, {1, 2}} - whole: the rows swap, their contents don't
+SUM({{1, 2}, {3, 4}})       ; 10
+```
+
+There's one exception, and it's a useful one: `FIND`'s second argument maps, so asking for a list of
+things gives back a list of positions. That's what makes [character mapping](#character-codes) a
+one-liner.
+
+### Functions take their arguments whole ###
+
+Your own [`FUNCTION`s](#functions) take their arguments whole too - a list arrives as one value. But
+when everything in the body maps, so does the function:
+
+```
+FUNCTION sqr(x) = x*x
+
+sqr({1, 2, 3})              ; {1, 4, 9} - because x*x maps
+```
+
+An `IF` doesn't map. It runs one branch or the other, so it needs a single value to decide on, and
+`{1, 300} > 255` is `{FALSE, TRUE}` - an answer per element, not one answer:
+
+```
+FUNCTION clamp(x)
+    IF x > 255
+        r = 255
+    ELSE
+        r = x
+    ENDIF
+= r
+
+clamp(300)                  ; 255
+clamp({1, 300})             ; an error - the IF can't decide for a whole list
+```
+
+So a `FUNCTION` with an `IF` in it is one for single values - unless the choice is made with `WHERE`,
+the element-wise `IF`. For each value in its first argument, it takes the matching value of the second
+where that's true, and of the third where it's false:
+
+```
+FUNCTION clamp(x) = WHERE(x > 255, 255, x)
+
+clamp({1, 300})                     ; {1, 255}
+WHERE({TRUE, FALSE}, "on", "off")   ; {"on", "off"}
+```
+
+Its three arguments broadcast together, just as an operator's two do. And like an `IF`, it only looks
+at what it picks, so `WHERE(x = 0, 0, 1/x)` is safe even where `x` is 0.
+
 ## Strings and character codes ##
+
+A string is text in double quotes - write `""` for a quote inside one. Two strings join with `+`, and
+compare in character-code order with `<`, `=` and the rest (so `"Z" < "a"`). `SORT`, `MIN` and `MAX`
+use the same order:
+
+```
+"HEL" + "LO"            ; "HELLO"
+"ab" < "b"              ; TRUE
+SORT({"pear", "apple"}) ; {"apple", "pear"}
+```
+
+### A string is one value ###
+
+A string is a single value, just as a number is - not a list of characters. Everything that builds
+lists, maps over them or measures their shape treats a string as one thing:
+
+```
+{"a", "b"} + "!"        ; {"a!", "b!"} - "!" pairs with each string, as a number would
+CONCAT("ab", "cd")      ; {"ab", "cd"} - two strings make a list of two
+FLATTEN({"ab", {"c"}})  ; {"ab", "c"}  - a string is already as flat as it gets
+RANK("abc")             ; 0            - one value, no axes
+```
+
+It's also why `+` joins strings: adding two pieces of text can only mean joining them. A list is
+many values, so `+` on lists adds the values inside, and lists join with `CONCAT` instead.
+
+`SUM` is `+` over a whole list, so it joins a list of strings. A list can run over several lines,
+which makes this the tidy way to build a long string from pieces:
+
+```
+title = SUM({"STARGLOBE v", AS_STRING(version),
+             " by ", author})
+```
+
+Numbers don't join quietly - `"v" + 3` is an error - so turn them into text first, with `AS_STRING`
+(or `~` for hex).
+
+### Looking inside a string ###
+
+A handful of things work *along* a sequence: subscripts, `LEN`, `REVERSE`, `FIND` and `REPLACE`.
+Those read a string as its characters, and give back a string (or a position in one):
+
+```
+"hello"[1..3]               ; "ell"
+LEN("hello")                ; 5
+REVERSE("hello")            ; "olleh"
+FIND("hello", "ll")         ; 2
+REPLACE("1.2.3", ".", "-")  ; "1-2-3"
+```
+
+Hand them a list and they do the same job with its elements. Baron has no separate character type -
+a single character is just a one-character string - so `FIND` in a string looks for a piece of text,
+of any length.
+
+`FOR` isn't one of them: it walks lists, and a string is a single value. Walk its codes instead,
+with `FOR c = CODES(s)`.
+
+### Searching and replacing ###
+
+`FIND(x, v)` gives the position where `v` first appears in `x`, and `REPLACE(x, old, new)` swaps every
+appearance of `old` for `new`, working left to right:
+
+```
+REPLACE("aaa", "aa", "b")       ; "ba" - appearances never overlap
+REPLACE("v1.2", "v", "")        ; "1.2" - an empty new deletes
+```
+
+A `REPLACE` that finds nothing hands `x` back unchanged. A `FIND` that finds nothing is an error -
+unless you give it a third argument, which it hands back instead. That's the way to ask whether
+something is there at all:
+
+```
+IF FIND(name, ".", -1) >= 0     ; does name contain a dot?
+```
+
+Both work on lists as well. There, `REPLACE` swaps *runs* of elements, and `old` and `new` can each be a
+list or a single value:
+
+```
+REPLACE(bytes, &0D, {&0D, &0A}) ; every CR becomes CR LF
+REPLACE(bytes, {0, 0}, {})      ; every pair of zeros goes
+```
+
+`FIND` is different on a list: its second argument maps, so a list there means "find each of these",
+and you get a position apiece. `FIND({1, 2, 3, 4}, {2, 3})` is `{1, 2}`, not where the run 2, 3 starts.
+
+### Character codes ###
 
 `CODES` turns a string into the list of its character codes, and `CHR` turns codes back into a string:
 
@@ -715,10 +865,19 @@ CHR(72)                 ; "H"
 CHR({72, 73})           ; "HI" - every code becomes a character of ONE string
 ```
 
-That one bridge, plus the machinery you already have, is the whole story of character mapping. A
+`CODES` is element-wise, so a list of strings gives one list of codes per string. `CHR` takes its
+argument whole, and makes *one* string from every code in it, however nested:
+
+```
+CODES({"AB", "C"})      ; {{65, 66}, {67}}
+CHR({{65, 66}, {67}})   ; "ABC"
+```
+
+That bridge, plus the machinery you already have, is the whole story of character mapping. A
 `CODES` result is a list, so it broadcasts - and a *list of indices* is a gather subscript, so
 indexing a table with one **is** the character map, NumPy-fashion. `FIND(x, v)` supplies the indices:
-it returns where `v` first occurs in `x`, and the needle broadcasts too.
+it returns where `v` first occurs in `x`, and - the one exception to whole arguments - a list of `v`s
+gives a list of positions.
 
 So BeebAsm's `MAPCHAR` is a one-liner. Map each character to its position in a glyph set:
 
@@ -747,7 +906,8 @@ EQUS CODES("HELLO WORLD") - ' '   ; font starts at space = 0
 ```
 
 A character missing from the set fails the assemble with `Not found: '81'` naming the stray code -
-which is exactly what you want from a font with holes in it.
+which is exactly what you want from a font with holes in it. If you'd rather have a stand-in, give
+`FIND` a third argument: `FIND(CODES(glyphs), CODES(s), 0)` sends anything missing to glyph 0.
 
 Two type predicates round the toolkit out: `IS_STRING(x)` and `IS_NUMBER(x)` answer `TRUE` or `FALSE`
 for the value *as a whole* (a list is neither; test list-ness with `RANK(x) > 0`) - handy for a
@@ -913,10 +1073,14 @@ form:
 ```
 FUNCTION sqr(x) = x*x
 
-EQUB sqr(0..15)                 ; broadcasting works through functions too
+EQUB sqr(0..15)                 ; maps over the range, because x*x does
 ```
 
-Longer functions take local assignments and `IF`s, with a top-level `=` as the return:
+A function takes each argument whole, so a list arrives as one value; it maps over the list only
+when everything in its body does (see
+[Functions take their arguments whole](#functions-take-their-arguments-whole)).
+
+Longer functions take local assignments, `IF`s and `FOR` loops, with a top-level `=` as the return:
 
 ```
 FUNCTION ball_ypos(n)
@@ -929,14 +1093,74 @@ Functions are pure - they compute, they never emit - and lexically scoped: a bod
 the globals of where it was *defined*, never the caller's locals. Overload by parameter count, and recurse
 away (`IF` for the base case, as with macros). Definition before use, as with macros.
 
-Locals bind **once**, parameters included: there is no mutation in a body, so a second assignment to the
-same name is an error rather than a silent no-op (`x = x + 1` is asking for a loop that does not exist -
-recursion is the loop). Assigning the same name in an `IF` and its `ELSE` is fine; only one arm runs.
-They bind in order, too: a local can be read only once its assignment has run.
-
 Recursion can go 128 calls deep; deeper than that is an error (usually a missing base case). To walk a
-long list, split it in half and recurse on each half: the depth then grows with the number of halvings,
-so even thousands of elements stay a dozen calls deep.
+long list, use a loop.
+
+Functions are powerful enough to be able to implement something like the quicksort algorithm, taking a list
+and returning it sorted!
+
+### Locals and loops ###
+
+A local takes a new value each time you assign it, parameters included, so a body can count and
+accumulate. That's the only change a body can make: assigning the name of a global makes a local that
+hides it, and the locals are gone when the call returns, so the function stays pure. A local can be
+read only once something has assigned it.
+
+`FOR ... NEXT` works in a body just as it does in a program, running its statements once for each
+element of a list or range. With assignment, that's how to build a list a piece at a time:
+
+```
+FUNCTION commands(names)            ; a length-prefixed command table
+    out = {}
+    FOR s = names
+        out = CONCAT(out, LEN(s), CODES(s))
+    NEXT
+= out
+
+EQUB commands({"LOAD", "SAVE", "RUN"})
+```
+
+The loop variable is an ordinary local, which keeps its last value after the `NEXT`, and anything else
+you assign carries from one step to the next:
+
+```
+FUNCTION offsets(lengths)           ; where each record starts
+    out = {}
+    at = 0
+    FOR n = lengths
+        out = CONCAT(out, at)
+        at = at + n
+    NEXT
+= out
+
+EQUW records + offsets({5, 3, 8})   ; records, records+5, records+8
+```
+
+A loop is also the way to apply something that takes its argument whole to each element of a list -
+here `LEN` of each string, which `LEN` on the list won't give you:
+
+```
+FUNCTION lengths(strings)
+    out = {}
+    FOR s = strings
+        out = CONCAT(out, LEN(s))
+    NEXT
+= out
+
+lengths({"LOAD", "SAVE", "RUN"})    ; {4, 4, 3}
+```
+
+A few things to know:
+
+- A loop always walks its whole list - there's no `WHILE` or `BREAK` - so put an `IF` inside it to skip
+  the steps you don't want.
+- The `=` return goes at the top level of the body, never inside a loop or an `IF`.
+- `FOR` and `NEXT` are keywords in a body, so they can't name locals (`next_one` is fine).
+- A loop has no depth limit, and each step's working memory is freed as the next begins. But a list
+  grown with `CONCAT` is copied at every step, so the time to build one grows with the square of its
+  length: a few thousand elements take a fraction of a second, twenty thousand a second or two.
+
+### Errors in a body ###
 
 An error inside a body is reported on the body line that caused it, followed by a note at the call it
 came from. A bad argument is the caller's mistake, so that one is reported at the call.
@@ -965,9 +1189,6 @@ FUNCTION checked(w)
     ENDIF
 = r
 ```
-
-Functions are powerful enough to be able to implement something like the quicksort algorithm, taking a list
-and returning it sorted! 
 
 ## Section transforms ##
 

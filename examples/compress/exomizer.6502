@@ -44,28 +44,22 @@ never = 2^40                                            ; dearer than any real t
 start   = {{0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 1..4, {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8}, 0..15}
 indices = {2 + (0..15), REPEATED(4, 2), REPEATED(16, 4), REPEATED(16, 4)}
 
-\ What every number from 1 to limit costs under one table (0 has no code),
-\ and which bucket each falls in.
+\ Which bucket every number from 1 to limit falls in under one table, and so
+\ what each costs: its bucket's number, then its place (0 has no code).
 
-FUNCTION bucket_costs(widths, idx, i, left)
-    IF i == LEN(widths) OR left <= 0
-        r = {}
-    ELSE
-        k = MIN({2^widths[i], left})
-        r = CONCAT(REPEATED(k, idx[i] + widths[i]), bucket_costs(widths, idx, i + 1, left - k))
-    ENDIF
-= r
+FUNCTION bucket_of(widths, limit)
+    buckets = {}
+    left    = limit
+    FOR i = 0..<LEN(widths)
+        IF left > 0
+            k       = MIN({2^widths[i], left})
+            buckets = CONCAT(buckets, REPEATED(k, i))
+            left    = left - k
+        ENDIF
+    NEXT
+= buckets
 
-FUNCTION bucket_of(widths, i, left)
-    IF i == LEN(widths) OR left <= 0
-        r = {}
-    ELSE
-        k = MIN({2^widths[i], left})
-        r = CONCAT(REPEATED(k, i), bucket_of(widths, i + 1, left - k))
-    ENDIF
-= r
-
-FUNCTION cost_table(widths, idx, limit) = CONCAT({-1}, bucket_costs(widths, idx, 0, limit))
+FUNCTION cost_table(widths, idx, limit) = CONCAT({-1}, (idx + widths)[bucket_of(widths, limit)])
 
 \ The search. A literal costs its flag and 8 bits, so a run of n costs n
 \ bits of flags; matches carry their own flags, so a run of them costs
@@ -107,50 +101,47 @@ FUNCTION smaller(a, b) = MIN({a, b}, 0)                  ; element by element
 \ pay for. The lists are padded so reaching past e reads as reaching e, and
 \ every shift is a slice.
 
-FUNCTION in_reach(b, e, w)                              ; how many numbers are in s..s + 2^w - 1, by width
-    c = b[2^w..e + 2^w] - b[0..e]
-    IF w == 0
-        r = {c}
-    ELSE
-        r = CONCAT(in_reach(b, e, w - 1), {c})
-    ENDIF
+FUNCTION in_reach(b, e, wmax)                           ; by width, how many numbers are in s..s + 2^w - 1
+    r = {}
+    FOR w = 0..wmax
+        r = CONCAT(r, {b[2^w..e + 2^w] - b[0..e]})
+    NEXT
 = r
 
-FUNCTION best_of(c, w, counts, g, e)                    ; the cheapest width from 0 to w
-    t = counts[w] * (c + w) + g[2^w..e + 2^w]
-    IF w == 0
-        r = t
-    ELSE
-        r = smaller(t, best_of(c, w - 1, counts, g, e))
-    ENDIF
-= r
+FUNCTION best_of(c, counts, g, e, wmax)                 ; the cheapest width from 0 to wmax
+    best = counts[0] * c + g[1..e + 1]
+    FOR w = 1..wmax
+        best = smaller(best, counts[w] * (c + w) + g[2^w..e + 2^w])
+    NEXT
+= best
 
-FUNCTION layers(i, counts, e, wmax, idx)                ; the layers for buckets i onwards
-    IF i == LEN(idx)
-        r = {CONCAT(REPEATED(e, never), {0})}
-    ELSE
-        rest = layers(i + 1, counts, e, wmax, idx)
-        g    = CONCAT(rest[0], REPEATED(2^wmax, 0))
-        r    = CONCAT({best_of(idx[i], wmax, counts, g, e)}, rest)
-    ENDIF
-= r
+FUNCTION layers(counts, e, wmax, idx)                   ; the layers for every bucket, and one past
+    ls = {CONCAT(REPEATED(e, never), {0})}
+    FOR i = LEN(idx) - 1..0
+        g  = CONCAT(ls[0], REPEATED(2^wmax, 0))
+        ls = CONCAT({best_of(idx[i], counts, g, e, wmax)}, ls)
+    NEXT
+= ls
 
 \ Back from the front: at each bucket, the narrowest width that does best.
 \ Buckets past the largest number get width 15, to reach as far as they can.
 
-FUNCTION trace(ls, below, e, wmax, idx, i, s)
-    IF i == LEN(idx)
-        r = {}
-    ELIF s == e
-        r = REPEATED(LEN(idx) - i, 15)
-    ELSE
-        ws    = 0..wmax
-        to    = smaller(s + 2^ws, e)
-        cands = (below[to] - below[s]) * (idx[i] + ws) + ls[i + 1][to]
-        w     = FIND(cands, MIN(cands))
-        r     = CONCAT({w}, trace(ls, below, e, wmax, idx, i + 1, smaller(s + 2^w, e)))
-    ENDIF
-= r
+FUNCTION trace(ls, below, e, wmax, idx)
+    widths = {}
+    s      = 1
+    FOR i = 0..<LEN(idx)
+        IF s == e
+            w = 15
+        ELSE
+            ws    = 0..wmax
+            to    = smaller(s + 2^ws, e)
+            cands = (below[to] - below[s]) * (idx[i] + ws) + ls[i + 1][to]
+            w     = FIND(cands, MIN(cands))
+            s     = smaller(s + 2^w, e)
+        ENDIF
+        widths = CONCAT(widths, w)
+    NEXT
+= widths
 
 \ The widths that write these numbers in the fewest bits, one per index cost.
 
@@ -160,55 +151,54 @@ FUNCTION fit(values, idx)
     below  = below_counts(vs, e)
     wmax   = MIN({15, BITLEN(e)})
     counts = in_reach(CONCAT(below, REPEATED(2^wmax, below[e])), e, wmax)
-= trace(layers(0, counts, e, wmax, idx), below, e, wmax, idx, 0, 1)
+= trace(layers(counts, e, wmax, idx), below, e, wmax, idx)
 
 
 \ ---- what a parse wrote ----
 
-\ The numbers in each table, gathered by halving the list of runs: every
-\ length, and each offset under its match's length (0 elsewhere - a repeat's
-\ offset is 0 too, since it writes none).
+\ The numbers in each table: every match's length, and its offset under the
+\ table for its length (0 under the others - a repeat's offset is 0 too,
+\ since it writes none).
 
-FUNCTION run_values(run)
-    IF run[0] == 0
-        r = {{}, {}, {}, {}}
-    ELSE
-        offs = run[1][0]
-        lens = run[1][1]
-        r = {lens, offs * (lens == 1), offs * (lens == 2), offs * (lens >= 3)}
-    ENDIF
-= r
-
-FUNCTION run_list_values(runs)
-    n = LEN(runs)
-    IF n == 0
-        r = {{}, {}, {}, {}}
-    ELIF n == 1
-        r = run_values(runs[0])
-    ELSE
-        h = n DIV 2
-        r = ZIP(run_list_values(runs[0..<h]), run_list_values(runs[h..<n]))
-    ENDIF
-= r
+FUNCTION values_written(runs)
+    lens = {}
+    off1 = {}
+    off2 = {}
+    off3 = {}
+    FOR run = runs
+        IF run[0] == 1
+            offs = run[1][0]
+            l    = run[1][1]
+            lens = CONCAT(lens, l)
+            off1 = CONCAT(off1, offs * (l == 1))
+            off2 = CONCAT(off2, offs * (l == 2))
+            off3 = CONCAT(off3, offs * (l >= 3))
+        ENDIF
+    NEXT
+= {lens, off1, off2, off3}
 
 FUNCTION fit_all(runs)
-    v = run_list_values(runs)
+    v = values_written(runs)
 = {fit(v[0], indices[0]), fit(v[1], indices[1]), fit(v[2], indices[2]), fit(v[3], indices[3])}
 
 \ Fit tables to what a parse wrote, parse again with them, and keep going
-\ while that saves anything. The result is the best {widths, parse} found.
+\ while that saves anything, eight times at most. The result is the best
+\ {widths, parse} found.
 
-FUNCTION settle(widths, p, data, tries)
-    next = fit_all(p[1])
-    q    = parse_with(next, data)
-    IF q[0] >= p[0]
-        r = {widths, p}
-    ELIF tries == 1
-        r = {next, q}
-    ELSE
-        r = settle(next, q, data, tries - 1)
-    ENDIF
-= r
+FUNCTION settle(widths, p, data)
+    better = TRUE
+    FOR try = 1..8
+        IF better
+            refit  = fit_all(p[1])
+            q      = parse_with(refit, data)
+            better = q[0] < p[0]
+            IF better
+                widths = refit
+                p      = q
+            ENDIF
+        ENDIF
+    NEXT
+= {widths, p}
 
 
 \ ---- the stream ----
@@ -229,15 +219,16 @@ FUNCTION place(v, w)                                    ; v in w bits, a low byt
 \ A table ready for writing: {widths, each number's bucket, each bucket's
 \ first number}.
 
-FUNCTION bases(widths, i, b)
-    IF i == LEN(widths)
-        r = {}
-    ELSE
-        r = CONCAT(b, bases(widths, i + 1, b + 2^widths[i]))
-    ENDIF
-= r
+FUNCTION bases(widths)
+    firsts = {}
+    b      = 1
+    FOR w = widths
+        firsts = CONCAT(firsts, b)
+        b      = b + 2^w
+    NEXT
+= firsts
 
-FUNCTION coder(widths, limit) = {widths, CONCAT({0}, bucket_of(widths, 0, limit)), bases(widths, 0, 1)}
+FUNCTION coder(widths, limit) = {widths, CONCAT({0}, bucket_of(widths, limit)), bases(widths)}
 
 \ A match: its length, then - flag set - the reuse flag, then its offset
 \ (none for a repeat, offset 0).
@@ -259,41 +250,27 @@ FUNCTION match_tokens(off, len, c, flag)
     ENDIF
 = r
 
-FUNCTION matches_tokens(offs, lens, c, flag)            ; only the first match can have the flag
-    n = LEN(offs)
-    IF n == 1
-        r = match_tokens(offs[0], lens[0], c, flag)
-    ELSE
-        h = n DIV 2
-        r = {matches_tokens(offs[0..<h], lens[0..<h], c, flag), matches_tokens(offs[h..<n], lens[h..<n], c, FALSE)}
-    ENDIF
+FUNCTION match_run_tokens(m, c, flag)                   ; only the first match can have the flag
+    r = {}
+    FOR j = 0..<LEN(m[0])
+        r = CONCAT(r, match_tokens(m[0][j], m[1][j], c, flag AND j == 0))
+    NEXT
 = r
 
 \ Runs come in pairs, a literal run and the match run after it (the last
 \ pair perhaps without one). A match run has the flag when its literal run
-\ is a single literal that follows a match - so not in the first pair. The
-\ halving passes slices down, with the index of the first pair in each.
+\ is a single literal that follows a match - so not in the first pair.
 
-FUNCTION pair_tokens(runs, k, c)                        ; {literals} or {literals, matches}
-    lit = runs[0][1]
-    l   = ZIP(REPEATED(LEN(lit), 1), 256 + lit)
-    IF LEN(runs) == 2
-        m = runs[1][1]
-        r = {l, matches_tokens(m[0], m[1], c, exo_reuse AND k > 0 AND LEN(lit) == 1)}
-    ELSE
-        r = l
-    ENDIF
-= r
-
-FUNCTION tokens(runs, c, k)
-    n = (LEN(runs) + 1) DIV 2                           ; pairs
-    IF n == 1
-        r = pair_tokens(runs, k, c)
-    ELSE
-        h = n DIV 2
-        r = {tokens(runs[0..<2 * h], c, k), tokens(runs[2 * h..<LEN(runs)], c, k + h)}
-    ENDIF
-= r
+FUNCTION tokens(runs, c)
+    t = {}
+    FOR k = 0..<(LEN(runs) + 1) DIV 2
+        lit = runs[2 * k][1]
+        t   = CONCAT(t, ZIP(REPEATED(LEN(lit), 1), 256 + lit))
+        IF 2 * k + 1 < LEN(runs)
+            t = CONCAT(t, match_run_tokens(runs[2 * k + 1][1], c, exo_reuse AND k > 0 AND LEN(lit) == 1))
+        ENDIF
+    NEXT
+= t
 
 \ The widths as the decruncher reads them: lengths, then the offset tables
 \ for long, 2-byte and 1-byte matches, each width's low 3 bits then its top.
@@ -326,8 +303,8 @@ FUNCTION stream(t)
 
 FUNCTION exomizer(data)
     n    = LEN(data)
-    best = settle(start, parse_with(start, data), data, 8)
+    best = settle(start, parse_with(start, data), data)
     w    = best[0]
     c    = {coder(w[0], 255), coder(w[1], n), coder(w[2], n), coder(w[3], n)}
-    t    = FLATTEN(tokens(best[1][1], c, 0))
+    t    = FLATTEN(tokens(best[1][1], c))
 = stream(CONCAT(width_tokens(w), t[1..<LEN(t)], 0, REPEATED(16, 0), 1))

@@ -87,7 +87,7 @@ to the end of the line.
 | `FOR v = seq` ... `NEXT` | Run the body once per element of a range or list, `v` bound to each element, each iteration in its own scope. An empty sequence runs zero times. |
 | `INCLUDE "file"` | Splice another source file in textually: its code emits here, its symbols bind here. Paths resolve relative to the including file. |
 | `MACRO name sig` ... `ENDMACRO` | Define a macro. The signature is parameter names, commas, and quoted literal tokens matched verbatim; one name may carry several overloads, matched by shape. An empty body forward-declares. Define before use. |
-| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments, `IF`s and `ASSERT`s ending in a top-level `= expr` return. Locals (parameters included) bind once, in order - a second live assignment to the same name is an error, and a local can be read only after its assignment. Overloads by parameter count. Define before use. Recursion may nest 128 calls deep. |
+| `FUNCTION name(params) = expr` | A pure function usable in any expression - one-liner form, or a multi-line body of local assignments, `IF`s, `FOR ... NEXT` loops and `ASSERT`s ending in a top-level `= expr` return. A local (parameters included) takes a new value at each assignment and can be read only once assigned; assigning a global's name makes a local that hides it, so a body changes nothing outside itself. A body `FOR` walks a list or bounded range as the statement does, its variable an ordinary local; there is no `WHILE` or `BREAK`, and the return is never inside a loop or an `IF`. Overloads by parameter count. Define before use. Recursion may nest 128 calls deep; loops have no limit. |
 | `PRINT [#n,] v [, v...]` | Write text during assembly (final pass only): values concatenated, one newline per statement, to channel `n` (default 0). |
 | `ERROR [v [, v...]]` | Report the message as an assembly error and fail the build; assembly carries on to find more. |
 | `ASSERT e [, v [, v...]]` | `IF NOT(e) : ERROR v... : ENDIF` in one statement. The message is evaluated only on failure; without one the error is "Assertion failed". Also a `FUNCTION` body statement, where a failure becomes the call's result. |
@@ -158,7 +158,10 @@ mnemonic, directive or macro, because references are read where an operand is ex
 mnemonic, directive or macro name means anything there. The one exception is a plain assignment,
 whose name starts the statement - there the keywords win, so `next = 5` will not parse. Prefix the
 name with `@` to force it to read as a name: `@next = 5` binds `next`, referenced bare (the C#
-idiom). Macro and `FUNCTION` *names* stay restricted - they become keywords themselves. All the NMOS
+idiom). Inside a `FUNCTION` body, a local's assignment starts its statement too, so the body
+keywords (`IF`, `ELIF`, `ELSE`, `ENDIF`, `ASSERT`, `FOR`, `NEXT`) cannot name locals. Macro and
+`FUNCTION` *names* stay restricted - they become keywords themselves, and a `FUNCTION` cannot take a
+builtin function's name (`LO`, `REPLACE`, `WHERE`, ...). All the NMOS
 6502 mnemonics are recognised, plus the 65C02 extras (`BRA`, `STZ`, `PHX`, ...) - usable inside a
 section carrying `cmos = TRUE`; elsewhere the target is plain NMOS and a CMOS-only encoding is
 refused with its own message.
@@ -171,7 +174,7 @@ refused with its own message.
 |------|----------|
 | Number | `42`, `1.5`, `&FF` or `$FF` (hex), `%1010` (binary), `'A'` (a [character literal](#character-literals): 65). All numbers are one type. |
 | Boolean | `TRUE`, `FALSE` - what comparisons and the predicates return. Coerces to 1 / 0 in any numeric context (`(x>5)*10`, `EQUB flag`), so a boolean goes anywhere a number does; only `AND`/`OR`/`EOR`/`NOT` care about the difference (logical on booleans, bitwise on numbers, a mixed pair refused). **Note: This is a breaking change from BeebAsm, which represents TRUE as -1, not 1.** The switch `--beebasm-true` can be used to restore TRUE as -1. |
-| String | `"hello"` - write `""` for a literal quote. |
+| String | `"hello"` - write `""` for a literal quote. A string is one value, like a number: broadcasting, list building (`CONCAT`, `FLATTEN`) and shape (`RANK("abc")` is 0) all treat it whole, and `FOR` won't walk one. Only the functions that work along a sequence - subscripts, `LEN`, `REVERSE`, `FIND` and `LZ_PARSE`'s data - read its characters, giving back a string (or a position in one). There is no character type: one character is a one-character string. |
 | List | `{1, 2, 3}` - nestable, mixed types welcome, newlines allowed inside the braces. Nested equal-length lists act as higher-rank arrays; `SHAPE`/`RANK` report the axes all elements agree on (ragged lists keep only their uniform leading axes). |
 | Range | A compact list of consecutive integers - see [Range forms](#range-forms). |
 
@@ -234,16 +237,23 @@ string: `"hello"[1..3]` is `"ell"`, `"hello"[4..0]` is `"olleh"`.
 Operators and element-wise functions map across lists and ranges, NumPy-fashion. The rules, in order:
 
 1. A range becomes its list of elements.
-2. A scalar pairs with everything in the other side, however deep: `{{1, 2}, {3, 4}} * 10` is
-   `{{10, 20}, {30, 40}}`.
+2. A single value (a number, or a string) pairs with everything in the other side, however deep:
+   `{{1, 2}, {3, 4}} * 10` is `{{10, 20}, {30, 40}}`.
 3. Two lists of the same depth pair off element-wise - lengths must match (`{1, 2} + {1, 2, 3}` is a
    shape error), except that a length-1 list repeats: `{1, 2, 3} + {10}` is `{11, 12, 13}`.
 4. The shallower side is held whole and applied to each element of the deeper: a rank-1 list against a
    rank-2 one applies per row (`{{1, 2, 3}, {4, 5, 6}} * {1, 0, 0}` is `{{1, 0, 0}, {4, 0, 0}}`), and a
    column against a row is the outer product (`{{1}, {2}} + {10, 20}` is `{{11, 21}, {12, 22}}`).
 
-The rules recurse, so nesting and ragged tails work: `{1, {2, 3}} * 2` is `{2, {4, 6}}`. User
-`FUNCTION`s inherit all of it - `sqr(0..15)` is a 16-element list.
+The rules recurse, so nesting and ragged tails work: `{1, {2, 3}} * 2` is `{2, {4, 6}}`. A string is
+a single value here, like a number: `{"a", "b"} + "!"` is `{"a!", "b!"}`.
+
+Only operators and the [element-wise functions](#element-wise-functions) broadcast. Every other
+function takes its arguments whole: `LEN({{1, 2}, {3}})` is 2, not `{2, 1}`. The one exception is
+`FIND`'s second argument, which maps. A user `FUNCTION` takes its arguments whole too, and maps over
+a list only when everything in its body does: `sqr(0..15)` is a 16-element list because `x*x`
+maps, but an `IF` needs one number or boolean, so a list condition is an error. `WHERE` is the
+element-wise choice that maps instead.
 
 ### Element-wise functions ###
 
@@ -264,6 +274,7 @@ All broadcast; trigonometry is in radians.
 | `RND(n)` | A random integer in 0..n-1. `RND(REPEATED(k, n))` makes k draws. Deterministically reseeded each pass, so it converges. |
 | `CODES(s)` | A string's character codes as a rank-1 list: `CODES("AB")` is `{65, 66}`, `CODES("")` is `{}`. The bridge from text to arithmetic (a lone character is simpler as a [character literal](#character-literals), `'A'`). The result broadcasts like any list: `CODES(s) - ' '` offsets every code. |
 | `AS_STRING(n)` | A number as decimal text, exactly as `PRINT` shows it: `AS_STRING(42)` is `"42"`, `AS_STRING(1.5)` is `"1.5"`, `AS_STRING(TRUE)` is `"1"`. For hex, use `~n`. A `ZA_AUTO` address is refused, since its length as text isn't known until it's allocated (`PRINT v` shows it). |
+| `WHERE(mask, a, b)` | The element-wise `IF`: for each value in `mask` (a boolean, or a number with non-zero for true), the matching value of `a` where it is true and of `b` where it is false. The three arguments broadcast together, as an operator's two do: `WHERE({1, 300} > 255, 255, {1, 300})` is `{1, 255}`. Only picked values matter - an error in one it passes over (a division by zero, a name not yet defined) is dropped, as in an `IF` arm not taken - so `WHERE(x = 0, 0, 1/x)` is safe. |
 | `AS_NUMBER(s)` | The number a string spells, written as a number literal is written in source: an optional `-` or `+`, then decimal, `&`/`$` hex, `%` binary or a character literal - `AS_NUMBER("42")` is 42, `AS_NUMBER("-&FF")` is -255. The whole string must be that one number, with no blanks around it; anything else is an error naming the string (`Not a number: '12x'`). So hex from `~` needs its `&` back: `AS_NUMBER("&" + ~n)` is `n`. |
 
 ### String, search and type functions ###
@@ -271,7 +282,8 @@ All broadcast; trigonometry is in radians.
 | Function | Meaning |
 |----------|---------|
 | `CHR(x)` | The inverse of `CODES`: every numeric leaf of `x` (flattened; ranges enumerate) becomes one character of a single string - `CHR(72)` is `"H"`, `CHR({72, 73})` is `"HI"`, `CHR(CODES(s))` is `s`. Codes must land in 0..255; fractions truncate. Doubles as the way to join a list of codes into one string. |
-| `FIND(x, v)` | The index of `v`'s first occurrence in `x` (a list, range, or string - a string is searched for a substring: `FIND("hello world", "world")` is 6). The needle broadcasts, so `FIND(from, CODES(s))` is a same-shape list of indices; a needle can therefore never itself be a list-valued element. A miss is a hard error naming the needle. |
+| `FIND(x, v [, otherwise])` | The index of `v`'s first occurrence in `x` (a list, range, or string - a string is searched for a substring: `FIND("hello world", "world")` is 6). The needle broadcasts - the one argument of a whole-value function that does - so `FIND(from, CODES(s))` is a same-shape list of indices; a needle can therefore never itself be a list-valued element, nor a run of elements. A miss is a hard error naming the needle, unless `otherwise` is given: then a miss gives `otherwise` (per needle, when the needle maps). `otherwise` only matters on a miss, so `ERROR("...")` there makes a custom message. |
+| `REPLACE(x, old, new)` | `x` with every occurrence of `old` replaced by `new`, left to right, never overlapping, and never looking inside what it has put in: `REPLACE("aaa", "aa", "b")` is `"ba"`. In a string, `old` and `new` are strings. In a list (or range) they are runs of elements, read as `CONCAT` reads its arguments - a list gives its elements, any other value is one element - so `REPLACE(bytes, &0D, {&0D, &0A})` adds a line feed after every carriage return; wrap a list to mean one list-valued element (`{{1, 2}}`). Nothing found leaves `x` unchanged; an empty `old` is an error. |
 | `IS_STRING(x)`, `IS_NUMBER(x)` | `TRUE` or `FALSE` for the value as a whole - a list is neither (test list-ness with `SHAPE(x) != {}` or `RANK(x) > 0`). A boolean counts as a number (it coerces to one). A still-undefined symbol defers rather than answering. |
 | `ERROR(v, ...)` | The [`ERROR` statement](#structure-and-control) as a value: an error carrying the concatenated message (strings raw, everything else as `PRINT` shows it), reported wherever the value ends up used. Made for guarding `FUNCTION` bodies: `r = ERROR("bad width: ", w)` behind an `IF`. |
 
@@ -287,9 +299,9 @@ All broadcast; trigonometry is in radians.
 | `CONCAT(a, b, ...)` | Join along the outermost axis: each list (or range) argument contributes its top-level elements, each scalar (strings included) itself - so a scalar and a one-element list are interchangeable. Not a flatten: nesting *inside* elements survives (`CONCAT({1,{2,3}}, 4)` is `{1,{2,3},4}`). To append a list as a single element, wrap it: `CONCAT(xs, {{3,4}})`. |
 | `ZIP(a, b, ...)` | Equal-length lists into a list of tuples: `ZIP({1,2},{3,4})` is `{{1,3},{2,4}}`. |
 | `REVERSE(x)` | The outermost axis reversed (works on strings too). |
-| `SORT(L [, key...])` | Sort ascending by numeric key; extra arguments subscript each element to find its key (`SORT(L, 0)` sorts on first items). |
-| `SUM(x [, axis])`, `PRODUCT(x [, axis])` | With no axis, fold *every* leaf to one scalar (`SUM({{1,2,3},{4,5,6}})` is 21; `SUM({})` is 0). With an axis (0 = outermost), collapse just that one: axis 0 folds rows together (`{5, 7, 9}`), axis 1 folds within each row (`{6, 15}`). |
-| `MIN(x [, axis])`, `MAX(x [, axis])` | Smallest / largest, same axis rules. `MIN({})` errors - no identity. |
+| `SORT(L [, key...])` | Sort ascending by key, the keys all numbers or all strings (strings in character-code order, as `<` orders them); extra arguments subscript each element to find its key (`SORT(L, 0)` sorts on first items). |
+| `SUM(x [, axis])`, `PRODUCT(x [, axis])` | With no axis, fold *every* leaf to one scalar (`SUM({{1,2,3},{4,5,6}})` is 21; `SUM({})` is 0). With an axis (0 = outermost), collapse just that one: axis 0 folds rows together (`{5, 7, 9}`), axis 1 folds within each row (`{6, 15}`). `SUM` is `+` folded, so it joins strings: `SUM({"ab", "cd"})` is `"abcd"`, and `SUM(rows, 1)` joins each row. Strings and numbers don't mix. |
+| `MIN(x [, axis])`, `MAX(x [, axis])` | Smallest / largest, same axis rules; strings compare as `<` compares them (`MIN({"pear", "apple"})` is `"apple"`). `MIN({})` errors - no identity. |
 | `DEFINED(name)` | `TRUE` if the symbol resolves (yet), `FALSE` if not - the one function happy to receive an undefined name. |
 
 ### Bit and compression functions ###

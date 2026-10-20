@@ -68,33 +68,14 @@ FUNCTION match_tokens(off, len)
     ENDIF
 = r
 
-\ Halving the lists, as lz.6502's encode does, keeps the recursion shallow.
-
-FUNCTION matches_tokens(offs, lens)
-    n = LEN(offs)
-    IF n == 1
-        r = match_tokens(offs[0], lens[0])
-    ELSE
-        h = n DIV 2
-        r = {matches_tokens(offs[0..<h], lens[0..<h]), matches_tokens(offs[h..<n], lens[h..<n])}
-    ENDIF
-= r
-
 FUNCTION run_tokens(run)
     IF run[0] == 0
         r = CONCAT(0, bit_list(gamma(LEN(run[1]))), 256 + run[1])
     ELSE
-        r = matches_tokens(run[1][0], run[1][1])
-    ENDIF
-= r
-
-FUNCTION tokens(runs)
-    n = LEN(runs)
-    IF n == 1
-        r = run_tokens(runs[0])
-    ELSE
-        h = n DIV 2
-        r = {tokens(runs[0..<h]), tokens(runs[h..<n])}
+        r = {}
+        FOR m = ZIP(run[1][0], run[1][1])               ; each match's {offset, length}
+            r = CONCAT(r, match_tokens(m[0], m[1]))
+        NEXT
     ENDIF
 = r
 
@@ -119,5 +100,8 @@ FUNCTION stream(t)
 \ flag), add the end, and lay them out.
 
 FUNCTION zx02(data)
-    t = FLATTEN(tokens(zx02_parse(data)[1]))
+    t = {}
+    FOR run = zx02_parse(data)[1]
+        t = CONCAT(t, run_tokens(run))
+    NEXT
 = stream(CONCAT(t[1..<LEN(t)], 1, bit_list(gamma(256))))

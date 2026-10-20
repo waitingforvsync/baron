@@ -64,41 +64,27 @@ FUNCTION parse_with(ob, data)
     offs = cost(off_field(0..n, ob))                    ; a match offset
 = LZ_PARSE(data, runs, lits, runs, lens, offs)
 
-\ The search with each OB from ob to 7, keeping the smallest as {ob, parse}.
+\ The search with every OB from 0 to 7, keeping the smallest as {ob, parse}.
 \ A tie goes to the smaller OB.
 
-FUNCTION smallest(ob, data)
-    p = parse_with(ob, data)
-    IF ob == 7
-        r = {ob, p}
-    ELSE
-        q = smallest(ob + 1, data)
-        IF p[0] <= q[1][0]
-            r = {ob, p}
-        ELSE
-            r = q
+FUNCTION smallest(data)
+    best = {0, parse_with(0, data)}
+    FOR ob = 1..7
+        p = parse_with(ob, data)
+        IF p[0] < best[1][0]
+            best = {ob, p}
         ENDIF
-    ENDIF
-= r
+    NEXT
+= best
 
-\ Every run's fields, by halving the list: BITPACK flattens the nesting, and
-\ halving keeps the recursion shallow however many runs there are.
-
-FUNCTION encode(runs, ob)
-    n = LEN(runs)
-    IF n == 0
-        r = {}
-    ELIF n == 1
-        r = run_fields(runs[0], ob)
-    ELSE
-        h = n DIV 2
-        r = {encode(runs[0..<h], ob), encode(runs[h..<n], ob)}
-    ENDIF
-= r
-
-\ The transform: search with every OB, keep the smallest, encode it.
+\ The transform: search with every OB, keep the smallest, and write every
+\ run's fields after the header. BITPACK flattens the nesting.
 
 FUNCTION lz(data)
-    best = smallest(0, data)
-    ob   = best[0]
-= BITPACK({bits(LEN(data), 16), bits(ob, 3), encode(best[1][1], ob)})
+    best   = smallest(data)
+    ob     = best[0]
+    fields = {bits(LEN(data), 16), bits(ob, 3)}
+    FOR run = best[1][1]
+        fields = CONCAT(fields, run_fields(run, ob))
+    NEXT
+= BITPACK(fields)

@@ -329,10 +329,15 @@ static value op_ge(value a, value b, rc_arena *arena)
 }
 
 
-// The fold operators behind min()/max(); they are not in the tables, only used by reduce().
+// The fold operators behind min()/max(); they are not in the tables, only used by reduce(). Two strings
+// order as the comparisons order them, and the winner comes back as it is.
 static value op_min(value a, value b, rc_arena *arena)
 {
     (void)arena;
+    if (value_is_string(a) && value_is_string(b)) {
+        return rc_str_compare(b.string, a.string) < 0 ? b : a;
+    }
+
     NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric < b.numeric ? a.numeric : b.numeric);
 }
@@ -341,6 +346,10 @@ static value op_min(value a, value b, rc_arena *arena)
 static value op_max(value a, value b, rc_arena *arena)
 {
     (void)arena;
+    if (value_is_string(a) && value_is_string(b)) {
+        return rc_str_compare(b.string, a.string) > 0 ? b : a;
+    }
+
     NEEDS_NUM(value_is_number(a) && value_is_number(b));
     return value_make_numeric(a.numeric > b.numeric ? a.numeric : b.numeric);
 }
@@ -1191,6 +1200,22 @@ static value fold(rc_view_value elems, value (*op)(value, value, rc_arena *), va
         acc = value_make_numeric(x);
     }
 
+    // A run of strings joins into one buffer, rather than copying the growing string at every step.
+    if (op == op_add && value_is_string(acc) && i < elems.num && value_is_string(rc_view_value_get(elems, i))) {
+        uint32_t end = i;
+        uint32_t len = acc.string.len;
+        for (; end < elems.num && value_is_string(rc_view_value_get(elems, end)); end++) {
+            len += rc_view_value_get(elems, end).string.len;
+        }
+
+        rc_mstr m = rc_mstr_make(len, arena);
+        rc_mstr_append(&m, acc.string, arena);
+        for (; i < end; i++) {
+            rc_mstr_append(&m, rc_view_value_get(elems, i).string, arena);
+        }
+        acc = value_make_string(m.view);
+    }
+
     for (; i < elems.num; i++) {
         acc = apply_binary(binop, acc, rc_view_value_get(elems, i), arena);
     }
@@ -1281,7 +1306,25 @@ static value reduce(rc_view_value args, value (*op)(value, value, rc_arena *), v
 }
 
 
-static value fn_sum(rc_view_value args, rc_arena *arena)     { return reduce(args, op_add, value_make_numeric(0), arena); }
+// The first value v holds: down through lists to the first thing that isn't one (an empty list holds
+// none, and comes back as itself).
+static value first_leaf(value v)
+{
+    while (value_is_list(v) && v.list.num > 0) {
+        v = rc_view_value_get(v.list, 0);
+    }
+    return v;
+}
+
+// sum: '+' folded over the values, and '+' joins two strings, so a list of strings joins - starting
+// from "" rather than 0 once the first value is a string.
+static value fn_sum(rc_view_value args, rc_arena *arena)
+{
+    value first = args.num > 0 ? first_leaf(rc_view_value_get(args, 0)) : value_make_none();
+    value start = value_is_string(first) ? value_make_string(RC_STR("")) : value_make_numeric(0);
+    return reduce(args, op_add, start, arena);
+}
+
 static value fn_product(rc_view_value args, rc_arena *arena) { return reduce(args, op_mul, value_make_numeric(1), arena); }
 static value fn_min(rc_view_value args, rc_arena *arena)     { return reduce(args, op_min, value_make_none(), arena); }
 static value fn_max(rc_view_value args, rc_arena *arena)     { return reduce(args, op_max, value_make_none(), arena); }
@@ -1412,9 +1455,7 @@ static value fn_concat(rc_view_value args, rc_arena *arena)
         }
 
         if (value_is_list(a)) {
-            for (uint32_t j = 0; j < a.list.num; j++) {
-                rc_array_value_push(&out, rc_view_value_get(a.list, j), arena);
-            }
+            rc_array_value_append(&out, a.list, arena);
         }
         else {
             rc_array_value_push(&out, a, arena);
@@ -1520,11 +1561,13 @@ static value fn_reverse(rc_view_value args, rc_arena *arena)
 }
 
 
-// sort: order a list's elements ascending by a numeric key - the element itself, or, given extra
-// arguments, the result of subscripting each element by them (sort(L, 0) sorts on first items). We
-// pair each element with its key once, then sort the pairs (richc introsort) on the stored key.
+// sort: order a list's elements ascending by a key - the element itself, or, given extra arguments, the
+// result of subscripting each element by them (sort(L, 0) sorts on first items). The keys are all
+// numbers or all strings, ordered as the comparisons order them. We pair each element with its key
+// once, then sort the pairs (richc introsort) on the stored key.
 typedef struct sort_pair {
-    double key;
+    double key;    // a number key
+    rc_str text;   // or a string key
     value  v;
 } sort_pair;
 
@@ -1534,6 +1577,11 @@ typedef struct sort_pair {
 #define RC_SORT_TYPE sort_pair
 #define RC_SORT_NAME sort_pairs
 #define RC_SORT_CMP(a, b) ((a).key < (b).key)
+#include "richc/template/algorithm/sort.h"
+
+#define RC_SORT_TYPE sort_pair
+#define RC_SORT_NAME sort_pairs_by_text
+#define RC_SORT_CMP(a, b) (rc_str_compare((a).text, (b).text) < 0)
 #include "richc/template/algorithm/sort.h"
 
 static value fn_sort(rc_view_value args, rc_arena *arena)
@@ -1559,6 +1607,7 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
     rc_view_value key_path = rc_view_value_get_tail(args, 1);   // the per-element subscript to the key
     uint32_t n = v.list.num;
     rc_array_sort_pair pairs = rc_array_sort_pair_make(n, arena);
+    bool by_text = false;
 
     for (uint32_t i = 0; i < n; i++) {
         value e = rc_view_value_get(v.list, i);
@@ -1568,21 +1617,32 @@ static value fn_sort(rc_view_value args, rc_arena *arena)
             return key;
         }
 
-        if (!value_is_number(key)) {
-            return value_make_error(error_type_type_mismatch);   // the key must be a number
+        // The first key says which kind they all are: numbers and strings don't order against each other.
+        if (i == 0) {
+            by_text = value_is_string(key);
+        }
+
+        if (by_text ? !value_is_string(key) : !value_is_number(key)) {
+            return value_make_error(error_type_type_mismatch);
         }
 
         rc_array_sort_pair_push(
             &pairs,
             (sort_pair) {
-                .key = key.numeric,
-                .v = e
+                .key  = by_text ? 0.0 : key.numeric,
+                .text = by_text ? key.string : (rc_str) {0},
+                .v    = e
             },
             arena
         );
     }
 
-    sort_pairs(pairs.span);
+    if (by_text) {
+        sort_pairs_by_text(pairs.span);
+    }
+    else {
+        sort_pairs(pairs.span);
+    }
 
     rc_array_value out = {0};
     for (uint32_t i = 0; i < n; i++) {
@@ -1670,6 +1730,23 @@ static value not_found(value needle, rc_arena *arena)
 }
 
 
+// What a miss gives: the caller's fallback when FIND was handed one (value_make_none() when not), else
+// the not_found error naming the needle.
+static value missed(value needle, value otherwise, rc_arena *arena)
+{
+    return value_is_none(otherwise) ? not_found(needle, arena) : otherwise;
+}
+
+
+// Two elements the same as a search sees them: a label is its address here, as anywhere a program
+// compares values. FIND and REPLACE share it.
+static bool same_element(value a, value b)
+{
+    return value_is_equal(value_is_label(a) ? value_make_numeric(a.numeric) : a,
+                          value_is_label(b) ? value_make_numeric(b.numeric) : b);
+}
+
+
 // A list haystack's numbers, each found by value at its first position: then many needles cost one
 // pass over the haystack and a lookup each, not a scan each. Open addressing on the number's bits,
 // with -0 folded into 0 and NaN left out, so a lookup finds just what == would. Only numbers: a
@@ -1728,9 +1805,10 @@ static find_index find_index_make(rc_view_value hay, rc_arena *arena)
 }
 
 // One find: the zero-based index of needle's first occurrence in hay. A compound needle broadcasts
-// to a same-shape list of indices (the character-map idiom). A miss anywhere fails the WHOLE call:
-// an embedded error element would only garble into "subscript out of range" downstream.
-static value find_one(value hay, value needle, find_index idx, rc_arena *arena)
+// to a same-shape list of indices (the character-map idiom). A miss gives the fallback; with none,
+// it fails the WHOLE call: an embedded error element would only garble into "subscript out of range"
+// downstream.
+static value find_one(value hay, value needle, value otherwise, find_index idx, rc_arena *arena)
 {
     if (value_is_error(needle)) {
         return needle;
@@ -1746,7 +1824,7 @@ static value find_one(value hay, value needle, find_index idx, rc_arena *arena)
     if (value_is_list(needle)) {
         rc_array_value out = rc_array_value_make(needle.list.num, arena);
         for (uint32_t i = 0; i < needle.list.num; i++) {
-            value r = find_one(hay, rc_view_value_get(needle.list, i), idx, arena);
+            value r = find_one(hay, rc_view_value_get(needle.list, i), otherwise, idx, arena);
             if (value_is_error(r)) {
                 return r;
             }
@@ -1768,33 +1846,31 @@ static value find_one(value hay, value needle, find_index idx, rc_arena *arena)
                 }
             }
         }
-        return not_found(needle, arena);
+        return missed(needle, otherwise, arena);
     }
 
     if (idx.slots.num != 0 && value_is_numeric(needle)) {
         uint32_t at = find_index_get(idx, hay.list, needle.numeric);
-        return at != RC_INDEX_NONE ? value_make_numeric((double) at) : not_found(needle, arena);
+        return at != RC_INDEX_NONE ? value_make_numeric((double) at) : missed(needle, otherwise, arena);
     }
 
-    // A label is its address here, as anywhere a program compares values.
-    value plain = value_is_label(needle) ? value_make_numeric(needle.numeric) : needle;
     for (uint32_t i = 0; i < hay.list.num; i++) {
-        value v = rc_view_value_get(hay.list, i);
-        if (value_is_equal(value_is_label(v) ? value_make_numeric(v.numeric) : v, plain)) {
+        if (same_element(rc_view_value_get(hay.list, i), needle)) {
             return value_make_numeric((double) i);
         }
     }
 
-    return not_found(needle, arena);
+    return missed(needle, otherwise, arena);
 }
 
 
-// find(haystack, needle): a list, range or string haystack (a string searches for a substring). The
-// needle broadcasts; the haystack does not - which means a needle can never itself be a list-valued
-// element of the haystack.
+// find(haystack, needle [, otherwise]): a list, range or string haystack (a string searches for a
+// substring). The needle broadcasts; the haystack does not - which means a needle can never itself be a
+// list-valued element of the haystack. A miss gives otherwise, when there is one, which only matters on
+// a miss: an error there (ERROR("no such glyph"), say) is reported only if something is missed.
 static value fn_find(rc_view_value args, rc_arena *arena)
 {
-    if (args.num != 2) {
+    if (args.num != 2 && args.num != 3) {
         return value_make_error(error_type_incorrect_parameters);
     }
 
@@ -1819,8 +1895,228 @@ static value fn_find(rc_view_value args, rc_arena *arena)
     if (value_is_range(needle)) {
         needle = range_to_list(needle.range, arena);
     }
-    bool many = value_is_list(hay) && hay.list.num >= 8 && value_is_list(needle) && needle.list.num >= 4;
-    return find_one(hay, needle, many ? find_index_make(hay.list, arena) : (find_index) {0}, arena);
+    value otherwise = args.num == 3 ? rc_view_value_get(args, 2) : value_make_none();
+    bool  many      = value_is_list(hay) && hay.list.num >= 8 && value_is_list(needle) && needle.list.num >= 4;
+    return find_one(hay, needle, otherwise, many ? find_index_make(hay.list, arena) : (find_index) {0}, arena);
+}
+
+
+// REPLACE in a string: each occurrence of old, scanning left to right, becomes with; the scan carries on
+// after what it put in, so nothing it inserts is looked at again.
+static value replace_text(rc_str s, rc_str old, rc_str with, rc_arena *arena)
+{
+    rc_mstr  m = rc_mstr_make(s.len, arena);
+    uint32_t i = 0;
+    while (i < s.len) {
+        if (old.len <= s.len - i && rc_str_is_equal(rc_str_substr(s, i, old.len), old)) {
+            rc_mstr_append(&m, with, arena);
+            i += old.len;
+        }
+        else {
+            rc_mstr_append_char(&m, s.data[i], arena);
+            i++;
+        }
+    }
+    return value_make_string(m.view);
+}
+
+
+// Does run sit in xs at position at, element for element?
+static bool run_at(rc_view_value xs, uint32_t at, rc_view_value run)
+{
+    if (run.num > xs.num - at) {
+        return false;
+    }
+    for (uint32_t j = 0; j < run.num; j++) {
+        if (!same_element(rc_view_value_get(xs, at + j), rc_view_value_get(run, j))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+// REPLACE in a list: replace_text's scan, over runs of elements.
+static value replace_run(rc_view_value xs, rc_view_value old, rc_view_value with, rc_arena *arena)
+{
+    rc_array_value out = rc_array_value_make(xs.num, arena);
+    uint32_t       i   = 0;
+    while (i < xs.num) {
+        if (run_at(xs, i, old)) {
+            rc_array_value_append(&out, with, arena);
+            i += old.num;
+        }
+        else {
+            rc_array_value_push(&out, rc_view_value_get(xs, i), arena);
+            i++;
+        }
+    }
+    return value_make_list(out.view);
+}
+
+
+// A REPLACE pattern or replacement read as a run of elements, the way CONCAT reads its arguments: a list
+// gives its elements, a range its numbers, and any other value is one element. An error anywhere in it
+// is the result, since a pattern has to be known in full.
+static value as_run(value v, rc_arena *arena)
+{
+    if (value_is_range(v)) {
+        v = range_to_list(v.range, arena);
+    }
+    if (value_is_error(v)) {
+        return v;
+    }
+    if (!value_is_list(v)) {
+        rc_array_value one = rc_array_value_make(1, arena);
+        rc_array_value_push(&one, v, arena);
+        return value_make_list(one.view);
+    }
+    for (uint32_t i = 0; i < v.list.num; i++) {
+        if (value_is_error(rc_view_value_get(v.list, i))) {
+            return rc_view_value_get(v.list, i);
+        }
+    }
+    return v;
+}
+
+
+// replace(x, old, new): every occurrence of old in x replaced with new, left to right and never
+// overlapping. In a string, old and new are strings; in a list (or range), runs of elements read as
+// as_run reads them. Finding nothing leaves x as it was, which is no error; an empty old would be found
+// everywhere, so that one is.
+static value fn_replace(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 3) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+
+    for (uint32_t i = 0; i < args.num; i++) {
+        if (value_is_error(rc_view_value_get(args, i))) {
+            return rc_view_value_get(args, i);
+        }
+    }
+
+    value x    = rc_view_value_get(args, 0);
+    value old  = rc_view_value_get(args, 1);
+    value with = rc_view_value_get(args, 2);
+
+    if (value_is_string(x)) {
+        if (!value_is_string(old) || !value_is_string(with)) {
+            return value_make_error(error_type_type_mismatch);
+        }
+        if (old.string.len == 0) {
+            return value_make_error(error_type_domain);
+        }
+        return replace_text(x.string, old.string, with.string, arena);
+    }
+
+    if (value_is_range(x)) {
+        x = range_to_list(x.range, arena);
+        if (value_is_error(x)) {
+            return x;
+        }
+    }
+
+    if (!value_is_list(x)) {
+        return value_make_error(error_type_type_mismatch);   // a single number has nothing to replace in
+    }
+
+    old = as_run(old, arena);
+    if (value_is_error(old)) {
+        return old;
+    }
+
+    with = as_run(with, arena);
+    if (value_is_error(with)) {
+        return with;
+    }
+
+    if (old.list.num == 0) {
+        return value_make_error(error_type_domain);
+    }
+
+    return replace_run(x.list, old.list, with.list, arena);
+}
+
+
+// The i'th value an operand gives a step of WHERE's broadcast: a held operand gives itself, a stepped one
+// its i'th element, or its only one when it has length 1.
+static value where_part(value v, bool stepped, uint32_t i)
+{
+    if (!stepped) {
+        return v;
+    }
+    return rc_view_value_get(v.list, v.list.num == 1 ? 0 : i);
+}
+
+
+// where(mask, a, b): the element-wise IF - for each value in mask, the matching value of a where it's
+// true and of b where it's false. The three broadcast together as an operator's operands do: those of
+// the deepest rank step through their outer axis together (a length-1 axis repeating), and shallower ones
+// are held whole. Only the values it picks matter: an error in one it passes over is dropped, just as an
+// IF arm not taken is never run.
+static value where_apply(value mask, value a, value b, rc_arena *arena)
+{
+    if (value_is_range(mask)) {
+        mask = range_to_list(mask.range, arena);
+    }
+    if (value_is_error(mask)) {
+        return mask;
+    }
+
+    // An unbounded range in a or b turns into an error value here, which matters only if it's picked.
+    if (value_is_range(a)) {
+        a = range_to_list(a.range, arena);
+    }
+    if (value_is_range(b)) {
+        b = range_to_list(b.range, arena);
+    }
+
+    if (!value_is_list(mask) && !value_is_list(a) && !value_is_list(b)) {
+        if (!value_is_number(mask)) {
+            return value_make_error(error_type_type_mismatch);
+        }
+        return mask.numeric != 0.0 ? a : b;
+    }
+
+    uint32_t rm  = rank_of(mask);
+    uint32_t ra  = rank_of(a);
+    uint32_t rb  = rank_of(b);
+    uint32_t top = rm > ra ? (rm > rb ? rm : rb) : (ra > rb ? ra : rb);
+
+    bool     step[3]     = {rm == top, ra == top, rb == top};
+    value    operands[3] = {mask, a, b};
+    uint32_t n           = 1;
+    bool     sized       = false;
+    for (uint32_t k = 0; k < 3; k++) {
+        if (!step[k]) {
+            continue;
+        }
+        uint32_t len = operands[k].list.num;
+        if (!sized || n == 1) {
+            n     = len;
+            sized = true;
+        }
+        else if (len != n && len != 1) {
+            return value_make_error(error_type_shape_mismatch);
+        }
+    }
+
+    rc_array_value out = rc_array_value_make(n, arena);
+    for (uint32_t i = 0; i < n; i++) {
+        value r = where_apply(where_part(mask, step[0], i), where_part(a, step[1], i), where_part(b, step[2], i), arena);
+        rc_array_value_push(&out, r, arena);
+    }
+    return value_make_list(out.view);
+}
+
+
+static value fn_where(rc_view_value args, rc_arena *arena)
+{
+    if (args.num != 3) {
+        return value_make_error(error_type_incorrect_parameters);
+    }
+    return where_apply(rc_view_value_get(args, 0), rc_view_value_get(args, 1), rc_view_value_get(args, 2), arena);
 }
 
 
@@ -2219,6 +2515,8 @@ static const token even_entries[] = {
     {RC_STR_INIT("defined("), {.type = lexeme_type_function, .function = {.apply = fn_defined}}},
     {RC_STR_INIT("chr("),     {.type = lexeme_type_function, .function = {.apply = fn_chr}}},
     {RC_STR_INIT("find("),    {.type = lexeme_type_function, .function = {.apply = fn_find}}},
+    {RC_STR_INIT("replace("), {.type = lexeme_type_function, .function = {.apply = fn_replace}}},
+    {RC_STR_INIT("where("),   {.type = lexeme_type_function, .function = {.apply = fn_where}}},    // element-wise, over three arguments
     {RC_STR_INIT("is_string("), {.type = lexeme_type_function, .function = {.apply = fn_is_string}}},
     {RC_STR_INIT("is_number("), {.type = lexeme_type_function, .function = {.apply = fn_is_number}}},
     {RC_STR_INIT("error("),   {.type = lexeme_type_function, .function = {.apply = fn_error}}},
@@ -2279,12 +2577,14 @@ token_table expression_operand_base(void) { return even_tokens; }
 
 // ---- FUNCTION call frames ----
 
-// A running FUNCTION call's parameters and locals: a handful of names, each bound once, kept in the
-// evaluation's own arena rather than the symbol table - so a call copies nothing and leaves nothing
-// behind once the evaluation is done.
+// A running FUNCTION call's parameters and locals: a handful of names kept in the evaluation's own arena
+// rather than the symbol table - so a call copies nothing and leaves nothing behind once the evaluation
+// is done. Each slot remembers when it last took a value, counted in the frame's assignments, so a loop
+// can tell which locals it has to carry from one step to the next.
 typedef struct frame_slot {
-    rc_str name;
-    value  v;
+    rc_str   name;
+    value    v;
+    uint32_t assigned;   // the frame's assignment count when this slot last took a value
 } frame_slot;
 
 #define RC_ARRAY_TYPE frame_slot
@@ -2292,6 +2592,7 @@ typedef struct frame_slot {
 
 typedef struct frame {
     rc_array_frame_slot slots;
+    uint32_t            assignments;   // made so far in this call
 } frame;
 
 // The slot binding name, or RC_INDEX_NONE - always so with no frame (outside a body). Newest first, so of
@@ -2309,6 +2610,26 @@ static uint32_t frame_find(const frame *f, rc_str name)
     }
 
     return RC_INDEX_NONE;
+}
+
+// Give name a value in the frame: a local (or parameter) already there takes the new one, and a new name
+// joins. A new slot grows the frame in arena - the parse's own, which inside a loop step is the step's.
+static void frame_assign(frame *f, rc_str name, value v, rc_arena *arena)
+{
+    f->assignments++;
+    frame_slot slot = {
+        .name     = name,
+        .v        = v,
+        .assigned = f->assignments,
+    };
+
+    uint32_t at = frame_find(f, name);
+    if (at == RC_INDEX_NONE) {
+        rc_array_frame_slot_push(&f->slots, slot, arena);
+    }
+    else {
+        rc_array_frame_slot_set(&f->slots, at, slot);
+    }
 }
 
 
@@ -2346,13 +2667,15 @@ static token_table operand_table(const parser *p) {
 // The FUNCTION-body statement keywords - the minimum a body needs. Its own tiny table, so a body can lex only
 // these (plus intrinsic identifiers/terminators): an opcode or EQUB name is just an identifier here, an
 // assignment target, never code. The '=' return marker reuses lexeme_type_assign (statement-start position).
-typedef enum body_keyword { body_if, body_elif, body_else, body_endif, body_assert } body_keyword;
+typedef enum body_keyword { body_if, body_elif, body_else, body_endif, body_assert, body_for, body_next } body_keyword;
 static const token function_body_entries[] = {
     {RC_STR_INIT("if"),    {.type = lexeme_type_closer, .closer = {body_if,    error_type_none}}},
     {RC_STR_INIT("elif"),  {.type = lexeme_type_closer, .closer = {body_elif,  error_type_none}}},
     {RC_STR_INIT("else"),  {.type = lexeme_type_closer, .closer = {body_else,  error_type_none}}},
     {RC_STR_INIT("endif"), {.type = lexeme_type_closer, .closer = {body_endif, error_type_none}}},
     {RC_STR_INIT("assert"),{.type = lexeme_type_closer, .closer = {body_assert, error_type_none}}},
+    {RC_STR_INIT("for"),   {.type = lexeme_type_closer, .closer = {body_for,   error_type_none}}},
+    {RC_STR_INIT("next"),  {.type = lexeme_type_closer, .closer = {body_next,  error_type_none}}},
     {RC_STR_INIT("="),     {.type = lexeme_type_assign}},
 };
 static const token_table function_body_tokens = RC_VIEW(function_body_entries);
@@ -2494,12 +2817,13 @@ typedef enum body_stop {
     body_stop_elif,     // an ELIF closer (left AT the keyword for the caller)
     body_stop_else,     // an ELSE closer
     body_stop_endif,    // an ENDIF closer
+    body_stop_next,     // a NEXT closer
     body_stop_eof,      // end of the body source
 } body_stop;
 
 typedef struct body_result {
     uint8_t  stop;           // body_stop
-    uint32_t   next;         // past the return expression, or AT the elif/else/endif keyword, or at EOF
+    uint32_t   next;         // past the return expression, or AT the elif/else/endif/next keyword, or at EOF
     value      value;        // the return value (stop == body_stop_return); value_make_none() = empty return
     bool       saw_statement;// did any assignment / IF run before the stop (to tell a forward decl from a body)
     value_error error;       // code error_type_none unless the body failed; placed at its origin
@@ -2550,9 +2874,9 @@ static parser body_sub(const parser *p, bool active)
 }
 
 
-// A body assignment name = expr, from just after name (whose start is name_at). A single immutable
-// binding in the call's frame when active; inactive (a dead branch, the definition scan) it binds
-// nothing. Returns the cursor after the RHS.
+// A body assignment name = expr, from just after name (whose start is name_at). Active, it gives name
+// its value in the call's frame - a new local, or a new value for one already there; inactive (a dead
+// branch, the definition scan) it binds nothing. Returns the cursor after the RHS.
 static body_result interpret_assignment(const parser *p, rc_str name, uint32_t pos, bool active, uint32_t name_at)
 {
     lexer_result eq = lexer_next(p->text, pos, assign_only_tokens);
@@ -2576,18 +2900,8 @@ static body_result interpret_assignment(const parser *p, rc_str name, uint32_t p
         return (body_result) {.next = rhs.next, .saw_statement = true};
     }
 
-    // Bindings are single-assignment: a second live assignment to the same name in one call (a
-    // parameter included) would read like mutation that never happens. Branches are fine - only the
-    // live one binds.
     RC_ASSERT(p->frame != NULL);   // a live body only ever runs inside a call
-    if (frame_find(p->frame, name) != RC_INDEX_NONE) {
-        body_result dup = body_fail(p, error_type_duplicate_symbol, name_at);
-        dup.error.detail = name;
-        return dup;
-    }
-
-    frame_slot local = {.name = name, .v = place_error(p, rhs.value, eq.next)};
-    rc_array_frame_slot_push(&p->frame->slots, local, p->arena);
+    frame_assign(p->frame, name, place_error(p, rhs.value, eq.next), p->arena);
     return (body_result) {.next = rhs.next, .saw_statement = true};
 }
 
@@ -2614,11 +2928,14 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
         };
     }
 
-    // A live IF with a KNOWN condition (a number or a boolean) picks a branch; a non-numeric
-    // condition is undecidable, so no branch runs and the eventual return defers.
-    bool decided     = active && value_is_number(cond.value);
-    bool run_if      = decided && cond.value.numeric != 0.0;
-    bool else_active = decided && !run_if;
+    // A live IF needs one number or boolean to pick a branch. A list has an answer per element, and a
+    // string has none, so neither can - as at the statement IF and ASSERT.
+    if (active && !value_is_number(cond.value)) {
+        return body_fail(p, error_type_operand_not_numeric, lexer_skip_whitespace(p->text, pos));
+    }
+
+    bool run_if      = active && cond.value.numeric != 0.0;
+    bool else_active = active && !run_if;
 
     body_result br = interpret_statements(p, cond.next, run_if);
     if (br.error.code != error_type_none) {
@@ -2633,6 +2950,10 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
         return body_fail(p, error_type_unclosed_function, br.next);   // IF with no ENDIF
     }
 
+    if (br.stop == body_stop_next) {
+        return body_fail(p, error_type_unexpected_next, br.next);     // a NEXT inside a branch, its FOR outside
+    }
+
     // Consume the closer keyword the branch stopped at.
     lexer_result closer = lexer_next(p->text, br.next, function_body_tokens);
     if (br.stop == body_stop_elif) {
@@ -2643,6 +2964,9 @@ static body_result interpret_if(const parser *p, uint32_t pos, bool active)
         body_result eb = interpret_statements(p, closer.next, else_active);
         if (eb.error.code != error_type_none) {
             return eb;
+        }
+        if (eb.stop == body_stop_next) {
+            return body_fail(p, error_type_unexpected_next, eb.next);
         }
         if (eb.stop != body_stop_endif) {
             return body_fail(p, error_type_unclosed_function, eb.next);   // ELSE must end at ENDIF
@@ -2710,9 +3034,145 @@ static body_result interpret_assert(const parser *p, uint32_t pos, bool active, 
 }
 
 
-// Run body statements (assignments, IFs, ASSERTs) until the top-level '=' return, a branch closer (elif/else/endif),
-// or EOF. active gates whether assignments bind and IF branches execute (an inactive run just walks the
-// structure, for the definition scan and dead branches).
+// Where a loop's body stopped: at its NEXT, which is consumed here, or somewhere a loop can't end. A
+// closer with no opener inside the loop is reported where it stands. Reaching the return (top level only)
+// or the end of the body means the NEXT is missing, reported at the FOR (for_at).
+static body_result loop_end(const parser *p, body_result br, uint32_t for_at)
+{
+    if (br.error.code != error_type_none) {
+        return br;
+    }
+
+    switch ((body_stop) br.stop) {
+        case body_stop_elif:   return body_fail(p, error_type_unexpected_elif, br.next);
+        case body_stop_else:   return body_fail(p, error_type_unexpected_else, br.next);
+        case body_stop_endif:  return body_fail(p, error_type_unexpected_endif, br.next);
+        case body_stop_return:
+        case body_stop_eof:    return body_fail(p, error_type_unclosed_for, lexer_skip_whitespace(p->text, for_at));
+        case body_stop_next:   break;
+    }
+
+    lexer_result next = lexer_next(p->text, br.next, function_body_tokens);
+    return (body_result) {.next = next.next, .saw_statement = true};
+}
+
+
+// The end of a loop step. Every step works in a fresh copy of the spare arena, so its temporaries are
+// gone once the next one starts; what it assigned has to get out first. Those locals are copied past the
+// step's own data, the call's arena is rewound to where it stood when the loop began, and they are
+// copied back - so the loop only ever holds one step's worth of what it carries, however many steps run.
+// The frame's slots go along too, in case a new local grew them into the step's memory.
+static void carry_locals(frame *f, uint32_t since, rc_arena *arena, rc_arena loop_start, rc_arena stage)
+{
+    rc_array_frame_slot staged = rc_array_frame_slot_make_copy(f->slots.view, f->slots.num, &stage);
+    for (uint32_t i = 0; i < staged.num; i++) {
+        frame_slot slot = rc_array_frame_slot_get(&staged, i);
+        if (slot.assigned > since) {
+            slot.v = value_make_copy(slot.v, &stage);
+            rc_array_frame_slot_set(&staged, i, slot);
+        }
+    }
+
+    *arena   = loop_start;
+    f->slots = rc_array_frame_slot_make_copy(staged.view, staged.num, arena);
+    for (uint32_t i = 0; i < f->slots.num; i++) {
+        frame_slot slot = rc_array_frame_slot_get(&f->slots, i);
+        if (slot.assigned > since) {
+            slot.v = value_make_copy(slot.v, arena);
+            rc_array_frame_slot_set(&f->slots, i, slot);
+        }
+    }
+}
+
+
+// A body FOR name = seq ... NEXT, from just after the keyword (whose start is for_at). Live, seq (a list
+// or a bounded range) is worked out once, then the statements up to NEXT run once per element with name
+// given that element - an ordinary local, which keeps the last one afterwards. Inactive (a dead branch,
+// the definition scan), or with nothing to walk, the statements are read once, to find the NEXT, and
+// nothing runs.
+static body_result interpret_for(const parser *p, uint32_t pos, bool active, uint32_t for_at)
+{
+    uint32_t     name_at = lexer_skip_whitespace(p->text, pos);
+    lexer_result var     = lexer_next(p->text, pos, function_body_tokens);
+    if (var.token.type != lexeme_type_identifier) {
+        return body_fail(p, error_type_expected_label_name, name_at);
+    }
+
+    rc_str name = var.token.identifier.name;
+    if (rc_str_find_first(name, RC_STR(".")) != RC_INDEX_NONE) {
+        return body_fail(p, error_type_invalid_assignment, name_at);   // a loop variable is a local, never dotted
+    }
+
+    lexer_result eq = lexer_next(p->text, var.next, assign_only_tokens);
+    if (eq.token.type != lexeme_type_assign) {
+        return body_fail(p, error_type_expected_assign, var.next);
+    }
+
+    parser      sp  = body_sub(p, active);
+    expr_result seq = parse_precedence(&sp, eq.next, 0);
+    if (seq.error != expr_error_none) {
+        return body_fail(p, error_type_expression, seq.error_at);
+    }
+
+    if (!active) {
+        return loop_end(p, interpret_statements(p, seq.next, false), for_at);
+    }
+
+    // A forward reference defers, as an IF condition's does; a range enumerates, as the statement's does.
+    value items = seq.value;
+    if (value_is_range(items) && items.range.has_start && items.range.has_end) {
+        items = range_to_list(items.range, p->arena);
+    }
+
+    if (value_is_error(items)) {
+        return (body_result) {
+            .next     = seq.next,
+            .error    = place_error(p, items, eq.next).error,
+            .error_at = eq.next,
+        };
+    }
+
+    if (!value_is_list(items)) {
+        return body_fail(p, error_type_not_iterable, lexer_skip_whitespace(p->text, eq.next));   // a string is one value
+    }
+
+    if (items.list.num == 0) {
+        return loop_end(p, interpret_statements(p, seq.next, false), for_at);
+    }
+
+    rc_arena    loop_start = *p->arena;
+    uint32_t    since      = p->frame->assignments;
+    body_result br         = {0};
+    for (uint32_t i = 0; i < items.list.num; i++) {
+        rc_arena step = p->spare;
+        parser   run  = *p;
+        run.arena = &step;
+        run.spare = *p->arena;
+
+        frame_assign(p->frame, name, rc_view_value_get(items.list, i), &step);
+        br = interpret_statements(&run, seq.next, true);
+
+        if (br.error.code != error_type_none) {
+            // Its message may sit in the step's memory: copy it out before anything reuses that.
+            value failed = value_make_copy((value) {.type = value_type_error, .error = br.error}, p->arena);
+            br.error = failed.error;
+            return br;
+        }
+
+        if (br.stop != body_stop_next) {
+            return loop_end(p, br, for_at);
+        }
+
+        carry_locals(p->frame, since, p->arena, loop_start, step);
+    }
+
+    return loop_end(p, br, for_at);
+}
+
+
+// Run body statements (assignments, IFs, FORs, ASSERTs) until the top-level '=' return, a closer
+// (elif/else/endif/next), or EOF. active gates whether assignments bind, IF branches execute and loops run
+// (an inactive run just walks the structure, for the definition scan and dead branches).
 static body_result interpret_statements(const parser *p, uint32_t pos, bool active)
 {
     bool saw = false;
@@ -2761,8 +3221,18 @@ static body_result interpret_statements(const parser *p, uint32_t pos, bool acti
                     saw = true;
                     continue;
                 }
+                case body_for: {
+                    body_result fr = interpret_for(p, lr.next, active, pos);
+                    if (fr.error.code != error_type_none) {
+                        return fr;
+                    }
+                    pos = fr.next;
+                    saw = true;
+                    continue;
+                }
                 case body_elif: return (body_result) {.stop = body_stop_elif,  .next = pos, .saw_statement = saw};
                 case body_else: return (body_result) {.stop = body_stop_else,  .next = pos, .saw_statement = saw};
+                case body_next: return (body_result) {.stop = body_stop_next,  .next = pos, .saw_statement = saw};
                 default:        return (body_result) {.stop = body_stop_endif, .next = pos, .saw_statement = saw};
             }
         }
@@ -2898,9 +3368,15 @@ function_body_scan expression_scan_function_body(rc_str text, uint32_t pos, cons
     }
 
     if (br.stop != body_stop_return) {
+        // A closer with nothing to close, or the end of the body and no return.
+        error_type code = br.stop == body_stop_next  ? error_type_unexpected_next
+                        : br.stop == body_stop_endif ? error_type_unexpected_endif
+                        : br.stop == body_stop_else  ? error_type_unexpected_else
+                        : br.stop == body_stop_elif  ? error_type_unexpected_elif
+                        : error_type_unclosed_function;
         return (function_body_scan) {
             .next     = br.next,
-            .error    = error_type_unclosed_function,
+            .error    = code,
             .error_at = br.next,
         };
     }
@@ -3228,6 +3704,12 @@ RC_TEST_GROUP_DEINIT(expression, fix)
 // Parse a source literal from offset 0 in the fixture's root scope.
 #define RESULT(src) expression_parse(RC_STR(src), 0, &(expr_env){.scopes = &fix->scopes, .scope_index = 0, .pc = 0}, &fix->arena, fix->spare)
 #define VAL(src)    RESULT(src).value
+
+// An expression and the literal it should come to, compared as values.
+#define SAME(src, expected) value_is_equal(VAL(src), VAL(expected))
+
+// An expression that should fail with this error.
+#define FAILS(src, want) (value_is_error(VAL(src)) && VAL(src).error.code == (want))
 
 // A bounded range with the expected start/end/step.
 static bool range_is(value v, int64_t start, int64_t end, int64_t step)
@@ -3941,6 +4423,28 @@ RC_TEST_STEP(expression, reductions, fix)
     RC_CHECK_TRUE(value_is_equal(VAL("sum({})"), value_make_numeric(0)));   // identity 0
     RC_CHECK_TRUE(value_is_error(VAL("min({})")));                          // min has no identity
     RC_CHECK_TRUE(value_is_error(VAL("sum(5, 0)")));                        // axis out of range
+
+    // '+' joins strings, so sum does too, starting from "" once the first value is a string
+    RC_CHECK_TRUE(SAME("sum({\"ab\", \"cd\", \"e\"})",                "\"abcde\""));
+    RC_CHECK_TRUE(SAME("sum({\"a\", {\"b\", \"c\"}})",                "\"abc\""));            // nested lists flatten
+    RC_CHECK_TRUE(SAME("sum({{\"a\", \"b\"}, {\"c\", \"d\"}}, 1)",    "{\"ab\", \"cd\"}"));   // each row joined
+    RC_CHECK_TRUE(SAME("sum({{\"a\", \"b\"}, {\"c\", \"d\"}}, 0)",    "{\"ac\", \"bd\"}"));   // down the columns
+    RC_CHECK_TRUE(SAME("sum({\"\", \"\"})",                           "\"\""));
+    RC_CHECK_TRUE(SAME("sum({\"a\"}) + sum({\"b\"})",                 "\"ab\""));
+    RC_CHECK_TRUE(FAILS("sum({\"a\", 1})",     error_type_type_mismatch));   // no quiet conversions
+    RC_CHECK_TRUE(FAILS("sum({1, \"a\"})",     error_type_type_mismatch));
+    RC_CHECK_TRUE(FAILS("product({\"a\"})",    error_type_type_mismatch));
+
+    // a boolean still starts from 0, so it sums to a number, as it always has
+    value one = VAL("sum({TRUE})");
+    RC_CHECK_TRUE(value_is_numeric(one) && one.numeric == 1.0);
+
+    // strings order, so min and max pick them too
+    RC_CHECK_TRUE(SAME("min({\"pear\", \"apple\", \"fig\"})",         "\"apple\""));
+    RC_CHECK_TRUE(SAME("max({\"pear\", \"apple\", \"fig\"})",         "\"pear\""));
+    RC_CHECK_TRUE(SAME("min({{\"b\", \"a\"}, {\"c\", \"d\"}}, 1)",    "{\"a\", \"c\"}"));
+    RC_CHECK_TRUE(FAILS("min({\"a\", 1})",     error_type_type_mismatch));
+    RC_CHECK_TRUE(FAILS("max({1, \"a\"})",     error_type_type_mismatch));
 }
 
 RC_TEST_STEP(expression, list_functions, fix)
@@ -3970,6 +4474,35 @@ RC_TEST_STEP(expression, list_functions, fix)
     value k2[] = {value_make_numeric(3), value_make_numeric(30)};
     value ks[] = {value_make_list((rc_view_value) RC_VIEW(k0)), value_make_list((rc_view_value) RC_VIEW(k1)), value_make_list((rc_view_value) RC_VIEW(k2))};
     RC_CHECK_TRUE(value_is_equal(VAL("sort({{3,30},{1,10},{2,20}}, 0)"), value_make_list((rc_view_value) RC_VIEW(ks))));
+
+    // string keys sort as the comparisons order them; the keys must all be one kind
+    RC_CHECK_TRUE(SAME("sort({\"pear\", \"apple\", \"fig\"})",  "{\"apple\", \"fig\", \"pear\"}"));
+    RC_CHECK_TRUE(SAME("sort({\"b\", \"B\", \"ab\", \"a\"})",   "{\"B\", \"a\", \"ab\", \"b\"}"));   // by code, prefix first
+    RC_CHECK_TRUE(SAME("sort({{\"b\", 2}, {\"a\", 1}}, 0)",     "{{\"a\", 1}, {\"b\", 2}}"));
+    RC_CHECK_TRUE(SAME("sort({\"cab\"[1..], \"cab\"})",          "{\"ab\", \"cab\"}"));               // slices sort too
+    RC_CHECK_TRUE(FAILS("sort({\"a\", 1})",      error_type_type_mismatch));
+    RC_CHECK_TRUE(FAILS("sort({1, \"a\"})",      error_type_type_mismatch));
+    RC_CHECK_TRUE(SAME("sort({})",               "{}"));
+}
+
+// A string is one value to everything that maps, builds lists or measures shape, and a sequence of
+// characters only to the few functions that work along one. Together these pin the rule.
+RC_TEST_STEP(expression, strings_are_single_values, fix)
+{
+    RC_CHECK_TRUE(SAME("{\"a\", \"b\"} + \"!\"",        "{\"a!\", \"b!\"}"));
+    RC_CHECK_TRUE(SAME("{\"ab\", \"cd\"} = \"cd\"",     "{FALSE, TRUE}"));
+    RC_CHECK_TRUE(SAME("concat(\"ab\", \"cd\")",        "{\"ab\", \"cd\"}"));
+    RC_CHECK_TRUE(SAME("flatten({\"ab\", {\"c\"}})",    "{\"ab\", \"c\"}"));
+    RC_CHECK_TRUE(SAME("rank(\"abc\")",                 "0"));
+    RC_CHECK_TRUE(SAME("shape(\"abc\")",                "{}"));
+    RC_CHECK_TRUE(SAME("codes({\"ab\", \"c\"})",        "{{97, 98}, {99}}"));
+    RC_CHECK_TRUE(SAME("\"ab\" + \"cd\"",               "\"abcd\""));
+
+    RC_CHECK_TRUE(SAME("len(\"abc\")",                  "3"));
+    RC_CHECK_TRUE(SAME("\"abc\"[1]",                    "\"b\""));
+    RC_CHECK_TRUE(SAME("{\"ab\", \"cd\"}[.., 0]",       "{\"a\", \"c\"}"));
+    RC_CHECK_TRUE(SAME("reverse(\"abc\")",              "\"cba\""));
+    RC_CHECK_TRUE(SAME("find(\"hello\", \"ll\")",       "2"));
 }
 
 RC_TEST_STEP(expression, defined_lohi_strings, fix)
@@ -4195,6 +4728,84 @@ RC_TEST_STEP(expression, find, fix)
     RC_CHECK_TRUE(imiss.error.code == error_type_not_found);
     RC_CHECK(imiss.error.detail, ==, RC_STR("6"));
     RC_CHECK_TRUE(value_is_equal(VAL("FIND(0..99, 99..0)[{0, 50, 99}]"), VAL("{99, 49, 0}")));   // ranges too
+
+    // A third argument is what a miss gives instead of the error - per needle when the needle maps, and
+    // through the index too. It only matters on a miss: an error there (even an undefined name) is
+    // reported only if something is missed.
+    RC_CHECK_TRUE(SAME("FIND(\"hello\", \"x\", -1)",                        "-1"));
+    RC_CHECK_TRUE(SAME("FIND(\"hello\", \"ll\", -1)",                       "2"));
+    RC_CHECK_TRUE(SAME("FIND({1, 2, 3}, {2, 9}, -1)",                       "{1, -1}"));
+    RC_CHECK_TRUE(SAME("FIND({9, 4, 5, 4, 3, 2, 1, 0}, {4, 6, 8, 5}, 99)", "{1, 99, 99, 2}"));
+    RC_CHECK_TRUE(SAME("FIND({1, 2}, 2, nosuch)",                           "1"));
+    RC_CHECK_TRUE(FAILS("FIND({1, 2}, 3, nosuch)",                          error_type_unknown_symbol));
+    value told = VAL("FIND(\"abc\", \"z\", ERROR(\"no z\"))");
+    RC_CHECK_TRUE(told.error.code == error_type_user_error);
+    RC_CHECK(told.error.detail, ==, RC_STR("no z"));
+    RC_CHECK_TRUE(FAILS("FIND({1, 2}, 1, 0, 0)",                            error_type_incorrect_parameters));
+}
+
+RC_TEST_STEP(expression, replace, fix)
+{
+    // In a string: every occurrence, left to right, never overlapping, never looking inside what it put in.
+    RC_CHECK_TRUE(SAME("REPLACE(\"1.2.3\", \".\", \"-\")",        "\"1-2-3\""));
+    RC_CHECK_TRUE(SAME("REPLACE(\"aaa\", \"aa\", \"b\")",         "\"ba\""));
+    RC_CHECK_TRUE(SAME("REPLACE(\"aa\", \"a\", \"aa\")",          "\"aaaa\""));
+    RC_CHECK_TRUE(SAME("REPLACE(\"a-b-\", \"-\", \"\")",          "\"ab\""));      // an empty new deletes
+    RC_CHECK_TRUE(SAME("REPLACE(\"abc\", \"x\", \"y\")",          "\"abc\""));     // nothing found: as it was
+    RC_CHECK_TRUE(SAME("REPLACE(\"\", \"x\", \"y\")",             "\"\""));
+    RC_CHECK_TRUE(SAME("REPLACE(\"ab\", \"abc\", \"y\")",         "\"ab\""));      // longer than the string
+
+    // In a list: runs of elements, old and new read as CONCAT reads its arguments.
+    RC_CHECK_TRUE(SAME("REPLACE({1, 13, 2, 13}, 13, {13, 10})",   "{1, 13, 10, 2, 13, 10}"));
+    RC_CHECK_TRUE(SAME("REPLACE({1, 0, 0, 2, 0}, {0, 0}, {})",    "{1, 2, 0}"));
+    RC_CHECK_TRUE(SAME("REPLACE({0, 0, 0}, {0, 0}, 7)",           "{7, 0}"));
+    RC_CHECK_TRUE(SAME("REPLACE({\"a\", \"b\", \"a\"}, \"a\", \"z\")", "{\"z\", \"b\", \"z\"}"));   // whole elements
+    RC_CHECK_TRUE(SAME("REPLACE({{1, 2}, 1, 2}, {{1, 2}}, 0)",    "{0, 1, 2}"));   // wrapped: one list element
+    RC_CHECK_TRUE(SAME("REPLACE({{1, 2}, 1, 2}, {1, 2}, 0)",      "{{1, 2}, 0}"));  // unwrapped: a run
+    RC_CHECK_TRUE(SAME("REPLACE(1..5, 2..3, 0)",                  "{1, 0, 4, 5}"));  // ranges enumerate
+    RC_CHECK_TRUE(SAME("REPLACE({}, 1, 2)",                       "{}"));
+    RC_CHECK_TRUE(SAME("REPLACE({1, 2}, {1, 2, 3}, 0)",           "{1, 2}"));
+
+    // An empty old would be everywhere; strings and lists don't mix; a single number holds nothing.
+    RC_CHECK_TRUE(FAILS("REPLACE(\"abc\", \"\", \"x\")",          error_type_domain));
+    RC_CHECK_TRUE(FAILS("REPLACE({1, 2}, {}, 3)",                 error_type_domain));
+    RC_CHECK_TRUE(FAILS("REPLACE(\"abc\", 97, \"x\")",            error_type_type_mismatch));
+    RC_CHECK_TRUE(FAILS("REPLACE(\"abc\", \"a\", {1})",           error_type_type_mismatch));
+    RC_CHECK_TRUE(FAILS("REPLACE(5, 5, 6)",                       error_type_type_mismatch));
+    RC_CHECK_TRUE(FAILS("REPLACE({1, 2}, 1)",                     error_type_incorrect_parameters));
+
+    // The pattern has to be known in full: an error in old or new, even inside a list, is the result.
+    RC_CHECK_TRUE(FAILS("REPLACE({1, 2}, {1, nosuch}, 0)",        error_type_unknown_symbol));
+    RC_CHECK_TRUE(FAILS("REPLACE({1, 2}, 1, {nosuch})",           error_type_unknown_symbol));
+    RC_CHECK_TRUE(FAILS("REPLACE(nosuch, 1, 2)",                  error_type_unknown_symbol));
+}
+
+RC_TEST_STEP(expression, where, fix)
+{
+    // The element-wise IF: the mask picks from a where true, b where false; all three broadcast together.
+    RC_CHECK_TRUE(SAME("WHERE(TRUE, 1, 2)",                             "1"));
+    RC_CHECK_TRUE(SAME("WHERE(0, 1, 2)",                                "2"));
+    RC_CHECK_TRUE(SAME("WHERE({1, 300} > 255, 255, {1, 300})",          "{1, 255}"));
+    RC_CHECK_TRUE(SAME("WHERE({TRUE, FALSE}, \"on\", \"off\")",         "{\"on\", \"off\"}"));
+    RC_CHECK_TRUE(SAME("WHERE(TRUE, {1, 2}, {3, 4})",                   "{1, 2}"));
+    RC_CHECK_TRUE(SAME("WHERE({TRUE, FALSE}, {1, 2}, {10})",            "{1, 10}"));    // a length-1 axis repeats
+    RC_CHECK_TRUE(SAME("WHERE((0..4) MOD 2, 0..4, 0)",                  "{0, 1, 0, 3, 0}"));
+    RC_CHECK_TRUE(SAME("WHERE({{TRUE}, {FALSE}}, {1, 2}, 0)",           "{{1, 2}, {0, 0}}"));   // the shallower held whole
+    RC_CHECK_TRUE(SAME("WHERE({TRUE, {FALSE, TRUE}}, 1, 0)",            "{1, {0, 1}}"));         // ragged recurses
+    RC_CHECK_TRUE(SAME("WHERE({}, 1, 2)",                               "{}"));
+
+    // Only the values it picks matter, so it guards like an IF: a division by zero, or an undefined
+    // name, in a value it passes over is no error.
+    RC_CHECK_TRUE(SAME("WHERE({0, 2} = 0, 0, 1 / {0, 2})",              "{0, 0.5}"));
+    RC_CHECK_TRUE(SAME("WHERE(TRUE, 1, nosuch)",                        "1"));
+    RC_CHECK_TRUE(SAME("WHERE({TRUE, TRUE}, {1, 2}, 0..)",              "{1, 2}"));
+    RC_CHECK_TRUE(FAILS("WHERE(FALSE, 1, nosuch)",                      error_type_unknown_symbol));
+    RC_CHECK_TRUE(FAILS("WHERE(nosuch, 1, 2)",                          error_type_unknown_symbol));
+
+    // A mask value is a number or a boolean; shapes must agree, as an operator's would.
+    RC_CHECK_TRUE(FAILS("WHERE(\"yes\", 1, 2)",                         error_type_type_mismatch));
+    RC_CHECK_TRUE(FAILS("WHERE({TRUE, FALSE}, {1, 2, 3}, 0)",           error_type_shape_mismatch));
+    RC_CHECK_TRUE(FAILS("WHERE(TRUE, 1)",                               error_type_incorrect_parameters));
 }
 
 RC_TEST_STEP(expression, numeric_fast_paths, fix)

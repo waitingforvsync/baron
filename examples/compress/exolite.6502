@@ -27,17 +27,18 @@ gammas = {0..15, 0..15, 0..15}                          ; widths 0, 1, 2, ...: E
 \ Every number's code from 0 to limit, under one table (0 has none). Bucket
 \ i's codes are its number - i ones and a zero - followed by w more bits.
 
-FUNCTION bucket_codes(widths, i, left)
-    IF i == LEN(widths) OR left <= 0
-        r = {}
-    ELSE
-        w = widths[i]
-        k = MIN({2^w, left})
-        r = CONCAT(bits(2^(i + 1) - 2, i + 1) * 2^w + (0..<k), bucket_codes(widths, i + 1, left - k))
-    ENDIF
-= r
-
-FUNCTION code_table(widths, limit) = CONCAT({0}, bucket_codes(widths, 0, limit))
+FUNCTION code_table(widths, limit)
+    codes = {0}
+    left  = limit
+    FOR i = 0..<LEN(widths)
+        IF left > 0
+            w     = widths[i]
+            k     = MIN({2^w, left})
+            codes = CONCAT(codes, bits(2^(i + 1) - 2, i + 1) * 2^w + (0..<k))
+            left  = left - k
+        ENDIF
+    NEXT
+= codes
 
 \ The three tables of codes for data n bytes long. Matches stop at 256 bytes,
 \ so the decompressor can copy one with an 8-bit index.
@@ -68,50 +69,47 @@ FUNCTION smaller(a, b) = MIN({a, b}, 0)                  ; element by element
 \ for. The lists are padded so reaching past e reads as reaching e, and every
 \ shift is a slice.
 
-FUNCTION in_reach(b, e, w)                              ; how many numbers are in s..s + 2^w - 1, by width
-    c = b[2^w..e + 2^w] - b[0..e]
-    IF w == 0
-        r = {c}
-    ELSE
-        r = CONCAT(in_reach(b, e, w - 1), {c})
-    ENDIF
+FUNCTION in_reach(b, e, wmax)                           ; by width, how many numbers are in s..s + 2^w - 1
+    r = {}
+    FOR w = 0..wmax
+        r = CONCAT(r, {b[2^w..e + 2^w] - b[0..e]})
+    NEXT
 = r
 
-FUNCTION best_of(c, w, counts, g, e)                    ; the cheapest width from 0 to w
-    t = counts[w] * (c + w) + g[2^w..e + 2^w]
-    IF w == 0
-        r = t
-    ELSE
-        r = smaller(t, best_of(c, w - 1, counts, g, e))
-    ENDIF
-= r
+FUNCTION best_of(c, counts, g, e, wmax)                 ; the cheapest width from 0 to wmax
+    best = counts[0] * c + g[1..e + 1]
+    FOR w = 1..wmax
+        best = smaller(best, counts[w] * (c + w) + g[2^w..e + 2^w])
+    NEXT
+= best
 
-FUNCTION layers(i, counts, e, wmax)                     ; the layers for buckets i to 16
-    IF i == 16
-        r = {CONCAT(REPEATED(e, never), {0})}
-    ELSE
-        rest = layers(i + 1, counts, e, wmax)
-        g    = CONCAT(rest[0], REPEATED(2^wmax, 0))
-        r    = CONCAT({best_of(i + 1, wmax, counts, g, e)}, rest)
-    ENDIF
-= r
+FUNCTION layers(counts, e, wmax)                        ; the layers for buckets 0 to 16
+    ls = {CONCAT(REPEATED(e, never), {0})}
+    FOR i = 15..0
+        g  = CONCAT(ls[0], REPEATED(2^wmax, 0))
+        ls = CONCAT({best_of(i + 1, counts, g, e, wmax)}, ls)
+    NEXT
+= ls
 
 \ Back from the front: at each bucket, the narrowest width that does best.
 \ Buckets past the largest number get width 15, to reach as far as they can.
 
-FUNCTION trace(ls, below, e, wmax, i, s)
-    IF i == 16
-        r = {}
-    ELIF s == e
-        r = REPEATED(16 - i, 15)
-    ELSE
-        ws    = 0..wmax
-        to    = smaller(s + 2^ws, e)
-        cands = (below[to] - below[s]) * (i + 1 + ws) + ls[i + 1][to]
-        w     = FIND(cands, MIN(cands))
-        r     = CONCAT({w}, trace(ls, below, e, wmax, i + 1, smaller(s + 2^w, e)))
-    ENDIF
-= r
+FUNCTION trace(ls, below, e, wmax)
+    widths = {}
+    s      = 1
+    FOR i = 0..15
+        IF s == e
+            w = 15
+        ELSE
+            ws    = 0..wmax
+            to    = smaller(s + 2^ws, e)
+            cands = (below[to] - below[s]) * (i + 1 + ws) + ls[i + 1][to]
+            w     = FIND(cands, MIN(cands))
+            s     = smaller(s + 2^w, e)
+        ENDIF
+        widths = CONCAT(widths, w)
+    NEXT
+= widths
 
 \ The 16 widths that write these numbers in the fewest bits. A width wider
 \ than wmax reaches no further and costs more. Nothing stops a later bucket
@@ -125,54 +123,50 @@ FUNCTION fit(values)
     below  = below_counts(vs, e)
     wmax   = MIN({15, BITLEN(e)})
     counts = in_reach(CONCAT(below, REPEATED(2^wmax, below[e])), e, wmax)
-= trace(layers(0, counts, e, wmax), below, e, wmax, 0, 1)
+= trace(layers(counts, e, wmax), below, e, wmax)
 
 
 \ ---- what a parse wrote ----
 
-\ The numbers in each table, as {run counts, lengths - 1, offsets}, gathered
-\ by halving the list of runs. ZIP pairs the halves up table by table; fit
-\ flattens them.
+\ The numbers in each table: run counts, lengths - 1 and offsets.
 
-FUNCTION run_values(run)
-    IF run[0] == 0
-        r = {LEN(run[1]), {}, {}}
-    ELSE
-        r = {LEN(run[1][0]), run[1][1] - 1, run[1][0]}
-    ENDIF
-= r
-
-FUNCTION run_list_values(runs)
-    n = LEN(runs)
-    IF n == 0
-        r = {{}, {}, {}}
-    ELIF n == 1
-        r = run_values(runs[0])
-    ELSE
-        h = n DIV 2
-        r = ZIP(run_list_values(runs[0..<h]), run_list_values(runs[h..<n]))
-    ENDIF
-= r
+FUNCTION values_written(runs)
+    counts = {}
+    lens   = {}
+    offs   = {}
+    FOR run = runs
+        IF run[0] == 0
+            counts = CONCAT(counts, LEN(run[1]))
+        ELSE
+            counts = CONCAT(counts, LEN(run[1][0]))
+            lens   = CONCAT(lens, run[1][1] - 1)
+            offs   = CONCAT(offs, run[1][0])
+        ENDIF
+    NEXT
+= {counts, lens, offs}
 
 FUNCTION fit_all(runs)
-    v = run_list_values(runs)
+    v = values_written(runs)
 = {fit(v[0]), fit(v[1]), fit(v[2])}
 
 \ Fit tables to what a parse wrote, parse again with them, and keep going
-\ while that saves anything. p is the parse made with widths; the result is
-\ the best {widths, parse} found.
+\ while that saves anything, eight times at most. p is the parse made with
+\ widths; the result is the best {widths, parse} found.
 
-FUNCTION settle(widths, p, data, tries)
-    next = fit_all(p[1])
-    q    = parse_with(tables(next, LEN(data)), data)
-    IF q[0] >= p[0]
-        r = {widths, p}
-    ELIF tries == 1
-        r = {next, q}
-    ELSE
-        r = settle(next, q, data, tries - 1)
-    ENDIF
-= r
+FUNCTION settle(widths, p, data)
+    better = TRUE
+    FOR try = 1..8
+        IF better
+            refit  = fit_all(p[1])
+            q      = parse_with(tables(refit, LEN(data)), data)
+            better = q[0] < p[0]
+            IF better
+                widths = refit
+                p      = q
+            ENDIF
+        ENDIF
+    NEXT
+= {widths, p}
 
 
 \ ---- the stream ----
@@ -187,23 +181,15 @@ FUNCTION run_codes(run, t)
     ENDIF
 = r
 
-FUNCTION encode(runs, t)
-    n = LEN(runs)
-    IF n == 0
-        r = {}
-    ELIF n == 1
-        r = run_codes(runs[0], t)
-    ELSE
-        h = n DIV 2
-        r = {encode(runs[0..<h], t), encode(runs[h..<n], t)}
-    ENDIF
-= r
-
 \ The transform: start from gamma codes, settle the tables, then write them
-\ and the runs.
+\ and the runs. BITPACK flattens the nesting.
 
 FUNCTION exolite(data)
-    n    = LEN(data)
-    best = settle(gammas, parse_with(tables(gammas, n), data), data, 8)
-    t    = tables(best[0], n)
-= BITPACK({bits(n, 16), bits(FLATTEN(best[0]), 4), encode(best[1][1], t)})
+    n     = LEN(data)
+    best  = settle(gammas, parse_with(tables(gammas, n), data), data)
+    t     = tables(best[0], n)
+    codes = {bits(n, 16), bits(FLATTEN(best[0]), 4)}
+    FOR run = best[1][1]
+        codes = CONCAT(codes, run_codes(run, t))
+    NEXT
+= BITPACK(codes)

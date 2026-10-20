@@ -104,11 +104,15 @@ value value_make_copy(value v, rc_arena *arena)
             return value_make_string(rc_mstr_from_str(v.string, v.string.len, arena).view);
 
         case value_type_list: {
-            // make_copy gives an arena-backed array of the (shallow) handles; deep-copy each
-            // element in place so nested lists and strings come along too.
+            // make_copy gives an arena-backed array of the (shallow) handles, which is all a number
+            // needs; deep-copy the elements with backing of their own, so nested lists and strings
+            // come along too.
             rc_array_value out = rc_array_value_make_copy(v.list, v.list.num, arena);
             for (uint32_t i = 0; i < out.num; i++) {
-                rc_array_value_set(&out, i, value_make_copy(rc_view_value_get(v.list, i), arena));
+                value e = rc_view_value_get(v.list, i);
+                if (value_is_list(e) || value_is_string(e) || value_is_error(e)) {
+                    rc_array_value_set(&out, i, value_make_copy(e, arena));
+                }
             }
             return value_make_list(out.view);
         }

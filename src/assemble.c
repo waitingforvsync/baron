@@ -9029,6 +9029,34 @@ RC_TEST_STEP(assemble, function_assert, fix)
     #undef CHECKED_FN
 }
 
+RC_TEST_STEP(assemble, function_if_needs_one_value, fix)
+{
+    // A body IF picks one branch, so it needs one number or boolean. A list has an answer per element,
+    // so it is refused at the condition, as the statement IF refuses it - rather than running neither
+    // branch and leaving the return to take the blame.
+    #define CLAMP_FN \
+        "FUNCTION clamp(x)\n" \
+        "    IF x > 255\n" \
+        "        r = 255\n" \
+        "    ELSE\n" \
+        "        r = x\n" \
+        "    ENDIF\n" \
+        "= r\n"
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(CLAMP_FN "EQUB clamp(300), clamp(7)"), (uint8_t[]) {255, 7}, 2));
+    RC_CHECK_TRUE(ERR(CLAMP_FN "EQUB clamp({1, 300})") == error_type_operand_not_numeric);
+    RC_CHECK(diag_pos(&fix->r, error_type_operand_not_numeric), ==, (uint32_t) (sizeof "FUNCTION clamp(x)\n    IF " - 1));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_called_from));
+    RC_CHECK_FALSE(has_diag(&fix->r, error_type_undefined_symbol));
+
+    // An ELIF is judged the same way, and a string is no better; a condition on a path not taken is
+    // never judged at all.
+    RC_CHECK_TRUE(ERR("FUNCTION f(x)\nIF FALSE\nr = 1\nELIF x\nr = 2\nELSE\nr = 3\nENDIF\n= r\nEQUB f(\"s\")")
+                  == error_type_operand_not_numeric);
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION g(x)\nIF TRUE\nr = 1\nELIF x\nr = 2\nENDIF\n= r\nEQUB g({1, 2})"),
+                          (uint8_t[]) {1}, 1));
+    #undef CLAMP_FN
+}
+
 RC_TEST_STEP(assemble, diagnostics_carry_payloads, fix)
 {
     // The payload plumbing end to end: an undefined symbol names itself (through the evaluator's error
@@ -9611,6 +9639,7 @@ RC_TEST_STEP(assemble, for_framing_and_sequence_errors, fix)
     RC_CHECK_TRUE(ERR("NEXT")               == error_type_unexpected_next);
     RC_CHECK_TRUE(ERR("FOR i = 5 : NOP : NEXT")   == error_type_not_iterable);   // a scalar is not a sequence
     RC_CHECK_TRUE(ERR("FOR i = 5.. : NOP : NEXT") == error_type_not_iterable);  // an unbounded range cannot be counted
+    RC_CHECK_TRUE(ERR("FOR c = \"abc\" : NOP : NEXT") == error_type_not_iterable);   // a string is one value
 }
 
 RC_TEST_STEP(assemble, equb_emits_bytes, fix)
@@ -10384,21 +10413,114 @@ RC_TEST_STEP(assemble, function_locals_are_plain_names_bound_in_order, fix)
     RC_CHECK_TRUE(ERR("FUNCTION g(n)\na.b = n\n= n\nEQUB g(7)") == error_type_invalid_assignment);
 }
 
-RC_TEST_STEP(assemble, function_duplicate_local, fix)
+RC_TEST_STEP(assemble, function_locals_reassign, fix)
 {
-    // Body locals are single-assignment: a second live assignment to one name used to be
-    // silently ignored (reading like mutation that never happened) - now it is a duplicate,
-    // naming the local at the call site.
-    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nr = 1\nr = r + n\n= r\nEQUB f(1)") == error_type_duplicate_symbol);
-    RC_CHECK(diag_payload(&fix->r, error_type_duplicate_symbol), ==, RC_STR("r"));
+    // A local takes a new value with each assignment - parameters included - which is all the
+    // mutation a body has: the locals are gone when the call returns, so the function stays pure.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION f(n)\nr = 1\nr = r + n\n= r\nEQUB f(1)"), (uint8_t[]) {2}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION g(n)\nn = n * 2\n= n\nEQUB g(3)"), (uint8_t[]) {6}, 1));
 
-    // Rebinding a parameter is the same mistake.
-    RC_CHECK_TRUE(ERR("FUNCTION g(n)\nn = 2\n= n\nEQUB g(1)") == error_type_duplicate_symbol);
+    // Assigning a global's name makes a local that hides it; the global itself never changes.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("x = 5\nFUNCTION h(n)\nx = x + n\n= x\nEQUB h(1), x"), (uint8_t[]) {6, 5}, 2));
 
-    // Branches stay fine: only the live arm binds, so IF/ELSE both assigning is one binding.
+    // Branches stay fine: only the live arm assigns.
     RC_CHECK_TRUE(code_is(&fix->r, ASM(
         "FUNCTION pick(c)\nIF c\nx = 2\nELSE\nx = 3\nENDIF\n= x\n"
         "EQUB pick(TRUE), pick(FALSE)"), (uint8_t[]) {2, 3}, 2));
+}
+
+RC_TEST_STEP(assemble, function_for_loops, fix)
+{
+    // FOR ... NEXT in a body runs once per element, the loop variable an ordinary local: map, filter and
+    // running state, with no recursion.
+    #define LOOP_FNS \
+        "FUNCTION total(xs)\ns = 0\nFOR x = xs\ns = s + x\nNEXT\n= s\n" \
+        "FUNCTION commands(names)\nout = {}\nFOR s = names\nout = CONCAT(out, LEN(s), CODES(s))\nNEXT\n= out\n" \
+        "FUNCTION offsets(lengths)\nout = {}\nat = 0\nFOR n = lengths\nout = CONCAT(out, at)\nat = at + n\nNEXT\n= out\n" \
+        "FUNCTION evens(xs)\nout = {}\nFOR x = xs\nIF x MOD 2 = 0\nout = CONCAT(out, x)\nENDIF\nNEXT\n= out\n" \
+        "FUNCTION table(n)\nrows = {}\nFOR y = 1..n\nrow = {}\nFOR x = 1..n\nrow = CONCAT(row, x * y)\nNEXT\n" \
+        "rows = CONCAT(rows, {row})\nNEXT\n= rows\n" \
+        "FUNCTION last(xs)\nFOR x = xs\nNEXT\n= x\n" \
+        "FUNCTION joined(ws)\ns = \"\"\nFOR w = ws\ns = s + w + \",\"\nNEXT\n= s\n"
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUB total({1, 2, 3}), total(1..10), total({})"), (uint8_t[]) {6, 55, 0}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUB commands({\"AB\", \"C\"})"),
+                          (uint8_t[]) {2, 'A', 'B', 1, 'C'}, 5));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUB offsets({5, 3, 8})"), (uint8_t[]) {0, 5, 8}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUB evens(1..7)"), (uint8_t[]) {2, 4, 6}, 3));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUB table(3)"), (uint8_t[]) {1, 2, 3, 2, 4, 6, 3, 6, 9}, 9));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUB last({4, 5, 6}), last(3..1)"), (uint8_t[]) {6, 1}, 2));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUS joined({\"ab\", \"cd\"})"), (uint8_t[]) {'a', 'b', ',', 'c', 'd', ','}, 6));
+
+    // An empty sequence runs nothing, nor does a loop in an arm not taken.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION f(xs)\nc = 7\nFOR x = xs\nc = ERROR(\"ran\")\nNEXT\n= c\nEQUB f({})"),
+                          (uint8_t[]) {7}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION g(n)\nc = 7\nIF n\nFOR x = 1..3\nc = ERROR(\"ran\")\nNEXT\nENDIF\n= c\nEQUB g(0)"),
+                          (uint8_t[]) {7}, 1));
+
+    // Calls inside a step, recursion included, and a forward-referenced sequence that settles.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION rec(n)\ns = 0\nIF n > 0\nFOR i = 1..n\ns = s + rec(n - 1)\nNEXT\nENDIF\n= s + 1\nEQUB rec(4)"),
+        (uint8_t[]) {65}, 1));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(LOOP_FNS "EQUB total(later)\nlater = {1, 2}"), (uint8_t[]) {3}, 1));
+
+    // No depth limit: thousands of steps, building a list as they go.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION grow(n)\nout = {}\nFOR i = 1..n\nout = CONCAT(out, i AND 255)\nNEXT\n= out\n"
+        "big = grow(3000)\nEQUW LEN(big)\nEQUB big[0], big[255], big[2999]"),
+        (uint8_t[]) {3000 & 255, 3000 >> 8, 1, 0, 3000 & 255}, 5));
+    #undef LOOP_FNS
+}
+
+RC_TEST_STEP(assemble, function_for_carries_what_it_assigned, fix)
+{
+    // Each step works in memory the next step reuses, so whatever a step assigned is carried across. Pin
+    // the awkward shapes: strings built by inner loops, locals first assigned mid-loop, slices viewing
+    // another local's storage, and a recursive call per step.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION words(n)\nout = {}\nFOR i = 1..n\nw = \"\"\nFOR j = 1..i\nw = w + CHR('a' + j - 1)\nNEXT\n"
+        "out = CONCAT(out, w)\nNEXT\n= out\n"
+        "EQUS SUM(words(3))"), (uint8_t[]) {'a', 'a', 'b', 'a', 'b', 'c'}, 6));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION shuffle(xs)\na = xs\nb = {}\nFOR k = 1..LEN(xs)\nhead = a[0]\nrest = a[1..]\n"
+        "a = CONCAT(rest, head)\nb = CONCAT({head}, b)\nview = b[0..1]\nlate = SUM(view)\nNEXT\n= {a, b, late}\n"
+        "EQUB shuffle({1, 2, 3, 4})"), (uint8_t[]) {1, 2, 3, 4, 4, 3, 2, 1, 7}, 9));
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION deep(n)\nacc = {}\nIF n > 0\nFOR i = 1..2\nacc = CONCAT(acc, {deep(n - 1)})\nNEXT\nENDIF\n= {n, acc}\n"
+        "EQUB deep(2)"), (uint8_t[]) {2, 1, 0, 0, 1, 0, 0}, 7));
+}
+
+RC_TEST_STEP(assemble, function_for_errors, fix)
+{
+    // The sequence must be a list or a bounded range, as the statement's must; a string is one value.
+    #define F(seq) "FUNCTION f(n)\nFOR x = " seq "\nNEXT\n= 0\nEQUB f(1)"
+    RC_CHECK_TRUE(ERR(F("\"abc\"")) == error_type_not_iterable);
+    RC_CHECK(diag_pos(&fix->r, error_type_not_iterable), ==, (uint32_t) (sizeof "FUNCTION f(n)\nFOR x = " - 1));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_called_from));
+    RC_CHECK_TRUE(ERR(F("5")) == error_type_not_iterable);
+    RC_CHECK_TRUE(ERR(F("1..")) == error_type_not_iterable);
+    RC_CHECK_TRUE(ERR(F("nosuch")) == error_type_undefined_symbol);
+    #undef F
+
+    // A step's error is reported on its line in the body, its message intact.
+    RC_CHECK_TRUE(ERR("FUNCTION f(xs)\nFOR x = xs\nASSERT x < 3, \"too big: \", x\nNEXT\n= 0\nEQUB f({1, 5})")
+                  == error_type_user_error);
+    RC_CHECK(diag_payload(&fix->r, error_type_user_error), ==, RC_STR("too big: 5"));
+    RC_CHECK_TRUE(has_diag(&fix->r, error_type_called_from));
+
+    // The shape of a loop, caught when the FUNCTION is defined.
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\n  FOR x = 1..2\n= 0") == error_type_unclosed_for);
+    RC_CHECK(diag_pos(&fix->r, error_type_unclosed_for), ==, (uint32_t) (sizeof "FUNCTION f(n)\n  " - 1));
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nNEXT\n= 0") == error_type_unexpected_next);
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nFOR x = 1..2\nENDIF\nNEXT\n= 0") == error_type_unexpected_endif);
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nFOR x = 1..2\nIF n\nNEXT\nENDIF\n= 0") == error_type_unexpected_next);
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nFOR x = 1..2\n= x\nNEXT\n= 0") == error_type_unclosed_for);   // no return inside
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nFOR = 1..2\nNEXT\n= 0") == error_type_expected_label_name);
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nFOR a.b = 1..2\nNEXT\n= 0") == error_type_invalid_assignment);
+    RC_CHECK_TRUE(ERR("FUNCTION f(n)\nFOR x 1..2\nNEXT\n= 0") == error_type_expected_assign);
+
+    // for and next are body keywords now; a longer name that starts with one is still a name.
+    RC_CHECK_TRUE(code_is(&fix->r, ASM("FUNCTION f(n)\nnext_one = n + 1\nformat = next_one\n= format\nEQUB f(1)"),
+                          (uint8_t[]) {2}, 1));
 }
 
 RC_TEST_STEP(assemble, function_undefined_names_the_culprit, fix)
