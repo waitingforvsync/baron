@@ -53,7 +53,7 @@ typedef struct address_result {
 
 static address_result address_from_value(value v)
 {
-    if (!value_is_number(v) || v.numeric < 0.0 || v.numeric > 4294967295.0) {
+    if (!value_is_number(v) || !(v.numeric >= 0.0 && v.numeric <= 4294967295.0)) {   // NaN fails too
         return (address_result) {0};
     }
 
@@ -180,6 +180,7 @@ rc_str output_write_files(const output_spec *spec, rc_str dir, bool inf, rc_aren
 #ifdef BARON_TESTS
 
 #include "richc/test.h"
+#include <math.h>
 
 RC_TEST(output, spec_from_sections)
 {
@@ -255,6 +256,12 @@ RC_TEST(output, spec_rejects_bad_attributes)
     // A fractional load is refused too (addresses are whole numbers).
     sections_add_attribute(&sec, a, RC_STR("filename"), value_make_string(RC_STR("code")), cursor_none());
     sections_add_attribute(&sec, a, RC_STR("load"), value_make_numeric(0.5), cursor_none());
+    r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
+    RC_CHECK_TRUE(r.error.len != 0);
+    RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("load")));
+
+    // So is a NaN, which slips past any range check written as "below or above" (load = 2^2000 - 2^2000).
+    sections_add_attribute(&sec, a, RC_STR("load"), value_make_numeric(NAN), cursor_none());
     r = output_spec_make(sections_all(&sec), RC_STR(""), 0, 0, &arena);
     RC_CHECK_TRUE(r.error.len != 0);
     RC_CHECK_TRUE(rc_str_contains(r.error, RC_STR("load")));

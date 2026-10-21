@@ -39,14 +39,17 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
 
-      # Top up with every real source in the repo (test fixtures + the examples, renamed
-      # to dodge the boot.6502 name collisions between examples).
+      # Top up with every real source in the repo: the test fixtures, and each example made
+      # self-contained, its INCLUDEs inlined and its INCBINs cut to a small slice of data. The
+      # harness assembles one string, so an INCLUDE finds no file and nothing after it runs -
+      # the compressors' transforms least of all. Renamed to dodge the examples' shared
+      # boot.6502 name.
       - name: Seed the corpus
         run: |
           mkdir -p corpus
           cp src/test/*.6502 src/test/*.bas corpus/ 2>/dev/null || true
           for f in examples/*/*.6502; do
-            cp "$f" "corpus/$(echo "$f" | md5sum | cut -c1-8).6502"
+            python3 .github/fuzz/self_contained.py "$f" > "corpus/$(echo "$f" | md5sum | cut -c1-8).6502"
           done
 
       - name: Fuzz

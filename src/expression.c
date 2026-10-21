@@ -49,7 +49,9 @@ static value zp_offset_add(value zp, double delta)
         return value_make_error(error_type_domain);
     }
 
-    int64_t off = (int64_t) zp.za_auto.offset + (int64_t) delta;
+    // Summed as doubles: exact for any offset that could fit, and a huge delta (or an infinite one)
+    // is simply out of range, never converted.
+    double off = (double) zp.za_auto.offset + delta;
     if (off < INT32_MIN || off > INT32_MAX) {
         return value_make_error(error_type_domain);
     }
@@ -391,7 +393,7 @@ static value fn_rnd(value v, rc_arena *arena)
 {
     (void)arena;
     NEEDS_NUM(value_is_number(v));
-    int64_t bound = (int64_t)v.numeric;   // truncate toward zero: RND(2.9) == RND(2)
+    int64_t bound = value_to_i64(v.numeric);   // truncate toward zero: RND(2.9) == RND(2); NaN is 0
     if (bound <= 0) {
         return value_make_error(error_type_domain);   // no 0..n-1 range for n <= 0
     }
@@ -925,8 +927,8 @@ static value apply_unary(lexeme_unary_op op, value v, rc_arena *arena)
 // selectors must land on a real element (only ranges are forgiving, by clamping).
 static uint32_t selector_index(value sel, uint32_t len)
 {
-    if (!value_is_number(sel) || sel.numeric < 0.0 || sel.numeric >= (double)len) {
-        return RC_INDEX_NONE;
+    if (!value_is_number(sel) || !(sel.numeric >= 0.0 && sel.numeric < (double)len)) {
+        return RC_INDEX_NONE;   // written so NaN, failing every comparison, fails too
     }
 
     uint32_t i = (uint32_t)sel.numeric;
@@ -1697,7 +1699,7 @@ static value fn_chr(rc_view_value args, rc_arena *arena)
             return value_make_error(error_type_type_mismatch);
         }
         double code = trunc(e.numeric);
-        if (code < 0.0 || code > 255.0) {
+        if (!(code >= 0.0 && code <= 255.0)) {   // NaN included
             return value_make_error(error_type_domain);
         }
         rc_mstr_append_char(&m, (char) (uint8_t) code, arena);
@@ -2302,6 +2304,9 @@ static cost_table cost_table_make(value v, rc_arena *arena)
             return (cost_table) {.err = value_make_error(error_type_type_mismatch)};
         }
         double d = floor(c.numeric);
+        if (isnan(d)) {
+            return (cost_table) {.err = value_make_error(error_type_domain)};
+        }
         rc_span_i32_set(costs, i, d < 0.0 ? -1 : (d > 1e9 ? 1000000000 : (int32_t) d));
     }
 
@@ -3061,7 +3066,7 @@ static body_result loop_end(const parser *p, body_result br, uint32_t for_at)
 // gone once the next one starts; what it assigned has to get out first. Those locals are copied past the
 // step's own data, the call's arena is rewound to where it stood when the loop began, and they are
 // copied back - so the loop only ever holds one step's worth of what it carries, however many steps run.
-// The frame's slots go along too, in case a new local grew them into the step's memory.
+// The frame's slots go along too: the step has been working on its own copy of them.
 static void carry_locals(frame *f, uint32_t since, rc_arena *arena, rc_arena loop_start, rc_arena stage)
 {
     rc_array_frame_slot staged = rc_array_frame_slot_make_copy(f->slots.view, f->slots.num, &stage);
@@ -3148,6 +3153,10 @@ static body_result interpret_for(const parser *p, uint32_t pos, bool active, uin
         parser   run  = *p;
         run.arena = &step;
         run.spare = *p->arena;
+
+        // The step takes its own copy of the frame's slots: a local new to the frame grows them, and
+        // an array may only grow in the arena that holds it. carry_locals copies them back.
+        p->frame->slots = rc_array_frame_slot_make_copy(p->frame->slots.view, p->frame->slots.num, &step);
 
         frame_assign(p->frame, name, rc_view_value_get(items.list, i), &step);
         br = interpret_statements(&run, seq.next, true);
@@ -4742,6 +4751,23 @@ RC_TEST_STEP(expression, find, fix)
     RC_CHECK_TRUE(told.error.code == error_type_user_error);
     RC_CHECK(told.error.detail, ==, RC_STR("no z"));
     RC_CHECK_TRUE(FAILS("FIND({1, 2}, 1, 0, 0)",                            error_type_incorrect_parameters));
+}
+
+RC_TEST_STEP(expression, non_finite_numbers_are_never_converted, fix)
+{
+    // 2^2000 is infinity and infinity less itself is NaN. Converting either to an integer is undefined
+    // in C, and NaN fails every comparison, so a range check written as "below or above" lets it
+    // through: each place that converts refuses them first.
+    #define NOT_A_NUMBER "(2^2000 - 2^2000)"
+    RC_CHECK_TRUE(FAILS("RND(" NOT_A_NUMBER ")",                error_type_domain));
+    RC_CHECK_TRUE(value_is_number(VAL("RND(2^2000)")));
+    RC_CHECK_TRUE(FAILS("{1, 2}[" NOT_A_NUMBER "]",             error_type_subscript_range));
+    RC_CHECK_TRUE(FAILS("{1, 2}[2^2000]",                       error_type_subscript_range));
+    RC_CHECK_TRUE(FAILS("\"ab\"[" NOT_A_NUMBER "]",             error_type_subscript_range));
+    RC_CHECK_TRUE(FAILS("CHR(" NOT_A_NUMBER ")",                error_type_domain));
+    RC_CHECK_TRUE(FAILS("LZ_PARSE({1}, {-1, 1}, full(256, " NOT_A_NUMBER "), {-1, 1}, {-1, 1}, {-1, 1})",
+                        error_type_domain));
+    #undef NOT_A_NUMBER
 }
 
 RC_TEST_STEP(expression, replace, fix)

@@ -6112,6 +6112,12 @@ RC_TEST_STEP(assemble, za_auto_address_arithmetic, fix)
     RC_CHECK_TRUE(code_is(&fix->r,
         ASM("ZA_POOL &70..&7F : ZA_AUTO2 p : STA p : STA p+1 : LDA (p),Y : EQUB (p+2)-p"),
         (uint8_t[]) {0x85, 0x70, 0x85, 0x71, 0xB1, 0x70, 0x02}, 7));
+
+    // An offset too big for any address is refused, never converted (a fuzzer find: 2^70 overflowed
+    // the conversion to a 64-bit integer); infinity and NaN with it.
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : LDA v : LDA v + 2^70") == error_type_domain);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : LDA v : LDA v - 2^2000") == error_type_domain);
+    RC_CHECK_TRUE(ERR("ZA_POOL &70..&7F : ZA_AUTO1 v : LDA v : LDA v + (2^2000 - 2^2000)") == error_type_domain);
 }
 
 RC_TEST_STEP(assemble, za_auto_address_tables_work, fix)
@@ -10487,6 +10493,15 @@ RC_TEST_STEP(assemble, function_for_carries_what_it_assigned, fix)
     RC_CHECK_TRUE(code_is(&fix->r, ASM(
         "FUNCTION deep(n)\nacc = {}\nIF n > 0\nFOR i = 1..2\nacc = CONCAT(acc, {deep(n - 1)})\nNEXT\nENDIF\n= {n, acc}\n"
         "EQUB deep(2)"), (uint8_t[]) {2, 1, 0, 0, 1, 0, 0}, 7));
+
+    // A frame already holding eight names grows when the loop variable joins it, and again when a
+    // local first appears in a later step: an array only grows in the arena that holds it, so each
+    // step works on its own copy of the slots. (Found by fuzzing the compressors.)
+    RC_CHECK_TRUE(code_is(&fix->r, ASM(
+        "FUNCTION many(n)\na = 1\nb = 2\nc = 3\nd = 4\ne = 5\nf = 6\ng = 7\n"
+        "FOR i = 1..3\nIF i == 2\nlate = i * 10\nENDIF\nIF i == 3\nlater = late + i\nENDIF\nNEXT\n"
+        "= {n + a + b + c + d + e + f + g, late, later}\n"
+        "EQUB many(100)"), (uint8_t[]) {128, 20, 23}, 3));
 }
 
 RC_TEST_STEP(assemble, function_for_errors, fix)
