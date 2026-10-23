@@ -146,6 +146,27 @@ parse_result syntax_error(baron *b, error_type code, cursor at)
 }
 
 
+// Running out of arena is a crash, so we stop while there is still room: a container that doubles
+// asks for as much again as it holds, so an arena with less free than we have used since start (and a
+// sixteenth over, for everything else) may not survive the next statement.
+static bool arena_is_low(const rc_arena *a, uint32_t start)
+{
+    uint64_t used = a->top - start;
+    uint64_t room = a->reserved - a->top;
+    return room < used + a->reserved / 16;
+}
+
+
+// Checked before every statement and every FOR step, so a runaway (a macro calling itself twice, a
+// loop of loops) ends in a diagnostic rather than a crash. Permanent counts from where this assemble
+// began, as earlier results kept there never grow; per_pass resets every pass.
+static bool memory_is_low(const baron *b, rc_arena scratch)
+{
+    return arena_is_low(b->permanent, b->permanent_start) || arena_is_low(b->per_pass, 0)
+        || arena_is_low(&scratch, 0);
+}
+
+
 void semantic_error_payload(baron *b, parse_flags flags, error_type code, cursor at, rc_str payload)
 {
     if (flags.final && flags.active) {
@@ -2836,7 +2857,6 @@ static parse_result handle_verbatim_assignment(baron *b, cursor stmt, cursor at,
 // unresolved / dead sequences all run the body once inactive (unresolved also owes a pass).
 static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
-    (void) stmt;
     rc_str src = source_files_text(&b->source_files, at.source);
 
     // The loop variable via peek_symbol - a keyword spelling is fine, a dotted path cannot be a
@@ -2914,6 +2934,10 @@ static parse_result handle_for(baron *b, cursor stmt, cursor at, uint32_t scope,
     bool active_body = iterate;   // iterate implies flags.active; empty / unresolved / dead parse inactive
     parse_result acc = {.next = body_start, .unresolved = unresolved};
     for (uint32_t i = 0; i < count && !acc.fatal; i++) {
+        // Each step makes a scope even when its body is empty, so the step is checked as well as its statements.
+        if (memory_is_low(b, scratch)) {
+            return syntax_error(b, error_type_out_of_memory, stmt);
+        }
         char storage[64];
         rc_mstr key = anon_for_scope_key(storage, sizeof storage, at, i);
         uint32_t child = scopes_get_or_make_child(&b->scopes, scope, key.view);
@@ -3476,6 +3500,10 @@ static parse_result handle_reserved_constant(baron *b, cursor stmt, cursor at, u
 
 static parse_result parse_one_statement(baron *b, cursor at, uint32_t scope, uint32_t section, parse_flags flags, rc_arena scratch)
 {
+    if (memory_is_low(b, scratch)) {
+        return syntax_error(b, error_type_out_of_memory, at);
+    }
+
     rc_str src = source_files_text(&b->source_files, at.source);
     lexer_result lr = lexer_next(src, at.pos, statement_tokens(b));
 
@@ -10185,6 +10213,43 @@ RC_TEST_STEP(assemble, macro_framing_and_call_errors, fix)
     RC_CHECK_TRUE(ERR("MACRO A n ENDMACRO") == error_type_expected_separator);
     // A macro cannot be named after a mnemonic.
     RC_CHECK_TRUE(ERR("MACRO NOP : ENDMACRO") == error_type_macro_name_reserved);
+}
+
+RC_TEST(assemble, runaway_growth_is_out_of_memory)
+{
+    // A macro calling itself twice doubles its work at every level (the depth cap bounds only how deep
+    // it goes), and nothing bounds a loop of loops. Either fills the arenas long before it ends, and the
+    // allocation that finds them full is a crash - so we stop while there is room, with a diagnostic. A
+    // small permanent arena keeps it quick.
+    baron_desc desc = {
+        .permanent = rc_arena_make(64u << 20),
+        .per_pass  = rc_arena_make_default(),
+        .scratch   = rc_arena_make_default(),
+    };
+
+    baron_result r = assemble_string(&desc, RC_STR("twice"), RC_STR("MACRO m : m : m : ENDMACRO\nm"));
+    RC_CHECK(r.passes, ==, 0u);
+    RC_CHECK_TRUE(first_error(&r) == error_type_out_of_memory);
+
+    // An empty body still makes a scope per step, so the steps are checked as well as the statements:
+    // the inner FOR is the one blamed.
+    rc_arena_reset(&desc.permanent);
+    r = assemble_string(&desc, RC_STR("loops"), RC_STR("FOR i = 0 ..< 60000 : FOR j = 0 ..< 60000 : NEXT : NEXT"));
+    RC_CHECK(r.passes, ==, 0u);
+    RC_CHECK_TRUE(first_error(&r) == error_type_out_of_memory);
+    RC_CHECK(rc_view_diagnostic_get(r.diagnostics, 0).at.pos, ==, 22u);
+
+    // Earlier results stay in permanent but never grow, so they do not count against the next assemble:
+    // fill over half the arena with them, and one more still assembles.
+    rc_arena_reset(&desc.permanent);
+    while (desc.permanent.top < desc.permanent.reserved / 2) {
+        RC_CHECK(assemble_string(&desc, RC_STR("small"), RC_STR("x = 1 : NOP")).passes, !=, 0u);
+    }
+    RC_CHECK(assemble_string(&desc, RC_STR("small"), RC_STR("x = 1 : NOP")).passes, !=, 0u);
+
+    rc_arena_deinit(&desc.permanent);
+    rc_arena_deinit(&desc.per_pass);
+    rc_arena_deinit(&desc.scratch);
 }
 
 RC_TEST_STEP(assemble, function_single_line, fix)

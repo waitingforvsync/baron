@@ -12,6 +12,7 @@ baron baron_make(baron_desc *a)
     baron b = {0};
     b.permanent = &a->permanent;
     b.per_pass  = &a->per_pass;
+    b.permanent_start = a->permanent.top;
 
     // The per_pass managers are re-made / reseeded by run_pass each pass; sections also borrows
     // permanent for the cross-pass emission fingerprints.

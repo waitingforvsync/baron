@@ -41,9 +41,11 @@ void scopes_reset(scopes *s)
     // Discard the half-built tree by standing up fresh, empty containers in the permanent arena (a bare
     // root at index 0). The old nodes / pool blocks / values become holes - acceptable on this
     // failure-only path. We do NOT reset the arena: it is shared (source text, diagnostics live there too).
-    s->nodes       = rc_array_scope_node_make(scopes_nodes_reserve, s->arena);
-    s->symbol_pool = rc_trie_symbol_pool_make(scopes_symbol_blocks_reserve, s->arena);
-    s->child_pool   = rc_trie_child_pool_make(scopes_child_blocks_reserve, s->arena);
+    // Nothing more is ever added, so the containers hold just the root: the assemble may have failed for
+    // want of room, and the up-front reserves would not fit.
+    s->nodes       = rc_array_scope_node_make(1, s->arena);
+    s->symbol_pool = rc_trie_symbol_pool_make(1, s->arena);
+    s->child_pool   = rc_trie_child_pool_make(1, s->arena);
     s->num_resolved = 0;
     scopes_make_root(s);
 }
@@ -815,6 +817,20 @@ static value flattened_lookup(rc_view_symbol_entry entries, rc_str path)
         }
     }
     return value_make_none();
+}
+
+RC_TEST(scopes, reset_fits_in_a_nearly_full_arena)
+{
+    // An assemble can fail for want of room and then empties its symbol table in that same arena, so
+    // the reset must not ask for the up-front reserves again.
+    rc_arena arena = rc_arena_make(16u << 20);
+    scopes s;
+    scopes_init(&s, &arena);
+    scopes_make_root(&s);
+    rc_arena_alloc(&arena, arena.reserved - arena.top - (1u << 20));   // leave a megabyte
+    scopes_reset(&s);
+    RC_CHECK(s.nodes.num, ==, 1u);
+    rc_arena_deinit(&arena);
 }
 
 RC_TEST_STEP(scopes, flatten_snapshots_spellable_symbols, fix)

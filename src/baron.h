@@ -25,6 +25,7 @@ typedef struct unsettled_note {
 typedef struct baron {
     rc_arena           *permanent;       // scopes/symbols, source text, diagnostics (never reset)
     rc_arena           *per_pass;        // sections, macros, functions (reset each pass)
+    uint32_t            permanent_start; // permanent's top when we began: below it, earlier results that never grow
     scopes              scopes;
     sections            sections;
     zeropage            zeropage;        // the ZA_POOL set + allocator IR; dormant until ZA_POOL runs

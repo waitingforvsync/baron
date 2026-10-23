@@ -138,6 +138,7 @@ typedef enum error_type {
     // Driver.
     error_type_no_convergence,
     error_type_unsettled_symbol,      // no_convergence with a culprit: the first binding that kept moving
+    error_type_out_of_memory,         // an arena nearly full: a runaway macro or loop, or simply too much
     error_type_source_load,           // a source file could not be read
 
     // Warnings (recorded with diagnostic_warning; harmless, they do not fail the assemble).

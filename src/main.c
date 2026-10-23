@@ -280,6 +280,9 @@ int main(int argc, char **argv)
         if (argv[i][0] == '-') {
             continue;   // options were handled above
         }
+        // Everything we keep from a file is rendered or copied out before the next one starts, so each
+        // file can have the permanent arena back from the start (else forty files fill it).
+        rc_arena_reset(&desc.permanent);
         rc_str path = rc_str_from_cstr(argv[i]);
         baron_result r = assemble_file(&desc, path);
 
